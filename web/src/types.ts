@@ -1,4 +1,4 @@
-// Types for the harness browser API (docs/protocol.md §4) and the agent event vocabulary (§2–3).
+// Types for the harness browser API (docs/protocol.md §4, §6.3) and the agent event vocabulary (§2–3).
 
 export type SessionStatus =
   | "starting"
@@ -11,9 +11,20 @@ export type SessionStatus =
   | "stopped"
   | "failed";
 
+export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted";
+
+/** Set by the watchdog (§6.3); cleared by the next agent event. */
+export interface Attention {
+  reason: AttentionReason;
+  since: string;
+  nudges: number;
+}
+
 export interface Session {
   id: string;
   repo: string;
+  /** Repository owner; older mothership builds omit it, see `orgOf`. */
+  org?: string;
   /** null for an open session started on a repository without an issue. */
   issue: number | null;
   issue_title: string;
@@ -31,6 +42,8 @@ export interface Session {
   cleaned_up: boolean;
   created_at: string;
   updated_at: string;
+  last_activity_at?: string | null;
+  attention?: Attention | null;
 }
 
 export interface Repo {
@@ -108,6 +121,100 @@ export interface ModuleInfo {
   schema: SettingsSchema | null;
 }
 
+// ---------------------------------------------------------------------------
+// Model providers (§6.3)
+// ---------------------------------------------------------------------------
+
+export type ProviderAuth = "x-api-key" | "bearer" | "none";
+export type ProviderPreset = "deepseek" | "local" | "custom";
+
+export interface ModelProvider {
+  id: string;
+  name: string;
+  base_url: string;
+  auth: ProviderAuth;
+  has_key: boolean;
+  models: string[];
+  preset: ProviderPreset;
+}
+
+export interface SaveProviderRequest {
+  name: string;
+  base_url: string;
+  auth: ProviderAuth;
+  models: string[];
+  preset?: ProviderPreset;
+  /** Omitted keeps the saved key; `""` removes it. */
+  api_key?: string;
+}
+
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+}
+
+// ---------------------------------------------------------------------------
+// Org workspaces (§6.3)
+// ---------------------------------------------------------------------------
+
+/** Every field is optional; missing or null inherits the global module setting. */
+export interface OrgSettings {
+  agent?: { model?: string | null; subagent_model?: string | null; background_model?: string | null } | null;
+  max_parallel?: number | null;
+  memory?: { enabled?: boolean | null } | null;
+  watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;
+}
+
+export interface OrgInfo {
+  org: string;
+  colonies: { live: number; total: number };
+  pending_memory: number;
+  settings: OrgSettings;
+}
+
+// ---------------------------------------------------------------------------
+// Shared memory (§6.2–6.3)
+// ---------------------------------------------------------------------------
+
+/** `key` is "" for global, the org for `org`, and `owner/repo` for `repo`. */
+export type MemoryScope = "global" | "org" | "repo";
+
+export type MemorySource = { session_id: string; repo: string } | { user: true };
+
+export interface MemoryNote {
+  id: string;
+  scope: MemoryScope;
+  key: string;
+  title: string;
+  content: string;
+  tags: string[];
+  created_at: string;
+  source: MemorySource;
+}
+
+export interface MemoryProposal extends MemoryNote {
+  status: "pending";
+}
+
+export interface MemoryListing {
+  scope: MemoryScope;
+  key: string;
+  notes: MemoryNote[];
+  proposals: MemoryProposal[];
+}
+
+export interface NewNoteRequest {
+  scope: MemoryScope;
+  key: string;
+  title: string;
+  content: string;
+}
+
+// ---------------------------------------------------------------------------
+// Claude login and the event vocabulary
+// ---------------------------------------------------------------------------
+
 export type LoginState = "idle" | "starting" | "awaiting_code" | "verifying" | "done" | "error";
 
 export interface LoginView {
@@ -158,7 +265,8 @@ export type AgentEvent = Sequenced & AgentEventBody;
 export type ServerFrame =
   | AgentEvent
   | { type: "session"; session: Session }
-  | { type: "harness_log"; level: LogLevel; message: string; ts: string };
+  | { type: "harness_log"; level: LogLevel; message: string; ts: string }
+  | { type: "memory_proposed"; proposal: MemoryProposal };
 
 export type ClientCommand =
   | { type: "user_message"; text: string }

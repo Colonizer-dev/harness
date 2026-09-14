@@ -8,7 +8,13 @@ import type {
   Issue,
   LogLevel,
   LoginView,
+  MemoryNote,
+  MemoryProposal,
+  ModelOption,
+  ModelProvider,
   ModuleInfo,
+  OrgInfo,
+  OrgSettings,
   Question,
   Repo,
   Session,
@@ -111,6 +117,8 @@ export async function createSession(req: Request) {
 class MockSession {
   readonly session: Session;
   private readonly events: AgentEvent[] = [];
+  /** Unsequenced frames (memory_proposed) replayed on every attach; the UI dedupes them. */
+  private readonly frames: { afterSeq: number; frame: object }[] = [];
   private readonly logs: { type: "harness_log"; level: LogLevel; message: string; ts: string }[] = [];
   private readonly sockets = new Set<MockSocket>();
   private seq = 0;
@@ -133,10 +141,13 @@ class MockSession {
     for (const socket of this.sockets) socket.deliver(text);
   }
 
-  emit(body: AgentEventBody): void {
-    const event = { ...body, seq: ++this.seq, ts: now() } as AgentEvent;
+  emit(body: AgentEventBody, ts = now()): void {
+    const event = { ...body, seq: ++this.seq, ts } as AgentEvent;
     this.events.push(event);
+    this.session.last_activity_at = ts;
     this.broadcast(event);
+    // Any agent event clears the watchdog flag (§6.3).
+    if (this.session.attention) this.patch({ attention: null });
     if (body.type === "status" && isLive(this.session.status)) {
       const map: Partial<Record<string, SessionStatus>> = {
         working: "running",
@@ -164,7 +175,16 @@ class MockSession {
     this.sockets.add(socket);
     socket.deliver(JSON.stringify({ type: "session", session: this.session }));
     for (const entry of this.logs.slice(-200)) socket.deliver(JSON.stringify(entry));
-    for (const event of this.events) if ((event.seq ?? 0) > since) socket.deliver(JSON.stringify(event));
+    // Frames go out where they happened, so a replayed notice lands after the same message.
+    let next = 0;
+    const flushFrames = (upTo: number) => {
+      while (next < this.frames.length && this.frames[next].afterSeq < upTo) socket.deliver(JSON.stringify(this.frames[next++].frame));
+    };
+    for (const event of this.events) {
+      flushFrames(event.seq ?? 0);
+      if ((event.seq ?? 0) > since) socket.deliver(JSON.stringify(event));
+    }
+    flushFrames(Infinity);
     if (!this.started && isLive(this.session.status)) {
       this.started = true;
       void this.intro();
@@ -238,6 +258,69 @@ class MockSession {
     this.emit({ type: "turn_end", is_error: true, result: "Failed to authenticate. API Error: 401 Invalid bearer token", cost_usd: 0, duration_ms: 1_830 });
     this.emit({ type: "status", state: "idle" });
     this.log("Colony stopped", "warn");
+  }
+
+  addFrame(frame: object): void {
+    this.frames.push({ afterSeq: this.seq, frame });
+    this.broadcast(frame);
+  }
+
+  /** A running colony stuck on a watch-mode command that the watchdog has nudged once. */
+  seedStalled(proposal: MemoryProposal): void {
+    this.started = true;
+    const s = this.session;
+    this.log("Worktree created, microVM booted, joined mesh");
+    this.emit({ type: "status", state: "working" }, ago(27));
+    this.emit(
+      {
+        type: "user_message",
+        id: "initial",
+        text: `Resolve GitHub issue #${s.issue} in ${s.repo}: ${s.issue_title}.\n\nRead the relevant code, make a focused fix with tests, and ask before making product decisions.`,
+      },
+      ago(27),
+    );
+    this.emit({ type: "assistant_text", message_id: "s1", block_index: 0, text: "I'll look at how the order confirmation email is built first." }, ago(26));
+    this.emit({ type: "tool_call", message_id: "s1", tool_call_id: "toolu_s1", name: "Read", input: { file_path: "/workspace/emails/order-confirmation.mjml" } }, ago(26));
+    this.emit(
+      {
+        type: "tool_result",
+        tool_call_id: "toolu_s1",
+        output: '<mjml>\n  <mj-head>\n    <mj-attributes>\n      <mj-all font-family="Inter, Arial" />\n    </mj-attributes>\n  </mj-head>\n  <mj-body background-color="#ffffff">',
+        is_error: false,
+      },
+      ago(25),
+    );
+    this.emit(
+      {
+        type: "assistant_text",
+        message_id: "s2",
+        block_index: 0,
+        text: "The templates are MJML, compiled by `npm run build:emails`. That isn't written down anywhere, so I proposed a repository note. Next I'll add a `prefers-color-scheme` block and rebuild.",
+      },
+      ago(21),
+    );
+    this.addFrame({ type: "memory_proposed", proposal });
+    this.emit(
+      {
+        type: "tool_call",
+        message_id: "s2",
+        tool_call_id: "toolu_s2",
+        name: "Bash",
+        input: { command: "npm run build:emails -- --watch", description: "Rebuild email templates" },
+      },
+      ago(19),
+    );
+    this.log("watchdog: no progress for 15 min, nudged the agent (1/3)", "warn");
+    this.emit(
+      {
+        type: "user_message",
+        id: "watchdog-1",
+        text: "Watchdog check: this colony has shown no progress for 15 minutes. If a command or process is hanging, stop it and try another way. If you need a decision from the maintainer, ask with a choice card. Otherwise, continue the task and report what you're doing.",
+      },
+      ago(4),
+    );
+    s.last_activity_at = ago(19);
+    s.attention = { reason: "stalled", since: ago(19), nudges: 1 };
   }
 
   private async intro(): Promise<void> {
@@ -498,6 +581,9 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
   return {
     id,
     repo,
+    org: repo.split("/")[0],
+    last_activity_at: now(),
+    attention: null,
     issue,
     issue_title: title,
     status: "starting",
@@ -550,6 +636,149 @@ export function createMockApi(): Api {
   sessions.set(failed.session.id, failed);
   sessions.set(old.session.id, old);
 
+  // Shared memory: two proposals waiting for review and a few notes per scope.
+  const proposals: MemoryProposal[] = [
+    {
+      id: "prop-emails",
+      scope: "repo",
+      key: "acme/webshop",
+      title: "Build email templates with `npm run build:emails`",
+      content:
+        "Order and account emails live in `emails/*.mjml` and compile to `dist/emails/*.html`.\n\n- Run `npm run build:emails` once after editing; **don't** pass `--watch` in a colony, it never exits\n- Snapshot tests: `npm test -- emails`",
+      tags: ["build", "emails"],
+      created_at: ago(21),
+      source: { session_id: "stall5678", repo: "acme/webshop" },
+      status: "pending",
+    },
+    {
+      id: "prop-pnpm",
+      scope: "org",
+      key: "acme",
+      title: "Use pnpm in acme repositories",
+      content: "Every acme repository has a `pnpm-lock.yaml`. Use `pnpm install` and `pnpm run <script>`; `npm install` creates a second lockfile that CI rejects.",
+      tags: ["tooling"],
+      created_at: ago(3),
+      source: { session_id: "demo1234", repo: "acme/webshop" },
+      status: "pending",
+    },
+  ];
+  const notes: MemoryNote[] = [
+    {
+      id: "note-g1",
+      scope: "global",
+      key: "",
+      title: "Ask before adding dependencies",
+      content: "Prefer the standard library and what the repository already uses. Ask with a choice card before adding a new package.",
+      tags: [],
+      created_at: ago(8000),
+      source: { user: true },
+    },
+    {
+      id: "note-g2",
+      scope: "global",
+      key: "",
+      title: "Commit messages",
+      content: "Imperative mood, under 72 characters, no trailing period. Reference the issue in the body, not the subject.",
+      tags: ["git"],
+      created_at: ago(7000),
+      source: { user: true },
+    },
+    {
+      id: "note-o1",
+      scope: "org",
+      key: "acme",
+      title: "Design tokens come from acme/design-system",
+      content: "Never hard-code colours. Import tokens from `@acme/tokens`; dark mode values are under `tokens.dark`.",
+      tags: ["ui"],
+      created_at: ago(2400),
+      source: { session_id: "old98765", repo: "acme/webshop" },
+    },
+    {
+      id: "note-o2",
+      scope: "org",
+      key: "acme",
+      title: "Staging deploys",
+      content: "Merges to `main` deploy to staging automatically. Production needs a tagged release; colonies should not tag.",
+      tags: [],
+      created_at: ago(3000),
+      source: { user: true },
+    },
+    {
+      id: "note-r1",
+      scope: "repo",
+      key: "acme/webshop",
+      title: "Prices are integer cents",
+      content: "Cart and order totals are stored as integer cents (`amount_cents`). Format with `formatPrice()` from `src/money.ts`.",
+      tags: ["checkout"],
+      created_at: ago(1560),
+      source: { session_id: "old98765", repo: "acme/webshop" },
+    },
+    {
+      id: "note-r2",
+      scope: "repo",
+      key: "acme/webshop",
+      title: "Checkout tests need the Stripe mock",
+      content: "Start it with `pnpm stripe:mock` before `pnpm test -- checkout`, or the payment tests time out.",
+      tags: ["tests"],
+      created_at: ago(900),
+      source: { user: true },
+    },
+    {
+      id: "note-r3",
+      scope: "repo",
+      key: "acme/design-system",
+      title: "Storybook is the source of truth",
+      content: "Every component change needs an updated story; visual tests run against Storybook.",
+      tags: [],
+      created_at: ago(5000),
+      source: { user: true },
+    },
+  ];
+
+  // A running colony the watchdog nudged, and a colony in a second org.
+  const stalled = new MockSession({
+    ...baseSession("stall5678", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
+    status: "running",
+    mesh: { name: "colony-stall5678", ip: "100.64.0.7" },
+    created_at: ago(28),
+  });
+  stalled.seedStalled(proposals[0]);
+  stalled.session.updated_at = ago(4);
+  sessions.set(stalled.session.id, stalled);
+  const octo = new MockSession({
+    ...baseSession("octo2468", "octocat/hello-world", null, "Refresh the README examples"),
+    status: "stopped",
+    mesh: null,
+    cost_usd: 0.18,
+    created_at: ago(320),
+    updated_at: ago(300),
+  });
+  octo.session.updated_at = ago(300);
+  sessions.set(octo.session.id, octo);
+
+  const providers: ModelProvider[] = [
+    { id: "deepseek", name: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", auth: "x-api-key", has_key: true, models: ["deepseek-flash", "deepseek-v4-pro"], preset: "deepseek" },
+    { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", has_key: false, models: [], preset: "local" },
+  ];
+  const ANTHROPIC_MODELS: [string, string][] = [
+    ["opus", "Claude Opus (latest)"],
+    ["sonnet", "Claude Sonnet (latest)"],
+    ["haiku", "Claude Haiku (latest)"],
+    ["fable", "Claude Fable (latest)"],
+    ["claude-opus-5", "Claude Opus 5"],
+    ["claude-sonnet-5", "Claude Sonnet 5"],
+    ["claude-haiku-4-5", "Claude Haiku 4.5"],
+  ];
+  const orgSettings: Record<string, OrgSettings> = {
+    acme: {
+      agent: { model: "opus", subagent_model: "deepseek/deepseek-flash", background_model: null },
+      max_parallel: 2,
+      memory: { enabled: true },
+      watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
+    },
+  };
+  const orgOfKey = (note: MemoryNote) => (note.scope === "org" ? note.key : note.scope === "repo" ? note.key.split("/")[0] : null);
+
   let githubSource = "gh CLI login";
   let claude: HarnessStatus["claude"] = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
   let login: LoginView = { state: "idle", url: null, message: null };
@@ -592,11 +821,46 @@ export function createMockApi(): Api {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
       enabled: true,
-      settings: { model: "" },
+      settings: { model: "", subagent_model: "", background_model: "" },
       schema: {
         type: "object",
         properties: {
-          model: { type: "string", title: "Model", enum: ["", "opus", "sonnet", "haiku"], default: "", description: "Empty uses the Claude Code default" },
+          model: { type: "string", title: "Orchestrator model", default: "", description: "Empty uses the Claude Code default" },
+          subagent_model: { type: "string", title: "Subagent model", default: "", description: "e.g. deepseek/deepseek-flash; empty uses the orchestrator model" },
+          background_model: { type: "string", title: "Background model", default: "", description: "Small, fast tasks; empty uses the Claude Code default" },
+        },
+      },
+    },
+    {
+      kind: "memory",
+      provider: "files",
+      providers: [{ id: "files", name: "Shared memory", description: "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes" }],
+      enabled: true,
+      settings: { require_review: true },
+      schema: {
+        type: "object",
+        properties: {
+          require_review: {
+            type: "boolean",
+            title: "Review proposals before they become memory",
+            description: "Recommended: an approved note becomes part of every future colony's context",
+            default: true,
+          },
+        },
+      },
+    },
+    {
+      kind: "watchdog",
+      provider: "default",
+      providers: [{ id: "default", name: "Watchdog", description: "Nudges colonies that stop making progress and flags the ones that need you" }],
+      enabled: true,
+      settings: { stall_minutes: 15, max_nudges: 3, waiting_minutes: 30 },
+      schema: {
+        type: "object",
+        properties: {
+          stall_minutes: { type: "integer", title: "Nudge after minutes without progress", minimum: 1, maximum: 1440, default: 15 },
+          max_nudges: { type: "integer", title: "Nudges before flagging", minimum: 0, maximum: 20, default: 3 },
+          waiting_minutes: { type: "integer", title: "Flag unanswered questions after minutes", minimum: 1, maximum: 10080, default: 30 },
         },
       },
     },
@@ -767,5 +1031,119 @@ export function createMockApi(): Api {
       return socket as unknown as SocketLike;
     },
     openTerminal: (id) => mockTerminal(sessions.get(id)),
+
+    providers: () => later(() => providers),
+    saveProvider: async (id, body) => {
+      await sleep(250);
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(id) || id === "anthropic") {
+        throw new ApiError('provider ids are lowercase letters, digits and dashes, and can\'t be "anthropic"', 400);
+      }
+      if (!body.name.trim()) throw new ApiError("provider name must be 1-60 characters", 400);
+      if (!/^https?:\/\/[^\s/]+/.test(body.base_url.trim())) throw new ApiError("base URL must be an http(s) URL like https://api.deepseek.com/anthropic", 400);
+      const existing = providers.find((p) => p.id === id);
+      const has_key = body.api_key === undefined ? (existing?.has_key ?? false) : body.api_key.trim() !== "";
+      const provider: ModelProvider = {
+        id,
+        name: body.name.trim(),
+        base_url: body.base_url.trim().replace(/\/+$/, ""),
+        auth: body.auth,
+        has_key,
+        models: body.models.map((m) => m.trim()).filter(Boolean),
+        preset: body.preset ?? existing?.preset ?? "custom",
+      };
+      if (existing) Object.assign(existing, provider);
+      else providers.push(provider);
+      return clone(provider);
+    },
+    deleteProvider: async (id) => {
+      const index = providers.findIndex((p) => p.id === id);
+      if (index < 0) throw new ApiError("no such provider", 404);
+      providers.splice(index, 1);
+      return { ok: true };
+    },
+    models: () =>
+      later((): ModelOption[] => [
+        ...ANTHROPIC_MODELS.map(([id, label]) => ({ id, label, provider: "anthropic" })),
+        ...providers.flatMap((p) => p.models.map((model) => ({ id: `${p.id}/${model}`, label: `${model} · ${p.name}`, provider: p.id }))),
+      ]),
+
+    orgs: () =>
+      later((): OrgInfo[] => {
+        const names = new Set([
+          ...REPOS.map((r) => r.full_name.split("/")[0]),
+          ...[...sessions.values()].map((s) => s.session.repo.split("/")[0]),
+          ...Object.keys(orgSettings),
+        ]);
+        return [...names].sort().map((org) => {
+          const colonies = [...sessions.values()].filter((s) => s.session.repo.split("/")[0] === org);
+          return {
+            org,
+            colonies: { live: colonies.filter((s) => isLive(s.session.status)).length, total: colonies.length },
+            pending_memory: proposals.filter((p) => orgOfKey(p) === org).length,
+            settings: orgSettings[org] ?? {},
+          };
+        });
+      }),
+    saveOrg: async (org, settings) => {
+      await sleep(250);
+      orgSettings[org] = clone(settings);
+      return clone({ org, settings });
+    },
+
+    memory: (scope, key) =>
+      later(() => ({
+        scope,
+        key,
+        notes: notes.filter((n) => n.scope === scope && n.key === key).sort((a, b) => b.created_at.localeCompare(a.created_at)),
+        proposals: proposals.filter((p) => p.scope === scope && p.key === key),
+      })),
+    memoryProposals: () => later(() => [...proposals].sort((a, b) => b.created_at.localeCompare(a.created_at))),
+    approveProposal: async (id, edits) => {
+      await sleep(250);
+      const index = proposals.findIndex((p) => p.id === id);
+      if (index < 0) throw new ApiError("no such proposal", 404);
+      const [proposal] = proposals.splice(index, 1);
+      const { status: _status, ...rest } = proposal;
+      const note: MemoryNote = {
+        ...rest,
+        id: `note-${Math.random().toString(16).slice(2, 8)}`,
+        title: edits?.title?.trim() || proposal.title,
+        content: edits?.content?.trim() || proposal.content,
+        created_at: now(),
+      };
+      notes.push(note);
+      return clone(note);
+    },
+    rejectProposal: async (id) => {
+      await sleep(200);
+      const index = proposals.findIndex((p) => p.id === id);
+      if (index < 0) throw new ApiError("no such proposal", 404);
+      proposals.splice(index, 1);
+      return { ok: true };
+    },
+    createNote: async (body) => {
+      await sleep(250);
+      if (!body.title.trim() || !body.content.trim()) throw new ApiError("a note needs a title and content", 400);
+      if (body.scope !== "global" && !body.key) throw new ApiError("org and repo notes need a key", 400);
+      const note: MemoryNote = {
+        id: `note-${Math.random().toString(16).slice(2, 8)}`,
+        scope: body.scope,
+        key: body.scope === "global" ? "" : body.key,
+        title: body.title.trim(),
+        content: body.content.trim(),
+        tags: [],
+        created_at: now(),
+        source: { user: true },
+      };
+      notes.push(note);
+      return clone(note);
+    },
+    deleteNote: async ({ id, scope, key }) => {
+      await sleep(200);
+      const index = notes.findIndex((n) => n.id === id && n.scope === scope && n.key === key);
+      if (index < 0) throw new ApiError("no such note", 404);
+      notes.splice(index, 1);
+      return { ok: true };
+    },
   };
 }

@@ -1,10 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Api } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
 import { useSessionStream, type LogEntry } from "../sessionStream";
 import type { Session } from "../types";
 import { ChatPanel } from "./ChatPanel";
 import {
+  IconAlert,
   IconBranch,
   IconChat,
   IconChevronDown,
@@ -16,11 +17,10 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { lazy, Suspense, useEffect } from "react";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, attentionText, buttonClass, cx, isLive, minutesAgo, orgOf } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
-import { Badge, Button, Spinner, StatusBadge, buttonClass, cx, isLive } from "./ui";
 
 export interface InterfaceFlags {
   chat: boolean;
@@ -34,15 +34,22 @@ export function SessionView({
   fallback,
   interfaces,
   narrow,
+  showOrg,
   onSessionChanged,
   onOpenSidebar,
+  onOpenMemory,
+  onMemoryProposed,
 }: {
   sessionId: string;
   fallback: Session | null;
   interfaces: InterfaceFlags;
   narrow: boolean;
+  /** Show the org chip (the sidebar isn't filtered to one org). */
+  showOrg: boolean;
   onSessionChanged: (session: Session) => void;
   onOpenSidebar: () => void;
+  onOpenMemory: () => void;
+  onMemoryProposed: () => void;
 }) {
   const api = useApi();
   const toast = useToast();
@@ -54,6 +61,14 @@ export function SessionView({
   useEffect(() => {
     if (state.session) onSessionChanged(state.session);
   }, [state.session, onSessionChanged]);
+
+  // A colony proposed a memory note: refresh the sidebar's review count right away.
+  const noticeCount = state.memoryNotices.length;
+  const seenNotices = useRef(0);
+  useEffect(() => {
+    if (noticeCount > seenNotices.current) onMemoryProposed();
+    seenNotices.current = noticeCount;
+  }, [noticeCount, onMemoryProposed]);
 
   const session = state.session ?? fallback;
   if (!session) {
@@ -69,6 +84,7 @@ export function SessionView({
   const showChat = interfaces.chat || !showTerminal;
   const split = showChat && showTerminal;
   const waiting = state.agentState === "waiting_for_answer" || session.status === "waiting_for_answer";
+  const attention = session.attention ?? null;
 
   const act = async (action: Action, call: (api: Api, id: string) => Promise<Session>, confirmText?: string) => {
     if (confirmText && !window.confirm(confirmText)) return;
@@ -98,11 +114,15 @@ export function SessionView({
           )}
           <div className="min-w-0 flex-1 basis-64">
             <div className="flex flex-wrap items-center gap-2">
+              {showOrg && (
+                <span className="rounded-md bg-panel-3 px-1.5 py-px text-[11.5px] font-medium text-muted">{orgOf(session)}</span>
+              )}
               <span className="font-mono text-[12.5px] text-muted">
                 {session.repo}
                 {session.issue != null && `#${session.issue}`}
               </span>
               <StatusBadge status={session.status} />
+              <AttentionBadge attention={attention} />
               {session.issue == null && <Badge>No issue</Badge>}
               {session.autopilot && <Badge>Autopilot</Badge>}
             </div>
@@ -123,6 +143,7 @@ export function SessionView({
               )}
               <span>{session.agent}</span>
               {session.cost_usd != null && <span>${session.cost_usd.toFixed(2)}</span>}
+              {live && session.last_activity_at && !attention && <span>Last activity {minutesAgo(session.last_activity_at)}</span>}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -159,6 +180,17 @@ export function SessionView({
             </Button>
           </div>
         </div>
+        {attention && (
+          <div role="status" className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+            <IconAlert size={14} className="shrink-0" />
+            <span className="font-semibold">{attentionText(attention)}</span>
+            <span className="opacity-80">· last activity {minutesAgo(session.last_activity_at ?? attention.since)}</span>
+            {attention.reason === "waiting_for_answer" && <span className="opacity-80">Answer the card in the chat.</span>}
+            {attention.reason === "nudges_exhausted" && (
+              <span className="opacity-80">Check the terminal, message the agent, or stop the colony.</span>
+            )}
+          </div>
+        )}
         {session.error && (
           <div role="alert" className="mt-3 rounded-lg bg-err-soft px-3 py-2 text-[13px] text-err [overflow-wrap:anywhere]">
             {session.error}
@@ -202,7 +234,7 @@ export function SessionView({
               </PanelHeader>
             )}
             <div className="min-h-0 flex-1">
-              <ChatPanel stream={stream} state={state} live={live} />
+              <ChatPanel stream={stream} state={state} live={live} onOpenMemory={onOpenMemory} />
             </div>
           </section>
         )}
