@@ -7,11 +7,12 @@
 use crate::{
     client_error,
     config::{setting, setting_str, setting_u64},
-    github,
+    github, memory,
     modules::{schema_for, AgentModule},
-    resolve_claude_bin,
+    orgs, providers, resolve_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     util::{random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
+    watchdog::Activity,
     ApiResult, App, Shared, CLAUDE_API_HOST,
 };
 use anyhow::{bail, Context, Result};
@@ -80,6 +81,9 @@ pub struct MeshInfo {
 pub struct Session {
     pub id: String,
     pub repo: String,
+    /// The GitHub org (repository owner) whose workspace this colony belongs to.
+    #[serde(default)]
+    pub org: String,
     /// `None` for an open session that starts from the repository alone.
     pub issue: Option<u64>,
     pub issue_title: String,
@@ -102,6 +106,12 @@ pub struct Session {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub cleaned_up: bool,
+    /// Set by the watchdog: `{reason, since, nudges}`.
+    #[serde(default)]
+    pub attention: Option<Value>,
+    /// Last agent progress (filled from the runtime for live colonies).
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -118,6 +128,7 @@ pub struct Runtime {
     file_lock: Mutex<()>,
     events_path: PathBuf,
     logs_path: PathBuf,
+    pub activity: Mutex<Activity>,
 }
 
 struct Broadcast {
@@ -151,12 +162,29 @@ impl Runtime {
             file_lock: Mutex::new(()),
             events_path,
             logs_path,
+            activity: Mutex::new(Activity::new(Utc::now())),
         }
     }
 
     fn broadcast(&self, seq: Option<u64>, json: String) {
         let _ = self.events.send(Arc::new(Broadcast { seq, json }));
     }
+
+    /// Queues a command for the agent (sent once the agent link is connected).
+    pub fn send_command(&self, command: Value) {
+        let _ = self.commands.send(command);
+    }
+}
+
+/// A session as shown to browsers: live colonies carry their last agent activity.
+async fn with_activity(app: &App, mut session: Session) -> Session {
+    if session.status.is_live() {
+        let rt = app.runtimes.lock().await.get(&session.id).cloned();
+        if let Some(rt) = rt {
+            session.last_activity_at = Some(rt.activity.lock().await.last);
+        }
+    }
+    session
 }
 
 /// Session-scoped harness log (shown in the UI next to agent events).
@@ -196,8 +224,10 @@ impl App {
             (session.clone(), result)
         };
         self.persist_sessions().await;
-        if let Some(rt) = self.runtimes.lock().await.get(id) {
-            rt.broadcast(None, json!({"type": "session", "session": session}).to_string());
+        let rt = self.runtimes.lock().await.get(id).cloned();
+        if let Some(rt) = rt {
+            let view = with_activity(self, session.clone()).await;
+            rt.broadcast(None, json!({"type": "session", "session": view}).to_string());
         }
         Some((session, result))
     }
@@ -279,18 +309,28 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if let Err(e) = app.cfg.asset("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
-    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
-    let max_parallel = setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel").max(1) as usize;
-    let active = app.sessions.read().await.iter().filter(|s| s.status.is_live() || s.status == SessionStatus::Publishing).count();
+    let (owner, name) = repo.split_once('/').context("invalid repository name")?;
+    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    let existing = app.sessions.read().await.clone();
+    let busy = |s: &&Session| s.status.is_live() || s.status == SessionStatus::Publishing;
+    let active = existing.iter().filter(busy).count();
     if active >= max_parallel {
         return Err(client_error(
             StatusCode::CONFLICT,
-            &format!("{active} sessions are already running (limit {max_parallel}); stop one or raise the limit in Settings → Modules"),
+            &format!("{active} colonies are already running (limit {max_parallel}); stop one or raise the limit in Settings → Modules"),
         ));
+    }
+    if let Some(limit) = orgs::org_max_parallel(&app.org_settings(owner)) {
+        let in_org = existing.iter().filter(busy).filter(|s| s.org == owner).count() as u64;
+        if in_org >= limit {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                &format!("{in_org} colonies are already running in {owner} (org limit {limit})"),
+            ));
+        }
     }
 
     let id = short_id();
-    let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     let slug = match req.issue {
         Some(number) => format!("issue-{number}-{id}"),
         None => format!("session-{id}"),
@@ -303,6 +343,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     let session = Session {
         id: id.clone(),
         repo: repo.clone(),
+        org: owner.to_string(),
         issue: req.issue,
         issue_title: title,
         instructions: truncate(req.instructions.trim(), 20_000),
@@ -320,6 +361,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         error: None,
         cost_usd: None,
         cleaned_up: false,
+        attention: None,
+        last_activity_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -398,11 +441,21 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
     let out_dir = dir.join("out");
     let prompt = github::build_prompt(&s, issue.as_ref(), &base);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
+    let org_settings = app.org_settings(&s.org);
+    let mut runner_env = agent_env(&agent, &orgs::effective_agent(&modules, &org_settings));
+    let routing = providers::colony_routes(app);
+    if !routing.routes.is_empty() {
+        runner_env.insert("COLONIZER_MODEL_ROUTES".into(), Value::String(serde_json::to_string(&routing.routes)?));
+    }
+    let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
+    if memory_on {
+        runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
+    }
     let session_json = json!({
         "session_id": id,
         "workspace": "/workspace",
         "listen": format!("0.0.0.0:{AGENTD_PORT}"),
-        "agent": {"module": agent.id, "command": agent.vm_command(), "env": agent_env(&agent, &modules.agent)},
+        "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
         "initial_prompt": prompt,
     });
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
@@ -427,6 +480,14 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         Mount { source: app.cfg.asset("bin/colonizer-agentd")?, target: "/opt/colonizer/bin/colonizer-agentd".into(), read_only: true },
         Mount { source: agent.dir.clone(), target: "/opt/colonizer/agent".into(), read_only: true },
     ];
+    if memory_on {
+        for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
+            // Mount points must exist inside the read-only /colonizer mount.
+            std::fs::create_dir_all(vm_dir.join("memory").join(scope))?;
+            let source = app.memory.ensure_scope(scope, &key)?;
+            mounts.push(Mount { source, target: format!("/colonizer/memory/{scope}"), read_only: true });
+        }
+    }
     let mut secrets = Vec::new();
     if agent.needs_claude {
         let cred = app.claude_cred().context("log in with Claude in Settings first")?;
@@ -452,6 +513,12 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
+    }
+
+    secrets.extend(routing.secrets);
+    env.extend(routing.env);
+    if routing.needs_host && !net_profiles.iter().any(|p| p == "host") {
+        net_profiles.push("host".into());
     }
 
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
@@ -625,6 +692,21 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
     }
     rt.broadcast(Some(seq), line.to_string());
 
+    // Progress for the watchdog: anything but status changes and the echo of its own nudges.
+    let kind = event["type"].as_str().unwrap_or_default();
+    let watchdog_echo = kind == "user_message" && event["id"].as_str().is_some_and(|i| i.starts_with("watchdog-"));
+    if kind != "status" && !watchdog_echo {
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = Utc::now();
+            activity.nudges = 0;
+            activity.last_nudge = None;
+        }
+        if app.session(id).await.is_some_and(|s| s.attention.is_some()) {
+            app.update_session(id, |x| x.attention = None).await;
+        }
+    }
+
     match event["type"].as_str() {
         Some("status") => {
             let state = event["state"].as_str().unwrap_or_default();
@@ -650,8 +732,15 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
                 }
             }
         }
-        Some("question") => *rt.open_question.lock().await = event["question_id"].as_str().map(String::from),
-        Some("question_answered") => *rt.open_question.lock().await = None,
+        Some("question") => {
+            *rt.open_question.lock().await = event["question_id"].as_str().map(String::from);
+            rt.activity.lock().await.question_since = Some(Utc::now());
+        }
+        Some("question_answered") => {
+            *rt.open_question.lock().await = None;
+            rt.activity.lock().await.question_since = None;
+        }
+        Some("memory_proposal") => memory_proposal(app, id, &event).await,
         Some("turn_end") => {
             let cost = event["cost_usd"].as_f64();
             if let Some((s, ())) = app.update_session(id, |x| {
@@ -669,6 +758,59 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
             }
         }
         _ => {}
+    }
+}
+
+/// A colony proposed a shared-memory note: queue it for review (or store it when review is off).
+async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
+    let Some(s) = app.session(id).await else { return };
+    let modules = app.modules.read().await.clone();
+    if !orgs::effective_memory_enabled(&modules, &app.org_settings(&s.org)) {
+        app.session_log(id, "info", "ignored a memory proposal: shared memory is off for this org".into()).await;
+        return;
+    }
+    let scope = event["scope"].as_str().unwrap_or("repo");
+    let key = match scope {
+        "org" => s.org.clone(),
+        "repo" => s.repo.clone(),
+        _ => String::new(),
+    };
+    let tags: Vec<String> =
+        event["tags"].as_array().map(|tags| tags.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+    let source = json!({"session_id": s.id, "repo": s.repo});
+    let title = event["title"].as_str().unwrap_or_default();
+    let content = event["content"].as_str().unwrap_or_default();
+    let note = match memory::draft(scope, &key, title, content, &tags, source) {
+        Ok(note) => note,
+        Err(e) => {
+            app.session_log(id, "error", format!("rejected a memory proposal: {e:#}")).await;
+            return;
+        }
+    };
+    let title = note.title.clone();
+    let stored = if orgs::memory_requires_review(&modules) {
+        app.memory.add_proposal(note).await.map(|proposal| json!(proposal))
+    } else {
+        app.memory.add_note(note).await.map(|note| {
+            let mut value = json!(note);
+            value["status"] = json!("approved");
+            value
+        })
+    };
+    match stored {
+        Ok(proposal) => {
+            let waiting = proposal["status"] == "pending";
+            let message = format!(
+                "memory: the agent proposed \"{title}\" for {scope} memory{}",
+                if waiting { ", waiting for your review" } else { " (review is off, so it is live)" }
+            );
+            app.session_log(id, "info", message).await;
+            let rt = app.runtimes.lock().await.get(id).cloned();
+            if let Some(rt) = rt {
+                rt.broadcast(None, json!({"type": "memory_proposed", "proposal": proposal}).to_string());
+            }
+        }
+        Err(e) => app.session_log(id, "error", format!("could not store a memory proposal: {e:#}")).await,
     }
 }
 
@@ -829,13 +971,17 @@ async fn agentd_ws(app: &App, s: &Session, path: &str) -> Result<WebSocketStream
 // ---------------------------------------------------------------------------
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Session>> {
-    let mut sessions = app.sessions.read().await.clone();
-    sessions.reverse();
-    Json(sessions)
+    let sessions = app.sessions.read().await.clone();
+    let mut out = Vec::with_capacity(sessions.len());
+    for session in sessions.into_iter().rev() {
+        out.push(with_activity(&app, session).await);
+    }
+    Json(out)
 }
 
 pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    Ok(Json(app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?))
+    let session = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    Ok(Json(with_activity(&app, session).await))
 }
 
 pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
@@ -908,6 +1054,7 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
     let text = |s: String| Message::Text(s.into());
 
     let Some(session) = app.session(&id).await else { return };
+    let session = with_activity(&app, session).await;
     if tx.send(text(json!({"type": "session", "session": session}).to_string())).await.is_err() {
         return;
     }

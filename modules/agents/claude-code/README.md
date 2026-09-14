@@ -16,11 +16,36 @@ lines on stdout, diagnostics on stderr.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `COLONIZER_CLAUDE_BIN` | `/opt/claude/bin/claude` | Native Claude Code binary |
-| `COLONIZER_MODEL` | Claude Code default | Model alias or ID |
+| `COLONIZER_MODEL` | Claude Code default | Orchestrator model: alias, ID or `<provider>/<model>` |
+| `COLONIZER_SUBAGENT_MODEL` | orchestrator model | Default subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`) |
+| `COLONIZER_BACKGROUND_MODEL` | Claude Code default | Background model (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
+| `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1) |
+| `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
 | `COLONIZER_EFFORT` | model default | `low`, `medium`, `high`, `xhigh` or `max` |
+| `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
 
 Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a microsandbox placeholder in
 the VM).
+
+## Model routing
+
+When a route or a `<provider>/<model>` model is configured, `router.mjs` listens on `127.0.0.1` and
+Claude Code's `ANTHROPIC_BASE_URL` points at it. A request whose `model` starts with a route prefix
+(`deepseek/deepseek-flash`) goes to that route's `base_url` with the prefix stripped, the route's key
+(`x-api-key`, `Bearer`, or none), and without the Anthropic credential or `oauth-*` betas. Everything
+else passes through to `https://api.anthropic.com` unchanged, so a subscription login keeps working for
+the orchestrator. Routed `count_tokens` calls the provider doesn't support get an estimate. Provider key
+variables are removed from Claude Code's own environment.
+
+Claude Code sends its full request shape to routed providers, including `thinking`, `context_management`,
+`output_config`, `metadata`, every tool definition and betas such as `context-management-*` and
+`advisor-tool-*`. Providers that reject unknown fields need to ignore them.
+
+## Shared memory
+
+With `COLONIZER_MEMORY_DIR` set, the agent gets two auto-allowed tools from an in-process MCP server
+(`colonizer_memory`): `memory_search` searches `{repo,org,global}/notes/*.md`, and `memory_propose`
+emits a `memory_proposal` event for review on the mothership. Nothing is written inside the colony.
 
 ## Develop
 

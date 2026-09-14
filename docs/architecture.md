@@ -34,6 +34,17 @@ editable in Settings → Modules). A module kind has one active provider:
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `chat`, `terminal` (toggles) | Panels in the session view |
 | `publish` | `github-pr` | Commit on the host, push, open the pull request |
+| `memory` | `files` | Shared notes per repository, org and globally; agents propose, the user approves |
+| `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
+
+Two settings layers sit next to the modules:
+
+- **Model providers** (`providers.json`, keys in `provider-keys/`, 0600): Anthropic-compatible endpoints
+  the agent can route models to as `<provider>/<model>`. The Claude Code runner starts a router inside
+  the colony; provider keys reach colonies as microsandbox secrets for the provider host only, and
+  loopback providers are reached through `host.microsandbox.internal`.
+- **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, memory
+  and the watchdog. A colony belongs to its repository owner's org.
 
 ## Session lifecycle
 

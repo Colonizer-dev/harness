@@ -20,10 +20,24 @@
     "properties": {
       "model": {
         "type": "string",
-        "title": "Model",
-        "description": "Claude model alias or ID. Empty uses Claude Code's default.",
+        "title": "Orchestrator model",
+        "description": "Model for the main agent: a Claude alias or ID (opus, claude-opus-5) or <provider>/<model> for another provider. Empty uses Claude Code's default.",
         "default": "",
         "env": "COLONIZER_MODEL"
+      },
+      "subagent_model": {
+        "type": "string",
+        "title": "Subagent model",
+        "description": "Default model for subagents: a Claude alias or ID, or <provider>/<model> such as deepseek/deepseek-flash. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_MODEL"
+      },
+      "background_model": {
+        "type": "string",
+        "title": "Background model",
+        "description": "Model for background work such as titles and summaries: a Claude alias or ID, or <provider>/<model>. Empty uses Claude Code's default.",
+        "default": "",
+        "env": "COLONIZER_BACKGROUND_MODEL"
       },
       "effort": {
         "type": "string",

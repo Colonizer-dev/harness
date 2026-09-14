@@ -116,6 +116,18 @@ pub struct ModulesConfig {
     pub agent: ModuleChoice,
     pub interfaces: ModuleChoice,
     pub publish: ModuleChoice,
+    #[serde(default = "default_memory")]
+    pub memory: ModuleChoice,
+    #[serde(default = "default_watchdog")]
+    pub watchdog: ModuleChoice,
+}
+
+fn default_memory() -> ModuleChoice {
+    ModuleChoice::new("files")
+}
+
+fn default_watchdog() -> ModuleChoice {
+    ModuleChoice::new("default")
 }
 
 impl Default for ModulesConfig {
@@ -127,6 +139,8 @@ impl Default for ModulesConfig {
             agent: ModuleChoice::new("claude-code"),
             interfaces: ModuleChoice::new("default"),
             publish: ModuleChoice::new("github-pr"),
+            memory: default_memory(),
+            watchdog: default_watchdog(),
         }
     }
 }
@@ -154,6 +168,8 @@ impl ModulesConfig {
             "agent" => Some(&self.agent),
             "interfaces" => Some(&self.interfaces),
             "publish" => Some(&self.publish),
+            "memory" => Some(&self.memory),
+            "watchdog" => Some(&self.watchdog),
             _ => None,
         }
     }
@@ -166,6 +182,8 @@ impl ModulesConfig {
             "agent" => Some(&mut self.agent),
             "interfaces" => Some(&mut self.interfaces),
             "publish" => Some(&mut self.publish),
+            "memory" => Some(&mut self.memory),
+            "watchdog" => Some(&mut self.watchdog),
             _ => None,
         }
     }
