@@ -1006,6 +1006,16 @@ pub async fn terminal_ws(
 }
 
 async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut socket: WebSocket) {
+    let not_ready = match s.status {
+        SessionStatus::Starting => Some("the colony is still starting; the terminal opens once its microVM is ready"),
+        status if !status.is_live() => Some("the colony's microVM isn't running"),
+        _ => None,
+    };
+    if let Some(message) = not_ready {
+        let _ = socket.send(Message::Text(json!({"type": "error", "message": message}).to_string().into())).await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
     let upstream = match agentd_ws(&app, &s, &format!("/v1/pty?cols={cols}&rows={rows}")).await {
         Ok(ws) => ws,
         Err(e) => {

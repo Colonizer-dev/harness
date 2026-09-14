@@ -361,9 +361,24 @@ taildrop:
     }
 
     pub async fn status(&self) -> Value {
-        let running = self.running.lock().await.is_some();
-        let node = if running { self.backend_state().await.ok() } else { None };
-        json!({"running": running, "harness_node": node, "control_port": self.ports.control})
+        if self.running.lock().await.is_none() {
+            return json!({"enabled": true, "provider": "headscale", "state": "stopped", "harness_ip": null, "nodes": 0});
+        }
+        let state = self.backend_state().await.ok().map(|s| s.to_lowercase());
+        let harness_ip = exec(self.tailscale().args(["ip", "-4"])).await.ok().map(|ip| ip.trim().to_string());
+        let colonies = self
+            .nodes()
+            .await
+            .map(|nodes| nodes.iter().filter(|n| n["user"]["name"] == VMS_USER && n["online"] == true).count())
+            .unwrap_or(0);
+        json!({
+            "enabled": true,
+            "provider": "headscale",
+            "state": state,
+            "harness_ip": harness_ip,
+            "nodes": colonies,
+            "control_port": self.ports.control,
+        })
     }
 }
 
