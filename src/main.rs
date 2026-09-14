@@ -7,6 +7,8 @@
 //! only — the guest environment holds a placeholder. Everything the VM leaves behind is treated
 //! as untrusted data by the host-side publish step.
 
+mod claude_login;
+
 use anyhow::{anyhow, bail, Context, Result};
 use axum::{
     extract::{Path, Request, State},
@@ -167,6 +169,7 @@ struct App {
     slots: Semaphore,
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     cancels: Mutex<HashMap<String, watch::Sender<bool>>>,
+    login: claude_login::LoginManager,
 }
 
 type Shared = Arc<App>;
@@ -201,7 +204,8 @@ impl App {
     fn claude_cred(&self) -> Option<ClaudeCred> {
         if let Some(token) = read_trimmed(&self.claude_token_file()) {
             let env = if token.starts_with("sk-ant-api") { "ANTHROPIC_API_KEY" } else { "CLAUDE_CODE_OAUTH_TOKEN" };
-            return Some(ClaudeCred { env, value: token, source: "saved token" });
+            let source = if env == "ANTHROPIC_API_KEY" { "saved API key" } else { "Claude subscription" };
+            return Some(ClaudeCred { env, value: token, source });
         }
         if let Some(value) = env_nonempty("CLAUDE_CODE_OAUTH_TOKEN") {
             return Some(ClaudeCred { env: "CLAUDE_CODE_OAUTH_TOKEN", value, source: "CLAUDE_CODE_OAUTH_TOKEN" });
@@ -1267,6 +1271,7 @@ async fn main() -> Result<()> {
         persist_lock: Mutex::new(()),
         repo_locks: Mutex::new(HashMap::new()),
         cancels: Mutex::new(HashMap::new()),
+        login: Default::default(),
     });
     interrupt_running(&app, "harness restarted while this run was in progress").await;
 
@@ -1275,6 +1280,10 @@ async fn main() -> Result<()> {
         .route("/api/status", get(status))
         .route("/api/settings/github-token", post(set_github_token).delete(delete_github_token))
         .route("/api/settings/claude-token", post(set_claude_token).delete(delete_claude_token))
+        .route("/api/claude-login", get(claude_login::status))
+        .route("/api/claude-login/start", post(claude_login::start))
+        .route("/api/claude-login/code", post(claude_login::submit_code))
+        .route("/api/claude-login/cancel", post(claude_login::cancel))
         .route("/api/repos", get(list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(list_issues))
         .route("/api/jobs", get(list_jobs).post(create_job))
