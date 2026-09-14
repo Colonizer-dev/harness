@@ -1,5 +1,6 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import type { SessionStatus } from "../types";
+import { useEffect, useId, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import type { Attention, ModelOption, Session, SessionStatus } from "../types";
+import { IconAlert } from "./icons";
 
 export function cx(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
@@ -131,6 +132,96 @@ export function Switch({
         )}
       />
     </button>
+  );
+}
+
+/** The GitHub org (repository owner) a colony belongs to. */
+export function orgOf(session: Pick<Session, "org" | "repo">): string {
+  return session.org || session.repo.split("/")[0] || "";
+}
+
+export function sameOrg(a: string | null | undefined, b: string | null | undefined): boolean {
+  return (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
+}
+
+export function attentionText(attention: Attention): string {
+  const n = attention.nudges ?? 0;
+  switch (attention.reason) {
+    case "stalled":
+      return `No progress, nudged ${n}×`;
+    case "nudges_exhausted":
+      return `Still stalled after ${n} nudge${n === 1 ? "" : "s"}`;
+    case "waiting_for_answer":
+      return "Waiting for your answer";
+    default:
+      return "Needs attention";
+  }
+}
+
+/** The amber marker for colonies the watchdog flagged. */
+export function AttentionBadge({ attention, className }: { attention: Attention | null | undefined; className?: string }) {
+  if (!attention) return null;
+  return (
+    <span
+      title={attentionText(attention)}
+      className={cx(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-warn-soft px-2 py-0.5 text-[11.5px] font-semibold leading-4 text-warn",
+        className,
+      )}
+    >
+      <IconAlert size={11} strokeWidth={2.5} /> Needs attention
+    </span>
+  );
+}
+
+/** "18 min ago", for sentences like "last activity 18 min ago". */
+export function minutesAgo(ts: string | null | undefined): string {
+  if (!ts) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
+}
+
+/** A free-text model field with suggestions from GET /api/models. */
+export function ModelInput({
+  value,
+  onChange,
+  models,
+  placeholder,
+  ariaLabel,
+  className,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  models: ModelOption[];
+  placeholder?: string;
+  ariaLabel?: string;
+  className?: string;
+}) {
+  const listId = useId();
+  return (
+    <>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        list={listId}
+        placeholder={placeholder ?? "opus, deepseek/deepseek-flash, …"}
+        aria-label={ariaLabel}
+        spellCheck={false}
+        autoComplete="off"
+        className={cx(inputClass, "font-mono text-[13px]", className)}
+      />
+      <datalist id={listId}>
+        {models.map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.label}
+          </option>
+        ))}
+      </datalist>
+    </>
   );
 }
 

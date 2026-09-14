@@ -114,3 +114,36 @@ export const IconBranch = make(
   </>,
 );
 export const IconPlus = make(<path d="M12 5v14M5 12h14" />);
+export const IconMemory = make(
+  <>
+    <path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5z" />
+    <path d="M12 6.5v13" />
+  </>,
+);
+export const IconAlert = make(
+  <>
+    <path d="M10.3 3.9 2.4 17.5a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
+  </>,
+);
+export const IconOrg = make(
+  <>
+    <rect x="4" y="3" width="16" height="18" rx="2" />
+    <path d="M9 7h1M14 7h1M9 11h1M14 11h1M9 15h1M14 15h1" />
+  </>,
+);
+export const IconKey = make(
+  <>
+    <circle cx="8" cy="15" r="4" />
+    <path d="m10.8 12.2 8.7-8.7M16 7l2.5 2.5M13.5 9.5l2 2" />
+  </>,
+);
+export const IconPencil = make(<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z" />);
+export const IconCpu = make(
+  <>
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+    <path d="M9.5 9.5h5v5h-5z" />
+    <path d="M9 2.5V6M15 2.5V6M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5" />
+  </>,
+);

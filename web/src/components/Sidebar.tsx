@@ -1,8 +1,36 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import type { HarnessStatus, Issue, Repo, Session } from "../types";
-import { IconChevron, IconExternal, IconPlus, IconSearch, IconSettings, IconX } from "./icons";
-import { Badge, Button, Spinner, StatusBadge, Switch, cx, inputClass, store, stored, timeAgo } from "./ui";
+import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
+import {
+  IconCheck,
+  IconChevron,
+  IconChevronDown,
+  IconExternal,
+  IconMemory,
+  IconOrg,
+  IconPlus,
+  IconSearch,
+  IconSettings,
+  IconX,
+} from "./icons";
+import {
+  AttentionBadge,
+  Badge,
+  Button,
+  Spinner,
+  StatusBadge,
+  Switch,
+  cx,
+  inputClass,
+  isLive,
+  orgOf,
+  sameOrg,
+  store,
+  stored,
+  timeAgo,
+} from "./ui";
+
+export type MainView = "colonies" | "memory";
 
 export function LogoMark({ size = 28 }: { size?: number }) {
   return (
@@ -29,6 +57,13 @@ export function Sidebar({
   onCreated,
   onOpenSettings,
   onClose,
+  orgs,
+  selectedOrg,
+  onSelectOrg,
+  onOpenOrgSettings,
+  view,
+  onOpenMemory,
+  pendingMemory,
 }: {
   status: HarnessStatus | null;
   statusError: boolean;
@@ -39,6 +74,14 @@ export function Sidebar({
   onCreated: (session: Session) => void;
   onOpenSettings: () => void;
   onClose?: () => void;
+  orgs: OrgInfo[];
+  /** null means "All orgs". */
+  selectedOrg: string | null;
+  onSelectOrg: (org: string | null) => void;
+  onOpenOrgSettings: (org: string) => void;
+  view: MainView;
+  onOpenMemory: () => void;
+  pendingMemory: number;
 }) {
   const api = useApi();
   const [tab, setTab] = useState<"sessions" | "new">(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
@@ -46,6 +89,8 @@ export function Sidebar({
   useEffect(() => {
     store("colonizer.sidebar-tab", tab);
   }, [tab]);
+
+  const visible = selectedOrg ? sessions.filter((s) => sameOrg(orgOf(s), selectedOrg)) : sessions;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -77,12 +122,27 @@ export function Sidebar({
         )}
       </div>
 
+      <div className="mx-3 mb-1 flex items-center gap-1.5">
+        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} />
+        {selectedOrg && (
+          <button
+            type="button"
+            onClick={() => onOpenOrgSettings(selectedOrg)}
+            aria-label={`Settings for ${selectedOrg}`}
+            title={`Settings for ${selectedOrg}`}
+            className="grid size-9 shrink-0 cursor-pointer place-items-center rounded-lg border border-border bg-panel text-muted hover:bg-panel-2 hover:text-text"
+          >
+            <IconSettings size={15} />
+          </button>
+        )}
+      </div>
+
       <StatusRow status={status} error={statusError} onOpenSettings={onOpenSettings} />
 
       <div role="tablist" aria-label="Sidebar" className="mx-3 mt-2 grid grid-cols-2 gap-1 rounded-lg bg-panel-2 p-1">
         <SidebarTab active={tab === "sessions"} onClick={() => setTab("sessions")}>
           Colonies
-          {sessions.length > 0 && <span className="text-faint">{sessions.length}</span>}
+          {visible.length > 0 && <span className="text-faint">{visible.length}</span>}
         </SidebarTab>
         <SidebarTab active={tab === "new"} onClick={() => setTab("new")}>
           <IconPlus size={13} /> Launch
@@ -92,14 +152,16 @@ export function Sidebar({
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-2">
         {tab === "sessions" ? (
           <SessionList
-            sessions={sessions}
+            sessions={visible}
             loaded={sessionsLoaded}
-            selectedId={selectedId}
+            selectedId={view === "colonies" ? selectedId : null}
+            org={selectedOrg}
             onSelect={onSelect}
             onNew={() => setTab("new")}
           />
         ) : (
           <NewSession
+            org={selectedOrg}
             githubConnected={status?.github.connected ?? false}
             statusKnown={status !== null}
             onOpenSettings={onOpenSettings}
@@ -109,6 +171,29 @@ export function Sidebar({
             }}
           />
         )}
+      </div>
+
+      <div className="shrink-0 border-t border-border p-2">
+        <button
+          type="button"
+          onClick={onOpenMemory}
+          aria-current={view === "memory" ? "page" : undefined}
+          className={cx(
+            "flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13.5px] font-medium transition-colors",
+            view === "memory" ? "bg-accent-soft text-text" : "text-muted hover:bg-panel-2 hover:text-text",
+          )}
+        >
+          <IconMemory size={16} className={view === "memory" ? "text-accent" : undefined} />
+          <span className="min-w-0 flex-1">Memory</span>
+          {pendingMemory > 0 && (
+            <span
+              className="rounded-full bg-accent px-1.5 text-[11.5px] font-semibold leading-5 text-on-accent"
+              aria-label={`${pendingMemory} waiting for review`}
+            >
+              {pendingMemory}
+            </span>
+          )}
+        </button>
       </div>
     </div>
   );
@@ -128,6 +213,154 @@ function SidebarTab({ active, onClick, children }: { active: boolean; onClick: (
     >
       {children}
     </button>
+  );
+}
+
+interface OrgEntry {
+  org: string;
+  live: number;
+  total: number;
+  pending: number;
+}
+
+/** Orgs from GET /api/orgs plus any org that only appears in the colony list; counts come from the live list. */
+function orgEntries(orgs: OrgInfo[], sessions: Session[]): OrgEntry[] {
+  const byKey = new Map<string, OrgEntry>();
+  const entry = (org: string) => {
+    const key = org.toLowerCase();
+    let found = byKey.get(key);
+    if (!found) byKey.set(key, (found = { org, live: 0, total: 0, pending: 0 }));
+    return found;
+  };
+  for (const info of orgs) entry(info.org).pending = info.pending_memory ?? 0;
+  for (const session of sessions) {
+    const org = orgOf(session);
+    if (!org) continue;
+    const e = entry(org);
+    e.total += 1;
+    if (isLive(session.status)) e.live += 1;
+  }
+  return [...byKey.values()].sort((a, b) => a.org.localeCompare(b.org));
+}
+
+function colonyCount(n: number): string {
+  return `${n} ${n === 1 ? "colony" : "colonies"}`;
+}
+
+function OrgSwitcher({
+  orgs,
+  sessions,
+  selected,
+  onSelect,
+}: {
+  orgs: OrgInfo[];
+  sessions: Session[];
+  selected: string | null;
+  onSelect: (org: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const entries = orgEntries(orgs, sessions);
+  const current = selected ? entries.find((e) => sameOrg(e.org, selected)) : null;
+  const totalLive = sessions.filter((s) => isLive(s.status)).length;
+  const live = current ? current.live : totalLive;
+  const choose = (org: string | null) => {
+    onSelect(org);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={ref} className="relative min-w-0 flex-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Switch organisation"
+        className="flex h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-border bg-panel px-2.5 text-left hover:bg-panel-2"
+      >
+        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-panel-3 text-muted">
+          <IconOrg size={12} />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{current?.org ?? selected ?? "All orgs"}</span>
+        {live > 0 && <span className="shrink-0 text-[11.5px] text-info">{live} live</span>}
+        <IconChevronDown size={14} className={cx("shrink-0 text-faint transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          aria-label="Organisations"
+          className="scroll-thin absolute inset-x-0 top-[calc(100%+4px)] z-30 max-h-80 overflow-y-auto rounded-xl border border-border bg-panel p-1 shadow-[var(--shadow)]"
+        >
+          <OrgOption label="All orgs" meta={colonyCount(sessions.length)} live={totalLive} pending={0} active={!selected} onClick={() => choose(null)} />
+          {entries.length > 0 && <li role="separator" className="my-1 border-t border-border" />}
+          {entries.map((e) => (
+            <OrgOption
+              key={e.org}
+              label={e.org}
+              meta={colonyCount(e.total)}
+              live={e.live}
+              pending={e.pending}
+              active={sameOrg(selected, e.org)}
+              onClick={() => choose(e.org)}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function OrgOption({
+  label,
+  meta,
+  live,
+  pending,
+  active,
+  onClick,
+}: {
+  label: string;
+  meta: string;
+  live: number;
+  pending: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <li role="option" aria-selected={active}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={cx("flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left", active ? "bg-accent-soft" : "hover:bg-panel-2")}
+      >
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13.5px] font-medium">{label}</span>
+          <span className="block text-[11.5px] text-faint">
+            {meta}
+            {pending > 0 && ` · ${pending} to review`}
+          </span>
+        </span>
+        {live > 0 && <Badge tone="info">{live} live</Badge>}
+        <IconCheck size={14} className={cx("shrink-0 text-accent", !active && "invisible")} />
+      </button>
+    </li>
   );
 }
 
@@ -178,12 +411,14 @@ function SessionList({
   sessions,
   loaded,
   selectedId,
+  org,
   onSelect,
   onNew,
 }: {
   sessions: Session[];
   loaded: boolean;
   selectedId: string | null;
+  org: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
 }) {
@@ -197,7 +432,7 @@ function SessionList({
   if (sessions.length === 0) {
     return (
       <div className="px-3 py-10 text-center text-[13px] text-muted">
-        No colonies yet.
+        {org ? `No colonies in ${org} yet.` : "No colonies yet."}
         <div className="mt-3">
           <Button size="sm" onClick={onNew}>
             <IconPlus size={13} /> Launch one from an issue
@@ -231,10 +466,14 @@ function SessionList({
               <div className="mt-1 line-clamp-2 text-[13.5px] font-medium leading-snug">
                 {session.issue_title || (session.issue != null ? `Issue #${session.issue}` : "Open colony")}
               </div>
-              <div className="mt-1 flex gap-2 text-[12px] text-faint">
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-faint">
+                {!org && (
+                  <span className="rounded-md bg-panel-3 px-1.5 text-[11px] font-medium leading-[18px] text-muted">{orgOf(session)}</span>
+                )}
                 <span>{timeAgo(session.updated_at)}</span>
                 {session.cost_usd != null && <span>· ${session.cost_usd.toFixed(2)}</span>}
                 {session.cleaned_up && <span>· cleaned up</span>}
+                <AttentionBadge attention={session.attention} />
               </div>
             </button>
           </li>
@@ -249,11 +488,13 @@ function SectionLabel({ children }: { children: ReactNode }) {
 }
 
 function NewSession({
+  org,
   githubConnected,
   statusKnown,
   onOpenSettings,
   onCreated,
 }: {
+  org: string | null;
   githubConnected: boolean;
   statusKnown: boolean;
   onOpenSettings: () => void;
@@ -270,6 +511,10 @@ function NewSession({
   const [issueQuery, setIssueQuery] = useState("");
   const [openIssue, setOpenIssue] = useState<number | null>(null);
 
+  const inOrg = (name: string) => !org || sameOrg(name.split("/")[0], org);
+  // A remembered repository from another org doesn't belong in this workspace.
+  const activeRepo = repo && inOrg(repo) ? repo : null;
+
   useEffect(() => {
     if (!githubConnected) return;
     let cancelled = false;
@@ -284,18 +529,18 @@ function NewSession({
   }, [api, githubConnected]);
 
   useEffect(() => {
-    if (!repo || !githubConnected) return;
+    if (!activeRepo || !githubConnected) return;
     let cancelled = false;
     setIssues(null);
     setIssuesError(null);
     api
-      .issues(repo)
+      .issues(activeRepo)
       .then((list) => !cancelled && setIssues(list))
       .catch((error) => !cancelled && setIssuesError(errorMessage(error)));
     return () => {
       cancelled = true;
     };
-  }, [api, repo, githubConnected]);
+  }, [api, activeRepo, githubConnected]);
 
   if (!statusKnown) {
     return (
@@ -326,8 +571,10 @@ function NewSession({
     setOpenIssue(null);
   };
 
+  const showPicker = picking || !activeRepo;
   const query = repoQuery.trim().toLowerCase();
-  const matchingRepos = (repos ?? []).filter((r) => r.full_name.toLowerCase().includes(query)).slice(0, 80);
+  const orgRepos = (repos ?? []).filter((r) => inOrg(r.full_name));
+  const matchingRepos = orgRepos.filter((r) => r.full_name.toLowerCase().includes(query)).slice(0, 80);
   const typedRepo =
     /^[\w.-]+\/[\w.-]+$/.test(repoQuery.trim()) && !(repos ?? []).some((r) => r.full_name.toLowerCase() === query)
       ? repoQuery.trim()
@@ -339,10 +586,10 @@ function NewSession({
 
   return (
     <div className="space-y-2 px-1">
-      <SectionLabel>Repository</SectionLabel>
-      {repo && !picking ? (
+      <SectionLabel>{org ? `Repository in ${org}` : "Repository"}</SectionLabel>
+      {!showPicker && activeRepo ? (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-panel py-1.5 pl-3 pr-1.5">
-          <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{repo}</span>
+          <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{activeRepo}</span>
           <Button size="sm" variant="ghost" onClick={() => setPicking(true)}>
             Change
           </Button>
@@ -354,7 +601,7 @@ function NewSession({
             <input
               value={repoQuery}
               onChange={(e) => setRepoQuery(e.target.value)}
-              placeholder="Search, or type owner/repo"
+              placeholder={org ? `Search ${org}, or type owner/repo` : "Search, or type owner/repo"}
               aria-label="Search repositories"
               className={cx(inputClass, "pl-8")}
             />
@@ -378,20 +625,22 @@ function NewSession({
               />
             ))}
             {repos && matchingRepos.length === 0 && !typedRepo && (
-              <p className="px-3 py-3 text-[13px] text-muted">No matching repositories</p>
+              <p className="px-3 py-3 text-[13px] text-muted">
+                {org && orgRepos.length === 0 ? `No repositories in ${org}` : "No matching repositories"}
+              </p>
             )}
           </div>
-          {repo && (
+          {activeRepo && (
             <button type="button" className="cursor-pointer px-1 text-[12.5px] text-muted hover:text-text" onClick={() => setPicking(false)}>
-              Keep {repo}
+              Keep {activeRepo}
             </button>
           )}
         </div>
       )}
 
-      {repo && !picking && (
+      {activeRepo && !showPicker && (
         <>
-          <OpenSessionRow repo={repo} onCreated={onCreated} />
+          <OpenSessionRow repo={activeRepo} onCreated={onCreated} />
           <div className="flex items-center justify-between px-1 pt-3">
             <SectionLabel>Open issues</SectionLabel>
             {issues && <span className="text-[11.5px] text-faint">{issues.length}</span>}
@@ -416,7 +665,7 @@ function NewSession({
             {matchingIssues.map((issue) => (
               <IssueRow
                 key={issue.number}
-                repo={repo}
+                repo={activeRepo}
                 issue={issue}
                 open={openIssue === issue.number}
                 onToggle={() => setOpenIssue(openIssue === issue.number ? null : issue.number)}

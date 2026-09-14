@@ -1,5 +1,5 @@
 // Session event stream: WebSocket client for /api/sessions/{id}/events plus the reducer that turns
-// protocol events (docs/protocol.md §2–4) into chat state, and the adapter into assistant-ui messages.
+// protocol events (docs/protocol.md §2–4, §6) into chat state, and the adapter into assistant-ui messages.
 import type { ThreadMessageLike } from "@assistant-ui/react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { SOCKET_OPEN, type Api, type SocketLike } from "./api";
@@ -9,6 +9,7 @@ import type {
   Answers,
   ClientCommand,
   LogLevel,
+  MemoryProposal,
   Question,
   ServerFrame,
   Session,
@@ -63,6 +64,12 @@ export interface TurnSummary {
   ts: string | null;
 }
 
+/** A colony proposed a shared-memory note (§6.2); shown inline where it happened. */
+export interface MemoryNotice {
+  proposal: MemoryProposal;
+  afterMessageId: string | null;
+}
+
 export interface LogEntry {
   source: "harness" | "agent";
   level: LogLevel;
@@ -76,6 +83,7 @@ export interface StreamState {
   session: Session | null;
   messages: ChatMessage[];
   turns: TurnSummary[];
+  memoryNotices: MemoryNotice[];
   agentState: AgentState | null;
   agentDetail: string | null;
   logs: LogEntry[];
@@ -90,6 +98,7 @@ export function initialStreamState(): StreamState {
     session: null,
     messages: [],
     turns: [],
+    memoryNotices: [],
     agentState: null,
     agentDetail: null,
     logs: [],
@@ -97,6 +106,13 @@ export function initialStreamState(): StreamState {
     connection: "connecting",
     submitting: {},
   };
+}
+
+/** The watchdog nudges an agent with a user_message whose id has this prefix (§6.3). */
+export const WATCHDOG_PREFIX = "watchdog-";
+
+export function isWatchdogMessageId(id: string | null | undefined): boolean {
+  return typeof id === "string" && id.startsWith(WATCHDOG_PREFIX);
 }
 
 const MAX_LOGS = 400;
@@ -136,6 +152,12 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
     }
     const entry: LogEntry = { source: "harness", level: frame.level, message: frame.message, ts: frame.ts };
     return { ...state, logs: [...state.logs, entry].slice(-MAX_LOGS) };
+  }
+  if (frame.type === "memory_proposed") {
+    const proposal = frame.proposal;
+    if (!proposal?.id || state.memoryNotices.some((n) => n.proposal.id === proposal.id)) return state;
+    const last = state.messages[state.messages.length - 1];
+    return { ...state, memoryNotices: [...state.memoryNotices, { proposal, afterMessageId: last?.id ?? null }] };
   }
 
   const ev = frame as AgentEvent;
@@ -408,7 +430,7 @@ type ToolCallPart = Extract<Part, { type: "tool-call" }>;
 
 export const ASK_USER_TOOL = "ask_user";
 
-/** Key in `ThreadView.turns` for summaries that have no rendered message to follow. */
+/** Key in `ThreadView.turns` / `ThreadView.notices` for items that have no rendered message to follow. */
 export const END_OF_THREAD = "__end__";
 
 export interface AskUserArgs {
@@ -427,8 +449,10 @@ export interface ToolResultPayload {
 
 export interface ThreadView {
   messages: ThreadMessageLike[];
-  /** Turn summaries keyed by the id of the (grouped) assistant message they follow. */
+  /** Turn summaries keyed by the id of the (grouped) message they follow. */
   turns: Record<string, TurnSummary[]>;
+  /** Memory proposals keyed the same way. */
+  notices: Record<string, MemoryNotice[]>;
   hasOpenQuestion: boolean;
 }
 
@@ -475,6 +499,7 @@ function toParts(blocks: Block[]): Part[] {
 export function buildThread(state: StreamState): ThreadView {
   const messages: ThreadMessageLike[] = [];
   const turns: Record<string, TurnSummary[]> = {};
+  const notices: Record<string, MemoryNotice[]> = {};
   const groupOf = new Map<string, string>();
   // Assistant groups with nothing renderable (e.g. a failed turn's empty text) hand their turn
   // summaries to the message rendered before them.
@@ -534,11 +559,13 @@ export function buildThread(state: StreamState): ThreadView {
     messages[messages.length - 1] = { ...last, status };
   }
 
-  for (const turn of state.turns) {
-    let key: string | null | undefined = turn.afterMessageId ? groupOf.get(turn.afterMessageId) : undefined;
+  const placement = (afterMessageId: string | null): string => {
+    let key: string | null | undefined = afterMessageId ? groupOf.get(afterMessageId) : undefined;
     if (key && !emitted.has(key)) key = fallbackOf.get(key);
-    (turns[key ?? END_OF_THREAD] ??= []).push(turn);
-  }
+    return key ?? END_OF_THREAD;
+  };
+  for (const turn of state.turns) (turns[placement(turn.afterMessageId)] ??= []).push(turn);
+  for (const notice of state.memoryNotices) (notices[placement(notice.afterMessageId)] ??= []).push(notice);
 
-  return { messages, turns, hasOpenQuestion };
+  return { messages, turns, notices, hasOpenQuestion };
 }

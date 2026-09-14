@@ -17,15 +17,19 @@ import {
   ASK_USER_TOOL,
   END_OF_THREAD,
   buildThread,
+  isWatchdogMessageId,
   type AskUserArgs,
   type AskUserResult,
+  type MemoryNotice,
   type SessionStream,
   type StreamState,
   type ToolResultPayload,
   type TurnSummary,
 } from "../sessionStream";
+import type { MemoryScope } from "../types";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
-import { IconCheck, IconChevron, IconQuestion, IconSend, IconSpark, IconStop, IconX } from "./icons";
+import { IconAlert, IconCheck, IconChevron, IconMemory, IconQuestion, IconSend, IconSpark, IconStop, IconX } from "./icons";
+import { InlineCode } from "./Markdown";
 import { Spinner, cx, formatDuration } from "./ui";
 
 /** The harness sends the session's initial prompt as a user message with this id. */
@@ -37,14 +41,22 @@ const AskUserToolUI = makeAssistantToolUI<AskUserArgs, AskUserResult>({
   render: AskUserCard,
 });
 
+type RenderedMessage = { id: string; content: readonly { type: string; text?: string }[]; createdAt?: Date };
+
+function messageText(message: RenderedMessage): string {
+  return message.content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("");
+}
+
 export function ChatPanel({
   stream,
   state,
   live,
+  onOpenMemory,
 }: {
   stream: SessionStream | null;
   state: StreamState;
   live: boolean;
+  onOpenMemory?: () => void;
 }) {
   const toast = useToast();
   const thread = useMemo(() => buildThread(state), [state]);
@@ -107,15 +119,23 @@ export function ChatPanel({
                   {message.role !== "user" ? (
                     <AssistantMessage />
                   ) : message.id === BRIEF_ID ? (
-                    <SessionBrief text={message.content.map((part) => (part.type === "text" ? part.text : "")).join("")} />
+                    <SessionBrief text={messageText(message)} />
+                  ) : isWatchdogMessageId(message.id) ? (
+                    <WatchdogNotice text={messageText(message)} at={message.createdAt} />
                   ) : (
                     <UserMessage />
                   )}
                   {thread.turns[message.id]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
+                  {thread.notices[message.id]?.map((notice) => (
+                    <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
+                  ))}
                 </>
               )}
             </ThreadPrimitive.Messages>
             {thread.turns[END_OF_THREAD]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
+            {thread.notices[END_OF_THREAD]?.map((notice) => (
+              <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
+            ))}
             <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
           </ThreadPrimitive.Viewport>
           <Composer isRunning={isRunning} live={live} waiting={thread.hasOpenQuestion} />
@@ -161,6 +181,46 @@ function SessionBrief({ text }: { text: string }) {
         </div>
       </details>
     </MessagePrimitive.Root>
+  );
+}
+
+/** A watchdog nudge (§6.3) is an operator notice, never shown as something the user said. */
+function WatchdogNotice({ text, at }: { text: string; at?: Date }) {
+  return (
+    <MessagePrimitive.Root className="my-3">
+      <details className="group rounded-lg border border-warn/25 bg-warn-soft text-[12.5px] text-warn">
+        <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-1.5 [&::-webkit-details-marker]:hidden">
+          <IconAlert size={13} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate font-medium">Watchdog nudged the agent after no progress</span>
+          {at && (
+            <span className="shrink-0 text-[11.5px] opacity-75">{at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+          )}
+          <IconChevron size={13} className="shrink-0 opacity-75 transition-transform group-open:rotate-90" />
+        </summary>
+        <div className="whitespace-pre-wrap border-t border-warn/20 px-3 py-2 leading-relaxed text-muted [overflow-wrap:anywhere]">
+          {text.trim()}
+        </div>
+      </details>
+    </MessagePrimitive.Root>
+  );
+}
+
+const SCOPE_WORD: Record<MemoryScope, string> = { global: "global", org: "org", repo: "repository" };
+
+function MemoryNoticeRow({ notice, onOpen }: { notice: MemoryNotice; onOpen?: () => void }) {
+  const { proposal } = notice;
+  return (
+    <div className="my-2 ml-10 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-panel-2/60 px-3 py-1.5 text-[12.5px] text-muted">
+      <IconMemory size={13} className="shrink-0 text-accent" />
+      <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
+        Proposed a {SCOPE_WORD[proposal.scope] ?? proposal.scope} memory: <span className="font-medium text-text"><InlineCode text={proposal.title} /></span>
+      </span>
+      {onOpen && (
+        <button type="button" onClick={onOpen} className="shrink-0 cursor-pointer font-medium text-accent hover:underline">
+          Review in Memory
+        </button>
+      )}
+    </div>
   );
 }
 

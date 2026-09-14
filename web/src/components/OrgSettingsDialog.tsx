@@ -1,0 +1,409 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { errorMessage, useApi, useToast } from "../context";
+import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
+import { useModels } from "../useModels";
+import { IconOrg, IconX } from "./icons";
+import { Button, ModelInput, Spinner, Switch, cx, inputClass } from "./ui";
+
+type FieldKey =
+  | "model"
+  | "subagent_model"
+  | "background_model"
+  | "max_parallel"
+  | "memory_enabled"
+  | "watchdog_enabled"
+  | "stall_minutes"
+  | "max_nudges";
+
+interface FieldSpec {
+  key: FieldKey;
+  group: string;
+  label: string;
+  hint: string;
+  kind: "model" | "number" | "boolean";
+  min?: number;
+  max?: number;
+  unit?: string;
+}
+
+const FIELDS: FieldSpec[] = [
+  { key: "model", group: "Models", label: "Orchestrator", hint: "The main agent in each colony", kind: "model" },
+  { key: "subagent_model", group: "Models", label: "Subagents", hint: "Agents the orchestrator starts for side tasks", kind: "model" },
+  { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
+  { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
+  { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
+  { key: "watchdog_enabled", group: "Watchdog", label: "Watchdog", hint: "Nudge colonies that stop making progress", kind: "boolean" },
+  { key: "stall_minutes", group: "Watchdog", label: "Stalled after", hint: "Minutes without agent activity", kind: "number", min: 1, max: 1440, unit: "min" },
+  { key: "max_nudges", group: "Watchdog", label: "Nudges", hint: "Before the colony is flagged as still stalled", kind: "number", min: 0, max: 20 },
+];
+
+type Value = string | number | boolean | null | undefined;
+type Draft = Record<FieldKey, { override: boolean; value: string | boolean }>;
+
+function readSetting(settings: OrgSettings, key: FieldKey): Value {
+  switch (key) {
+    case "model":
+    case "subagent_model":
+    case "background_model":
+      return settings.agent?.[key];
+    case "max_parallel":
+      return settings.max_parallel;
+    case "memory_enabled":
+      return settings.memory?.enabled;
+    case "watchdog_enabled":
+      return settings.watchdog?.enabled;
+    case "stall_minutes":
+    case "max_nudges":
+      return settings.watchdog?.[key];
+  }
+}
+
+/** What an inherited field resolves to, from the global modules. */
+function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
+  if (!modules) return undefined;
+  const module = (kind: string) => modules.find((m) => m.kind === kind);
+  const setting = (kind: string, name: string): Value => {
+    const m = module(kind);
+    return (m?.settings?.[name] ?? m?.schema?.properties?.[name]?.default) as Value;
+  };
+  const toggle = (kind: string): Value => {
+    const m = module(kind);
+    return m ? m.enabled && setting(kind, "enabled") !== false : undefined;
+  };
+  switch (key) {
+    case "model":
+    case "subagent_model":
+    case "background_model":
+      return setting("agent", key);
+    case "max_parallel":
+      return setting("sandbox", "max_parallel");
+    case "memory_enabled":
+      return toggle("memory");
+    case "watchdog_enabled":
+      return toggle("watchdog");
+    case "stall_minutes":
+    case "max_nudges":
+      return setting("watchdog", key);
+  }
+}
+
+function describe(spec: FieldSpec, value: Value): string {
+  if (value === undefined || value === null) return "global default";
+  if (typeof value === "boolean") return value ? "on" : "off";
+  if (value === "") return spec.key === "model" ? "Claude Code default" : "same as orchestrator";
+  return spec.unit ? `${value} ${spec.unit}` : String(value);
+}
+
+function toDraft(settings: OrgSettings, modules: ModuleInfo[] | null): Draft {
+  const draft = {} as Draft;
+  for (const spec of FIELDS) {
+    const own = readSetting(settings, spec.key);
+    const fallback = globalValue(modules, spec.key);
+    const override = own !== undefined && own !== null && !(spec.kind === "model" && own === "");
+    const base = override ? own : fallback;
+    draft[spec.key] = {
+      override,
+      value: spec.kind === "boolean" ? base !== false : base === undefined || base === null ? "" : String(base),
+    };
+  }
+  return draft;
+}
+
+function parseNumber(spec: FieldSpec, raw: string): number | null {
+  if (!/^\d+$/.test(raw.trim())) return null;
+  const n = Number(raw);
+  if ((spec.min !== undefined && n < spec.min) || (spec.max !== undefined && n > spec.max)) return null;
+  return n;
+}
+
+/** Inherited fields are sent as null; an empty model override also means inherit. */
+function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null } {
+  const pick = (key: FieldKey): string | number | boolean | null => {
+    const field = draft[key];
+    const spec = FIELDS.find((f) => f.key === key)!;
+    if (!field.override) return null;
+    if (spec.kind === "boolean") return Boolean(field.value);
+    if (spec.kind === "model") return String(field.value).trim() || null;
+    return parseNumber(spec, String(field.value));
+  };
+  const invalid = FIELDS.find((spec) => spec.kind === "number" && draft[spec.key].override && pick(spec.key) === null);
+  const settings: OrgSettings = {
+    agent: {
+      model: pick("model") as string | null,
+      subagent_model: pick("subagent_model") as string | null,
+      background_model: pick("background_model") as string | null,
+    },
+    max_parallel: pick("max_parallel") as number | null,
+    memory: { enabled: pick("memory_enabled") as boolean | null },
+    watchdog: {
+      enabled: pick("watchdog_enabled") as boolean | null,
+      stall_minutes: pick("stall_minutes") as number | null,
+      max_nudges: pick("max_nudges") as number | null,
+    },
+  };
+  return {
+    settings,
+    error: invalid ? `${invalid.label} must be a whole number from ${invalid.min} to ${invalid.max}` : null,
+  };
+}
+
+export function OrgSettingsDialog({
+  org,
+  info,
+  onClose,
+  onSaved,
+}: {
+  org: string | null;
+  info: OrgInfo | undefined;
+  onClose: () => void;
+  onSaved: (saved: OrgInfo) => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [lastOrg, setLastOrg] = useState(org);
+  if (org && org !== lastOrg) setLastOrg(org);
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (org && !dialog.open) dialog.showModal();
+    else if (!org && dialog.open) dialog.close();
+  }, [org]);
+
+  const shown = org ?? lastOrg;
+
+  return (
+    <dialog
+      ref={ref}
+      onClose={onClose}
+      aria-labelledby="org-settings-title"
+      className="m-auto w-[min(640px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
+    >
+      {org && shown && <OrgSettingsForm key={shown} org={shown} info={info} onClose={onClose} onSaved={onSaved} />}
+    </dialog>
+  );
+}
+
+function OrgSettingsForm({
+  org,
+  info,
+  onClose,
+  onSaved,
+}: {
+  org: string;
+  info: OrgInfo | undefined;
+  onClose: () => void;
+  onSaved: (saved: OrgInfo) => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const models = useModels();
+  const [modules, setModules] = useState<ModuleInfo[] | null>(null);
+  const [draft, setDraft] = useState<Draft>(() => toDraft(info?.settings ?? {}, null));
+  const [initial, setInitial] = useState(() => JSON.stringify(fromDraft(toDraft(info?.settings ?? {}, null)).settings));
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .modules()
+      .then((list) => {
+        if (cancelled) return;
+        setModules(list);
+        // Re-seed inherited values (what an override starts from) now that the global settings are known.
+        setDraft((current) => {
+          const seeded = toDraft(info?.settings ?? {}, list);
+          for (const spec of FIELDS) if (current[spec.key].override) seeded[spec.key] = current[spec.key];
+          return seeded;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // Only on open; later polls of the org list must not reset the form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+
+  const { settings, error } = fromDraft(draft);
+  const overrides = FIELDS.filter((spec) => draft[spec.key].override).length;
+  const dirty = JSON.stringify(settings) !== initial;
+
+  const set = (key: FieldKey, patch: Partial<Draft[FieldKey]>) => setDraft((d) => ({ ...d, [key]: { ...d[key], ...patch } }));
+
+  const save = async () => {
+    if (error) return;
+    setSaving(true);
+    try {
+      const saved = await api.saveOrg(org, settings);
+      setInitial(JSON.stringify(settings));
+      onSaved({ colonies: { live: 0, total: 0 }, pending_memory: 0, ...info, ...saved });
+      toast(`Saved ${org} workspace settings`);
+      onClose();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const groups = [...new Set(FIELDS.map((f) => f.group))];
+
+  return (
+    <div className="flex max-h-[calc(100dvh-24px)] flex-col">
+      <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
+        <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
+          <IconOrg size={18} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 id="org-settings-title" className="text-[16px] font-semibold [overflow-wrap:anywhere]">
+            {org} workspace
+          </h2>
+          <p className="mt-0.5 text-[12.5px] text-muted">
+            Colonies on {org} repositories use these settings. Inherit follows Settings → Modules.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close workspace settings"
+          className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
+        >
+          <IconX size={17} />
+        </button>
+      </div>
+
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
+        {groups.map((group) => (
+          <section key={group} className="border-b border-border py-3 last:border-b-0">
+            <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">{group}</h3>
+            <div className="divide-y divide-border">
+              {FIELDS.filter((f) => f.group === group).map((spec) => (
+                <OverrideRow
+                  key={spec.key}
+                  spec={spec}
+                  override={draft[spec.key].override}
+                  inherited={describe(spec, globalValue(modules, spec.key))}
+                  onOverride={(override) => set(spec.key, { override })}
+                >
+                  {spec.kind === "model" && (
+                    <ModelInput
+                      value={String(draft[spec.key].value)}
+                      onChange={(value) => set(spec.key, { value })}
+                      models={models}
+                      ariaLabel={`${spec.label} model for ${org}`}
+                      placeholder={spec.key === "model" ? "opus" : "deepseek/deepseek-flash"}
+                    />
+                  )}
+                  {spec.kind === "number" && (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={spec.min}
+                        max={spec.max}
+                        step={1}
+                        value={String(draft[spec.key].value)}
+                        onChange={(e) => set(spec.key, { value: e.target.value })}
+                        aria-label={`${spec.label} for ${org}`}
+                        aria-invalid={parseNumber(spec, String(draft[spec.key].value)) === null}
+                        className={cx(
+                          inputClass,
+                          "w-28",
+                          parseNumber(spec, String(draft[spec.key].value)) === null && "border-err focus:border-err",
+                        )}
+                      />
+                      {spec.unit && <span className="text-[13px] text-muted">{spec.unit}</span>}
+                    </div>
+                  )}
+                  {spec.kind === "boolean" && (
+                    <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                      <Switch
+                        checked={Boolean(draft[spec.key].value)}
+                        onChange={(value) => set(spec.key, { value })}
+                        label={`${spec.label} for ${org}`}
+                      />
+                      {draft[spec.key].value ? "On" : "Off"}
+                    </label>
+                  )}
+                </OverrideRow>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
+        <span className={cx("mr-auto text-[12.5px]", error ? "text-err" : "text-muted")}>
+          {error ?? (overrides === 0 ? "Everything inherits the global settings" : `${overrides} override${overrides === 1 ? "" : "s"}`)}
+        </span>
+        {overrides > 0 && (
+          <Button
+            variant="ghost"
+            onClick={() =>
+              setDraft((d) => Object.fromEntries(FIELDS.map((f) => [f.key, { ...d[f.key], override: false }])) as Draft)
+            }
+          >
+            Inherit all
+          </Button>
+        )}
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" disabled={!dirty || saving || error !== null} onClick={save}>
+          {saving && <Spinner />} Save
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function OverrideRow({
+  spec,
+  override,
+  inherited,
+  onOverride,
+  children,
+}: {
+  spec: FieldSpec;
+  override: boolean;
+  inherited: string;
+  onOverride: (override: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
+      <div className="min-w-0 flex-1 basis-44">
+        <div className="text-[13.5px] font-medium">{spec.label}</div>
+        <div className="text-[12px] text-muted">{spec.hint}</div>
+      </div>
+      <div className="flex w-full min-w-0 flex-col gap-2 sm:w-[270px]">
+        <div role="radiogroup" aria-label={`${spec.label}: inherit or override`} className="inline-flex self-start rounded-lg bg-panel-2 p-0.5">
+          {[false, true].map((value) => (
+            <button
+              key={String(value)}
+              type="button"
+              role="radio"
+              aria-checked={override === value}
+              onClick={() => onOverride(value)}
+              className={cx(
+                "cursor-pointer rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors",
+                override === value
+                  ? value
+                    ? "bg-panel text-accent shadow-sm"
+                    : "bg-panel text-text shadow-sm"
+                  : "text-muted hover:text-text",
+              )}
+            >
+              {value ? "Override" : "Inherit"}
+            </button>
+          ))}
+        </div>
+        {override ? (
+          children
+        ) : (
+          <div className="flex h-9 items-center text-[12.5px] text-faint">
+            Global setting: <span className="ml-1 font-medium text-muted [overflow-wrap:anywhere]">{inherited}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

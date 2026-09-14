@@ -1,11 +1,21 @@
-// Typed client for the harness browser API (docs/protocol.md §4).
+// Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
   HarnessStatus,
   Issue,
   LoginView,
+  MemoryListing,
+  MemoryNote,
+  MemoryProposal,
+  MemoryScope,
+  ModelOption,
+  ModelProvider,
   ModuleInfo,
+  NewNoteRequest,
   NewSessionRequest,
+  OrgInfo,
+  OrgSettings,
   Repo,
+  SaveProviderRequest,
   Session,
 } from "./types";
 
@@ -52,6 +62,19 @@ export interface Api {
   claudeLoginStart(): Promise<LoginView>;
   claudeLoginCode(code: string): Promise<LoginView>;
   claudeLoginCancel(): Promise<LoginView>;
+  providers(): Promise<ModelProvider[]>;
+  saveProvider(id: string, body: SaveProviderRequest): Promise<ModelProvider>;
+  deleteProvider(id: string): Promise<unknown>;
+  models(): Promise<ModelOption[]>;
+  orgs(): Promise<OrgInfo[]>;
+  /** Returns `{org, settings}`; colony and memory counts come from the next `orgs()`. */
+  saveOrg(org: string, settings: OrgSettings): Promise<Pick<OrgInfo, "org" | "settings">>;
+  memory(scope: MemoryScope, key: string): Promise<MemoryListing>;
+  memoryProposals(): Promise<MemoryProposal[]>;
+  approveProposal(id: string, edits?: { title?: string; content?: string }): Promise<MemoryNote>;
+  rejectProposal(id: string): Promise<unknown>;
+  createNote(body: NewNoteRequest): Promise<MemoryNote>;
+  deleteNote(note: Pick<MemoryNote, "id" | "scope" | "key">): Promise<unknown>;
   openEvents(sessionId: string, since: number): SocketLike;
   openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
 }
@@ -81,6 +104,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
+const put = <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body: JSON.stringify(body) });
+
+const del = <T>(path: string) => request<T>(path, { method: "DELETE" });
+
 const enc = encodeURIComponent;
 
 function wsUrl(path: string): string {
@@ -92,8 +119,7 @@ export const httpApi: Api = {
   mock: false,
   status: () => request("/api/status"),
   modules: () => request("/api/modules"),
-  saveModule: (kind, body) =>
-    request(`/api/modules/${enc(kind)}`, { method: "PUT", body: JSON.stringify(body) }),
+  saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");
@@ -106,13 +132,25 @@ export const httpApi: Api = {
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   setGithubToken: (token) => post("/api/settings/github-token", { token }),
-  deleteGithubToken: () => request("/api/settings/github-token", { method: "DELETE" }),
+  deleteGithubToken: () => del("/api/settings/github-token"),
   setClaudeToken: (token) => post("/api/settings/claude-token", { token }),
-  deleteClaudeToken: () => request("/api/settings/claude-token", { method: "DELETE" }),
+  deleteClaudeToken: () => del("/api/settings/claude-token"),
   claudeLogin: () => request("/api/claude-login"),
   claudeLoginStart: () => post("/api/claude-login/start"),
   claudeLoginCode: (code) => post("/api/claude-login/code", { code }),
   claudeLoginCancel: () => post("/api/claude-login/cancel"),
+  providers: () => request("/api/providers"),
+  saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
+  deleteProvider: (id) => del(`/api/providers/${enc(id)}`),
+  models: () => request("/api/models"),
+  orgs: () => request("/api/orgs"),
+  saveOrg: (org, settings) => put(`/api/orgs/${enc(org)}`, { settings }),
+  memory: (scope, key) => request(`/api/memory?scope=${enc(scope)}&key=${enc(key)}`),
+  memoryProposals: () => request("/api/memory/proposals"),
+  approveProposal: (id, edits) => post(`/api/memory/proposals/${enc(id)}/approve`, edits ?? {}),
+  rejectProposal: (id) => post(`/api/memory/proposals/${enc(id)}/reject`),
+  createNote: (body) => post("/api/memory/notes", body),
+  deleteNote: ({ id, scope, key }) => del(`/api/memory/notes/${enc(id)}?scope=${enc(scope)}&key=${enc(key)}`),
   openEvents: (id, since) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}`)),
   openTerminal: (id, cols, rows) =>
     new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),
