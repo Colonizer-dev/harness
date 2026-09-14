@@ -63,6 +63,9 @@ editable in Settings → Modules). A module kind has one active provider:
   connects directly (≈1 ms) instead of through a public DERP relay. LAN access stays blocked.
 - Users: `harness` and `vms`. Policy: `harness@` may reach `vms@:*`; VMs cannot reach each other.
 - VM keys are single-use, ephemeral, 30-minute pre-auth keys; nodes are deleted on session end.
+- Headscale reads a bundled DERP relay map (`vendor/derpmap.yaml`, refreshed with
+  `scripts/update-derpmap.sh`) instead of fetching one, so the mesh starts without internet access.
+  Relays are only a fallback; the direct UDP path doesn't need them.
 
 ## Trust boundaries
 
@@ -82,6 +85,7 @@ bin/colonizer            host server
 bin/colonizer-agentd             static musl build (built in a rust:alpine microVM)
 vendor/headscale              pinned + sha256-verified (vendor/vendor.lock)
 vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified
+vendor/derpmap.yaml           DERP relay map snapshot (committed)
 modules/agents/claude-code/   runner + production node_modules
 web/                          built UI
 ```

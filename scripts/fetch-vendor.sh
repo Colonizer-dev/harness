@@ -34,3 +34,7 @@ while read -r name version plat kind sha url; do
 done < "$root/vendor/vendor.lock"
 
 [ "$found" -gt 0 ] || { echo "no vendored binaries pinned for $platform" >&2; exit 1; }
+
+# The DERP relay map is committed (scripts/update-derpmap.sh), so the mesh never fetches it at runtime.
+install -m 644 "$root/vendor/derpmap.yaml" "$out/derpmap.yaml"
+echo "installed DERP map"
