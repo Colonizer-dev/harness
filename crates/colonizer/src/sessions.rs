@@ -443,9 +443,23 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let org_settings = app.org_settings(&s.org);
     let mut runner_env = agent_env(&agent, &orgs::effective_agent(&modules, &org_settings));
-    let routing = providers::colony_routes(app);
+    let gateway_token = random_token();
+    write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
+    let routing = providers::colony_routes(app, &gateway_token);
     if !routing.routes.is_empty() {
         runner_env.insert("COLONIZER_MODEL_ROUTES".into(), Value::String(serde_json::to_string(&routing.routes)?));
+    }
+    let used = routing.used(&runner_env);
+    let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe(app, p))).await;
+    for (provider, health) in used.iter().zip(probes) {
+        if health["reachable"] != true {
+            let then = match &provider.fallback_model {
+                Some(model) => format!("its requests will fall back to {model}"),
+                None => "its requests will fail until it is back (set a fallback model to use Claude instead)".into(),
+            };
+            let error = health["error"].as_str().unwrap_or("unknown error");
+            app.session_log(id, "warn", format!("model provider {} is unreachable ({error}); {then}", provider.id)).await;
+        }
     }
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
@@ -515,9 +529,8 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
 
-    secrets.extend(routing.secrets);
-    env.extend(routing.env);
-    if routing.needs_host && !net_profiles.iter().any(|p| p == "host") {
+    // Model providers are reached through the gateway on the mothership.
+    if !routing.routes.is_empty() && !net_profiles.iter().any(|p| p == "host") {
         net_profiles.push("host".into());
     }
 

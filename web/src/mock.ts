@@ -310,6 +310,7 @@ class MockSession {
       },
       ago(19),
     );
+    this.log("provider strix is unreachable (connect timed out after 5 s); strix/ds4-flash requests fall back to sonnet", "warn");
     this.log("watchdog: no progress for 15 min, nudged the agent (1/3)", "warn");
     this.emit(
       {
@@ -756,9 +757,55 @@ export function createMockApi(): Api {
   octo.session.updated_at = ago(300);
   sessions.set(octo.session.id, octo);
 
+  const DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
   const providers: ModelProvider[] = [
-    { id: "deepseek", name: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", auth: "x-api-key", has_key: true, models: ["deepseek-flash", "deepseek-v4-pro"], preset: "deepseek" },
-    { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", has_key: false, models: [], preset: "local" },
+    {
+      id: "deepseek",
+      name: "DeepSeek",
+      base_url: "https://api.deepseek.com/anthropic",
+      auth: "x-api-key",
+      has_key: true,
+      models: ["deepseek-flash", "deepseek-v4-pro"],
+      preset: "deepseek",
+      ...DEFAULT_LIMITS,
+      in_flight: 0,
+      queued: 0,
+    },
+    {
+      id: "strix",
+      name: "Strix Halo",
+      base_url: "http://strix.tail4c2e.ts.net:8080",
+      auth: "none",
+      has_key: false,
+      models: ["ds4-flash"],
+      preset: "local",
+      timeout_secs: 900,
+      max_concurrent: 1,
+      queue_timeout_secs: null,
+      context_tokens: 131072,
+      fallback_model: "sonnet",
+      in_flight: 1,
+      queued: 2,
+    },
+    {
+      id: "lab",
+      name: "Lab vLLM",
+      base_url: "http://10.0.4.20:8000",
+      auth: "bearer",
+      has_key: true,
+      models: ["qwen3-coder"],
+      preset: "custom",
+      ...DEFAULT_LIMITS,
+      max_concurrent: 4,
+      in_flight: 0,
+      queued: 0,
+    },
+  ];
+  const LIMIT_RANGES: [keyof typeof DEFAULT_LIMITS, number, number][] = [
+    ["timeout_secs", 30, 3600],
+    ["max_concurrent", 1, 64],
+    ["queue_timeout_secs", 1, 3600],
+    ["context_tokens", 1024, 2_000_000],
   ];
   const ANTHROPIC_MODELS: [string, string][] = [
     ["opus", "Claude Opus (latest)"],
@@ -1040,6 +1087,16 @@ export function createMockApi(): Api {
       }
       if (!body.name.trim()) throw new ApiError("provider name must be 1-60 characters", 400);
       if (!/^https?:\/\/[^\s/]+/.test(body.base_url.trim())) throw new ApiError("base URL must be an http(s) URL like https://api.deepseek.com/anthropic", 400);
+      for (const [key, min, max] of LIMIT_RANGES) {
+        const value = body[key];
+        if (value != null && (!Number.isInteger(value) || (value as number) < min || (value as number) > max)) {
+          throw new ApiError(`${key} must be between ${min} and ${max}`, 400);
+        }
+      }
+      const fallback = body.fallback_model?.trim() || null;
+      if (fallback && (fallback.includes("/") || !/^[a-z0-9][a-z0-9.-]*$/.test(fallback))) {
+        throw new ApiError("fallback_model must be an Anthropic model id or alias like sonnet", 400);
+      }
       const existing = providers.find((p) => p.id === id);
       const has_key = body.api_key === undefined ? (existing?.has_key ?? false) : body.api_key.trim() !== "";
       const provider: ModelProvider = {
@@ -1050,6 +1107,13 @@ export function createMockApi(): Api {
         has_key,
         models: body.models.map((m) => m.trim()).filter(Boolean),
         preset: body.preset ?? existing?.preset ?? "custom",
+        timeout_secs: body.timeout_secs ?? DEFAULT_LIMITS.timeout_secs,
+        max_concurrent: body.max_concurrent ?? null,
+        queue_timeout_secs: body.queue_timeout_secs ?? null,
+        context_tokens: body.context_tokens ?? null,
+        fallback_model: fallback,
+        in_flight: existing?.in_flight ?? 0,
+        queued: existing?.queued ?? 0,
       };
       if (existing) Object.assign(existing, provider);
       else providers.push(provider);
@@ -1060,6 +1124,20 @@ export function createMockApi(): Api {
       if (index < 0) throw new ApiError("no such provider", 404);
       providers.splice(index, 1);
       return { ok: true };
+    },
+    providerHealth: async (id) => {
+      const provider = providers.find((p) => p.id === id);
+      if (!provider) throw new ApiError("no such provider", 404);
+      // strix is a local server that is switched off; custom endpoints answer but have no /v1/models.
+      await sleep(provider.id === "strix" ? 2200 : 700);
+      const checked_at = now();
+      if (provider.id === "strix") {
+        return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", checked_at };
+      }
+      if (provider.preset === "custom") {
+        return { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", checked_at };
+      }
+      return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, checked_at };
     },
     models: () =>
       later((): ModelOption[] => [

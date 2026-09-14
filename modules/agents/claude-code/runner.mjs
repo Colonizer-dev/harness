@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
-import { routingPlan, startRouter } from './router.mjs';
+import { routeEnv, routingPlan, startRouter } from './router.mjs';
 
 export const SYSTEM_PROMPT_APPEND = [
   'You are running inside the Colonizer; the user follows along in a web UI.',
@@ -110,12 +110,14 @@ export function childEnv(env) {
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
+ * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, hiddenEnv = [] } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, hiddenEnv = [], routes = [] } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
   if (routerUrl) claudeEnv.ANTHROPIC_BASE_URL = routerUrl;
+  for (const [key, value] of Object.entries(routeEnv(routes, env))) claudeEnv[key] ??= value;
   if (env.COLONIZER_SUBAGENT_MODEL) claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
@@ -455,7 +457,7 @@ async function main() {
   for (const message of plan.warnings) emit({ type: 'log', level: 'warn', message });
   let router = null;
   if (plan.needsRouter) {
-    router = await startRouter({ routes: plan.routes, env: process.env });
+    router = await startRouter({ routes: plan.routes, env: process.env, log: ({ level, message }) => emit({ type: 'log', level, message }) });
     const served = plan.routes.map((route) => route.prefix).join(', ') || 'none';
     emit({ type: 'log', level: 'info', message: `model router listening on ${router.url} (provider routes: ${served})` });
   }
@@ -470,6 +472,7 @@ async function main() {
     routerUrl: router?.url,
     memoryServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
+    routes: plan.routes,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
 

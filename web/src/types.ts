@@ -128,7 +128,20 @@ export interface ModuleInfo {
 export type ProviderAuth = "x-api-key" | "bearer" | "none";
 export type ProviderPreset = "deepseek" | "local" | "custom";
 
-export interface ModelProvider {
+/** Gateway settings the Mothership applies to every request to a provider. */
+export interface ProviderLimits {
+  /** Effective request timeout (default 600). */
+  timeout_secs: number;
+  /** null = unlimited. */
+  max_concurrent: number | null;
+  /** null = same as `timeout_secs`. */
+  queue_timeout_secs: number | null;
+  context_tokens: number | null;
+  /** An Anthropic model id or alias used when the provider fails. */
+  fallback_model: string | null;
+}
+
+export interface ModelProvider extends ProviderLimits {
   id: string;
   name: string;
   base_url: string;
@@ -136,6 +149,9 @@ export interface ModelProvider {
   has_key: boolean;
   models: string[];
   preset: ProviderPreset;
+  /** Live counts across all colonies. */
+  in_flight: number;
+  queued: number;
 }
 
 export interface SaveProviderRequest {
@@ -146,6 +162,23 @@ export interface SaveProviderRequest {
   preset?: ProviderPreset;
   /** Omitted keeps the saved key; `""` removes it. */
   api_key?: string;
+  /** For each limit, null uses the default. */
+  timeout_secs?: number | null;
+  max_concurrent?: number | null;
+  queue_timeout_secs?: number | null;
+  context_tokens?: number | null;
+  fallback_model?: string | null;
+}
+
+/** GET /api/providers/{id}/health */
+export interface ProviderHealth {
+  reachable: boolean;
+  /** HTTP status of the probe, when a response arrived. */
+  status: number | null;
+  latency_ms: number | null;
+  models: string[];
+  error: string | null;
+  checked_at: string;
 }
 
 export interface ModelOption {

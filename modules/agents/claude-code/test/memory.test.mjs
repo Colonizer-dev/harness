@@ -98,7 +98,10 @@ test('buildOptions maps routing and memory settings into Claude Code options', (
     routerUrl: 'http://127.0.0.1:4545',
     memoryServer,
     hiddenEnv: ['COLONIZER_PROVIDER_KEY_DEEPSEEK'],
+    routes: [{ prefix: 'deepseek/', timeout_secs: 900, context_tokens: 131072 }],
   });
+  assert.equal(options.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS, '900000');
+  assert.equal(options.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '131072');
   assert.equal(options.model, 'opus');
   assert.equal(options.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4545');
   assert.equal(options.env.CLAUDE_CODE_SUBAGENT_MODEL, 'deepseek/deepseek-flash');

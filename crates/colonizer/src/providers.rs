@@ -1,10 +1,11 @@
 //! Model providers: Anthropic-compatible endpoints that colonies can route models to, such as
-//! DeepSeek's API or a model served on this machine. Keys stay on the mothership (0600) and reach
-//! colonies as microsandbox secrets scoped to the provider's host.
+//! DeepSeek's API or a model served on this machine or the operator's tailnet. Colonies reach them
+//! through the mothership's provider gateway (gateway.rs), so keys stay here (0600) and never enter a
+//! colony.
 
 use crate::{
     client_error,
-    sandbox::Secret,
+    gateway::{DEFAULT_TIMEOUT_SECS, COLONY_HEADER},
     util::{read_trimmed, write_secret},
     ApiResult, App, Shared,
 };
@@ -14,7 +15,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,6 +28,29 @@ pub struct Provider {
     pub models: Vec<String>,
     #[serde(default)]
     pub preset: String,
+    /// Headers and body-idle timeout for one request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Requests at once across all colonies; more wait in the gateway's queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Anthropic model used when the provider is unreachable, times out or its queue is full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
+}
+
+impl Provider {
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)
+    }
+
+    pub fn queue_timeout_secs(&self) -> u64 {
+        self.queue_timeout_secs.unwrap_or_else(|| self.timeout_secs())
+    }
 }
 
 /// Models served by Anthropic with the Claude login, offered as suggestions in model pickers.
@@ -42,6 +66,8 @@ const ANTHROPIC_MODELS: &[(&str, &str)] = &[
 
 const AUTH_MODES: [&str; 3] = ["x-api-key", "bearer", "none"];
 const PRESETS: [&str; 3] = ["deepseek", "local", "custom"];
+/// The runner reads these to decide which routes a colony actually uses.
+const MODEL_VARS: [&str; 3] = ["COLONIZER_MODEL", "COLONIZER_SUBAGENT_MODEL", "COLONIZER_BACKGROUND_MODEL"];
 
 impl App {
     fn providers_file(&self) -> PathBuf {
@@ -81,6 +107,22 @@ fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 120 && model.chars().all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c))
 }
 
+/// Claude Code resolves aliases itself, but a fallback request goes to the API as is, so it needs a model ID.
+fn api_model(model: &str) -> &str {
+    match model {
+        "opus" => "claude-opus-5",
+        "sonnet" => "claude-sonnet-5",
+        "haiku" => "claude-haiku-4-5",
+        "fable" => "claude-fable-5-1",
+        other => other,
+    }
+}
+
+/// Removes OAuth capability betas, which only Anthropic understands.
+pub fn strip_oauth_betas(value: &str) -> String {
+    value.split(',').map(str::trim).filter(|beta| !beta.is_empty() && !beta.starts_with("oauth-")).collect::<Vec<_>>().join(",")
+}
+
 /// Splits `scheme://host[:port][/path]`; only http and https are accepted.
 pub fn split_url(url: &str) -> Option<(String, String, Option<u16>, String)> {
     let (scheme, rest) = url.split_once("://")?;
@@ -114,51 +156,48 @@ pub fn split_url(url: &str) -> Option<(String, String, Option<u16>, String)> {
     Some((scheme.to_string(), host, port, path))
 }
 
-/// Everything a colony needs to route models to the configured providers.
+/// Everything a colony needs to route models through the gateway.
 #[derive(Default)]
 pub struct ColonyRoutes {
     pub routes: Vec<Value>,
-    pub secrets: Vec<Secret>,
-    pub env: Vec<(String, String)>,
-    /// A provider runs on this machine, so the colony needs the `host` network profile.
-    pub needs_host: bool,
+    pub providers: Vec<Provider>,
 }
 
-pub fn colony_routes(app: &App) -> ColonyRoutes {
-    let mut out = ColonyRoutes::default();
-    for provider in app.providers() {
-        let Some((scheme, host, port, path)) = split_url(provider.base_url.trim_end_matches('/')) else { continue };
-        let loopback = matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0");
-        if loopback {
-            out.needs_host = true;
-        }
-        let colony_host = if loopback { "host.microsandbox.internal" } else { host.as_str() };
-        let port = port.map(|p| format!(":{p}")).unwrap_or_default();
-        let mut route = json!({
-            "provider": provider.id,
-            "prefix": format!("{}/", provider.id),
-            "base_url": format!("{scheme}://{colony_host}{port}{path}"),
-            "auth": provider.auth,
-        });
-        if provider.auth != "none" {
-            if let Some(key) = app.provider_key(&provider.id) {
-                let key_env = format!("COLONIZER_PROVIDER_KEY_{}", provider.id.to_uppercase().replace('-', "_"));
-                if scheme == "https" {
-                    // Substituted by microsandbox's TLS proxy for this host only; the colony sees a placeholder.
-                    out.secrets.push(Secret { env: key_env.clone(), value: key, hosts: vec![host.clone()] });
-                } else {
-                    // Plain-HTTP (local) endpoints can't use TLS substitution, so the key is passed as is.
-                    out.env.push((key_env.clone(), key));
-                }
-                route["key_env"] = json!(key_env);
-            }
-        }
-        out.routes.push(route);
+impl ColonyRoutes {
+    /// Providers the colony's model settings actually point at.
+    pub fn used(&self, runner_env: &Map<String, Value>) -> Vec<Provider> {
+        let models: Vec<&str> = MODEL_VARS.iter().filter_map(|var| runner_env.get(*var)?.as_str()).collect();
+        self.providers
+            .iter()
+            .filter(|p| models.iter().any(|m| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/'))))
+            .cloned()
+            .collect()
     }
-    out
+}
+
+pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
+    let port = app.cfg.gateway_bind.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(41750);
+    let providers = app.providers();
+    let routes = providers
+        .iter()
+        .map(|provider| {
+            json!({
+                "provider": provider.id,
+                "prefix": format!("{}/", provider.id),
+                "base_url": format!("http://host.microsandbox.internal:{port}/providers/{}", provider.id),
+                "auth": "none",
+                "headers": {COLONY_HEADER: gateway_token},
+                "timeout_secs": provider.timeout_secs(),
+                "context_tokens": provider.context_tokens,
+                "fallback_model": provider.fallback_model.as_deref().map(api_model),
+            })
+        })
+        .collect();
+    ColonyRoutes { routes, providers }
 }
 
 fn describe(app: &App, provider: &Provider) -> Value {
+    let (in_flight, queued) = app.gateway.load(&provider.id);
     json!({
         "id": provider.id,
         "name": provider.name,
@@ -167,6 +206,13 @@ fn describe(app: &App, provider: &Provider) -> Value {
         "has_key": app.provider_key(&provider.id).is_some(),
         "models": provider.models,
         "preset": if provider.preset.is_empty() { "custom" } else { provider.preset.as_str() },
+        "timeout_secs": provider.timeout_secs(),
+        "max_concurrent": provider.max_concurrent,
+        "queue_timeout_secs": provider.queue_timeout_secs,
+        "context_tokens": provider.context_tokens,
+        "fallback_model": provider.fallback_model,
+        "in_flight": in_flight,
+        "queued": queued,
     })
 }
 
@@ -187,10 +233,24 @@ pub struct PutProvider {
     /// Omitted keeps the saved key; an empty string removes it.
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    max_concurrent: Option<u64>,
+    #[serde(default)]
+    queue_timeout_secs: Option<u64>,
+    #[serde(default)]
+    context_tokens: Option<u64>,
+    #[serde(default)]
+    fallback_model: Option<String>,
 }
 
 fn default_auth() -> String {
     "x-api-key".into()
+}
+
+fn in_range(value: Option<u64>, min: u64, max: u64) -> bool {
+    value.is_none_or(|v| (min..=max).contains(&v))
 }
 
 pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<PutProvider>) -> ApiResult<Value> {
@@ -217,6 +277,22 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if !PRESETS.contains(&preset.as_str()) {
         return Err(bad("preset must be deepseek, local or custom"));
     }
+    if !in_range(req.timeout_secs, 30, 3600) {
+        return Err(bad("request timeout must be 30-3600 seconds"));
+    }
+    if !in_range(req.max_concurrent, 1, 64) {
+        return Err(bad("max concurrent requests must be 1-64, or empty for no limit"));
+    }
+    if !in_range(req.queue_timeout_secs, 1, 3600) {
+        return Err(bad("queue timeout must be 1-3600 seconds"));
+    }
+    if !in_range(req.context_tokens, 1024, 2_000_000) {
+        return Err(bad("context window must be 1,024-2,000,000 tokens"));
+    }
+    let fallback_model = req.fallback_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if fallback_model.as_deref().is_some_and(|m| !valid_model(m) || m.contains('/')) {
+        return Err(bad("fallback model must be a Claude model such as sonnet or claude-sonnet-5"));
+    }
     match req.api_key.as_deref().map(str::trim) {
         Some("") => {
             let _ = std::fs::remove_file(app.provider_key_file(&id));
@@ -226,7 +302,19 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         None => {}
     }
 
-    let provider = Provider { id: id.clone(), name: name.to_string(), base_url, auth: req.auth, models, preset };
+    let provider = Provider {
+        id: id.clone(),
+        name: name.to_string(),
+        base_url,
+        auth: req.auth,
+        models,
+        preset,
+        timeout_secs: req.timeout_secs,
+        max_concurrent: req.max_concurrent,
+        queue_timeout_secs: req.queue_timeout_secs,
+        context_tokens: req.context_tokens,
+        fallback_model,
+    };
     let mut providers = app.providers();
     match providers.iter_mut().find(|p| p.id == id) {
         Some(existing) => *existing = provider.clone(),
@@ -269,6 +357,22 @@ pub async fn models(State(app): State<Shared>) -> Json<Vec<Value>> {
 mod tests {
     use super::*;
 
+    fn provider(id: &str) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            base_url: "http://100.80.225.14:8000".into(),
+            auth: "none".into(),
+            models: vec![],
+            preset: "local".into(),
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: None,
+        }
+    }
+
     #[test]
     fn urls_are_split_and_validated() {
         assert_eq!(
@@ -289,5 +393,29 @@ mod tests {
         assert!(!valid_id("Deep Seek"));
         assert!(valid_model("deepseek-ai/DeepSeek-V4.1-Flash"));
         assert!(!valid_model("has space"));
+    }
+
+    #[test]
+    fn timeouts_default_and_aliases_resolve() {
+        let mut p = provider("strix");
+        assert_eq!((p.timeout_secs(), p.queue_timeout_secs()), (600, 600));
+        p.timeout_secs = Some(900);
+        assert_eq!(p.queue_timeout_secs(), 900);
+        p.queue_timeout_secs = Some(30);
+        assert_eq!(p.queue_timeout_secs(), 30);
+        assert_eq!(api_model("sonnet"), "claude-sonnet-5");
+        assert_eq!(api_model("claude-opus-5"), "claude-opus-5");
+        assert_eq!(strip_oauth_betas("oauth-2025-04-20, a ,b"), "a,b");
+    }
+
+    #[test]
+    fn used_providers_follow_the_model_settings() {
+        let routes = ColonyRoutes { routes: vec![], providers: vec![provider("strix"), provider("str"), provider("deepseek")] };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("opus"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_EFFORT".into(), json!("deepseek/not-a-model-var"));
+        let used: Vec<String> = routes.used(&env).into_iter().map(|p| p.id).collect();
+        assert_eq!(used, vec!["strix"]);
     }
 }

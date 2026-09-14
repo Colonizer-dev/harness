@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import type { HarnessStatus, LoginView, ModelOption, ModelProvider, ModuleInfo, ProviderAuth, ProviderPreset, SchemaField } from "../types";
+import type {
+  HarnessStatus,
+  LoginView,
+  ModelOption,
+  ModelProvider,
+  ModuleInfo,
+  ProviderAuth,
+  ProviderHealth,
+  ProviderLimits,
+  ProviderPreset,
+  SchemaField,
+} from "../types";
 import { useModels } from "../useModels";
-import { IconCheck, IconCpu, IconExternal, IconKey, IconPencil, IconPlus, IconX } from "./icons";
+import { IconCheck, IconChevron, IconCpu, IconExternal, IconKey, IconNetwork, IconPencil, IconPlus, IconX } from "./icons";
 import { Badge, Button, ModelInput, Spinner, Switch, cx, inputClass } from "./ui";
 
 export function SettingsDialog({
@@ -562,13 +573,64 @@ function SettingField({
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------
 
-type ProviderDraft = { id: string; name: string; base_url: string; auth: ProviderAuth; models: string[] };
+type ProviderDraft = ProviderLimits & { id: string; name: string; base_url: string; auth: ProviderAuth; models: string[] };
+
+const DEFAULT_TIMEOUT = 600;
+const DEFAULT_LIMITS: ProviderLimits = { timeout_secs: DEFAULT_TIMEOUT, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
 
 const PRESETS: Record<ProviderPreset, ProviderDraft> = {
-  deepseek: { id: "deepseek", name: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", auth: "x-api-key", models: ["deepseek-flash", "deepseek-v4-pro"] },
-  local: { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", models: [] },
-  custom: { id: "", name: "", base_url: "", auth: "x-api-key", models: [] },
+  deepseek: {
+    id: "deepseek",
+    name: "DeepSeek",
+    base_url: "https://api.deepseek.com/anthropic",
+    auth: "x-api-key",
+    models: ["deepseek-flash", "deepseek-v4-pro"],
+    ...DEFAULT_LIMITS,
+  },
+  // Local servers are slow and usually serve one or two requests at a time.
+  local: { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", models: [], ...DEFAULT_LIMITS, timeout_secs: 900, max_concurrent: 1 },
+  custom: { id: "", name: "", base_url: "", auth: "x-api-key", models: [], ...DEFAULT_LIMITS },
 };
+
+/** Integer fields of the Advanced group, with the ranges the Mothership accepts. */
+const LIMIT_RANGE = {
+  timeout_secs: [30, 3600],
+  max_concurrent: [1, 64],
+  queue_timeout_secs: [1, 3600],
+  context_tokens: [1024, 2_000_000],
+} as const;
+
+type LimitKey = keyof typeof LIMIT_RANGE;
+
+function parseLimit(key: LimitKey, raw: string): { value: number | null; error: string | null } {
+  const text = raw.trim().replace(/[_,\s]/g, "");
+  if (!text) return { value: null, error: null };
+  const [min, max] = LIMIT_RANGE[key];
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    return { value: null, error: `A whole number from ${min.toLocaleString()} to ${max.toLocaleString()}` };
+  }
+  return { value, error: null };
+}
+
+const limitText = (value: number | null | undefined) => (value == null ? "" : String(value));
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}k`;
+  return String(n);
+}
+
+/** Short labels for non-default gateway settings, for rows and the collapsed Advanced summary. */
+function limitLabels(limits: Partial<ProviderLimits>): string[] {
+  const labels: string[] = [];
+  if (limits.max_concurrent != null) labels.push(`max ${limits.max_concurrent}`);
+  if (limits.timeout_secs != null && limits.timeout_secs !== DEFAULT_TIMEOUT) labels.push(`timeout ${limits.timeout_secs} s`);
+  if (limits.queue_timeout_secs != null) labels.push(`queue ${limits.queue_timeout_secs} s`);
+  if (limits.context_tokens != null) labels.push(`context ${formatTokens(limits.context_tokens)}`);
+  if (limits.fallback_model) labels.push(`fallback ${limits.fallback_model}`);
+  return labels;
+}
 
 const PRESET_LABEL: Record<ProviderPreset, string> = { deepseek: "DeepSeek preset", local: "Local preset", custom: "Custom" };
 
@@ -585,6 +647,7 @@ function ProvidersSection() {
   const [providers, setProviders] = useState<ModelProvider[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing>(null);
+  const [health, setHealth] = useState<Record<string, HealthView>>({});
 
   const load = useCallback(async () => {
     try {
@@ -598,6 +661,28 @@ function ProvidersSection() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // In-flight and queued counts change as colonies work; refresh them quietly.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      api
+        .providers()
+        .then(setProviders)
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [api]);
+
+  const check = async (id: string) => {
+    setHealth((h) => ({ ...h, [id]: { state: "checking" } }));
+    try {
+      const result = await api.providerHealth(id);
+      setHealth((h) => ({ ...h, [id]: { state: "done", result } }));
+    } catch (e) {
+      setHealth((h) => ({ ...h, [id]: { state: "failed", message: errorMessage(e) } }));
+    }
+  };
 
   const has = (id: string) => providers?.some((p) => p.id === id) ?? false;
   const upsert = (saved: ModelProvider) =>
@@ -639,6 +724,11 @@ function ProvidersSection() {
                 onCancel={() => setEditing(null)}
                 onSaved={(saved) => {
                   upsert(saved);
+                  setHealth((h) => {
+                    const next = { ...h };
+                    delete next[saved.id];
+                    return next;
+                  });
                   setEditing(null);
                 }}
                 onDeleted={(id) => {
@@ -647,7 +737,14 @@ function ProvidersSection() {
                 }}
               />
             ) : (
-              <ProviderRow key={provider.id} provider={provider} disabled={editing !== null} onEdit={() => setEditing({ mode: "edit", id: provider.id })} />
+              <ProviderRow
+                key={provider.id}
+                provider={provider}
+                health={health[provider.id]}
+                disabled={editing !== null}
+                onCheck={() => void check(provider.id)}
+                onEdit={() => setEditing({ mode: "edit", id: provider.id })}
+              />
             ),
           )}
           {editing?.mode === "new" && (
@@ -677,7 +774,7 @@ function ProvidersSection() {
       </div>
       <p className="flex items-start gap-1.5 text-[12px] text-faint">
         <IconKey size={13} className="mt-px shrink-0" />
-        API keys stay on the Mothership. Colonies only ever see a placeholder that is swapped for the key on the way out.
+        Requests go through the Mothership gateway. Colonies never see provider keys, and private-network servers (LAN, tailnet) work without extra setup.
       </p>
     </Section>
   );
@@ -688,7 +785,68 @@ function KeyBadge({ provider }: { provider: ModelProvider }) {
   return provider.has_key ? <Badge tone="ok">Key saved</Badge> : <Badge tone="warn">No key</Badge>;
 }
 
-function ProviderRow({ provider, disabled, onEdit }: { provider: ModelProvider; disabled: boolean; onEdit: () => void }) {
+type HealthView = { state: "checking" } | { state: "done"; result: ProviderHealth } | { state: "failed"; message: string };
+
+function HealthStatus({ health }: { health: HealthView }) {
+  if (health.state === "checking") {
+    return (
+      <span role="status" className="flex items-center gap-1.5 text-[12px] text-muted">
+        <Spinner className="size-3" /> Checking from the Mothership…
+      </span>
+    );
+  }
+  let tone: "ok" | "warn" | "err";
+  let text: string;
+  let title: string | undefined;
+  if (health.state === "failed") {
+    tone = "err";
+    text = `Check failed: ${health.message}`;
+  } else {
+    const r = health.result;
+    const latency = r.latency_ms != null ? `${Math.round(r.latency_ms)} ms` : null;
+    const models = r.models.length ? `${r.models.length} model${r.models.length === 1 ? "" : "s"}` : null;
+    if (!r.reachable) {
+      tone = "err";
+      text = `Unreachable${r.error ? `: ${r.error}` : ""}`;
+    } else if (r.status != null && (r.status < 200 || r.status > 299)) {
+      tone = "warn";
+      text = [`HTTP ${r.status}`, latency, r.error].filter(Boolean).join(" · ");
+    } else {
+      tone = "ok";
+      text = ["Reachable", latency, models].filter(Boolean).join(" · ");
+    }
+    title = [r.models.length ? `Models: ${r.models.join(", ")}` : null, r.checked_at ? `Checked ${new Date(r.checked_at).toLocaleTimeString()}` : null]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return (
+    <span
+      role="status"
+      title={title || undefined}
+      className={cx("flex items-start gap-1.5 text-[12px] font-medium", tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-err")}
+    >
+      <span className="mt-[5px] size-1.5 shrink-0 rounded-full bg-current" />
+      <span className="min-w-0 [overflow-wrap:anywhere]">{text}</span>
+    </span>
+  );
+}
+
+function ProviderRow({
+  provider,
+  health,
+  disabled,
+  onCheck,
+  onEdit,
+}: {
+  provider: ModelProvider;
+  health?: HealthView;
+  disabled: boolean;
+  onCheck: () => void;
+  onEdit: () => void;
+}) {
+  const running = provider.in_flight ?? 0;
+  const queued = provider.queued ?? 0;
+  const limits = limitLabels(provider);
   return (
     <div className="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-border px-3.5 py-3">
       <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-panel-2 text-muted">
@@ -700,8 +858,20 @@ function ProviderRow({ provider, disabled, onEdit }: { provider: ModelProvider; 
           <span className="font-mono text-[12px] text-faint">{provider.id}</span>
           <Badge tone={provider.preset === "custom" ? "neutral" : "accent"}>{PRESET_LABEL[provider.preset] ?? provider.preset}</Badge>
           <KeyBadge provider={provider} />
+          {(running > 0 || queued > 0) && (
+            <Badge tone={queued > 0 ? "warn" : "info"} pulse={running > 0}>
+              {[running > 0 && `${running} running`, queued > 0 && `${queued} queued`].filter(Boolean).join(" · ")}
+            </Badge>
+          )}
         </div>
         <div className="mt-0.5 font-mono text-[12px] text-muted [overflow-wrap:anywhere]">{provider.base_url}</div>
+        {limits.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {limits.map((label) => (
+              <Badge key={label}>{label}</Badge>
+            ))}
+          </div>
+        )}
         <div className="mt-1.5 flex flex-wrap gap-1">
           {provider.models.length === 0 ? (
             <span className="text-[12px] text-faint">No models listed; type model IDs where you pick a model.</span>
@@ -713,10 +883,20 @@ function ProviderRow({ provider, disabled, onEdit }: { provider: ModelProvider; 
             ))
           )}
         </div>
+        {health && (
+          <div className="mt-2">
+            <HealthStatus health={health} />
+          </div>
+        )}
       </div>
-      <Button size="sm" disabled={disabled} onClick={onEdit}>
-        <IconPencil size={13} /> Edit
-      </Button>
+      <div className="flex shrink-0 gap-1.5">
+        <Button size="sm" disabled={health?.state === "checking"} onClick={onCheck} title="Check that the Mothership can reach this provider">
+          {health?.state === "checking" ? <Spinner className="size-3" /> : <IconNetwork size={13} />} Check
+        </Button>
+        <Button size="sm" disabled={disabled} onClick={onEdit}>
+          <IconPencil size={13} /> Edit
+        </Button>
+      </div>
     </div>
   );
 }
@@ -749,6 +929,31 @@ function ProviderForm({
   const [keyMode, setKeyMode] = useState<"keep" | "replace" | "remove">(initial?.has_key ? "keep" : "replace");
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState<"save" | "delete" | null>(null);
+  const [limitDraft, setLimitDraft] = useState<Record<LimitKey, string>>({
+    timeout_secs: limitText(start.timeout_secs),
+    max_concurrent: limitText(start.max_concurrent),
+    queue_timeout_secs: limitText(start.queue_timeout_secs),
+    context_tokens: limitText(start.context_tokens),
+  });
+  const [fallback, setFallback] = useState(start.fallback_model ?? "");
+  // A new Local provider opens Advanced so the prefilled limits are visible.
+  const [advancedOpen, setAdvancedOpen] = useState(!initial && preset === "local");
+  const anthropicModels = useModels().filter((m) => m.provider === "anthropic");
+  const limits = {
+    timeout_secs: parseLimit("timeout_secs", limitDraft.timeout_secs),
+    max_concurrent: parseLimit("max_concurrent", limitDraft.max_concurrent),
+    queue_timeout_secs: parseLimit("queue_timeout_secs", limitDraft.queue_timeout_secs),
+    context_tokens: parseLimit("context_tokens", limitDraft.context_tokens),
+  };
+  const limitsInvalid = Object.values(limits).some((l) => l.error);
+  const setLimit = (k: LimitKey, value: string) => setLimitDraft((d) => ({ ...d, [k]: value }));
+  const advancedSummary = limitLabels({
+    timeout_secs: limits.timeout_secs.value ?? undefined,
+    max_concurrent: limits.max_concurrent.value,
+    queue_timeout_secs: limits.queue_timeout_secs.value,
+    context_tokens: limits.context_tokens.value,
+    fallback_model: fallback || null,
+  });
 
   const isNew = !initial;
   const idError = !isNew
@@ -762,7 +967,7 @@ function ProviderForm({
           : null;
   const urlError = /^https?:\/\/[^\s/]+(\/\S*)?$/.test(baseUrl.trim()) ? null : "An http(s) URL";
   const keyError = auth !== "none" && keyMode === "replace" && initial?.has_key && !key.trim() ? "Paste the new key" : null;
-  const invalid = Boolean(idError || urlError || keyError || !name.trim());
+  const invalid = Boolean(idError || urlError || keyError || limitsInvalid || !name.trim());
   const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(baseUrl.trim());
 
   const save = async (event: FormEvent) => {
@@ -775,7 +980,19 @@ function ProviderForm({
       else if (keyMode === "replace" && key.trim()) api_key = key.trim();
     }
     try {
-      const saved = await api.saveProvider(id, { name: name.trim(), base_url: baseUrl.trim(), auth, models, preset: initial?.preset ?? preset, api_key });
+      const saved = await api.saveProvider(id, {
+        name: name.trim(),
+        base_url: baseUrl.trim(),
+        auth,
+        models,
+        preset: initial?.preset ?? preset,
+        api_key,
+        timeout_secs: limits.timeout_secs.value,
+        max_concurrent: limits.max_concurrent.value,
+        queue_timeout_secs: limits.queue_timeout_secs.value,
+        context_tokens: limits.context_tokens.value,
+        fallback_model: fallback || null,
+      });
       toast(`${saved.name} saved`);
       onSaved(saved);
     } catch (e) {
@@ -838,7 +1055,7 @@ function ProviderForm({
           {urlError && baseUrl ? (
             <span className="block text-[12px] text-err">{urlError}</span>
           ) : loopback ? (
-            <span className="block text-[12px] text-faint">Colonies reach this through host.microsandbox.internal.</span>
+            <span className="block text-[12px] text-faint">The Mothership connects to this address, so localhost is the Mothership itself.</span>
           ) : null}
         </label>
         <label className="block min-w-0 space-y-1">
@@ -905,6 +1122,70 @@ function ProviderForm({
           <ChipsInput values={models} onChange={setModels} placeholder={models.length ? "Add another" : "deepseek-flash, qwen3-coder, …"} label="Models" />
           <span className="block text-[12px] text-faint">Model IDs as the endpoint expects them. Press Enter or comma to add.</span>
         </div>
+        <details
+          open={advancedOpen}
+          onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
+          className="group min-w-0 rounded-lg border border-border sm:col-span-2"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Advanced</span>
+            <span className={cx("min-w-0 flex-1 truncate text-[12px]", limitsInvalid ? "text-err" : "text-faint")}>
+              {limitsInvalid
+                ? "Some values are out of range"
+                : advancedSummary.length
+                  ? advancedSummary.join(" · ")
+                  : "Timeouts, concurrency, context window, fallback"}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+            <LimitField
+              label="Request timeout (seconds)"
+              value={limitDraft.timeout_secs}
+              onChange={(v) => setLimit("timeout_secs", v)}
+              placeholder={String(DEFAULT_TIMEOUT)}
+              error={limits.timeout_secs.error}
+              help={`How long the Mothership waits for a response. Blank uses ${DEFAULT_TIMEOUT}.`}
+            />
+            <LimitField
+              label="Queue timeout (seconds)"
+              value={limitDraft.queue_timeout_secs}
+              onChange={(v) => setLimit("queue_timeout_secs", v)}
+              placeholder="Same as request timeout"
+              error={limits.queue_timeout_secs.error}
+              help="How long a request may wait for a free slot."
+            />
+            <LimitField
+              label="Max concurrent requests"
+              value={limitDraft.max_concurrent}
+              onChange={(v) => setLimit("max_concurrent", v)}
+              placeholder="Unlimited"
+              error={limits.max_concurrent.error}
+              help="Requests beyond this wait in a queue on the Mothership; a local server usually handles 1-2."
+            />
+            <LimitField
+              label="Context window (tokens)"
+              value={limitDraft.context_tokens}
+              onChange={(v) => setLimit("context_tokens", v)}
+              placeholder="Claude default"
+              error={limits.context_tokens.error}
+              help="The model's context size, so agents compact before they hit it."
+            />
+            <label className="block min-w-0 space-y-1">
+              <span className={fieldLabel}>Fallback model</span>
+              <select value={fallback} onChange={(e) => setFallback(e.target.value)} className={inputClass}>
+                <option value="">None</option>
+                {fallback && !anthropicModels.some((m) => m.id === fallback) && <option value={fallback}>{fallback}</option>}
+                {anthropicModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label === model.id ? model.id : `${model.id} · ${model.label}`}
+                  </option>
+                ))}
+              </select>
+              <span className="block text-[12px] text-faint">Used when the provider is unreachable, times out or the queue is full.</span>
+            </label>
+          </div>
+        </details>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
         {!isNew && (
@@ -920,6 +1201,39 @@ function ProviderForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+function LimitField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  error,
+  help,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  error: string | null;
+  help: string;
+}) {
+  return (
+    <label className="block min-w-0 space-y-1">
+      <span className="text-[12.5px] font-medium text-muted">{label}</span>
+      <input
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        aria-invalid={Boolean(error)}
+        className={cx(inputClass, "font-mono text-[13px]", error && "border-err")}
+      />
+      <span className={cx("block text-[12px]", error ? "text-err" : "text-faint")}>{error ?? help}</span>
+    </label>
   );
 }
 

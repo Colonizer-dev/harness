@@ -160,6 +160,7 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
 }
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
+    crate::github::refresh_orgs(&app).await;
     let saved = app.all_org_settings();
     let sessions = app.sessions.read().await.clone();
     let mut orgs: BTreeSet<String> = saved.keys().cloned().collect();

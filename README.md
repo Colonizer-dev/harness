@@ -179,8 +179,10 @@ protocol on stdio, so an agent module can be written in anything.
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 
 Every GitHub org is a workspace with its own overrides for models, the parallel limit, memory and the
-watchdog. Model providers (DeepSeek, a local server, any Anthropic-compatible endpoint) are added in
-Settings; their keys stay on the mothership like every other credential.
+watchdog. Model providers (DeepSeek, a server on your LAN or tailnet, any Anthropic-compatible endpoint)
+are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
+keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
+Claude when a provider is down or busy.
 
 ---
 
@@ -218,8 +220,9 @@ Stated here rather than buried.
 - **Not yet exercised end to end:** opening a pull request from a colony, and `install.sh --install`. Both
   are implemented; neither has been run against the real world yet.
 - **Cross-provider subagents are off the beaten path.** Anthropic doesn't support routing Claude Code to
-  non-Claude models. Routing is verified with a stub Anthropic-compatible provider inside a real colony,
-  not yet against DeepSeek's API, and Claude-specific request fields are forwarded as they are.
+  non-Claude models. Routing and the gateway are tested with stub Anthropic-compatible providers inside
+  real colonies, not yet against DeepSeek's API or `ds4-server`, and Claude-specific request fields are
+  forwarded as they are.
 - **Memory search is plain text matching**, not semantic search.
 - **No CI yet**, and nothing is published to crates.io or npm.
 
@@ -234,6 +237,7 @@ Stated here rather than buried.
 | Org workspaces ([#2](https://github.com/Colonizer-dev/harness/issues/2)) | `SHIPPING` |
 | Shared memory with review ([#3](https://github.com/Colonizer-dev/harness/issues/3)) | `SHIPPING` |
 | Watchdog for stalled colonies ([#4](https://github.com/Colonizer-dev/harness/issues/4)) | `SHIPPING` |
+| Provider gateway: private-network models, queues, long timeouts, health, Claude fallback ([#5](https://github.com/Colonizer-dev/harness/issues/5)) | `SHIPPING` |
 | CI running the Rust, runner and UI test suites | `PLANNED` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
@@ -251,6 +255,7 @@ The roadmap is the issue tracker. There is no private version of it.
 | :--- | :--- |
 | GitHub token | Mothership only. Commit, push and `gh pr create` run on the host after the colony is gone. |
 | Claude token | Mothership only (0600). The colony sees a placeholder; microsandbox's TLS proxy substitutes the real value for `api.anthropic.com` only. |
+| Model provider keys | Mothership only (0600). Colonies send provider requests to the gateway with a per-colony token; the gateway adds the key. |
 | Worktree | Mounted read-write at `/workspace`. |
 | Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |
 | Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
@@ -268,6 +273,7 @@ come from the environment:
 | :--- | :--- | :--- |
 | `COLONIZER_BIND` | `127.0.0.1:7878` | Listen address |
 | `COLONIZER_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated |
+| `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | Provider gateway; colonies reach it through `host.microsandbox.internal` |
 | `COLONIZER_DATA_DIR` | `~/.local/share/colonizer` | Clones, worktrees, colonies, mesh state |
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |

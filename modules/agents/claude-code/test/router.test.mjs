@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 
-import { parseRoutes, routingPlan, startRouter, stripOauthBetas } from '../router.mjs';
+import { fallbackBody, parseRoutes, routeEnv, routingPlan, startRouter, stripOauthBetas } from '../router.mjs';
 
 /** A fake upstream that records requests and answers with `respond(req, body, res)`. */
 async function upstream(respond = (req, body, res) => {
@@ -175,7 +175,17 @@ test('route parsing, OAuth beta stripping and the routing plan', () => {
     { prefix: 'bad', base_url: 'https://x' },
   ]));
   assert.equal(parsed.routes.length, 1);
-  assert.deepEqual(parsed.routes[0], { provider: 'deepseek', prefix: 'deepseek/', base_url: 'https://api.deepseek.com/anthropic', auth: 'x-api-key', key_env: 'K' });
+  assert.deepEqual(parsed.routes[0], {
+    provider: 'deepseek',
+    prefix: 'deepseek/',
+    base_url: 'https://api.deepseek.com/anthropic',
+    auth: 'x-api-key',
+    key_env: 'K',
+    headers: {},
+    timeout_secs: null,
+    context_tokens: null,
+    fallback_model: null,
+  });
   assert.equal(parsed.warnings.length, 1);
 
   assert.equal(routingPlan({ COLONIZER_MODEL: 'opus' }).needsRouter, false);
@@ -189,4 +199,126 @@ test('route parsing, OAuth beta stripping and the routing plan', () => {
   });
   assert.equal(routed.needsRouter, true);
   assert.deepEqual(routed.warnings, []);
+});
+
+const gatewayRoute = (url, extra = {}) => ({
+  provider: 'strix',
+  prefix: 'strix/',
+  base_url: `${url}/providers/strix`,
+  auth: 'none',
+  headers: { 'x-colonizer-colony': 'colony-token' },
+  fallback_model: 'claude-sonnet-5',
+  ...extra,
+});
+
+test('gateway routes carry the colony token and never the Claude credential', async () => {
+  const gateway = await upstream();
+  const router = await startRouter({ routes: [gatewayRoute(gateway.url)], env: {}, anthropicBase: 'http://127.0.0.1:1' });
+  try {
+    const res = await fetch(`${router.url}/v1/messages?beta=true`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'strix/deepseek-v4-flash' }) });
+    assert.equal(res.status, 200);
+    const [seen] = gateway.requests;
+    assert.equal(seen.url, '/providers/strix/v1/messages?beta=true');
+    assert.equal(seen.headers['x-colonizer-colony'], 'colony-token');
+    assert.equal(seen.headers.authorization, undefined);
+    assert.equal(seen.headers['x-api-key'], undefined);
+    assert.equal(JSON.parse(seen.body).model, 'deepseek-v4-flash');
+  } finally {
+    await router.close();
+    await gateway.close();
+  }
+});
+
+test('falls back to the Claude model when the gateway reports the provider unavailable', async () => {
+  const gateway = await upstream((req, body, res) => {
+    res.writeHead(503, { 'content-type': 'application/json', 'x-colonizer-fallback': 'queue_timeout' });
+    res.end('{"type":"error","error":{"type":"overloaded_error","message":"busy"}}');
+  });
+  const anthropic = await upstream();
+  const logs = [];
+  const router = await startRouter({ routes: [gatewayRoute(gateway.url)], env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages?beta=true`, {
+      method: 'POST',
+      headers: claudeHeaders,
+      body: JSON.stringify({ model: 'strix/deepseek-v4-flash', thinking: { type: 'enabled', budget_tokens: 2000 }, messages: [] }),
+    });
+    assert.equal(res.status, 200);
+    const [seen] = anthropic.requests;
+    assert.equal(seen.url, '/v1/messages?beta=true');
+    assert.deepEqual(JSON.parse(seen.body), { model: 'claude-sonnet-5', thinking: { type: 'adaptive' }, messages: [] });
+    // The fallback uses Claude Code's own credential and betas, and not the colony token.
+    assert.equal(seen.headers.authorization, 'Bearer oauth-access-token');
+    assert.equal(seen.headers['anthropic-beta'], claudeHeaders['anthropic-beta']);
+    assert.equal(seen.headers['x-colonizer-colony'], undefined);
+    assert.deepEqual(logs, [{ level: 'warn', message: 'provider strix unavailable (queue_timeout); used claude-sonnet-5' }]);
+  } finally {
+    await router.close();
+    await gateway.close();
+    await anthropic.close();
+  }
+});
+
+test('falls back when the gateway itself is unreachable', async () => {
+  const closed = await upstream();
+  const deadUrl = closed.url;
+  await closed.close();
+  const anthropic = await upstream();
+  const logs = [];
+  const router = await startRouter({ routes: [gatewayRoute(deadUrl)], env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'strix/m' }) });
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse(anthropic.requests[0].body).model, 'claude-sonnet-5');
+    assert.match(logs[0].message, /gateway unreachable/);
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('provider errors without the gateway marker, or routes without a fallback, pass through', async () => {
+  const gateway = await upstream((req, body, res) => {
+    const marked = JSON.parse(body).model === 'marked';
+    res.writeHead(marked ? 503 : 502, { 'content-type': 'application/json', ...(marked ? { 'x-colonizer-fallback': 'unreachable' } : {}) });
+    res.end('{"type":"error","error":{"type":"api_error","message":"upstream"}}');
+  });
+  const anthropic = await upstream();
+  const routes = [gatewayRoute(gateway.url), gatewayRoute(gateway.url, { provider: 'nofb', prefix: 'nofb/', fallback_model: null })];
+  const router = await startRouter({ routes, env: {}, anthropicBase: anthropic.url });
+  try {
+    const unmarked = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'strix/unmarked' }) });
+    assert.equal(unmarked.status, 502);
+    const noFallback = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'nofb/marked' }) });
+    assert.equal(noFallback.status, 503);
+    assert.equal((await noFallback.json()).error.message, 'upstream');
+    assert.equal(anthropic.requests.length, 0);
+  } finally {
+    await router.close();
+    await gateway.close();
+    await anthropic.close();
+  }
+});
+
+test('route settings become Claude Code timeouts and a context limit for used routes only', () => {
+  const routes = [
+    { prefix: 'strix/', timeout_secs: 900, context_tokens: 131072 },
+    { prefix: 'deepseek/', timeout_secs: 600, context_tokens: 1000000 },
+    { prefix: 'huge/', timeout_secs: 3600, context_tokens: 4096 },
+  ];
+  assert.deepEqual(routeEnv(routes, { COLONIZER_MODEL: 'opus' }), {});
+  assert.deepEqual(routeEnv(routes, { COLONIZER_MODEL: 'opus', COLONIZER_SUBAGENT_MODEL: 'strix/deepseek-v4-flash', COLONIZER_BACKGROUND_MODEL: 'deepseek/deepseek-flash' }), {
+    CLAUDE_STREAM_IDLE_TIMEOUT_MS: '900000',
+    API_TIMEOUT_MS: '960000',
+    API_FORCE_IDLE_TIMEOUT: '0',
+    CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: '900000',
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '131072',
+  });
+  // The stream idle timeout is capped at Claude Code's 30-minute maximum.
+  assert.equal(routeEnv(routes, { COLONIZER_SUBAGENT_MODEL: 'huge/m' }).CLAUDE_STREAM_IDLE_TIMEOUT_MS, '1800000');
+  // Fast routes keep Claude Code's defaults.
+  assert.deepEqual(routeEnv([{ prefix: 'fast/', timeout_secs: 120 }], { COLONIZER_SUBAGENT_MODEL: 'fast/m' }), {});
+
+  assert.deepEqual(fallbackBody({ model: 'x', thinking: { type: 'adaptive' } }, 'claude-sonnet-5'), { model: 'claude-sonnet-5', thinking: { type: 'adaptive' } });
+  assert.deepEqual(parseRoutes(JSON.stringify([{ prefix: 'p/', base_url: 'http://h', auth: 'none', headers: { 'X-Colonizer-Colony': 't', 'bad header': 'x', n: 1 }, timeout_secs: 900, context_tokens: -1 }])).routes[0].headers, { 'x-colonizer-colony': 't' });
 });

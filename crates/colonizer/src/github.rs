@@ -449,6 +449,21 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
     Ok(Json(repos))
 }
 
+/// Adds the signed-in user and every GitHub org they belong to to the known owners, so org workspaces
+/// show orgs whose repositories haven't been listed yet. Refreshes at most every five minutes.
+pub async fn refresh_orgs(app: &App) {
+    if app.orgs_refreshed.lock().await.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300)) {
+        return;
+    }
+    let Ok(orgs) = exec(&mut app.gh(["api", "--paginate", "/user/orgs?per_page=100", "--jq", ".[].login"])).await else { return };
+    let mut owners: Vec<String> = orgs.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+    if let Ok(login) = exec(&mut app.gh(["api", "user", "--jq", ".login"])).await {
+        owners.push(login.trim().to_string());
+    }
+    app.repo_owners.write().await.extend(owners);
+    *app.orgs_refreshed.lock().await = Some(std::time::Instant::now());
+}
+
 pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
     let repo = format!("{owner}/{name}");
     if !valid_repo(&repo) {
