@@ -41,8 +41,11 @@ Two settings layers sit next to the modules:
 
 - **Model providers** (`providers.json`, keys in `provider-keys/`, 0600): Anthropic-compatible endpoints
   the agent can route models to as `<provider>/<model>`. The Claude Code runner starts a router inside
-  the colony; provider keys reach colonies as microsandbox secrets for the provider host only, and
-  loopback providers are reached through `host.microsandbox.internal`.
+  the colony that sends those requests to the mothership's provider gateway
+  (`host.microsandbox.internal:41750`). The gateway reaches loopback, LAN and tailnet providers, adds the
+  key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
+  for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
+  unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, memory
   and the watchdog. A colony belongs to its repository owner's org.
 
@@ -81,7 +84,8 @@ Two settings layers sit next to the modules:
 ## Trust boundaries
 
 - GitHub token: host only. Claude credential: host only, injected by microsandbox's TLS proxy for
-  `api.anthropic.com`; the guest sees a placeholder.
+  `api.anthropic.com`; the guest sees a placeholder. Model provider keys: host only, added by the
+  provider gateway, which accepts only a live colony's token.
 - Git objects and worktree metadata are mounted read-only; publish treats VM output as untrusted.
 - agentd requires a per-session bearer token even inside the private mesh.
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).

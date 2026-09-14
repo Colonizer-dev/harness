@@ -118,6 +118,19 @@ async fn check_all(app: &Shared) {
             _ => Observed::Other,
         };
         let attention = s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(String::from);
+        // A request waiting on a slow model through the gateway is progress, not a stall.
+        if app.gateway.colony_busy(&s.id) {
+            {
+                let mut current = rt.activity.lock().await;
+                current.last = now;
+                current.nudges = 0;
+                current.last_nudge = None;
+            }
+            if attention.as_deref().is_some_and(|reason| reason != "waiting_for_answer") {
+                app.update_session(&s.id, |x| x.attention = None).await;
+                continue;
+            }
+        }
         let activity = rt.activity.lock().await.clone();
         match decide(&settings, now, state, &activity, attention.as_deref()) {
             Decision::Nothing => {}

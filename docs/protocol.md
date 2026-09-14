@@ -246,8 +246,10 @@ Runner environment set by the mothership:
   "auth": "x-api-key", "key_env": "COLONIZER_PROVIDER_KEY_DEEPSEEK"}]
 ```
 
-`auth` is `x-api-key`, `bearer` or `none`. `key_env` names an env var holding the key (a microsandbox
-placeholder for https upstreams). When any route or non-default model is configured, the runner starts
+`auth` is `x-api-key`, `bearer` or `none`. `key_env` names an env var holding the key. Since v1.2 the
+mothership points every route at its provider gateway with `auth: none` and a colony token instead, so
+no key enters the colony (§6.5); `key_env` remains for routes set by hand. When any route or non-default
+model is configured, the runner starts
 a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at it:
 
 - Requests whose JSON `model` matches a route prefix: strip the prefix, send to `base_url` + the request
@@ -352,3 +354,65 @@ agent event clears `attention`.
   repo), and a pending count badge in the sidebar.
 - Watchdog: amber attention badge on colonies, the reason in the colony header, and `watchdog-` messages
   rendered as notices.
+
+### 6.5 Provider gateway (v1.2, issue #5)
+
+Routed (non-Anthropic) model traffic goes through a gateway on the mothership instead of straight from
+the colony. The mothership is on the operator's networks (tailnet, LAN), holds the provider keys, and
+sees every colony, so it can enforce per-provider concurrency, long timeouts, health and fallback.
+
+The gateway listens on `127.0.0.1:41750` (`COLONIZER_GATEWAY_BIND`). Colonies reach it as
+`http://host.microsandbox.internal:41750`; a colony with any route gets the `host` network profile.
+Provider keys never enter colonies.
+
+**Routes.** `COLONIZER_MODEL_ROUTES` entries gain fields:
+
+```json
+[{"provider": "strix", "prefix": "strix/",
+  "base_url": "http://host.microsandbox.internal:41750/providers/strix", "auth": "none",
+  "headers": {"x-colonizer-colony": "<per-colony token>"},
+  "timeout_secs": 900, "context_tokens": 131072, "fallback_model": "claude-sonnet-5"}]
+```
+
+**Runner.**
+
+- Adds a route's `headers` to every request routed through it.
+- For routes referenced by `COLONIZER_MODEL`, `COLONIZER_SUBAGENT_MODEL` or `COLONIZER_BACKGROUND_MODEL`
+  (the "used" routes), sets in Claude Code's environment:
+  - when the largest `timeout_secs` is above 300: `CLAUDE_STREAM_IDLE_TIMEOUT_MS` = min(t·1000, 1800000),
+    `API_TIMEOUT_MS` = t·1000 + 60000, `API_FORCE_IDLE_TIMEOUT` = `0`,
+    `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` = t·1000;
+  - when any used route has `context_tokens`: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` = the smallest of them.
+- **Fallback.** When a routed request returns 502, 503 or 504 with an `x-colonizer-fallback` header and
+  the route has `fallback_model`, resend the same request to Anthropic (as for unrouted models, with the
+  headers Claude Code sent) with `model` set to `fallback_model`, and emit
+  `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require.
+  Without `fallback_model`, return the gateway's response unchanged.
+
+**Gateway endpoint** `ANY /providers/{id}/{path}`:
+
+- Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
+- Forwards to the provider's `base_url` + `/{path}` + query, with `content-type`, `accept`,
+  `anthropic-version` and `anthropic-beta` (minus `oauth-*` betas) plus the provider credential. It never
+  forwards the client's `authorization` or `x-api-key`.
+- `max_concurrent`: waits up to `queue_timeout_secs` for a slot, then answers `503`
+  `{"type":"error","error":{"type":"overloaded_error","message":"…"}}` with `x-colonizer-fallback: queue_timeout`.
+- Connection failure: `502` `api_error` with `x-colonizer-fallback: unreachable`. No response headers within
+  `timeout_secs`: `504` with `x-colonizer-fallback: timeout`. A response body silent for `timeout_secs`
+  is ended.
+- Errors use the Anthropic error shape so Claude Code reports them normally.
+- A colony with a request in flight through the gateway counts as making progress for the watchdog.
+
+**Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
+unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
+`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `in_flight` and
+`queued`.
+
+**Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
+
+```json
+{"reachable": true, "status": 200, "latency_ms": 42, "models": ["deepseek-v4-flash"], "error": null, "checked_at": "…"}
+```
+
+At colony start the mothership probes every used provider and logs a warning for each unreachable one
+(the colony still starts; fallback covers it when configured).

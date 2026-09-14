@@ -20,6 +20,8 @@ pub struct Settings {
     pub assets: Option<PathBuf>,
     pub msb: String,
     pub claude_bin: Option<String>,
+    /// Provider gateway listener; colonies reach it through `host.microsandbox.internal`.
+    pub gateway_bind: String,
     pub allowed_hosts: Vec<String>,
 }
 
@@ -45,6 +47,7 @@ impl Settings {
                 if local_msb.exists() { local_msb.display().to_string() } else { "msb".into() }
             }),
             claude_bin: env_nonempty("COLONIZER_CLAUDE_BIN"),
+            gateway_bind: env_nonempty("COLONIZER_GATEWAY_BIND").unwrap_or_else(|| "127.0.0.1:41750".into()),
             allowed_hosts: env_nonempty("COLONIZER_ALLOWED_HOSTS")
                 .unwrap_or_default()
                 .split(',')

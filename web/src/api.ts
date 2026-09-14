@@ -10,6 +10,7 @@ import type {
   ModelOption,
   ModelProvider,
   ModuleInfo,
+  ProviderHealth,
   NewNoteRequest,
   NewSessionRequest,
   OrgInfo,
@@ -65,6 +66,8 @@ export interface Api {
   providers(): Promise<ModelProvider[]>;
   saveProvider(id: string, body: SaveProviderRequest): Promise<ModelProvider>;
   deleteProvider(id: string): Promise<unknown>;
+  /** Probes the provider from the Mothership; can take ~5 s. */
+  providerHealth(id: string): Promise<ProviderHealth>;
   models(): Promise<ModelOption[]>;
   orgs(): Promise<OrgInfo[]>;
   /** Returns `{org, settings}`; colony and memory counts come from the next `orgs()`. */
@@ -142,6 +145,7 @@ export const httpApi: Api = {
   providers: () => request("/api/providers"),
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),
+  providerHealth: (id) => request(`/api/providers/${enc(id)}/health`),
   models: () => request("/api/models"),
   orgs: () => request("/api/orgs"),
   saveOrg: (org, settings) => put(`/api/orgs/${enc(org)}`, { settings }),

@@ -3,11 +3,13 @@
 //! between the harness and every VM. Every moving part is a module; see docs/architecture.md.
 //!
 //! Trust model: a microVM only sees its worktree (rw), the repository's git objects (ro), its
-//! session files (ro) and an output directory (rw). The GitHub token never enters a VM; agent API
-//! credentials are injected by microsandbox's host-side TLS proxy for the API host only.
+//! session files (ro) and an output directory (rw). The GitHub token never enters a VM; the Claude
+//! credential is injected by microsandbox's host-side TLS proxy for the API host only, and model
+//! provider keys are added by the mothership's provider gateway.
 
 mod claude_login;
 mod config;
+mod gateway;
 mod github;
 mod memory;
 mod mesh;
@@ -69,8 +71,11 @@ pub struct App {
     mesh: Mutex<Option<Arc<Mesh>>>,
     pub login: claude_login::LoginManager,
     pub memory: memory::MemoryStore,
+    pub gateway: gateway::Gateway,
     /// Owners seen in the repository list, so org workspaces can be offered before any colony exists.
     pub repo_owners: RwLock<BTreeSet<String>>,
+    /// When the user's GitHub orgs were last fetched.
+    pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
 }
 
 pub type Shared = Arc<App>;
@@ -311,7 +316,9 @@ async fn main() -> Result<()> {
         mesh: Mutex::new(None),
         login: Default::default(),
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
+        gateway: gateway::Gateway::new()?,
         repo_owners: RwLock::new(BTreeSet::new()),
+        orgs_refreshed: Mutex::new(None),
         cfg,
     });
 
@@ -327,6 +334,7 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/cancel", post(claude_login::cancel))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
+        .route("/api/providers/{id}/health", get(gateway::health))
         .route("/api/models", get(providers::models))
         .route("/api/orgs", get(orgs::list))
         .route("/api/orgs/{org}", put(orgs::put))
@@ -358,6 +366,18 @@ async fn main() -> Result<()> {
     match &app.cfg.assets {
         Some(assets) => println!("assets: {}", assets.display()),
         None => println!("assets: not found (run scripts/install.sh)"),
+    }
+    match tokio::net::TcpListener::bind(&app.cfg.gateway_bind).await {
+        Ok(listener) => {
+            println!("provider gateway on http://{}", app.cfg.gateway_bind);
+            let gateway = gateway::router(app.clone());
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, gateway).await {
+                    eprintln!("provider gateway stopped: {e}");
+                }
+            });
+        }
+        Err(e) => eprintln!("provider gateway: cannot bind {}: {e}; colonies can't use model providers", app.cfg.gateway_bind),
     }
 
     let recovery = app.clone();
