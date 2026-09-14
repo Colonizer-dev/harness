@@ -1,0 +1,128 @@
+// Typed client for the harness browser API (docs/protocol.md §4).
+import type {
+  HarnessStatus,
+  Issue,
+  LoginView,
+  ModuleInfo,
+  NewSessionRequest,
+  Repo,
+  Session,
+} from "./types";
+
+/** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
+export type SocketLike = Pick<
+  WebSocket,
+  "binaryType" | "readyState" | "onopen" | "onmessage" | "onclose" | "onerror" | "send" | "close"
+>;
+
+export const SOCKET_OPEN = 1;
+
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export interface SaveModuleRequest {
+  provider: string;
+  enabled: boolean;
+  settings: Record<string, unknown>;
+}
+
+export interface Api {
+  readonly mock: boolean;
+  status(): Promise<HarnessStatus>;
+  modules(): Promise<ModuleInfo[]>;
+  saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
+  repos(): Promise<Repo[]>;
+  issues(repo: string): Promise<Issue[]>;
+  sessions(): Promise<Session[]>;
+  session(id: string): Promise<Session>;
+  createSession(body: NewSessionRequest): Promise<Session>;
+  publishSession(id: string): Promise<Session>;
+  stopSession(id: string): Promise<Session>;
+  cleanupSession(id: string): Promise<Session>;
+  setGithubToken(token: string): Promise<{ login: string }>;
+  deleteGithubToken(): Promise<unknown>;
+  setClaudeToken(token: string): Promise<unknown>;
+  deleteClaudeToken(): Promise<unknown>;
+  claudeLogin(): Promise<LoginView>;
+  claudeLoginStart(): Promise<LoginView>;
+  claudeLoginCode(code: string): Promise<LoginView>;
+  claudeLoginCancel(): Promise<LoginView>;
+  openEvents(sessionId: string, since: number): SocketLike;
+  openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(path, {
+    ...init,
+    headers: { "content-type": "application/json", ...(init.headers ?? {}) },
+  });
+  const text = await res.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const message =
+      data && typeof data === "object" && "error" in data
+        ? String((data as { error: unknown }).error)
+        : text || res.statusText;
+    throw new ApiError(message, res.status);
+  }
+  return data as T;
+}
+
+const post = <T>(path: string, body?: unknown) =>
+  request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+
+const enc = encodeURIComponent;
+
+function wsUrl(path: string): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}${path}`;
+}
+
+export const httpApi: Api = {
+  mock: false,
+  status: () => request("/api/status"),
+  modules: () => request("/api/modules"),
+  saveModule: (kind, body) =>
+    request(`/api/modules/${enc(kind)}`, { method: "PUT", body: JSON.stringify(body) }),
+  repos: () => request("/api/repos"),
+  issues: (repo) => {
+    const [owner, name] = repo.split("/");
+    return request(`/api/repos/${enc(owner)}/${enc(name)}/issues`);
+  },
+  sessions: () => request("/api/sessions"),
+  session: (id) => request(`/api/sessions/${enc(id)}`),
+  createSession: (body) => post("/api/sessions", body),
+  publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
+  stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
+  cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
+  setGithubToken: (token) => post("/api/settings/github-token", { token }),
+  deleteGithubToken: () => request("/api/settings/github-token", { method: "DELETE" }),
+  setClaudeToken: (token) => post("/api/settings/claude-token", { token }),
+  deleteClaudeToken: () => request("/api/settings/claude-token", { method: "DELETE" }),
+  claudeLogin: () => request("/api/claude-login"),
+  claudeLoginStart: () => post("/api/claude-login/start"),
+  claudeLoginCode: (code) => post("/api/claude-login/code", { code }),
+  claudeLoginCancel: () => post("/api/claude-login/cancel"),
+  openEvents: (id, since) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}`)),
+  openTerminal: (id, cols, rows) =>
+    new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),
+};
+
+/** `?mock=1` swaps in an in-browser backend so the UI can be exercised without a harness. */
+export async function loadApi(): Promise<Api> {
+  if (new URLSearchParams(location.search).get("mock") === "1") {
+    const { createMockApi } = await import("./mock");
+    return createMockApi();
+  }
+  return httpApi;
+}
