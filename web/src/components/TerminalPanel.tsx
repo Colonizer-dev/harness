@@ -23,7 +23,16 @@ function terminalTheme() {
 
 type TerminalState = "idle" | "connecting" | "open" | "closed";
 
-export function TerminalPanel({ sessionId, enabled }: { sessionId: string; enabled: boolean }) {
+export function TerminalPanel({
+  sessionId,
+  enabled,
+  starting = false,
+}: {
+  sessionId: string;
+  enabled: boolean;
+  /** The colony is booting: the shell connects on its own once it's ready. */
+  starting?: boolean;
+}) {
   const api = useApi();
   const hostRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<TerminalState>("idle");
@@ -142,8 +151,12 @@ export function TerminalPanel({ sessionId, enabled }: { sessionId: string; enabl
       <div ref={hostRef} className="h-full min-h-0 w-full" />
       {!enabled && (
         <Overlay>
-          <IconTerminal size={20} />
-          <span>The microVM isn't running, so there is no terminal.</span>
+          {starting ? <Spinner /> : <IconTerminal size={20} />}
+          <span>
+            {starting
+              ? "The terminal opens as soon as the colony's microVM is ready."
+              : "The microVM isn't running, so there is no terminal."}
+          </span>
         </Overlay>
       )}
       {enabled && state === "connecting" && (

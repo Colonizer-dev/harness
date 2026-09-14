@@ -218,7 +218,11 @@ export function SessionView({
             )}
             <div className="min-h-0 flex-1 bg-[var(--term-bg)]">
               <Suspense fallback={null}>
-                <TerminalPanel sessionId={session.id} enabled={live} />
+                <TerminalPanel
+                  sessionId={session.id}
+                  enabled={live && session.status !== "starting"}
+                  starting={session.status === "starting"}
+                />
               </Suspense>
             </div>
           </section>

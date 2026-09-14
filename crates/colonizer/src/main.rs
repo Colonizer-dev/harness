@@ -171,11 +171,12 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let mesh = if modules.mesh_enabled() {
         match app.mesh().await {
             Ok(mesh) => mesh.status().await,
-            Err(e) => json!({"running": false, "error": format!("{e:#}")}),
+            Err(e) => json!({"enabled": true, "provider": "headscale", "state": "error", "error": format!("{e:#}")}),
         }
     } else {
-        json!({"running": false, "disabled": true})
+        json!({"enabled": false, "provider": "none"})
     };
+    let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
     Json(json!({
         "github": match user {
@@ -189,6 +190,10 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
         },
         "sandbox": {
             "provider": modules.sandbox.provider,
+            "image": config::setting_str(&modules.sandbox, &sandbox_schema, "image"),
+            "cpus": setting_u64(&modules.sandbox, &sandbox_schema, "cpus"),
+            "memory": config::setting_str(&modules.sandbox, &sandbox_schema, "memory"),
+            "max_parallel": setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel"),
             "msb_version": msb_version.ok().map(|v| v.trim().to_string()),
             "claude_bin": claude_bin.as_ref().ok().map(|p| p.display().to_string()),
             "claude_bin_error": claude_bin.err().map(|e| format!("{e:#}")),
