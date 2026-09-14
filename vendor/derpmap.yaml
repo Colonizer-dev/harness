@@ -1,0 +1,728 @@
+# Tailscale's public DERP relay map, bundled so the mesh control server works offline.
+# Regenerate with scripts/update-derpmap.sh.
+regions:
+  1:
+    regionid: 1
+    regioncode: "nyc"
+    regionname: "New York City"
+    latitude: 40.7128
+    longitude: -74.006
+    nodes:
+      - name: "1i"
+        regionid: 1
+        hostname: "derp1i.tailscale.com"
+        ipv4: "199.38.181.103"
+        ipv6: "2607:f740:f::e19"
+        canport80: true
+      - name: "1h"
+        regionid: 1
+        hostname: "derp1h.tailscale.com"
+        ipv4: "199.38.181.93"
+        ipv6: "2607:f740:f::afd"
+        canport80: true
+      - name: "1g"
+        regionid: 1
+        hostname: "derp1g.tailscale.com"
+        ipv4: "209.177.145.120"
+        ipv6: "2607:f740:f::3eb"
+        canport80: true
+      - name: "1f"
+        regionid: 1
+        hostname: "derp1f.tailscale.com"
+        ipv4: "199.38.181.104"
+        ipv6: "2607:f740:f::bc"
+        canport80: true
+  10:
+    regionid: 10
+    regioncode: "sea"
+    regionname: "Seattle"
+    latitude: 47.609722
+    longitude: -122.333056
+    nodes:
+      - name: "10d"
+        regionid: 10
+        hostname: "derp10d.tailscale.com"
+        ipv4: "192.73.240.132"
+        ipv6: "2607:f740:14::500"
+        canport80: true
+      - name: "10c"
+        regionid: 10
+        hostname: "derp10c.tailscale.com"
+        ipv4: "192.73.240.121"
+        ipv6: "2607:f740:14::40c"
+        canport80: true
+      - name: "10b"
+        regionid: 10
+        hostname: "derp10b.tailscale.com"
+        ipv4: "192.73.240.161"
+        ipv6: "2607:f740:14::61c"
+        canport80: true
+  11:
+    regionid: 11
+    regioncode: "sao"
+    regionname: "S\u00e3o Paulo"
+    latitude: -23.55
+    longitude: -46.633333
+    nodes:
+      - name: "11g"
+        regionid: 11
+        hostname: "derp11g.tailscale.com"
+        ipv4: "172.237.61.190"
+        ipv6: "2600:3c0d::2000:62ff:febe:2e67"
+        canport80: true
+      - name: "11f"
+        regionid: 11
+        hostname: "derp11f.tailscale.com"
+        ipv4: "172.237.61.197"
+        ipv6: "2600:3c0d::2000:3bff:fe44:6166"
+        canport80: true
+      - name: "11e"
+        regionid: 11
+        hostname: "derp11e.tailscale.com"
+        ipv4: "172.237.61.194"
+        ipv6: "2600:3c0d::2000:d2ff:fe43:1790"
+        canport80: true
+  12:
+    regionid: 12
+    regioncode: "ord"
+    regionname: "Chicago"
+    latitude: 41.881944
+    longitude: -87.627778
+    nodes:
+      - name: "12f"
+        regionid: 12
+        hostname: "derp12f.tailscale.com"
+        ipv4: "199.38.182.118"
+        ipv6: "2607:f740:e::4c8"
+        canport80: true
+      - name: "12e"
+        regionid: 12
+        hostname: "derp12e.tailscale.com"
+        ipv4: "209.177.158.15"
+        ipv6: "2607:f740:e::b17"
+        canport80: true
+      - name: "12d"
+        regionid: 12
+        hostname: "derp12d.tailscale.com"
+        ipv4: "209.177.158.246"
+        ipv6: "2607:f740:e::811"
+        canport80: true
+  13:
+    regionid: 13
+    regioncode: "den"
+    regionname: "Denver"
+    latitude: 39.7392
+    longitude: -104.9849
+    nodes:
+      - name: "13d"
+        regionid: 13
+        hostname: "derp13d.tailscale.com"
+        ipv4: "192.73.242.204"
+        ipv6: "2607:f740:16::c23"
+        canport80: true
+      - name: "13c"
+        regionid: 13
+        hostname: "derp13c.tailscale.com"
+        ipv4: "192.73.242.28"
+        ipv6: "2607:f740:16::5c"
+        canport80: true
+      - name: "13b"
+        regionid: 13
+        hostname: "derp13b.tailscale.com"
+        ipv4: "192.73.242.187"
+        ipv6: "2607:f740:16::640"
+        canport80: true
+  14:
+    regionid: 14
+    regioncode: "ams"
+    regionname: "Amsterdam"
+    latitude: 52.372778
+    longitude: 4.893611
+    nodes:
+      - name: "14d"
+        regionid: 14
+        hostname: "derp14d.tailscale.com"
+        ipv4: "176.58.93.154"
+        ipv6: "2a00:dd80:3c::3d5"
+        canport80: true
+      - name: "14c"
+        regionid: 14
+        hostname: "derp14c.tailscale.com"
+        ipv4: "176.58.93.147"
+        ipv6: "2a00:dd80:3c::b09"
+        canport80: true
+      - name: "14b"
+        regionid: 14
+        hostname: "derp14b.tailscale.com"
+        ipv4: "176.58.93.248"
+        ipv6: "2a00:dd80:3c::807"
+        canport80: true
+  15:
+    regionid: 15
+    regioncode: "jnb"
+    regionname: "Johannesburg"
+    latitude: -26.204444
+    longitude: 28.045556
+    nodes:
+      - name: "15d"
+        regionid: 15
+        hostname: "derp15d.tailscale.com"
+        ipv4: "102.67.165.36"
+        ipv6: "2c0f:edb0:0:10::599"
+        canport80: true
+      - name: "15c"
+        regionid: 15
+        hostname: "derp15c.tailscale.com"
+        ipv4: "102.67.165.185"
+        ipv6: "2c0f:edb0:0:10::b59"
+        canport80: true
+      - name: "15b"
+        regionid: 15
+        hostname: "derp15b.tailscale.com"
+        ipv4: "102.67.165.90"
+        ipv6: "2c0f:edb0:0:10::963"
+        canport80: true
+  16:
+    regionid: 16
+    regioncode: "mia"
+    regionname: "Miami"
+    latitude: 25.78
+    longitude: -80.21
+    nodes:
+      - name: "16d"
+        regionid: 16
+        hostname: "derp16d.tailscale.com"
+        ipv4: "192.73.243.141"
+        ipv6: "2607:f740:17::475"
+        canport80: true
+      - name: "16c"
+        regionid: 16
+        hostname: "derp16c.tailscale.com"
+        ipv4: "192.73.243.229"
+        ipv6: "2607:f740:17::4e4"
+        canport80: true
+      - name: "16b"
+        regionid: 16
+        hostname: "derp16b.tailscale.com"
+        ipv4: "192.73.243.135"
+        ipv6: "2607:f740:17::476"
+        canport80: true
+  17:
+    regionid: 17
+    regioncode: "lax"
+    regionname: "Los Angeles"
+    latitude: 34.05
+    longitude: -118.25
+    nodes:
+      - name: "17d"
+        regionid: 17
+        hostname: "derp17d.tailscale.com"
+        ipv4: "208.111.40.216"
+        ipv6: "2607:f740:c::e1b"
+        canport80: true
+      - name: "17c"
+        regionid: 17
+        hostname: "derp17c.tailscale.com"
+        ipv4: "208.111.40.12"
+        ipv6: "2607:f740:c::10"
+        canport80: true
+      - name: "17b"
+        regionid: 17
+        hostname: "derp17b.tailscale.com"
+        ipv4: "192.73.244.245"
+        ipv6: "2607:f740:c::646"
+        canport80: true
+  18:
+    regionid: 18
+    regioncode: "par"
+    regionname: "Paris"
+    latitude: 48.856667
+    longitude: 2.352222
+    nodes:
+      - name: "18d"
+        regionid: 18
+        hostname: "derp18d.tailscale.com"
+        ipv4: "176.58.90.104"
+        ipv6: "2a00:dd80:3e::f2e"
+        canport80: true
+      - name: "18c"
+        regionid: 18
+        hostname: "derp18c.tailscale.com"
+        ipv4: "176.58.90.207"
+        ipv6: "2a00:dd80:3e::c19"
+        canport80: true
+      - name: "18b"
+        regionid: 18
+        hostname: "derp18b.tailscale.com"
+        ipv4: "176.58.90.147"
+        ipv6: "2a00:dd80:3e::363"
+        canport80: true
+  19:
+    regionid: 19
+    regioncode: "mad"
+    regionname: "Madrid"
+    latitude: 40.416944
+    longitude: -3.703333
+    nodes:
+      - name: "19d"
+        regionid: 19
+        hostname: "derp19d.tailscale.com"
+        ipv4: "45.159.97.233"
+        ipv6: "2a00:dd80:14:10::34a"
+        canport80: true
+      - name: "19c"
+        regionid: 19
+        hostname: "derp19c.tailscale.com"
+        ipv4: "45.159.97.61"
+        ipv6: "2a00:dd80:14:10::20"
+        canport80: true
+      - name: "19b"
+        regionid: 19
+        hostname: "derp19b.tailscale.com"
+        ipv4: "45.159.97.144"
+        ipv6: "2a00:dd80:14:10::335"
+        canport80: true
+  2:
+    regionid: 2
+    regioncode: "sfo"
+    regionname: "San Francisco"
+    latitude: 37.7775
+    longitude: -122.416389
+    nodes:
+      - name: "2f"
+        regionid: 2
+        hostname: "derp2f.tailscale.com"
+        ipv4: "208.111.34.178"
+        ipv6: "2607:f740:0:3f::f4"
+        canport80: true
+      - name: "2e"
+        regionid: 2
+        hostname: "derp2e.tailscale.com"
+        ipv4: "192.73.252.134"
+        ipv6: "2607:f740:0:3f::44c"
+        canport80: true
+      - name: "2d"
+        regionid: 2
+        hostname: "derp2d.tailscale.com"
+        ipv4: "192.73.252.65"
+        ipv6: "2607:f740:0:3f::287"
+        canport80: true
+  20:
+    regionid: 20
+    regioncode: "hkg"
+    regionname: "Hong Kong"
+    latitude: 22.3193
+    longitude: 114.1694
+    nodes:
+      - name: "20d"
+        regionid: 20
+        hostname: "derp20d.tailscale.com"
+        ipv4: "205.147.105.78"
+        ipv6: "2403:2500:8000:1::e9a"
+        canport80: true
+      - name: "20c"
+        regionid: 20
+        hostname: "derp20c.tailscale.com"
+        ipv4: "205.147.105.30"
+        ipv6: "2403:2500:8000:1::5fb"
+        canport80: true
+      - name: "20b"
+        regionid: 20
+        hostname: "derp20b.tailscale.com"
+        ipv4: "103.6.84.152"
+        ipv6: "2403:2500:8000:1::ef6"
+        canport80: true
+  21:
+    regionid: 21
+    regioncode: "tor"
+    regionname: "Toronto"
+    latitude: 43.741667
+    longitude: -79.373333
+    nodes:
+      - name: "21d"
+        regionid: 21
+        hostname: "derp21d.tailscale.com"
+        ipv4: "162.248.221.248"
+        ipv6: "2607:f740:50::ca4"
+        canport80: true
+      - name: "21c"
+        regionid: 21
+        hostname: "derp21c.tailscale.com"
+        ipv4: "162.248.221.215"
+        ipv6: "2607:f740:50::f10"
+        canport80: true
+      - name: "21b"
+        regionid: 21
+        hostname: "derp21b.tailscale.com"
+        ipv4: "162.248.221.199"
+        ipv6: "2607:f740:50::1d1"
+        canport80: true
+  22:
+    regionid: 22
+    regioncode: "waw"
+    regionname: "Warsaw"
+    latitude: 52.23
+    longitude: 21.011111
+    nodes:
+      - name: "22d"
+        regionid: 22
+        hostname: "derp22d.tailscale.com"
+        ipv4: "45.159.98.145"
+        ipv6: "2a00:dd80:40:100::211"
+        canport80: true
+      - name: "22c"
+        regionid: 22
+        hostname: "derp22c.tailscale.com"
+        ipv4: "45.159.98.253"
+        ipv6: "2a00:dd80:40:100::3f"
+        canport80: true
+      - name: "22b"
+        regionid: 22
+        hostname: "derp22b.tailscale.com"
+        ipv4: "45.159.98.196"
+        ipv6: "2a00:dd80:40:100::316"
+        canport80: true
+  23:
+    regionid: 23
+    regioncode: "dbi"
+    regionname: "Dubai"
+    latitude: 25.263056
+    longitude: 55.297222
+    nodes:
+      - name: "23d"
+        regionid: 23
+        hostname: "derp23d.tailscale.com"
+        ipv4: "185.34.3.75"
+        ipv6: "2a00:dd80:3f:100::97e"
+        canport80: true
+      - name: "23c"
+        regionid: 23
+        hostname: "derp23c.tailscale.com"
+        ipv4: "185.34.3.207"
+        ipv6: "2a00:dd80:3f:100::a50"
+        canport80: true
+      - name: "23b"
+        regionid: 23
+        hostname: "derp23b.tailscale.com"
+        ipv4: "185.34.3.232"
+        ipv6: "2a00:dd80:3f:100::76f"
+        canport80: true
+  24:
+    regionid: 24
+    regioncode: "hnl"
+    regionname: "Honolulu"
+    latitude: 21.306944
+    longitude: -157.858333
+    nodes:
+      - name: "24d"
+        regionid: 24
+        hostname: "derp24d.tailscale.com"
+        ipv4: "208.72.155.133"
+        ipv6: "2001:19f0:c000:c564:5400:04ff:fe26:2ba8"
+        canport80: true
+      - name: "24c"
+        regionid: 24
+        hostname: "derp24c.tailscale.com"
+        ipv4: "208.83.233.233"
+        ipv6: "2001:19f0:c000:c591:5400:04ff:fe26:2c5f"
+        canport80: true
+      - name: "24b"
+        regionid: 24
+        hostname: "derp24b.tailscale.com"
+        ipv4: "208.83.234.151"
+        ipv6: "2001:19f0:c000:c586:5400:04ff:fe26:2ba6"
+        canport80: true
+  25:
+    regionid: 25
+    regioncode: "nai"
+    regionname: "Nairobi"
+    latitude: -1.286389
+    longitude: 36.817222
+    nodes:
+      - name: "25d"
+        regionid: 25
+        hostname: "derp25d.tailscale.com"
+        ipv4: "102.67.167.188"
+        ipv6: "2c0f:edb0:2000:1::188"
+        canport80: true
+      - name: "25c"
+        regionid: 25
+        hostname: "derp25c.tailscale.com"
+        ipv4: "102.67.167.37"
+        ipv6: "2c0f:edb0:2000:1::2c7"
+        canport80: true
+      - name: "25b"
+        regionid: 25
+        hostname: "derp25b.tailscale.com"
+        ipv4: "102.67.167.245"
+        ipv6: "2c0f:edb0:2000:1::2e9"
+        canport80: true
+  26:
+    regionid: 26
+    regioncode: "nue"
+    regionname: "Nuremberg"
+    latitude: 49.453889
+    longitude: 11.0775
+    nodes:
+      - name: "26d"
+        regionid: 26
+        hostname: "derp26d.tailscale.com"
+        ipv4: "49.13.204.141"
+        ipv6: "2a01:4f8:1c0c:7d06::1"
+        canport80: true
+      - name: "26c"
+        regionid: 26
+        hostname: "derp26c.tailscale.com"
+        ipv4: "49.12.193.137"
+        ipv6: "2a01:4f8:1c1c:5c70::1"
+        canport80: true
+      - name: "26b"
+        regionid: 26
+        hostname: "derp26b.tailscale.com"
+        ipv4: "167.235.72.200"
+        ipv6: "2a01:4f8:1c1c:47b6::1"
+        canport80: true
+  27:
+    regionid: 27
+    regioncode: "iad"
+    regionname: "Ashburn"
+    latitude: 39.03
+    longitude: -77.471111
+    nodes:
+      - name: "27e"
+        regionid: 27
+        hostname: "derp27e.tailscale.com"
+        ipv4: "178.156.134.232"
+        ipv6: "2a01:4ff:f0:28d4::1"
+        canport80: true
+      - name: "27d"
+        regionid: 27
+        hostname: "derp27d.tailscale.com"
+        ipv4: "178.156.152.106"
+        ipv6: "2a01:4ff:f0:3c8e::1"
+        canport80: true
+      - name: "27c"
+        regionid: 27
+        hostname: "derp27c.tailscale.com"
+        ipv4: "178.156.152.91"
+        ipv6: "2a01:4ff:f0:3913::1"
+        canport80: true
+      - name: "27b"
+        regionid: 27
+        hostname: "derp27b.tailscale.com"
+        ipv4: "5.161.218.233"
+        ipv6: "2a01:4ff:f0:3db9::1"
+        canport80: true
+  28:
+    regionid: 28
+    regioncode: "hel"
+    regionname: "Helsinki"
+    latitude: 60.170833
+    longitude: 24.9375
+    nodes:
+      - name: "28d"
+        regionid: 28
+        hostname: "derp28d.tailscale.com"
+        ipv4: "157.180.28.32"
+        ipv6: "2a01:4f9:c012:2e5b::1"
+        canport80: true
+      - name: "28c"
+        regionid: 28
+        hostname: "derp28c.tailscale.com"
+        ipv4: "95.217.2.165"
+        ipv6: "2a01:4f9:c012:cd74::1"
+        canport80: true
+      - name: "28b"
+        regionid: 28
+        hostname: "derp28b.tailscale.com"
+        ipv4: "65.109.143.62"
+        ipv6: "2a01:4f9:c012:d55c::1"
+        canport80: true
+  3:
+    regionid: 3
+    regioncode: "sin"
+    regionname: "Singapore"
+    latitude: 1.3521
+    longitude: 103.8198
+    nodes:
+      - name: "3h"
+        regionid: 3
+        hostname: "derp3h.tailscale.com"
+        ipv4: "172.237.66.30"
+        ipv6: "2600:3c15::2000:3dff:fe44:50aa"
+        canport80: true
+      - name: "3g"
+        regionid: 3
+        hostname: "derp3g.tailscale.com"
+        ipv4: "172.237.72.79"
+        ipv6: "2600:3c15::2000:adff:fe08:6fab"
+        canport80: true
+      - name: "3f"
+        regionid: 3
+        hostname: "derp3f.tailscale.com"
+        ipv4: "172.237.72.8"
+        ipv6: "2600:3c15::2000:53ff:fe48:a668"
+        canport80: true
+      - name: "3e"
+        regionid: 3
+        hostname: "derp3e.tailscale.com"
+        ipv4: "172.237.72.43"
+        ipv6: "2600:3c15::2000:6cff:fee4:d799"
+        canport80: true
+  4:
+    regionid: 4
+    regioncode: "fra"
+    regionname: "Frankfurt"
+    latitude: 50.1109
+    longitude: 8.6821
+    nodes:
+      - name: "4i"
+        regionid: 4
+        hostname: "derp4i.tailscale.com"
+        ipv4: "185.40.234.53"
+        ipv6: "2a00:dd80:20::8a6"
+        canport80: true
+      - name: "4j"
+        regionid: 4
+        hostname: "derp4j.tailscale.com"
+        ipv4: "185.40.234.176"
+        ipv6: "2a00:dd80:20::e67"
+        canport80: true
+      - name: "4g"
+        regionid: 4
+        hostname: "derp4g.tailscale.com"
+        ipv4: "185.40.234.113"
+        ipv6: "2a00:dd80:20::8f"
+        canport80: true
+      - name: "4h"
+        regionid: 4
+        hostname: "derp4h.tailscale.com"
+        ipv4: "185.40.234.77"
+        ipv6: "2a00:dd80:20::bcf"
+        canport80: true
+      - name: "4f"
+        regionid: 4
+        hostname: "derp4f.tailscale.com"
+        ipv4: "185.40.234.219"
+        ipv6: "2a00:dd80:20::a25"
+        canport80: true
+  5:
+    regionid: 5
+    regioncode: "syd"
+    regionname: "Sydney"
+    latitude: -33.867778
+    longitude: 151.21
+    nodes:
+      - name: "5g"
+        regionid: 5
+        hostname: "derp5g.tailscale.com"
+        ipv4: "172.105.169.57"
+        ipv6: "2400:8907::2000:2fff:fea7:57f4"
+        canport80: true
+      - name: "5f"
+        regionid: 5
+        hostname: "derp5f.tailscale.com"
+        ipv4: "172.105.166.103"
+        ipv6: "2400:8907::2000:ccff:fe1f:80da"
+        canport80: true
+      - name: "5e"
+        regionid: 5
+        hostname: "derp5e.tailscale.com"
+        ipv4: "172.105.179.230"
+        ipv6: "2400:8907::2000:ceff:fe8d:4f4e"
+        canport80: true
+  6:
+    regionid: 6
+    regioncode: "blr"
+    regionname: "Bengaluru"
+    latitude: 12.9716
+    longitude: 77.5946
+    nodes:
+      - name: "6a"
+        regionid: 6
+        hostname: "derp6.tailscale.com"
+        ipv4: "68.183.90.120"
+        ipv6: "2400:6180:100:d0::982:d001"
+        canport80: true
+  7:
+    regionid: 7
+    regioncode: "tok"
+    regionname: "Tokyo"
+    latitude: 35.6764
+    longitude: 139.65
+    nodes:
+      - name: "7h"
+        regionid: 7
+        hostname: "derp7h.tailscale.com"
+        ipv4: "172.237.28.183"
+        ipv6: "2600:3c18::2000:b1ff:fea9:4560"
+        canport80: true
+      - name: "7g"
+        regionid: 7
+        hostname: "derp7g.tailscale.com"
+        ipv4: "172.238.6.179"
+        ipv6: "2600:3c18::2000:3fff:fe80:3ebd"
+        canport80: true
+      - name: "7f"
+        regionid: 7
+        hostname: "derp7f.tailscale.com"
+        ipv4: "172.238.6.34"
+        ipv6: "2600:3c18::2000:acff:fe8e:3ed5"
+        canport80: true
+      - name: "7e"
+        regionid: 7
+        hostname: "derp7e.tailscale.com"
+        ipv4: "172.238.6.180"
+        ipv6: "2600:3c18::2000:60ff:fe0f:6e83"
+        stunonly: true
+        canport80: true
+  8:
+    regionid: 8
+    regioncode: "lhr"
+    regionname: "London"
+    latitude: 51.5072
+    longitude: 0.1276
+    nodes:
+      - name: "8g"
+        regionid: 8
+        hostname: "derp8g.tailscale.com"
+        ipv4: "176.58.92.254"
+        ipv6: "2a00:dd80:3a::ed"
+        canport80: true
+      - name: "8f"
+        regionid: 8
+        hostname: "derp8f.tailscale.com"
+        ipv4: "176.58.88.183"
+        ipv6: "2a00:dd80:3a::dfa"
+        canport80: true
+      - name: "8e"
+        regionid: 8
+        hostname: "derp8e.tailscale.com"
+        ipv4: "176.58.92.144"
+        ipv6: "2a00:dd80:3a::b33"
+        canport80: true
+  9:
+    regionid: 9
+    regioncode: "dfw"
+    regionname: "Dallas"
+    latitude: 32.779167
+    longitude: -96.808889
+    nodes:
+      - name: "9f"
+        regionid: 9
+        hostname: "derp9f.tailscale.com"
+        ipv4: "209.177.156.197"
+        ipv6: "2607:f740:100::cad"
+        canport80: true
+      - name: "9e"
+        regionid: 9
+        hostname: "derp9e.tailscale.com"
+        ipv4: "192.73.248.83"
+        ipv6: "2607:f740:100::359"
+        canport80: true
+      - name: "9d"
+        regionid: 9
+        hostname: "derp9d.tailscale.com"
+        ipv4: "209.177.156.94"
+        ipv6: "2607:f740:100::c05"
+        canport80: true

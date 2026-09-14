@@ -33,6 +33,7 @@ use std::{
     collections::HashMap,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     process::Command,
@@ -339,8 +340,21 @@ async fn main() -> Result<()> {
     if app.modules.read().await.mesh_enabled() && app.cfg.assets.is_some() {
         let mesh_app = app.clone();
         tokio::spawn(async move {
-            if let Err(e) = async { mesh_app.mesh().await?.ensure_started().await }.await {
-                eprintln!("mesh: {e:#}");
+            let mut delay = Duration::from_secs(2);
+            for attempt in 1..=8 {
+                match async { mesh_app.mesh().await?.ensure_started().await }.await {
+                    Ok(()) => {
+                        if attempt > 1 {
+                            println!("mesh: started on attempt {attempt}");
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("mesh: attempt {attempt} failed: {e:#}");
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
+                }
             }
         });
     }
