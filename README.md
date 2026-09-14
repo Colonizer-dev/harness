@@ -1,108 +1,284 @@
-# Colonizer
+<p align="center">
+  <img src="assets/readme-banner.svg" alt="Colonizer Harness. The open-source core. One microVM per task, a private mesh home, and a pull request at the end." width="100%">
+</p>
 
-Turn a task into a pull request by running a coding agent inside a disposable microVM, and follow
-along in the browser:
+<p align="center">
+  <img src="https://img.shields.io/badge/STATUS-ALPHA-FF6B35?style=flat-square&labelColor=0A0A0B" alt="Status: alpha">
+  <img src="https://img.shields.io/badge/LANGUAGE-RUST-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Language: Rust">
+  <img src="https://img.shields.io/badge/SANDBOX-KVM%20MICROVMS-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Sandbox: KVM microVMs">
+  <img src="https://img.shields.io/badge/MESH-HEADSCALE%20%C2%B7%20WIREGUARD-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Mesh: Headscale and WireGuard">
+  <img src="https://img.shields.io/badge/AGENT-CLAUDE%20CODE%20NOW%20%C2%B7%20MORE%20LATER-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Agent: Claude Code now, more later">
+  <img src="https://img.shields.io/badge/LICENSE-MIT-FF6B35?style=flat-square&labelColor=0A0A0B" alt="License: MIT">
+</p>
 
-- **Sessions** — start from a GitHub issue or just a repository. Each session gets a fresh git
-  worktree on a `colonizer/…` branch and its own microVM.
-- **Chat** — watch the agent work; its questions always arrive as **multiple-choice cards** (with an
-  "Other…" answer), never as buried plain-text questions. Send follow-ups at any time.
-- **Terminal** — a shell inside the same microVM, right next to the chat.
-- **Private mesh** — every microVM joins a private Tailscale-compatible network with the harness,
-  automatically. It runs on bundled Headscale and never touches your own tailnet.
-- **Create PR** — the host commits, pushes and opens the pull request (or let autopilot do it when the
-  agent finishes).
+<p align="center">
+  <b>colonizer.dev</b> · HARNESS · the open-source core
+</p>
 
-Everything is a **module** you choose in Settings → Modules: source (GitHub), sandbox (microsandbox),
-mesh (private mesh / loopback), agent (Claude Code), interfaces (chat, terminal) and publish (GitHub PR).
+---
 
-See [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
+# The harness
 
-## Requirements
+Coding agents are good enough to work on their own for a long time. Most setups still make you pick
+between **safe** (a sandbox, one task at a time, an approval every few seconds) and **fast** (an agent
+with your credentials loose on your laptop). This is the setup that doesn't make you pick.
 
-- Linux x86_64 with KVM (`/dev/kvm` readable and writable by your user)
-- [microsandbox](https://docs.microsandbox.dev) (`curl -fsSL https://get.microsandbox.dev | sh`)
-- `git`, `gh`, Node.js ≥ 20 + npm, a Rust toolchain, and a native Claude Code install (its binary is
-  mounted read-only into microVMs)
+Every task gets a **colony**: its own KVM microVM with a fresh git worktree and an agent inside. The
+agent can do anything in there. Every colony joins a **private mesh** with the machine that launched it,
+so its chat and a real terminal are one hop away. When the agent needs you, it asks with **choices**.
+When the work is done, your machine, the **mothership**, commits it and opens the pull request.
 
-## Install
+This repository is the open-source core, MIT, and it runs on one Linux machine today.
+[colonizer.dev](https://colonizer.dev) is the name for everything around it. Nothing is live there
+yet, and nothing in this README pretends otherwise.
 
-```sh
-scripts/install.sh --install     # builds dist/ and installs ~/.local/share/colonizer/app
-colonizer                   # open http://127.0.0.1:7878
+> **Colonies only ever hold placeholders.**
+> The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
+> host-side TLS proxy, for one host, on the way out. A colony that goes rogue can wreck its own
+> worktree, and that's all.
+
+The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
+mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
+it's going, is in [docs/vision.md](docs/vision.md).
+
+---
+
+## Two things, and which is which
+
+| | What it is | Status |
+| :--- | :--- | :--- |
+| **Harness** | This repository: the mothership, the in-VM daemon, the agent module, the web UI, the bundled mesh. Runnable today on your own machine. | `SHIPPING` |
+| **Colonizer** | Anything beyond one machine: remote outposts, a fleet view, a hosted offering. | `PLANNED` |
+
+Two labels are used everywhere below, and they set the tense of the sentence around them:
+
+- `SHIPPING`: merged, in this repository, and exercised on a real machine.
+- `PLANNED`: named, not specified, not started.
+
+---
+
+## A question, from inside a colony
+
+Real, from a colony working on this repository. Unedited apart from line breaks.
+
+```json
+{"type": "question", "seq": 14,
+ "question_id": "toolu_01Kz2S34mniQ6KJ476Twd2X3",
+ "questions": [{
+   "header": "README tweak", "multi_select": false,
+   "question": "Which small README improvement do you prefer?",
+   "options": [
+     {"label": "Add a table of contents",
+      "description": "Insert a short linked ToC near the top (Requirements, Install, Trust model, Configuration, Development, Run as a service) so readers can jump to a section in this fairly long README."},
+     {"label": "Add a Quick Start block",
+      "description": "Add a 3-line 'Quick Start' snippet right under the intro paragraph (clone, install.sh --install, open the URL) so skimmers get running before reading Requirements/Trust model/Configuration."}
+   ]}]}
 ```
 
-`install.sh` bundles everything the app needs, so nothing is downloaded at runtime:
+The web UI renders that as a card with both options and an **Other…** answer. One click sends
+`question_answered` back through the mothership, over the mesh, to the agent that is waiting for it.
 
-| Piece | How it's built |
-| --- | --- |
-| Headscale, Tailscale | Pinned in `vendor/vendor.lock`, sha256-verified (`scripts/fetch-vendor.sh`) |
-| `colonizer-agentd` | Static musl binary built inside a `rust:alpine` microVM (`scripts/build-agentd.sh`) |
-| Agent modules | `modules/agents/*` with production `node_modules` |
-| Web UI | `web/` (React + assistant-ui + xterm.js) |
-| Harness | `crates/colonizer` |
+Agents never ask in plain text. The Claude Code module routes `AskUserQuestion` into this event, and if a
+turn still ends on a plain-text question, the runner holds the turn open and has the agent ask again as
+a card. Autopilot can't publish in the middle of a question.
 
-Then open **Settings**:
+---
 
-- **GitHub** – uses your `gh auth login` session automatically, or paste a token.
-- **Claude** – **Log in with Claude subscription** runs the official `claude setup-token` flow; the
-  token stays on the host.
+## Shape
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{
+  "background":"transparent",
+  "fontFamily":"ui-monospace, SFMono-Regular, Menlo, monospace",
+  "fontSize":"13px",
+  "primaryColor":"#141821","primaryTextColor":"#EDEBE6","primaryBorderColor":"#3A3A3F",
+  "lineColor":"#6E6E76","textColor":"#8A8A8E",
+  "clusterBkg":"transparent","clusterBorder":"#3A3A3F",
+  "edgeLabelBackground":"#0E121A"
+}} }%%
+flowchart LR
+  U(["browser"]):::req --> M
+
+  subgraph HOST["YOUR MACHINE · THE MOTHERSHIP"]
+    M["<b>colonizer</b><br/>modules · colonies · publish"]:::core
+    HS["headscale<br/>bundled control plane"]:::mod
+    TS["tailscaled<br/>userspace node"]:::mod
+    M --> HS & TS
+  end
+
+  subgraph C["ONE TASK · ONE MICROVM · ONE WORKTREE"]
+    AD["<b>colonizer-agentd</b><br/>events · terminals"]:::port
+    AG["agent runner<br/>Claude Code"]:::mod
+    WT[("/workspace<br/>git worktree")]:::vendor
+    AD --> AG --> WT
+  end
+
+  TS == "private mesh" ==> AD
+  M --> GH["GitHub<br/>issues · pull requests"]:::vendor
+  AG -. "placeholder, swapped at the edge" .-> API["api.anthropic.com"]:::vendor
+  C2["another colony"]:::ghost
+  TS -.-> C2
+
+  classDef req fill:#0E121A,stroke:#FF6B35,stroke-width:1.5px,color:#EDEBE6
+  classDef core fill:#141821,stroke:#FF6B35,stroke-width:1.5px,color:#EDEBE6
+  classDef mod fill:#0E121A,stroke:#3A3A3F,color:#EDEBE6
+  classDef port fill:#141821,stroke:#EDEBE6,stroke-width:1.5px,color:#EDEBE6
+  classDef vendor fill:#0E121A,stroke:#3A3A3F,color:#A9A8A5
+  classDef ghost fill:transparent,stroke:#55555A,stroke-dasharray:4 3,color:#8A8A8E
+```
+
+---
+
+## The argument, in five points
+
+**1. A colony is a machine, not a container.** Each task runs in a KVM microVM
+([microsandbox](https://microsandbox.dev), libkrun) with its own kernel. The agent runs without
+permission prompts because there is nothing on the other side of the wall worth protecting.
+
+**2. Secrets stay home.** Git objects are mounted read-only, so the agent can read history but not
+rewrite it. The mothership commits, pushes and opens the pull request after the microVM is gone, and it
+treats everything the colony left behind as untrusted: `.git` is rewritten, nested repositories are
+removed, and git runs with hooks and fsmonitor disabled.
+
+**3. Every colony is one hop away.** The mothership runs its own Headscale and a userspace `tailscaled`,
+both bundled. Every colony joins with a single-use key. The network is separate from any tailnet the
+machine is already on. The mothership can reach colonies, and colonies can't reach each other. One narrow
+UDP rule per colony keeps WireGuard direct (about 1 ms) instead of relayed.
+
+**4. Decisions, not prose.** Agents bring you choices. Your job is to pick one, not to parse a paragraph
+that ends in a question mark.
+
+**5. Everything is a module.** Source, sandbox, mesh, agent, interfaces and publish are providers behind
+small contracts, selected in the UI and saved in `modules.json`. The agent contract is a JSON Lines
+protocol on stdio, so an agent module can be written in anything.
+
+---
+
+## What's in the repository
+
+| Path | What it is | Status |
+| :--- | :--- | :--- |
+| [`crates/colonizer`](crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
+| [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
+| [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
+| [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
+| [`vendor`](vendor) | Pinned, sha256-verified Headscale and Tailscale, plus a DERP map snapshot | `SHIPPING` |
+| [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build | `SHIPPING` |
+
+## Modules
+
+| Kind | Providers today | Next |
+| :--- | :--- | :--- |
+| `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs) | other VMMs `PLANNED` |
+| `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
+| `agent` | Claude Code | more agents behind the same protocol `PLANNED` |
+| `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
+| `publish` | GitHub pull request | review-comment follow-ups `PLANNED` |
+
+---
+
+## Run it
+
+Linux x86_64 with `/dev/kvm` readable and writable by your user,
+[microsandbox](https://docs.microsandbox.dev), `git`, `gh`, Node.js ≥ 20, a Rust toolchain, and a native
+Claude Code install.
+
+```sh
+git clone https://github.com/Colonizer-dev/harness && cd harness
+scripts/install.sh           # builds everything into ./dist; nothing is downloaded at runtime
+dist/bin/colonizer           # open http://127.0.0.1:7878
+```
+
+In **Settings**, connect GitHub (your `gh` login is picked up automatically) and press **Log in with
+Claude subscription**. Then **Launch** a colony on an issue, or on a repository with nothing but a
+sentence of instructions.
+
+`scripts/install.sh --install` additionally copies the app to `~/.local/share/colonizer/app` and links
+`~/.local/bin/colonizer`.
+
+---
+
+## What this does not do
+
+Stated here rather than buried.
+
+- **One machine.** Colonies run on the host that launched them. Linux x86_64 with KVM only; no macOS.
+- **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
+- **The web UI has no login.** It binds to `127.0.0.1`, checks `Host` and `Origin` headers, and should stay there.
+- **Colony images need glibc.** The host's native Claude Code binary is mounted read-only into the microVM.
+- **Relays are Tailscale's.** Direct connections don't need them; when a colony falls back to a relay,
+  encrypted traffic crosses Tailscale's public DERP servers.
+- **Not yet exercised end to end:** opening a pull request from a colony, and `install.sh --install`. Both
+  are implemented; neither has been run against the real world yet.
+- **No CI yet**, and nothing is published to crates.io or npm.
+
+---
+
+## Roadmap, in public
+
+| Capability | Status |
+| :--- | :--- |
+| Colonies, private mesh, choice cards, terminal, Claude Code module, GitHub source and publish | `SHIPPING` |
+| CI running the Rust, runner and UI test suites | `PLANNED` |
+| More agent modules behind the runner protocol | `PLANNED` |
+| GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
+| Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
+| Fleet view, per-colony budgets and network policies | `PLANNED` |
+| Dev-server previews over the mesh | `PLANNED` |
+
+The roadmap is the issue tracker. There is no private version of it.
+
+---
 
 ## Trust model
 
 | What | Where it lives |
-| --- | --- |
-| GitHub token | Host only. Commit, push and `gh pr create` run on the host after the VM is gone. |
-| Claude token | Host only. The guest sees a placeholder; microsandbox's TLS proxy swaps in the real value for `api.anthropic.com` only. |
+| :--- | :--- |
+| GitHub token | Mothership only. Commit, push and `gh pr create` run on the host after the colony is gone. |
+| Claude token | Mothership only (0600). The colony sees a placeholder; microsandbox's TLS proxy substitutes the real value for `api.anthropic.com` only. |
 | Worktree | Mounted read-write at `/workspace`. |
-| Git objects & worktree metadata | Mounted read-only (`git status/diff/log` work in the VM, commits don't). |
-| VM output | Untrusted: `.git` is rewritten, nested `.git` dirs removed, host git runs without hooks/fsmonitor, `pr.md` must be a regular file. |
-| Mesh | Separate Headscale + userspace tailscaled (own state and socket, `--no-logs-no-support`). The harness may reach VMs; VMs can't reach each other. VMs get one extra network rule: UDP to the harness node's port, for direct WireGuard. |
-| agentd | Per-session bearer token, even inside the mesh. |
-| Web API | Loopback by default; rejects unexpected `Host` headers and cross-origin writes and WebSocket upgrades. |
+| Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |
+| Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
+| Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
+| colonizer-agentd | Per-colony bearer token, even inside the mesh. |
 
-microVMs are detached: they keep running when the harness restarts, and sessions reconnect.
+Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
 ## Configuration
 
-Module settings live in `~/.config/colonizer/modules.json` (edit them in the UI). Process
-settings come from the environment:
+Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. Process settings
+come from the environment:
 
 | Variable | Default | Meaning |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `COLONIZER_BIND` | `127.0.0.1:7878` | Listen address |
 | `COLONIZER_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated |
-| `COLONIZER_DATA_DIR` | `~/.local/share/colonizer` | Bare clones, worktrees, sessions, mesh state |
-| `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens (0600) |
+| `COLONIZER_DATA_DIR` | `~/.local/share/colonizer` | Clones, worktrees, colonies, mesh state |
+| `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
-| `COLONIZER_HOME` | next to the binary / `dist/` | Bundled app assets |
+| `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
 
 ## Development
 
 ```sh
-scripts/install.sh                         # build dist/ in the checkout
-cargo test --workspace                     # harness + agentd tests
+cargo test --workspace                          # mothership and agentd
 (cd modules/agents/claude-code && node --test test/)
-(cd web && npm run dev)                    # UI dev server, proxies /api to 127.0.0.1:7878
-open 'http://127.0.0.1:5173/?mock=1'       # UI against an in-browser mock backend
+(cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
+# http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
 ```
 
-## Run as a user service
+<p align="center">
+  <br>
+  <a href="https://colonizer.dev"><b>colonizer.dev</b></a>
+  &nbsp;·&nbsp;
+  <a href="docs/vision.md">Vision</a>
+  &nbsp;·&nbsp;
+  <a href="docs/architecture.md">Architecture</a>
+  &nbsp;·&nbsp;
+  <a href="docs/protocol.md">Protocol</a>
+</p>
 
-```ini
-# ~/.config/systemd/user/colonizer.service
-[Unit]
-Description=Colonizer
-
-[Service]
-ExecStart=%h/.local/share/colonizer/app/bin/colonizer
-Environment=PATH=%h/.local/bin:%h/.local/share/mise/installs/claude/latest:/usr/bin
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-systemctl --user daemon-reload && systemctl --user enable --now colonizer
-```
+<p align="center">
+  <sub>MIT license · Colonize your backlog.</sub>
+</p>
