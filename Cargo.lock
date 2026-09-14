@@ -168,6 +168,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "colonizer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-socks",
+ "tokio-stream",
+ "tokio-tungstenite 0.30.0",
+ "toml",
+ "tower-http",
+ "uuid",
+]
+
+[[package]]
+name = "colonizer-agentd"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -516,39 +549,6 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "legion-agentd"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "futures-util",
- "libc",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.30.0",
-]
-
-[[package]]
-name = "legion-harness"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tokio-socks",
- "tokio-stream",
- "tokio-tungstenite 0.30.0",
- "toml",
- "tower-http",
- "uuid",
 ]
 
 [[package]]

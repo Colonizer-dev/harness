@@ -1,10 +1,10 @@
-# Legion harness
+# Colonizer
 
 Turn a task into a pull request by running a coding agent inside a disposable microVM, and follow
 along in the browser:
 
 - **Sessions** — start from a GitHub issue or just a repository. Each session gets a fresh git
-  worktree on a `legion/…` branch and its own microVM.
+  worktree on a `colonizer/…` branch and its own microVM.
 - **Chat** — watch the agent work; its questions always arrive as **multiple-choice cards** (with an
   "Other…" answer), never as buried plain-text questions. Send follow-ups at any time.
 - **Terminal** — a shell inside the same microVM, right next to the chat.
@@ -28,8 +28,8 @@ See [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/pro
 ## Install
 
 ```sh
-scripts/install.sh --install     # builds dist/ and installs ~/.local/share/legion-harness/app
-legion-harness                   # open http://127.0.0.1:7878
+scripts/install.sh --install     # builds dist/ and installs ~/.local/share/colonizer/app
+colonizer                   # open http://127.0.0.1:7878
 ```
 
 `install.sh` bundles everything the app needs, so nothing is downloaded at runtime:
@@ -37,10 +37,10 @@ legion-harness                   # open http://127.0.0.1:7878
 | Piece | How it's built |
 | --- | --- |
 | Headscale, Tailscale | Pinned in `vendor/vendor.lock`, sha256-verified (`scripts/fetch-vendor.sh`) |
-| `legion-agentd` | Static musl binary built inside a `rust:alpine` microVM (`scripts/build-agentd.sh`) |
+| `colonizer-agentd` | Static musl binary built inside a `rust:alpine` microVM (`scripts/build-agentd.sh`) |
 | Agent modules | `modules/agents/*` with production `node_modules` |
 | Web UI | `web/` (React + assistant-ui + xterm.js) |
-| Harness | `crates/legion-harness` |
+| Harness | `crates/colonizer` |
 
 Then open **Settings**:
 
@@ -65,17 +65,17 @@ microVMs are detached: they keep running when the harness restarts, and sessions
 
 ## Configuration
 
-Module settings live in `~/.config/legion-harness/modules.json` (edit them in the UI). Process
+Module settings live in `~/.config/colonizer/modules.json` (edit them in the UI). Process
 settings come from the environment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HARNESS_BIND` | `127.0.0.1:7878` | Listen address |
-| `HARNESS_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated |
-| `HARNESS_DATA_DIR` | `~/.local/share/legion-harness` | Bare clones, worktrees, sessions, mesh state |
-| `HARNESS_CONFIG_DIR` | `~/.config/legion-harness` | Module config and saved tokens (0600) |
-| `HARNESS_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
-| `LEGION_HOME` | next to the binary / `dist/` | Bundled app assets |
+| `COLONIZER_BIND` | `127.0.0.1:7878` | Listen address |
+| `COLONIZER_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated |
+| `COLONIZER_DATA_DIR` | `~/.local/share/colonizer` | Bare clones, worktrees, sessions, mesh state |
+| `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens (0600) |
+| `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
+| `COLONIZER_HOME` | next to the binary / `dist/` | Bundled app assets |
 
 ## Development
 
@@ -90,12 +90,12 @@ open 'http://127.0.0.1:5173/?mock=1'       # UI against an in-browser mock backe
 ## Run as a user service
 
 ```ini
-# ~/.config/systemd/user/legion-harness.service
+# ~/.config/systemd/user/colonizer.service
 [Unit]
-Description=Legion harness
+Description=Colonizer
 
 [Service]
-ExecStart=%h/.local/share/legion-harness/app/bin/legion-harness
+ExecStart=%h/.local/share/colonizer/app/bin/colonizer
 Environment=PATH=%h/.local/bin:%h/.local/share/mise/installs/claude/latest:/usr/bin
 Restart=on-failure
 
@@ -104,5 +104,5 @@ WantedBy=default.target
 ```
 
 ```sh
-systemctl --user daemon-reload && systemctl --user enable --now legion-harness
+systemctl --user daemon-reload && systemctl --user enable --now colonizer
 ```

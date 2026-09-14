@@ -3,7 +3,7 @@
   "id": "claude-code",
   "name": "Claude Code",
   "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
-  "protocol": "legion-runner/1",
+  "protocol": "colonizer-runner/1",
   "entry": ["node", "runner.mjs"],
   "requires": {
     "binaries": ["claude"],
@@ -23,7 +23,7 @@
         "title": "Model",
         "description": "Claude model alias or ID. Empty uses Claude Code's default.",
         "default": "",
-        "env": "LEGION_MODEL"
+        "env": "COLONIZER_MODEL"
       },
       "effort": {
         "type": "string",
@@ -31,7 +31,14 @@
         "description": "Reasoning effort. Empty uses the model default.",
         "enum": ["", "low", "medium", "high", "xhigh", "max"],
         "default": "",
-        "env": "LEGION_EFFORT"
+        "env": "COLONIZER_EFFORT"
+      },
+      "enforce_choices": {
+        "type": "boolean",
+        "title": "Enforce choice cards",
+        "description": "If the agent ends a turn with a plain-text question, ask it once to re-ask with choices.",
+        "default": true,
+        "env": "COLONIZER_ENFORCE_CHOICES"
       }
     }
   }

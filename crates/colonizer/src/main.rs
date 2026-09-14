@@ -1,4 +1,4 @@
-//! Legion harness: turn a task into a pull request by running a coding agent in a microVM, with a
+//! Colonizer: turn a task into a pull request by running a coding agent in a microVM, with a
 //! web UI for chat (questions as choice cards), a terminal in the VM, and a private mesh network
 //! between the harness and every VM. Every moving part is a module; see docs/architecture.md.
 //!
@@ -43,8 +43,8 @@ use util::{env_nonempty, exec, is_elf, read_trimmed};
 
 pub const CLAUDE_API_HOST: &str = "api.anthropic.com";
 
-const UI_MISSING_HTML: &str = "<!doctype html><title>Legion harness</title>\
-<body style=\"font:15px system-ui;margin:3rem\"><h1>Legion harness is running</h1>\
+const UI_MISSING_HTML: &str = "<!doctype html><title>Colonizer</title>\
+<body style=\"font:15px system-ui;margin:3rem\"><h1>Colonizer is running</h1>\
 <p>The web UI isn't built yet. Run <code>scripts/install.sh</code> (or <code>npm run build</code> in <code>web/</code>).</p>";
 
 pub struct ClaudeCred {
@@ -135,7 +135,7 @@ pub async fn resolve_claude_bin(cfg: &Settings) -> Result<PathBuf> {
             }
         }
     }
-    bail!("no native Claude Code binary found; install Claude Code or set HARNESS_CLAUDE_BIN")
+    bail!("no native Claude Code binary found; install Claude Code or set COLONIZER_CLAUDE_BIN")
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
         },
         "assets": {
             "path": app.cfg.assets.as_ref().map(|p| p.display().to_string()),
-            "agentd": asset("bin/legion-agentd"),
+            "agentd": asset("bin/colonizer-agentd"),
             "headscale": asset("vendor/headscale"),
             "tailscale": asset("vendor/tailscale/tailscaled"),
             "web": asset("web/index.html"),
@@ -243,7 +243,7 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
         || hostname == bind_host
         || app.cfg.allowed_hosts.iter().any(|h| *h == hostname);
     if !allowed {
-        return (StatusCode::FORBIDDEN, "Host not allowed (set HARNESS_ALLOWED_HOSTS)").into_response();
+        return (StatusCode::FORBIDDEN, "Host not allowed (set COLONIZER_ALLOWED_HOSTS)").into_response();
     }
     if req.method() != Method::GET || req.headers().contains_key(header::UPGRADE) {
         if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&app.cfg.bind)
         .await
         .with_context(|| format!("cannot bind {}", app.cfg.bind))?;
-    println!("legion-harness listening on http://{}", app.cfg.bind);
+    println!("colonizer listening on http://{}", app.cfg.bind);
     println!("data: {}", app.cfg.data_dir.display());
     match &app.cfg.assets {
         Some(assets) => println!("assets: {}", assets.display()),

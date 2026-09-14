@@ -1,6 +1,6 @@
 //! Interactive sessions: one worktree + microVM + agent per task, bridged to browsers.
 //!
-//! Harness ⇄ VM traffic goes to `legion-agentd` over the private mesh (or a loopback port when the
+//! Harness ⇄ VM traffic goes to `colonizer-agentd` over the private mesh (or a loopback port when the
 //! mesh module is disabled). Agent events are persisted per session and fanned out to every open
 //! browser; browser commands are forwarded to the agent.
 
@@ -276,7 +276,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if agent.needs_claude && app.claude_cred().is_none() {
         return Err(client_error(StatusCode::BAD_REQUEST, "log in with Claude in Settings first"));
     }
-    if let Err(e) = app.cfg.asset("bin/legion-agentd") {
+    if let Err(e) = app.cfg.asset("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
@@ -307,11 +307,11 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         issue_title: title,
         instructions: truncate(req.instructions.trim(), 20_000),
         status: SessionStatus::Starting,
-        branch: format!("legion/{slug}"),
+        branch: format!("colonizer/{slug}"),
         base: None,
         worktree: app.cfg.data_dir.join("worktrees").join(owner).join(name).join(&slug).display().to_string(),
         git_admin_dir: None,
-        sandbox: format!("legion-{id}"),
+        sandbox: format!("colonizer-{id}"),
         mesh: None,
         local_port: None,
         agent: agent.id.clone(),
@@ -414,7 +414,7 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
         ("GIT_DIR".into(), admin.display().to_string()),
         ("GIT_WORK_TREE".into(), "/workspace".into()),
-        ("GIT_INDEX_FILE".into(), "/tmp/legion-git-index".into()),
+        ("GIT_INDEX_FILE".into(), "/tmp/colonizer-git-index".into()),
         ("GIT_CONFIG_COUNT".into(), "1".into()),
         ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
         ("GIT_CONFIG_VALUE_0".into(), "*".into()),
@@ -422,10 +422,10 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
     let mut mounts = vec![
         Mount { source: wt.clone(), target: "/workspace".into(), read_only: false },
         Mount { source: bare.clone(), target: bare.display().to_string(), read_only: true },
-        Mount { source: vm_dir.clone(), target: "/legion".into(), read_only: true },
+        Mount { source: vm_dir.clone(), target: "/colonizer".into(), read_only: true },
         Mount { source: out_dir, target: "/harness/out".into(), read_only: false },
-        Mount { source: app.cfg.asset("bin/legion-agentd")?, target: "/opt/legion/bin/legion-agentd".into(), read_only: true },
-        Mount { source: agent.dir.clone(), target: "/opt/legion/agent".into(), read_only: true },
+        Mount { source: app.cfg.asset("bin/colonizer-agentd")?, target: "/opt/colonizer/bin/colonizer-agentd".into(), read_only: true },
+        Mount { source: agent.dir.clone(), target: "/opt/colonizer/agent".into(), read_only: true },
     ];
     let mut secrets = Vec::new();
     if agent.needs_claude {
@@ -442,9 +442,9 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         mesh.ensure_started().await?;
         mesh.delete_nodes_named(&s.sandbox).await?;
         write_private(&vm_dir.join("mesh-authkey"), mesh.mint_vm_key().await?.as_bytes())?;
-        mounts.push(Mount { source: app.cfg.asset("vendor/tailscale")?, target: "/opt/legion/tailscale".into(), read_only: true });
-        env.push(("LEGION_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
-        env.push(("LEGION_MESH_HOSTNAME".into(), s.sandbox.clone()));
+        mounts.push(Mount { source: app.cfg.asset("vendor/tailscale")?, target: "/opt/colonizer/tailscale".into(), read_only: true });
+        env.push(("COLONIZER_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
+        env.push(("COLONIZER_MESH_HOSTNAME".into(), s.sandbox.clone()));
         net_profiles.push("host".into());
         net_rules = mesh.direct_path_rules().await;
         app.update_session(id, |x| x.mesh = Some(MeshInfo { name: s.sandbox.clone(), ip: None })).await;
@@ -469,7 +469,7 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         net_profiles,
         net_rules,
         publish,
-        command: vec!["sh".into(), "/legion/boot.sh".into()],
+        command: vec!["sh".into(), "/colonizer/boot.sh".into()],
     };
     log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
@@ -515,31 +515,31 @@ fn agent_env(agent: &AgentModule, choice: &crate::config::ModuleChoice) -> Map<S
         }
     }
     if agent.needs_claude {
-        env.insert("LEGION_CLAUDE_BIN".into(), Value::String("/opt/claude/bin/claude".into()));
+        env.insert("COLONIZER_CLAUDE_BIN".into(), Value::String("/opt/claude/bin/claude".into()));
     }
     env
 }
 
 const BOOT_SCRIPT: &str = r#"#!/bin/sh
-# Generated by legion-harness. Runs as the microVM's main process.
+# Generated by colonizer. Runs as the microVM's main process.
 set -u
-mkdir -p /var/lib/legion
+mkdir -p /var/lib/colonizer
 # Git metadata is mounted read-only; give git a private, writable index.
 if [ -f "${GIT_DIR:-}/index" ]; then cp "$GIT_DIR/index" "$GIT_INDEX_FILE"; fi
 export PATH="/opt/claude/bin:$PATH"
-if [ -f /legion/mesh-authkey ]; then
+if [ -f /colonizer/mesh-authkey ]; then
   mkdir -p /var/lib/tailscale
-  /opt/legion/tailscale/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscaled.sock \
-    --no-logs-no-support >/var/lib/legion/tailscaled.log 2>&1 &
+  /opt/colonizer/tailscale/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscaled.sock \
+    --no-logs-no-support >/var/lib/colonizer/tailscaled.log 2>&1 &
   i=0
   while [ ! -S /run/tailscaled.sock ] && [ "$i" -lt 80 ]; do sleep 0.25; i=$((i + 1)); done
   # --accept-dns=false keeps microsandbox's DNS gateway, which its secret injection relies on.
-  /opt/legion/tailscale/tailscale --socket=/run/tailscaled.sock up \
-    --login-server="$LEGION_MESH_LOGIN_SERVER" --auth-key=file:/legion/mesh-authkey \
-    --hostname="$LEGION_MESH_HOSTNAME" --accept-dns=false >>/var/lib/legion/tailscaled.log 2>&1 \
-    || echo "legion: joining the mesh failed" >&2
+  /opt/colonizer/tailscale/tailscale --socket=/run/tailscaled.sock up \
+    --login-server="$COLONIZER_MESH_LOGIN_SERVER" --auth-key=file:/colonizer/mesh-authkey \
+    --hostname="$COLONIZER_MESH_HOSTNAME" --accept-dns=false >>/var/lib/colonizer/tailscaled.log 2>&1 \
+    || echo "colonizer: joining the mesh failed" >&2
 fi
-exec /opt/legion/bin/legion-agentd --config /legion/session.json --token-file /legion/token --state-dir /var/lib/legion
+exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --state-dir /var/lib/colonizer
 "#;
 
 async fn start_link(app: &Shared, id: &str) {

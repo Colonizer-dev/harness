@@ -1,4 +1,4 @@
-//! `/legion/session.json` (docs/protocol.md §1).
+//! `/colonizer/session.json` (docs/protocol.md §1).
 
 use serde::Deserialize;
 use std::{collections::BTreeMap, path::PathBuf};

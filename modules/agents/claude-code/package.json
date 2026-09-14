@@ -1,7 +1,7 @@
 {
-  "name": "legion-agent-claude-code",
+  "name": "colonizer-agent-claude-code",
   "version": "0.1.0",
-  "description": "Legion agent module: Claude Code via the Claude Agent SDK",
+  "description": "Colonizer agent module: Claude Code via the Claude Agent SDK",
   "scripts": {
     "test": "node --test test/",
     "start": "node runner.mjs"

@@ -29,23 +29,23 @@ impl Settings {
         let local_msb = home.join(".local/bin/msb");
         let uid = std::fs::metadata(&home).map(|m| m.uid()).unwrap_or(0);
         let runtime_dir = env_nonempty("XDG_RUNTIME_DIR")
-            .map(|d| PathBuf::from(d).join("legion-harness"))
-            .unwrap_or_else(|| PathBuf::from(format!("/tmp/legion-harness-{uid}")));
+            .map(|d| PathBuf::from(d).join("colonizer"))
+            .unwrap_or_else(|| PathBuf::from(format!("/tmp/colonizer-{uid}")));
         let settings = Settings {
-            bind: env_nonempty("HARNESS_BIND").unwrap_or_else(|| "127.0.0.1:7878".into()),
-            data_dir: env_nonempty("HARNESS_DATA_DIR")
+            bind: env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into()),
+            data_dir: env_nonempty("COLONIZER_DATA_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/share/legion-harness")),
-            config_dir: env_nonempty("HARNESS_CONFIG_DIR")
+                .unwrap_or_else(|| home.join(".local/share/colonizer")),
+            config_dir: env_nonempty("COLONIZER_CONFIG_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config/legion-harness")),
+                .unwrap_or_else(|| home.join(".config/colonizer")),
             runtime_dir,
             assets: resolve_assets(),
-            msb: env_nonempty("HARNESS_MSB").unwrap_or_else(|| {
+            msb: env_nonempty("COLONIZER_MSB").unwrap_or_else(|| {
                 if local_msb.exists() { local_msb.display().to_string() } else { "msb".into() }
             }),
-            claude_bin: env_nonempty("HARNESS_CLAUDE_BIN"),
-            allowed_hosts: env_nonempty("HARNESS_ALLOWED_HOSTS")
+            claude_bin: env_nonempty("COLONIZER_CLAUDE_BIN"),
+            allowed_hosts: env_nonempty("COLONIZER_ALLOWED_HOSTS")
                 .unwrap_or_default()
                 .split(',')
                 .map(|h| h.trim().to_string())
@@ -54,7 +54,7 @@ impl Settings {
         };
         let data = settings.data_dir.display().to_string();
         if data.contains(':') || data.contains(',') {
-            bail!("HARNESS_DATA_DIR must not contain ':' or ',' (it is used in microVM mount specs)");
+            bail!("COLONIZER_DATA_DIR must not contain ':' or ',' (it is used in microVM mount specs)");
         }
         Ok(settings)
     }
@@ -63,7 +63,7 @@ impl Settings {
         let root = self
             .assets
             .as_ref()
-            .context("app assets not found: run scripts/install.sh (or set LEGION_HOME)")?;
+            .context("app assets not found: run scripts/install.sh (or set COLONIZER_HOME)")?;
         let path = root.join(relative);
         if !path.exists() {
             bail!("missing bundled asset {} (run scripts/install.sh)", path.display());
@@ -72,9 +72,9 @@ impl Settings {
     }
 }
 
-/// `LEGION_HOME`, an installed layout next to the binary, or `dist/` in a source checkout.
+/// `COLONIZER_HOME`, an installed layout next to the binary, or `dist/` in a source checkout.
 fn resolve_assets() -> Option<PathBuf> {
-    if let Some(home) = env_nonempty("LEGION_HOME") {
+    if let Some(home) = env_nonempty("COLONIZER_HOME") {
         return Some(PathBuf::from(home));
     }
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;

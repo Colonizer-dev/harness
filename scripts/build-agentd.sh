@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds a fully static (musl) legion-agentd inside a rust:1-alpine microVM and installs it to
-# dist/bin/legion-agentd. The crate is built from an isolated copy so concurrent edits to other
+# Builds a fully static (musl) colonizer-agentd inside a rust:1-alpine microVM and installs it to
+# dist/bin/colonizer-agentd. The crate is built from an isolated copy so concurrent edits to other
 # workspace members can't break or rewrite this build.
 #
 #   scripts/build-agentd.sh           build
@@ -10,30 +10,30 @@ set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 MSB=${MSB:-$HOME/.local/bin/msb}
 SRC="$REPO/target/agentd-src"
-OUT="$REPO/dist/bin/legion-agentd"
+OUT="$REPO/dist/bin/colonizer-agentd"
 
 rm -rf "$SRC"
 mkdir -p "$SRC/crates" "$REPO/target/alpine" "$REPO/target/alpine-cargo-registry" "$REPO/dist/bin"
-cp -R "$REPO/crates/legion-agentd" "$SRC/crates/"
+cp -R "$REPO/crates/colonizer-agentd" "$SRC/crates/"
 cp "$REPO/Cargo.lock" "$SRC/Cargo.lock"
 cat > "$SRC/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "3"
-members = ["crates/legion-agentd"]
+members = ["crates/colonizer-agentd"]
 
 [profile.release]
 strip = true
 EOF
 
-echo "building legion-agentd (x86_64-unknown-linux-musl) in a rust:1-alpine microVM..."
+echo "building colonizer-agentd (x86_64-unknown-linux-musl) in a rust:1-alpine microVM..."
 "$MSB" run --no-tty -q -m 4G -c 8 \
   -v "$SRC:/src" \
   -v "$REPO/target/alpine:/build-target" \
   -v "$REPO/target/alpine-cargo-registry:/usr/local/cargo/registry" \
   -w /src \
-  rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release -p legion-agentd --target-dir /build-target'
+  rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release -p colonizer-agentd --target-dir /build-target'
 
-install -m 755 "$REPO/target/alpine/release/legion-agentd" "$OUT"
+install -m 755 "$REPO/target/alpine/release/colonizer-agentd" "$OUT"
 file "$OUT"
 ls -lh "$OUT" | awk '{print "size:", $5}'
 
@@ -46,9 +46,9 @@ if [ "${1:-}" = "--smoke" ]; then
  "agent":{"module":"smoke","command":["sh","-c","echo '{\"type\":\"status\",\"state\":\"idle\"}'; cat >/dev/null"],"env":{}}}
 EOF
   echo "smoke test in node:24-bookworm..."
-  "$MSB" run --no-tty -q -m 1G -v "$OUT:/opt/legion/bin/legion-agentd:ro" -v "$SMOKE:/legion:ro" node:24-bookworm -- sh -c '
-    /opt/legion/bin/legion-agentd --version
-    /opt/legion/bin/legion-agentd >/tmp/agentd.log 2>&1 </dev/null &
+  "$MSB" run --no-tty -q -m 1G -v "$OUT:/opt/colonizer/bin/colonizer-agentd:ro" -v "$SMOKE:/colonizer:ro" node:24-bookworm -- sh -c '
+    /opt/colonizer/bin/colonizer-agentd --version
+    /opt/colonizer/bin/colonizer-agentd >/tmp/agentd.log 2>&1 </dev/null &
     pid=$!
     for i in $(seq 50); do curl -sf -H "Authorization: Bearer smoke-token" http://127.0.0.1:7070/v1/health && break; sleep 0.1; done
     echo
