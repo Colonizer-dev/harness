@@ -1,4 +1,4 @@
-//! claude-harness: pick a GitHub issue in the browser, let Claude Code resolve it inside a
+//! legion-harness: pick a GitHub issue in the browser, let Claude Code resolve it inside a
 //! microsandbox microVM on a fresh git worktree, then commit, push and open a pull request.
 //!
 //! Trust model: the microVM only sees the worktree (rw), the repository's git objects (ro),
@@ -71,10 +71,10 @@ impl Config {
             bind: var("HARNESS_BIND", "127.0.0.1:7878"),
             data_dir: env_nonempty("HARNESS_DATA_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/share/claude-harness")),
+                .unwrap_or_else(|| home.join(".local/share/legion-harness")),
             config_dir: env_nonempty("HARNESS_CONFIG_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config/claude-harness")),
+                .unwrap_or_else(|| home.join(".config/legion-harness")),
             msb: env_nonempty("HARNESS_MSB").unwrap_or_else(|| {
                 if local_msb.exists() { local_msb.display().to_string() } else { "msb".into() }
             }),
@@ -600,7 +600,7 @@ async fn pipeline(app: &Shared, id: &str, log: &JobLog, cancel: &mut watch::Rece
     }
 
     let (pr_title, pr_body) = read_pr_description(&outp, &job, &title, claude.result.as_deref());
-    let login = viewer["login"].as_str().unwrap_or("claude-harness");
+    let login = viewer["login"].as_str().unwrap_or("legion-harness");
     let name = viewer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
     let email = format!("{}+{login}@users.noreply.github.com", viewer["id"]);
     let trailer = format!("Refs #{}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", job.issue);
@@ -924,7 +924,7 @@ fn compose_pr_body(body: &str, issue: u64) -> String {
         }
         out.push_str(&format!("Closes {reference}"));
     }
-    out.push_str("\n\n---\n🤖 Generated with [Claude Code](https://claude.com/claude-code) in a microsandbox microVM by claude-harness\n");
+    out.push_str("\n\n---\n🤖 Generated with [Claude Code](https://claude.com/claude-code) in a microsandbox microVM by legion-harness\n");
     out
 }
 
@@ -1088,7 +1088,7 @@ async fn create_job(State(app): State<Shared>, Json(req): Json<NewJob>) -> ApiRe
         issue_title: req.title,
         instructions: truncate(req.instructions.trim(), 20_000),
         status: Status::Queued,
-        branch: format!("claude/issue-{}-{id}", req.issue),
+        branch: format!("legion/issue-{}-{id}", req.issue),
         base: None,
         worktree: app
             .cfg
@@ -1288,7 +1288,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&app.cfg.bind)
         .await
         .with_context(|| format!("cannot bind {}", app.cfg.bind))?;
-    println!("claude-harness listening on http://{}", app.cfg.bind);
+    println!("legion-harness listening on http://{}", app.cfg.bind);
     println!("data: {}", app.cfg.data_dir.display());
 
     tokio::select! {
