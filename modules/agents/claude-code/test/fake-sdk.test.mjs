@@ -5,6 +5,8 @@ import {
   AsyncQueue,
   buildOptions,
   childEnv,
+  CHOICE_NUDGE,
+  endsWithQuestion,
   MAX_TOOL_OUTPUT,
   runAgent,
   SYSTEM_PROMPT_APPEND,
@@ -213,10 +215,64 @@ test('free-text response is passed to Claude and echoed', async () => {
   assert.equal(events.find((e) => e.type === 'question_answered').response, 'Use markdown');
 });
 
+test('a plain-text question ending a turn is re-asked as a choice card once', async () => {
+  const { query, calls } = fakeQuery(async function* (options, c) {
+    const result = c.prompts.length === 1 ? 'Which database should I use?' : 'Still unsure, which one?';
+    yield { type: 'result', subtype: 'success', is_error: false, result, total_cost_usd: 0, duration_ms: 1 };
+  });
+  const events = [];
+  const commands = new AsyncQueue();
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', text: 'go' });
+
+  await runAgent({ query, commands, emit, graceMs: 100 });
+
+  assert.equal(calls.prompts.length, 2);
+  assert.deepEqual(calls.prompts[1], {
+    type: 'user',
+    message: { role: 'user', content: CHOICE_NUDGE },
+    parent_tool_use_id: null,
+    isSynthetic: true,
+  });
+  // The first turn_end is withheld (autopilot must not publish mid-question); only one nudge per message.
+  const turnEnds = events.filter((e) => e.type === 'turn_end');
+  assert.equal(turnEnds.length, 1);
+  assert.equal(turnEnds[0].result, 'Still unsure, which one?');
+  assert.ok(events.some((e) => e.type === 'log' && e.message.includes('choice card')));
+  assert.ok(!events.some((e) => e.type === 'user_message' && e.text === CHOICE_NUDGE));
+});
+
+test('choice enforcement can be turned off; question detection', async () => {
+  assert.ok(endsWithQuestion('Which one?'));
+  assert.ok(endsWithQuestion('Should I proceed? **'));
+  assert.ok(!endsWithQuestion('Done. Created hello.txt'));
+  assert.ok(!endsWithQuestion('Is it fixed? Yes, it is.'));
+  assert.ok(!endsWithQuestion(null));
+
+  const { query, calls } = fakeQuery(async function* () {
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'Which one?', total_cost_usd: 0, duration_ms: 1 };
+  });
+  const events = [];
+  const commands = new AsyncQueue();
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', text: 'go' });
+
+  await runAgent({ query, commands, emit, graceMs: 100, enforceChoices: false });
+
+  assert.equal(calls.prompts.length, 1);
+  assert.equal(events.filter((e) => e.type === 'turn_end').length, 1);
+});
+
 test('options come from the environment', () => {
   const { options, warnings } = buildOptions({
-    LEGION_MODEL: 'haiku',
-    LEGION_EFFORT: 'extreme',
+    COLONIZER_MODEL: 'haiku',
+    COLONIZER_EFFORT: 'extreme',
     CLAUDECODE: '1',
     CLAUDE_CODE_ENTRYPOINT: 'cli',
     CLAUDE_CODE_OAUTH_TOKEN: 'placeholder',
@@ -229,12 +285,12 @@ test('options come from the environment', () => {
   assert.equal(options.pathToClaudeCodeExecutable, '/opt/claude/bin/claude');
   assert.deepEqual(options.systemPrompt, { type: 'preset', preset: 'claude_code', append: SYSTEM_PROMPT_APPEND });
   assert.deepEqual(options.env, {
-    LEGION_MODEL: 'haiku',
-    LEGION_EFFORT: 'extreme',
+    COLONIZER_MODEL: 'haiku',
+    COLONIZER_EFFORT: 'extreme',
     CLAUDE_CODE_OAUTH_TOKEN: 'placeholder',
     PATH: '/usr/bin',
   });
-  assert.equal(buildOptions({ LEGION_EFFORT: 'high' }).options.effort, 'high');
+  assert.equal(buildOptions({ COLONIZER_EFFORT: 'high' }).options.effort, 'high');
   assert.deepEqual(childEnv({ CLAUDE_PID: '1', HOME: '/root' }), { HOME: '/root' });
 });
 

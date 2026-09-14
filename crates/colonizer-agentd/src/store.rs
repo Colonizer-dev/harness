@@ -75,7 +75,7 @@ impl EventStore {
         }
         let line = Value::Object(event).to_string();
         if let Err(e) = writeln!(inner.file, "{line}") {
-            eprintln!("legion-agentd: cannot write event log: {e}");
+            eprintln!("colonizer-agentd: cannot write event log: {e}");
         }
         let _ = self.live.send(Arc::new(Stored { seq, line }));
         seq

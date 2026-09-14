@@ -34,7 +34,7 @@ pub async fn serve(mut socket: WebSocket, workspace: PathBuf, cols: u16, rows: u
     let (master, mut child) = match open_shell(&workspace, cols, rows) {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("legion-agentd: cannot open terminal: {e}");
+            eprintln!("colonizer-agentd: cannot open terminal: {e}");
             let _ = socket.send(exit_frame(-1)).await;
             return;
         }

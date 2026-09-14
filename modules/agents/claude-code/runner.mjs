@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Legion agent runner for Claude Code. Implements the runner contract in docs/protocol.md §2:
+// Colonizer agent runner for Claude Code. Implements the runner contract in docs/protocol.md §2:
 // commands arrive as JSON lines on stdin, protocol events leave as JSON lines on stdout.
 // Diagnostics go to stderr only.
 
@@ -8,10 +8,19 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 export const SYSTEM_PROMPT_APPEND = [
-  'You are running inside the Legion harness; the user follows along in a web UI.',
+  'You are running inside the Colonizer; the user follows along in a web UI.',
   '- Whenever you need a decision, a clarification or any other input from the user, call the AskUserQuestion tool with 2-4 concrete options. Never ask the user in plain text, and never end a turn with a plain-text question. The UI always adds a free-text "Other" choice, so do not add one yourself.',
   '- Do not run `git commit` or `git push` and do not create branches; the harness commits your changes and opens the pull request.',
 ].join('\n');
+
+export const CHOICE_NUDGE =
+  'You ended your turn with a question in plain text. Ask it again with the AskUserQuestion tool, offering 2-4 concrete options, and wait for the answer.';
+
+/** True when a turn's final text ends by asking the user something. */
+export function endsWithQuestion(text) {
+  if (typeof text !== 'string') return false;
+  return /\?[\s*_`'")\]]*$/.test(text.trim());
+}
 
 export const MAX_TOOL_OUTPUT = 20_000;
 const ASK_TOOL = 'AskUserQuestion';
@@ -97,7 +106,7 @@ export function buildOptions(env = process.env) {
   const warnings = [];
   const options = {
     cwd: process.cwd(),
-    pathToClaudeCodeExecutable: env.LEGION_CLAUDE_BIN || '/opt/claude/bin/claude',
+    pathToClaudeCodeExecutable: env.COLONIZER_CLAUDE_BIN || '/opt/claude/bin/claude',
     // Not bypassPermissions: AskUserQuestion only reaches canUseTool when nothing auto-approves it.
     permissionMode: 'default',
     includePartialMessages: true,
@@ -106,10 +115,10 @@ export function buildOptions(env = process.env) {
     env: childEnv(env),
     stderr: (data) => process.stderr.write(data),
   };
-  if (env.LEGION_MODEL) options.model = env.LEGION_MODEL;
-  if (env.LEGION_EFFORT) {
-    if (EFFORT_LEVELS.has(env.LEGION_EFFORT)) options.effort = env.LEGION_EFFORT;
-    else warnings.push(`ignoring LEGION_EFFORT=${env.LEGION_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
+  if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
+  if (env.COLONIZER_EFFORT) {
+    if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
+    else warnings.push(`ignoring COLONIZER_EFFORT=${env.COLONIZER_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
   }
   return { options, warnings };
 }
@@ -124,8 +133,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {Function} args.emit      writes one protocol event
  * @param {object} [args.options]   SDK options (canUseTool is added here)
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
+ * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  */
-export async function runAgent({ query, commands, emit, options = {}, graceMs = 8000 }) {
+export async function runAgent({ query, commands, emit, options = {}, graceMs = 8000, enforceChoices = true }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -142,6 +152,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   let streamMessageId = null;
   let turnActive = false;
   let closing = false;
+  let nudged = false; // one choice-card nudge per user message
 
   const settleStatus = () => {
     if (pending.size > 0) setStatus('waiting_for_answer');
@@ -280,10 +291,20 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
     streams.clear();
     fallbackIndex.clear();
     streamMessageId = null;
+    const result = typeof msg.result === 'string' ? msg.result : null;
+    if (enforceChoices && !closing && !nudged && !msg.is_error && pending.size === 0 && endsWithQuestion(result)) {
+      // Withhold turn_end (so autopilot can't publish mid-question) and have the agent re-ask with choices.
+      nudged = true;
+      emit({ type: 'log', level: 'info', message: 'The agent asked in plain text; asking it to use a choice card instead.' });
+      input.push({ type: 'user', message: { role: 'user', content: CHOICE_NUDGE }, parent_tool_use_id: null, isSynthetic: true });
+      turnActive = true;
+      settleStatus();
+      return;
+    }
     emit({
       type: 'turn_end',
       is_error: Boolean(msg.is_error),
-      result: typeof msg.result === 'string' ? msg.result : null,
+      result,
       cost_usd: typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : null,
       duration_ms: typeof msg.duration_ms === 'number' ? msg.duration_ms : null,
     });
@@ -340,6 +361,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
         }
         const id = typeof command.id === 'string' && command.id ? command.id : `u-${++messageCount}`;
         emit({ type: 'user_message', id, text });
+        nudged = false;
         input.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
         turnActive = true;
         settleStatus();
@@ -406,7 +428,8 @@ async function main() {
   const { options, warnings } = buildOptions();
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
 
-  await runAgent({ query, commands, emit, options });
+  const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
+  await runAgent({ query, commands, emit, options, enforceChoices });
   process.exit(0);
 }
 

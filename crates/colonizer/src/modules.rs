@@ -30,11 +30,11 @@ pub struct AgentModule {
 }
 
 impl AgentModule {
-    /// The runner command as seen inside the VM, where the module is mounted at `/opt/legion/agent`.
+    /// The runner command as seen inside the VM, where the module is mounted at `/opt/colonizer/agent`.
     pub fn vm_command(&self) -> Vec<String> {
         self.entry
             .iter()
-            .map(|arg| if self.dir.join(arg).exists() { format!("/opt/legion/agent/{arg}") } else { arg.clone() })
+            .map(|arg| if self.dir.join(arg).exists() { format!("/opt/colonizer/agent/{arg}") } else { arg.clone() })
             .collect()
     }
 }

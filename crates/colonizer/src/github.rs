@@ -278,7 +278,7 @@ pub async fn publish(app: &App, s: &Session, agent_name: &str, log: &SessionLogg
 
     let (title, body) = read_pr_description(&session_dir.join("out"), s);
     let viewer = viewer(app).await?;
-    let login = viewer["login"].as_str().unwrap_or("legion-harness");
+    let login = viewer["login"].as_str().unwrap_or("colonizer");
     let name = viewer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
     let email = format!("{}+{login}@users.noreply.github.com", viewer["id"]);
     let mut trailers = Vec::new();
@@ -288,7 +288,7 @@ pub async fn publish(app: &App, s: &Session, agent_name: &str, log: &SessionLogg
     if agent_name.contains("Claude") {
         trailers.push("Co-Authored-By: Claude <noreply@anthropic.com>".to_string());
     }
-    let trailer = if trailers.is_empty() { format!("Legion session {}", s.id) } else { trailers.join("\n\n") };
+    let trailer = if trailers.is_empty() { format!("Colonizer session {}", s.id) } else { trailers.join("\n\n") };
     exec(
         wt_git()
             .arg("-c").arg(format!("user.name={name}"))
@@ -380,7 +380,7 @@ fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
     };
     let default_title = match s.issue {
         Some(number) => format!("Fix #{number}: {}", s.issue_title),
-        None => format!("Changes from Legion session {}", s.id),
+        None => format!("Changes from Colonizer session {}", s.id),
     };
     let (title, body) = match content.as_deref().map(str::trim) {
         Some(text) if !text.is_empty() => {
@@ -405,7 +405,7 @@ fn compose_pr_body(body: &str, issue: Option<u64>, agent_name: &str) -> String {
             out.push_str(&format!("Closes {reference}"));
         }
     }
-    out.push_str(&format!("\n\n---\n🤖 Generated with {agent_name} in a microVM by Legion harness\n"));
+    out.push_str(&format!("\n\n---\n🤖 Generated with {agent_name} in a microVM by Colonizer\n"));
     out
 }
 

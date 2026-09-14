@@ -1,4 +1,4 @@
-//! Runs the real legion-agentd binary against a fake agent runner (python3).
+//! Runs the real colonizer-agentd binary against a fake agent runner (python3).
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -58,7 +58,7 @@ impl Drop for Daemon {
 
 fn scratch(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("legion-agentd-{name}-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("colonizer-agentd-{name}-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(dir.join("workspace")).unwrap();
     dir
 }
@@ -75,7 +75,7 @@ async fn start(dir: &Path, initial_prompt: &str) -> Daemon {
         "initial_prompt": initial_prompt,
     });
     std::fs::write(dir.join("session.json"), config.to_string()).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_legion-agentd"))
+    let child = Command::new(env!("CARGO_BIN_EXE_colonizer-agentd"))
         .arg("--config")
         .arg(dir.join("session.json"))
         .arg("--token-file")
@@ -91,7 +91,7 @@ async fn start(dir: &Path, initial_prompt: &str) -> Daemon {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("legion-agentd did not become healthy");
+    panic!("colonizer-agentd did not become healthy");
 }
 
 async fn http(port: u16, method: &str, path: &str, token: Option<&str>) -> std::io::Result<(u16, String)> {

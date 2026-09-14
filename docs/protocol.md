@@ -1,9 +1,9 @@
-# Legion protocol v1
+# Colonizer protocol v1
 
 Three hops, one event vocabulary:
 
 ```
-agent runner ──stdio JSONL──▶ legion-agentd ──WS (mesh)──▶ legion-harness ──WS──▶ browser
+agent runner ──stdio JSONL──▶ colonizer-agentd ──WS (mesh)──▶ colonizer ──WS──▶ browser
 ```
 
 All messages are single-line JSON objects with a `type` field. Unknown `type`s and unknown fields
@@ -15,17 +15,17 @@ must be ignored (forward compatibility).
 
 | Path | Mode | Content |
 | --- | --- | --- |
-| `/legion/session.json` | ro | Session config (below) |
-| `/legion/token` | ro | Bearer token for agentd (single line) |
-| `/legion/boot.sh` | ro | Boot script (image command) |
-| `/legion/mesh-authkey` | ro | Headscale pre-auth key (absent when mesh disabled) |
-| `/opt/legion/bin/legion-agentd` | ro | Static agentd binary |
-| `/opt/legion/tailscale/{tailscale,tailscaled}` | ro | Static tailscale binaries |
-| `/opt/legion/agent/` | ro | Active agent module directory |
+| `/colonizer/session.json` | ro | Session config (below) |
+| `/colonizer/token` | ro | Bearer token for agentd (single line) |
+| `/colonizer/boot.sh` | ro | Boot script (image command) |
+| `/colonizer/mesh-authkey` | ro | Headscale pre-auth key (absent when mesh disabled) |
+| `/opt/colonizer/bin/colonizer-agentd` | ro | Static agentd binary |
+| `/opt/colonizer/tailscale/{tailscale,tailscaled}` | ro | Static tailscale binaries |
+| `/opt/colonizer/agent/` | ro | Active agent module directory |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
-| `/var/lib/legion/events.jsonl` | VM-local | agentd event log (replay source) |
+| `/var/lib/colonizer/events.jsonl` | VM-local | agentd event log (replay source) |
 
 `session.json`:
 
@@ -36,8 +36,8 @@ must be ignored (forward compatibility).
   "listen": "0.0.0.0:7070",
   "agent": {
     "module": "claude-code",
-    "command": ["node", "/opt/legion/agent/runner.mjs"],
-    "env": { "LEGION_MODEL": "" }
+    "command": ["node", "/opt/colonizer/agent/runner.mjs"],
+    "env": { "COLONIZER_MODEL": "" }
   },
   "initial_prompt": "You are resolving GitHub issue #12 ..."
 }
@@ -94,13 +94,13 @@ Rules:
 
 ---
 
-## 3. legion-agentd API (VM, port 7070)
+## 3. colonizer-agentd API (VM, port 7070)
 
-Every request requires `Authorization: Bearer <contents of /legion/token>`; otherwise `401`.
+Every request requires `Authorization: Bearer <contents of /colonizer/token>`; otherwise `401`.
 Browsers never talk to agentd; only the harness does, over the mesh.
 
 agentd assigns each runner event a monotonically increasing `seq` (starting at 1) and `ts` (RFC 3339
-UTC), appends it to `/var/lib/legion/events.jsonl`, and broadcasts it. agentd's own diagnostics are
+UTC), appends it to `/var/lib/colonizer/events.jsonl`, and broadcasts it. agentd's own diagnostics are
 `log` events with the same numbering. If the runner exits, agentd emits
 `{"type":"status","state":"exited","detail":"exit code N"}`.
 
@@ -173,8 +173,8 @@ missing values mean the `default`.
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
   "status": "starting|running|waiting_for_answer|idle|publishing|pr_opened|no_changes|stopped|failed",
-  "branch": "legion/issue-12-ab12cd34", "base": "main", "worktree": "/…",
-  "sandbox": "legion-ab12cd34", "mesh": {"name": "legion-ab12cd34", "ip": "100.64.0.3"},
+  "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
+  "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "error": null, "cost_usd": 0.42, "cleaned_up": false,
   "created_at": "…", "updated_at": "…"

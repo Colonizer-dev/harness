@@ -1,4 +1,4 @@
-//! legion-agentd: the daemon inside every Legion microVM. It runs the agent runner module, keeps the
+//! colonizer-agentd: the daemon inside every Colonizer microVM. It runs the agent runner module, keeps the
 //! session event log, and serves events, terminals and shutdown to the harness over the mesh.
 //! Contract: docs/protocol.md §1–§3.
 
@@ -33,11 +33,11 @@ use crate::{
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const USAGE: &str = "usage: legion-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
+const USAGE: &str = "usage: colonizer-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
 
-  --config PATH      session config            (default /legion/session.json)
-  --token-file PATH  bearer token for the API  (default /legion/token)
-  --state-dir DIR    event log directory       (default /var/lib/legion)
+  --config PATH      session config            (default /colonizer/session.json)
+  --token-file PATH  bearer token for the API  (default /colonizer/token)
+  --state-dir DIR    event log directory       (default /var/lib/colonizer)
   --version          print the version";
 
 struct Args {
@@ -50,9 +50,9 @@ impl Args {
     /// `Ok(None)` means the command was fully handled (`--help`, `--version`).
     fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
         let mut args = Args {
-            config: "/legion/session.json".into(),
-            token_file: "/legion/token".into(),
-            state_dir: "/var/lib/legion".into(),
+            config: "/colonizer/session.json".into(),
+            token_file: "/colonizer/token".into(),
+            state_dir: "/var/lib/colonizer".into(),
         };
         let mut iter = argv.into_iter();
         while let Some(arg) = iter.next() {
@@ -66,7 +66,7 @@ impl Args {
             };
             match flag.as_str() {
                 "--version" | "-V" => {
-                    println!("legion-agentd {VERSION}");
+                    println!("colonizer-agentd {VERSION}");
                     return Ok(None);
                 }
                 "--help" | "-h" => {
@@ -98,14 +98,14 @@ async fn main() -> ExitCode {
         Ok(Some(args)) => args,
         Ok(None) => return ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("legion-agentd: {e}\n\n{USAGE}");
+            eprintln!("colonizer-agentd: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
     match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("legion-agentd: {e}");
+            eprintln!("colonizer-agentd: {e}");
             ExitCode::FAILURE
         }
     }
@@ -131,12 +131,12 @@ async fn run(args: Args) -> Result<(), BoxError> {
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?;
     eprintln!(
-        "legion-agentd {VERSION}: session {} (agent {}) listening on {}",
+        "colonizer-agentd {VERSION}: session {} (agent {}) listening on {}",
         config.session_id, config.agent.module, config.listen
     );
     store.append(log_event(
         "info",
-        format!("legion-agentd {VERSION} listening on {} (agent module {})", config.listen, config.agent.module),
+        format!("colonizer-agentd {VERSION} listening on {} (agent module {})", config.listen, config.agent.module),
     ));
 
     let runner = runner::start(&config, store.clone());
@@ -152,7 +152,7 @@ async fn run(args: Args) -> Result<(), BoxError> {
     tokio::select! {
         result = async { axum::serve(listener, app).await } => result?,
         _ = shutdown_signal() => {
-            eprintln!("legion-agentd: stopping the agent runner");
+            eprintln!("colonizer-agentd: stopping the agent runner");
             runner.shutdown().await;
         }
     }
