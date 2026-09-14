@@ -1,0 +1,771 @@
+// In-browser mock of the harness API and event streams, enabled with `?mock=1`.
+import { ApiError, type Api, type SocketLike } from "./api";
+import type {
+  AgentEvent,
+  AgentEventBody,
+  Answers,
+  HarnessStatus,
+  Issue,
+  LogLevel,
+  LoginView,
+  ModuleInfo,
+  Question,
+  Repo,
+  Session,
+  SessionStatus,
+} from "./types";
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const now = () => new Date().toISOString();
+const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+const clone = <T>(value: T): T => structuredClone(value);
+const LIVE: SessionStatus[] = ["starting", "running", "waiting_for_answer", "idle"];
+const isLive = (status: SessionStatus) => LIVE.includes(status);
+
+interface SocketHandlers {
+  open(socket: MockSocket): void;
+  message(socket: MockSocket, data: unknown): void;
+  close(socket: MockSocket): void;
+}
+
+class MockSocket {
+  binaryType: BinaryType = "blob";
+  readyState = 0;
+  onopen: ((event: Event) => unknown) | null = null;
+  onmessage: ((event: MessageEvent) => unknown) | null = null;
+  onclose: ((event: CloseEvent) => unknown) | null = null;
+  onerror: ((event: Event) => unknown) | null = null;
+  private readonly handlers: SocketHandlers;
+
+  constructor(handlers: SocketHandlers) {
+    this.handlers = handlers;
+    setTimeout(() => {
+      if (this.readyState !== 0) return;
+      this.readyState = 1;
+      this.onopen?.(new Event("open"));
+      this.handlers.open(this);
+    }, 150);
+  }
+
+  deliver(data: string | ArrayBuffer): void {
+    if (this.readyState === 1) this.onmessage?.(new MessageEvent("message", { data }));
+  }
+
+  send(data: unknown): void {
+    if (this.readyState === 1) this.handlers.message(this, data);
+  }
+
+  close(): void {
+    if (this.readyState >= 2) return;
+    this.readyState = 3;
+    this.handlers.close(this);
+    this.onclose?.(new CloseEvent("close", { code: 1000 }));
+  }
+}
+
+const DEMO_QUESTIONS: Question[] = [
+  {
+    question: "How should guest checkout create the order?",
+    header: "Guest flow",
+    multi_select: false,
+    options: [
+      {
+        label: "Guest cart by email",
+        description: "Keep guests anonymous and attach the order to the email address they enter.",
+      },
+      {
+        label: "Silent account",
+        description: "Create a passwordless account behind the scenes so the order appears if they sign up later.",
+      },
+      {
+        label: "Require sign-in",
+        description: "Treat the error as intended and show a clear sign-in prompt instead.",
+      },
+    ],
+  },
+  {
+    question: "What else should go into this pull request?",
+    header: "Scope",
+    multi_select: true,
+    options: [
+      {
+        label: "Regression test",
+        description: "Add an API test that checks out as a guest.",
+        preview:
+          '```ts\nit("lets guests check out", async () => {\n  const res = await api.post("/checkout", {\n    email: "guest@example.com",\n    items: [{ sku: "TSHIRT-M", qty: 1 }],\n  });\n  expect(res.status).toBe(201);\n});\n```',
+      },
+      { label: "Update docs", description: "Document the guest checkout flow in docs/checkout.md." },
+      { label: "Error telemetry", description: "Log checkout failures with a reason so regressions surface sooner." },
+    ],
+  },
+];
+
+const SESSION_TS = `import { createGuestCart } from "./cart";
+
+export async function createSession(req: Request) {
+  const user = await currentUser(req);
+  if (!user) throw new Error("guest checkout disabled");
+  return { user, cart: await loadCart(user.id) };
+}`;
+
+class MockSession {
+  readonly session: Session;
+  private readonly events: AgentEvent[] = [];
+  private readonly logs: { type: "harness_log"; level: LogLevel; message: string; ts: string }[] = [];
+  private readonly sockets = new Set<MockSocket>();
+  private seq = 0;
+  private started = false;
+  private generation = 0;
+  private cost = 0;
+  private pendingQuestion: string | null = null;
+  private userMessages = 0;
+
+  private readonly instructions: string | null;
+
+  constructor(session: Session, history = false, instructions: string | null = null) {
+    this.session = session;
+    this.instructions = instructions;
+    if (history) this.seedHistory();
+  }
+
+  private broadcast(frame: object): void {
+    const text = JSON.stringify(frame);
+    for (const socket of this.sockets) socket.deliver(text);
+  }
+
+  emit(body: AgentEventBody): void {
+    const event = { ...body, seq: ++this.seq, ts: now() } as AgentEvent;
+    this.events.push(event);
+    this.broadcast(event);
+    if (body.type === "status" && isLive(this.session.status)) {
+      const map: Partial<Record<string, SessionStatus>> = {
+        working: "running",
+        waiting_for_answer: "waiting_for_answer",
+        idle: "idle",
+      };
+      const status = map[body.state];
+      if (status && status !== this.session.status) this.patch({ status });
+    }
+    if (body.type === "turn_end" && body.cost_usd != null) this.patch({ cost_usd: body.cost_usd });
+  }
+
+  log(message: string, level: LogLevel = "info"): void {
+    const entry = { type: "harness_log" as const, level, message, ts: now() };
+    this.logs.push(entry);
+    this.broadcast(entry);
+  }
+
+  patch(changes: Partial<Session>): void {
+    Object.assign(this.session, changes, { updated_at: now() });
+    this.broadcast({ type: "session", session: this.session });
+  }
+
+  attach(socket: MockSocket, since: number): void {
+    this.sockets.add(socket);
+    socket.deliver(JSON.stringify({ type: "session", session: this.session }));
+    for (const entry of this.logs.slice(-200)) socket.deliver(JSON.stringify(entry));
+    for (const event of this.events) if ((event.seq ?? 0) > since) socket.deliver(JSON.stringify(event));
+    if (!this.started && isLive(this.session.status)) {
+      this.started = true;
+      void this.intro();
+    }
+  }
+
+  detach(socket: MockSocket): void {
+    this.sockets.delete(socket);
+  }
+
+  command(data: unknown): void {
+    if (typeof data !== "string") return;
+    let command: { type?: string; text?: string; question_id?: string; answers?: Answers; response?: string | null };
+    try {
+      command = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (command.type === "answer" && command.question_id && command.question_id === this.pendingQuestion) {
+      void this.onAnswer(command.question_id, command.answers ?? {}, command.response ?? null);
+    } else if (command.type === "user_message" && command.text) {
+      void this.onUserMessage(command.text);
+    } else if (command.type === "interrupt") {
+      this.generation += 1;
+      this.emit({ type: "log", level: "info", message: "Interrupted by user" });
+      this.emit({ type: "status", state: this.pendingQuestion ? "waiting_for_answer" : "idle" });
+    }
+  }
+
+  halt(): void {
+    this.generation += 1;
+    this.pendingQuestion = null;
+  }
+
+  private alive(generation: number): boolean {
+    return generation === this.generation && isLive(this.session.status);
+  }
+
+  private async streamText(generation: number, messageId: string, text: string): Promise<boolean> {
+    const words = text.match(/\S+\s*/g) ?? [text];
+    for (let i = 0; i < words.length; i += 2) {
+      if (!this.alive(generation)) return false;
+      this.emit({ type: "assistant_text_delta", message_id: messageId, block_index: 0, delta: words.slice(i, i + 2).join("") });
+      await sleep(40);
+    }
+    if (!this.alive(generation)) return false;
+    this.emit({ type: "assistant_text", message_id: messageId, block_index: 0, text });
+    return true;
+  }
+
+  private async tool(generation: number, messageId: string, id: string, name: string, input: Record<string, unknown>, output: string, delay = 800): Promise<boolean> {
+    if (!this.alive(generation)) return false;
+    this.emit({ type: "tool_call", message_id: messageId, tool_call_id: id, name, input });
+    await sleep(delay);
+    if (!this.alive(generation)) return false;
+    this.emit({ type: "tool_result", tool_call_id: id, output, is_error: false });
+    return true;
+  }
+
+  /** A stopped session whose only turn failed, like a run with a bad Claude token. */
+  seedFailedHistory(): void {
+    this.started = true;
+    this.log("Worktree created, microVM booted, joined mesh");
+    this.emit({
+      type: "user_message",
+      id: "initial",
+      text: `You are resolving GitHub issue #${this.session.issue} in the repository ${this.session.repo}.\n\n<issue>\nTitle: ${this.session.issue_title}\n</issue>\n\nHow to work:\n1. Read the relevant code first.\n2. Ask before product decisions.`,
+    });
+    this.emit({ type: "status", state: "working" });
+    this.emit({ type: "assistant_text", message_id: "f1", block_index: 1, text: "" });
+    this.emit({ type: "turn_end", is_error: true, result: "Failed to authenticate. API Error: 401 Invalid bearer token", cost_usd: 0, duration_ms: 1_830 });
+    this.emit({ type: "status", state: "idle" });
+    this.log("Colony stopped", "warn");
+  }
+
+  private async intro(): Promise<void> {
+    const generation = this.generation;
+    const s = this.session;
+    if (s.issue == null) {
+      if (s.status === "starting") {
+        this.log(`Booting microVM ${s.sandbox} for a new colony`);
+        await sleep(1200);
+        this.patch({ status: "running" });
+      }
+      if (this.instructions) this.emit({ type: "user_message", id: "initial", text: `Colony on ${s.repo}.\n\n${this.instructions}` });
+      this.emit({ type: "status", state: "working" });
+      await sleep(500);
+      if (!(await this.streamText(generation, "msg_open", `I'm ready in \`/workspace\` on branch \`${s.branch}\`. What should I work on?`))) return;
+      this.emit({ type: "turn_end", is_error: false, result: null, cost_usd: 0.01, duration_ms: 2_100 });
+      this.emit({ type: "status", state: "idle" });
+      return;
+    }
+    if (s.status === "starting") {
+      this.log(`Creating worktree ${s.branch} from origin/${s.base ?? "main"}`);
+      await sleep(700);
+      this.log(`Booting microVM ${s.sandbox} (node:24-bookworm, 4 vCPU, 8G)`);
+      await sleep(900);
+      this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
+      this.patch({ status: "running" });
+    } else {
+      this.log(`Worktree ${s.branch} created from origin/${s.base ?? "main"}`);
+      this.log(`microVM ${s.sandbox} booted (node:24-bookworm, 4 vCPU, 8G)`);
+      this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
+    }
+    this.emit({ type: "status", state: "working" });
+    this.emit({
+      type: "user_message",
+      id: "initial",
+      text: `Resolve GitHub issue #${s.issue} in ${s.repo}: ${s.issue_title}.\n\nRead the relevant code, make a focused fix with tests, and ask before making product decisions.`,
+    });
+    await sleep(600);
+    if (!(await this.streamText(generation, "msg_1", "I'll start by finding where guest checkout is handled so I can reproduce the failure."))) return;
+    if (
+      !(await this.tool(
+        generation,
+        "msg_1",
+        "toolu_1",
+        "Bash",
+        { command: 'grep -rn "guest" src/checkout --include=*.ts', description: "Find guest checkout code" },
+        'src/checkout/session.ts:5:  if (!user) throw new Error("guest checkout disabled");\nsrc/checkout/cart.ts:12:export async function createGuestCart(email: string) {\nsrc/checkout/api.ts:71:  const cart = await createGuestCart(body.email);',
+        900,
+      ))
+    )
+      return;
+    if (!(await this.tool(generation, "msg_1", "toolu_2", "Read", { file_path: "/workspace/src/checkout/session.ts" }, SESSION_TS, 600))) return;
+    await sleep(300);
+    if (
+      !(await this.streamText(
+        generation,
+        "msg_2",
+        "Found it: `createSession()` throws whenever there is no signed-in user, so the **guest path never reaches `createGuestCart()`**.\n\nThere are a few reasonable fixes and they change what the product does, so I'd like your call before I edit anything.",
+      ))
+    )
+      return;
+    this.pendingQuestion = "toolu_q1";
+    this.emit({ type: "status", state: "waiting_for_answer" });
+    this.emit({ type: "question", question_id: "toolu_q1", message_id: "msg_2", questions: DEMO_QUESTIONS });
+  }
+
+  private async onAnswer(questionId: string, answers: Answers, response: string | null): Promise<void> {
+    this.pendingQuestion = null;
+    const generation = ++this.generation;
+    await sleep(350);
+    this.emit({ type: "question_answered", question_id: questionId, answers, response });
+    this.emit({ type: "status", state: "working" });
+
+    const flow = answers[DEMO_QUESTIONS[0].question];
+    const scopeValue = answers[DEMO_QUESTIONS[1].question];
+    const flowText = Array.isArray(flow) ? flow.join(", ") : (flow ?? response ?? "your answer");
+    const scope = Array.isArray(scopeValue) ? scopeValue : scopeValue ? [scopeValue] : [];
+    const withTests = scope.some((item) => /test/i.test(item));
+    const scopeText = scope.length ? `, and I'll include ${scope.map((x) => `*${x.toLowerCase()}*`).join(" and ")}` : "";
+
+    if (!(await this.streamText(generation, "msg_3", `Going with **${flowText}**${scopeText}.`))) return;
+    if (
+      !(await this.tool(
+        generation,
+        "msg_3",
+        "toolu_3",
+        "Edit",
+        {
+          file_path: "/workspace/src/checkout/session.ts",
+          old_string: 'if (!user) throw new Error("guest checkout disabled");',
+          new_string: "if (!user) return { user: null, cart: await createGuestCart(req.body.email) };",
+        },
+        "The file /workspace/src/checkout/session.ts has been updated successfully.",
+      ))
+    )
+      return;
+    if (withTests) {
+      if (
+        !(await this.tool(
+          generation,
+          "msg_3",
+          "toolu_4",
+          "Bash",
+          { command: "npm test -- checkout", description: "Run checkout tests" },
+          "PASS  test/checkout.guest.test.ts\n  ✓ lets guests check out (212 ms)\n  ✓ keeps the guest email on the order (48 ms)\n\nTest Suites: 3 passed, 3 total\nTests:       14 passed, 14 total",
+          1400,
+        ))
+      )
+        return;
+    }
+    const summary = [
+      "Guest checkout works again.",
+      "",
+      "- `createSession()` falls back to a guest cart when nobody is signed in",
+      "- The order keeps the email address the guest entered",
+      withTests ? "- Added `test/checkout.guest.test.ts` — all 14 checkout tests pass" : null,
+      "",
+      "Press **Create PR** when you're happy, or tell me what to change.",
+    ]
+      .filter((line) => line !== null)
+      .join("\n");
+    if (!(await this.streamText(generation, "msg_4", summary))) return;
+    this.cost += 0.42;
+    this.emit({ type: "turn_end", is_error: false, result: "Guest checkout fixed.", cost_usd: Math.round(this.cost * 100) / 100, duration_ms: 81_234 });
+    this.emit({ type: "status", state: "idle" });
+  }
+
+  private async onUserMessage(text: string): Promise<void> {
+    const generation = ++this.generation;
+    const n = ++this.userMessages;
+    await sleep(250);
+    this.emit({ type: "user_message", id: `u-${n}`, text });
+    this.emit({ type: "status", state: "working" });
+    const reply = `Got it. *(mock reply)* In a real colony I'd now work on “${text.slice(0, 80)}${text.length > 80 ? "…" : ""}” inside the microVM.`;
+    if (!(await this.streamText(generation, `msg_u${n}`, reply))) return;
+    this.cost += 0.06;
+    this.emit({ type: "turn_end", is_error: false, result: reply, cost_usd: Math.round(this.cost * 100) / 100, duration_ms: 4_210 });
+    this.emit({ type: "status", state: this.pendingQuestion ? "waiting_for_answer" : "idle" });
+  }
+
+  private seedHistory(): void {
+    this.started = true;
+    this.log("Worktree created, microVM booted, joined mesh");
+    this.emit({ type: "user_message", id: "initial", text: `Resolve GitHub issue #${this.session.issue} in ${this.session.repo}: ${this.session.issue_title}.` });
+    this.emit({ type: "assistant_text", message_id: "h1", block_index: 0, text: "Cart totals were summed as floats. I switched the cart to integer cents and added tests." });
+    this.emit({ type: "turn_end", is_error: false, result: "Done", cost_usd: 1.12, duration_ms: 214_000 });
+    this.log("Committed 4 files, pushed, opened pull request");
+  }
+}
+
+const RESPONSES: Record<string, string> = {
+  ls: "README.md  node_modules  package.json  src  test\r\n",
+  pwd: "/workspace\r\n",
+  whoami: "root\r\n",
+  "git status":
+    "On branch colonizer/issue-42-demo1234\r\nChanges not staged for commit:\r\n  \x1b[31mmodified:   src/checkout/session.ts\x1b[0m\r\n",
+  "tailscale status":
+    "100.64.0.3  colony-demo1234  vms      linux  -\r\n100.64.0.1  mothership       harness  linux  active; direct 192.168.1.6:41981\r\n",
+};
+
+function mockTerminal(session: MockSession | undefined): SocketLike {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const bytes = (text: string): ArrayBuffer => encoder.encode(text).slice().buffer;
+  const host = session?.session.sandbox ?? "colony-mock";
+  const prompt = `\x1b[1;32mroot@${host}\x1b[0m:\x1b[1;34m/workspace\x1b[0m# `;
+  let line = "";
+  const socket = new MockSocket({
+    open: (s) => {
+      if (!session || !isLive(session.session.status)) {
+        s.deliver(JSON.stringify({ type: "exit", code: 1 }));
+        setTimeout(() => s.close(), 30);
+        return;
+      }
+      s.deliver(bytes(`\x1b[2mColonizer mock terminal — commands are simulated.\x1b[0m\r\n\r\n${prompt}`));
+    },
+    message: (s, data) => {
+      if (typeof data === "string") return; // resize
+      const text = decoder.decode(data instanceof ArrayBuffer ? new Uint8Array(data) : (data as Uint8Array));
+      let out = "";
+      for (const ch of text) {
+        if (ch === "\r") {
+          const command = line.trim();
+          line = "";
+          if (command === "exit") {
+            s.deliver(bytes(`${out}\r\nlogout\r\n`));
+            s.deliver(JSON.stringify({ type: "exit", code: 0 }));
+            setTimeout(() => s.close(), 30);
+            return;
+          }
+          const response = command ? (RESPONSES[command] ?? `mock: ${command.split(/\s+/)[0]}: not simulated in mock mode\r\n`) : "";
+          out += `\r\n${response}${prompt}`;
+        } else if (ch === "\x7f") {
+          if (line) {
+            line = line.slice(0, -1);
+            out += "\b \b";
+          }
+        } else if (ch === "\x03") {
+          line = "";
+          out += `^C\r\n${prompt}`;
+        } else if (ch >= " ") {
+          line += ch;
+          out += ch;
+        }
+      }
+      if (out) s.deliver(bytes(out));
+    },
+    close: () => {},
+  });
+  return socket as unknown as SocketLike;
+}
+
+const REPOS: Repo[] = [
+  { full_name: "acme/webshop", description: "Storefront and checkout", private: true, fork: false, archived: false, open_issues_count: 2, pushed_at: ago(30) },
+  { full_name: "acme/design-system", description: "Shared UI components", private: false, fork: false, archived: false, open_issues_count: 5, pushed_at: ago(600) },
+  { full_name: "octocat/hello-world", description: null, private: false, fork: true, archived: false, open_issues_count: 0, pushed_at: ago(9000) },
+];
+
+const ISSUES: Record<string, Issue[]> = {
+  "acme/webshop": [
+    {
+      number: 42,
+      title: "Checkout fails for guest users",
+      body: 'Guests get "Something went wrong" when pressing **Pay**. Logged-in users are fine.\n\nSteps:\n1. Open the shop in a private window\n2. Add any item\n3. Checkout without signing in',
+      labels: [
+        { name: "bug", color: "d73a4a" },
+        { name: "checkout", color: "0e8a16" },
+      ],
+      author: { login: "maria" },
+      updatedAt: ago(90),
+      url: "https://github.com/acme/webshop/issues/42",
+    },
+    {
+      number: 43,
+      title: "Add dark mode to the order confirmation email",
+      body: "The confirmation email is unreadable in dark-mode mail clients.",
+      labels: [{ name: "enhancement", color: "a2eeef" }],
+      author: { login: "sam" },
+      updatedAt: ago(1500),
+      url: "https://github.com/acme/webshop/issues/43",
+    },
+  ],
+  "acme/design-system": [
+    {
+      number: 7,
+      title: "Button focus ring is invisible on dark backgrounds",
+      body: null,
+      labels: [{ name: "a11y", color: "5319e7" }],
+      author: { login: "lee" },
+      updatedAt: ago(300),
+      url: "https://github.com/acme/design-system/issues/7",
+    },
+  ],
+};
+
+function baseSession(id: string, repo: string, issue: number | null, title: string): Session {
+  const slug = issue != null ? `issue-${issue}-${id}` : `session-${id}`;
+  return {
+    id,
+    repo,
+    issue,
+    issue_title: title,
+    status: "starting",
+    branch: `colonizer/${slug}`,
+    base: "main",
+    worktree: `/home/you/.local/share/colonizer/worktrees/${repo}/${slug}`,
+    sandbox: `colony-${id}`,
+    mesh: { name: `colony-${id}`, ip: `100.64.0.${Math.floor(Math.random() * 200) + 10}` },
+    agent: "claude-code",
+    autopilot: false,
+    pr_url: null,
+    error: null,
+    cost_usd: null,
+    cleaned_up: false,
+    created_at: now(),
+    updated_at: now(),
+  };
+}
+
+export function createMockApi(): Api {
+  const sessions = new Map<string, MockSession>();
+  const demo = new MockSession({
+    ...baseSession("demo1234", "acme/webshop", 42, "Checkout fails for guest users"),
+    status: "running",
+    mesh: { name: "colony-demo1234", ip: "100.64.0.3" },
+    created_at: ago(6),
+  });
+  const old = new MockSession(
+    {
+      ...baseSession("old98765", "acme/webshop", 37, "Price rounding in cart totals"),
+      status: "pr_opened",
+      mesh: null,
+      pr_url: "https://github.com/acme/webshop/pull/61",
+      cost_usd: 1.12,
+      created_at: ago(1600),
+      updated_at: ago(1560),
+    },
+    true,
+  );
+  old.session.updated_at = ago(1560);
+  const failed = new MockSession({
+    ...baseSession("fail4321", "acme/design-system", 7, "Button focus ring is invisible on dark backgrounds"),
+    status: "stopped",
+    mesh: null,
+    created_at: ago(95),
+  });
+  failed.seedFailedHistory();
+  failed.session.updated_at = ago(93);
+  sessions.set(demo.session.id, demo);
+  sessions.set(failed.session.id, failed);
+  sessions.set(old.session.id, old);
+
+  let githubSource = "gh CLI login";
+  let claude: HarnessStatus["claude"] = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+  let login: LoginView = { state: "idle", url: null, message: null };
+  const modules: ModuleInfo[] = [
+    { kind: "source", provider: "github", providers: [{ id: "github", name: "GitHub", description: "Issues from repositories you can access" }], enabled: true, settings: {}, schema: null },
+    {
+      kind: "sandbox",
+      provider: "microsandbox",
+      providers: [{ id: "microsandbox", name: "microsandbox", description: "Rootless libkrun microVMs" }],
+      enabled: true,
+      settings: { image: "node:24-bookworm", cpus: 4, memory: "8G" },
+      schema: {
+        type: "object",
+        properties: {
+          image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm" },
+          cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
+          memory: { type: "string", title: "Memory", default: "8G" },
+          max_parallel: { type: "integer", title: "Parallel colonies", minimum: 1, maximum: 16, default: 3 },
+        },
+      },
+    },
+    {
+      kind: "mesh",
+      provider: "headscale",
+      providers: [
+        { id: "headscale", name: "Private mesh (Headscale)", description: "Bundled Headscale + Tailscale, separate from your own tailnet" },
+        { id: "none", name: "Disabled", description: "Reach VMs through microsandbox only" },
+      ],
+      enabled: true,
+      settings: { direct_udp: true },
+      schema: {
+        type: "object",
+        properties: {
+          direct_udp: { type: "boolean", title: "Direct connections", description: "Let VMs reach the Mothership node over UDP on this host", default: true },
+        },
+      },
+    },
+    {
+      kind: "agent",
+      provider: "claude-code",
+      providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
+      enabled: true,
+      settings: { model: "" },
+      schema: {
+        type: "object",
+        properties: {
+          model: { type: "string", title: "Model", enum: ["", "opus", "sonnet", "haiku"], default: "", description: "Empty uses the Claude Code default" },
+        },
+      },
+    },
+    {
+      kind: "interfaces",
+      provider: "default",
+      providers: [{ id: "default", name: "Colony panels" }],
+      enabled: true,
+      settings: { chat: true, terminal: true },
+      schema: {
+        type: "object",
+        properties: {
+          chat: { type: "boolean", title: "Chat", default: true },
+          terminal: { type: "boolean", title: "Terminal", default: true },
+        },
+      },
+    },
+    {
+      kind: "publish",
+      provider: "github-pr",
+      providers: [{ id: "github-pr", name: "GitHub pull request" }],
+      enabled: true,
+      settings: { draft: false },
+      schema: { type: "object", properties: { draft: { type: "boolean", title: "Open PRs as drafts", default: false } } },
+    },
+  ];
+
+  const find = (id: string): MockSession => {
+    const session = sessions.get(id);
+    if (!session) throw new ApiError("no such colony", 404);
+    return session;
+  };
+  const later = async <T>(value: () => T, ms = 160): Promise<T> => {
+    await sleep(ms);
+    return clone(value());
+  };
+
+  return {
+    mock: true,
+    status: () =>
+      later(() => ({
+        github: { connected: true, login: "octocat", name: "The Octocat", source: githubSource },
+        claude,
+        sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+        mesh: {
+          enabled: true,
+          provider: "headscale",
+          state: "running",
+          harness_ip: "100.64.0.1",
+          nodes: [...sessions.values()].filter((s) => isLive(s.session.status)).length + 1,
+          error: null,
+        },
+      })),
+    modules: () => later(() => modules),
+    saveModule: async (kind, body) => {
+      await sleep(250);
+      const module = modules.find((m) => m.kind === kind);
+      if (!module) throw new ApiError("unknown module kind", 404);
+      if (!module.providers.some((p) => p.id === body.provider)) throw new ApiError("unknown provider", 400);
+      Object.assign(module, { provider: body.provider, enabled: body.enabled, settings: body.settings });
+      return clone(module);
+    },
+    repos: () => later(() => REPOS, 350),
+    issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
+    sessions: () =>
+      later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
+    session: async (id) => later(() => find(id).session),
+    createSession: async (body) => {
+      await sleep(450);
+      const id = Math.random().toString(16).slice(2, 10);
+      const issueNumber = body.issue ?? null;
+      const issue = ISSUES[body.repo]?.find((i) => i.number === issueNumber);
+      const title = issueNumber == null ? "Open colony" : (body.title ?? issue?.title ?? `Issue #${issueNumber}`);
+      const session = new MockSession(
+        { ...baseSession(id, body.repo, issueNumber, title), autopilot: Boolean(body.autopilot) },
+        false,
+        body.instructions ?? null,
+      );
+      sessions.set(id, session);
+      return clone(session.session);
+    },
+    publishSession: async (id) => {
+      const s = find(id);
+      if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
+      s.halt();
+      s.patch({ status: "publishing" });
+      s.log("Stopping the agent and removing the microVM");
+      setTimeout(() => {
+        s.log(`Committed 3 files on ${s.session.branch} and pushed`);
+        s.patch({ status: "pr_opened", mesh: null, pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}` });
+        s.log("Opened pull request");
+      }, 1800);
+      return clone(s.session);
+    },
+    stopSession: async (id) => {
+      const s = find(id);
+      if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
+      s.halt();
+      s.patch({ status: "stopped", mesh: null });
+      s.log("microVM stopped and removed; the worktree was kept");
+      return clone(s.session);
+    },
+    cleanupSession: async (id) => {
+      const s = find(id);
+      if (isLive(s.session.status) || s.session.status === "publishing") throw new ApiError("stop the colony first", 409);
+      s.patch({ cleaned_up: true });
+      s.log("Removed the worktree and local branch");
+      return clone(s.session);
+    },
+    setGithubToken: async (token) => {
+      await sleep(300);
+      if (!token.trim() || /\s/.test(token.trim())) throw new ApiError("empty or malformed token", 400);
+      githubSource = "saved token";
+      return { login: "octocat" };
+    },
+    deleteGithubToken: async () => {
+      githubSource = "gh CLI login";
+      return { ok: true };
+    },
+    setClaudeToken: async (token) => {
+      if (!token.trim().startsWith("sk-ant-")) {
+        throw new ApiError("expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)", 400);
+      }
+      claude = { configured: true, source: token.includes("-api") ? "saved API key" : "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+      return { ok: true };
+    },
+    deleteClaudeToken: async () => {
+      claude = { configured: false, source: null, kind: null };
+      return { ok: true };
+    },
+    claudeLogin: () => later(() => login, 60),
+    claudeLoginStart: async () => {
+      login = { state: "starting", url: null, message: null };
+      setTimeout(() => {
+        if (login.state === "starting") {
+          login = { state: "awaiting_code", url: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock", message: null };
+        }
+      }, 800);
+      return clone(login);
+    },
+    claudeLoginCode: async (code) => {
+      if (!/^[\x21-\x7e]+$/.test(code.trim())) throw new ApiError("that doesn't look like a sign-in code", 400);
+      if (login.state !== "awaiting_code") throw new ApiError("no Claude sign-in is waiting for a code", 409);
+      login = { ...login, state: "verifying" };
+      setTimeout(() => {
+        login = { state: "done", url: null, message: "Connected your Claude subscription" };
+        claude = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+      }, 1200);
+      return clone(login);
+    },
+    claudeLoginCancel: async () => {
+      login = { state: "idle", url: null, message: null };
+      return clone(login);
+    },
+    openEvents: (id, since) => {
+      const session = sessions.get(id);
+      const socket = new MockSocket({
+        open: (s) => {
+          if (!session) {
+            s.close();
+            return;
+          }
+          session.attach(s, since);
+        },
+        message: (_s, data) => session?.command(data),
+        close: (s) => session?.detach(s),
+      });
+      return socket as unknown as SocketLike;
+    },
+    openTerminal: (id) => mockTerminal(sessions.get(id)),
+  };
+}

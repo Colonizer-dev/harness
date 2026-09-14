@@ -1,0 +1,175 @@
+// Types for the harness browser API (docs/protocol.md §4) and the agent event vocabulary (§2–3).
+
+export type SessionStatus =
+  | "starting"
+  | "running"
+  | "waiting_for_answer"
+  | "idle"
+  | "publishing"
+  | "pr_opened"
+  | "no_changes"
+  | "stopped"
+  | "failed";
+
+export interface Session {
+  id: string;
+  repo: string;
+  /** null for an open session started on a repository without an issue. */
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  branch: string;
+  base: string | null;
+  worktree: string;
+  sandbox: string;
+  mesh: { name: string; ip: string | null } | null;
+  agent: string;
+  autopilot: boolean;
+  pr_url: string | null;
+  error: string | null;
+  cost_usd: number | null;
+  cleaned_up: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Repo {
+  full_name: string;
+  description: string | null;
+  private: boolean;
+  fork: boolean;
+  archived: boolean;
+  open_issues_count: number;
+  pushed_at: string | null;
+  has_issues?: boolean;
+}
+
+export interface Issue {
+  number: number;
+  title: string;
+  body: string | null;
+  labels: { name: string; color: string }[];
+  author: { login: string } | null;
+  updatedAt: string;
+  url: string;
+}
+
+export interface HarnessStatus {
+  github: { connected: boolean; login?: string; name?: string | null; source?: string; error?: string };
+  claude: { configured: boolean; source: string | null; kind: string | null };
+  sandbox: {
+    msb_version: string | null;
+    image: string;
+    cpus?: number;
+    memory?: string;
+    max_parallel?: number;
+    claude_bin?: string | null;
+    claude_bin_error?: string | null;
+  };
+  mesh?: {
+    enabled: boolean;
+    provider?: string;
+    state?: string;
+    harness_ip?: string | null;
+    nodes?: number;
+    error?: string | null;
+  } | null;
+}
+
+export interface ModuleProviderInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+/** A small JSON-Schema subset: an object whose properties are scalar settings. */
+export interface SchemaField {
+  type?: "string" | "number" | "integer" | "boolean";
+  title?: string;
+  description?: string;
+  enum?: (string | number)[];
+  default?: unknown;
+  minimum?: number;
+  maximum?: number;
+}
+
+export interface SettingsSchema {
+  type?: "object";
+  properties?: Record<string, SchemaField>;
+  required?: string[];
+}
+
+export interface ModuleInfo {
+  kind: string;
+  provider: string;
+  providers: ModuleProviderInfo[];
+  enabled: boolean;
+  settings: Record<string, unknown>;
+  schema: SettingsSchema | null;
+}
+
+export type LoginState = "idle" | "starting" | "awaiting_code" | "verifying" | "done" | "error";
+
+export interface LoginView {
+  state: LoginState;
+  url: string | null;
+  message: string | null;
+}
+
+export interface QuestionOption {
+  label: string;
+  description?: string;
+  preview?: string | null;
+}
+
+export interface Question {
+  question: string;
+  header: string;
+  multi_select: boolean;
+  options: QuestionOption[];
+}
+
+export type Answers = Record<string, string | string[]>;
+
+export type AgentState = "idle" | "working" | "waiting_for_answer" | "error" | "exited";
+
+export type LogLevel = "info" | "warn" | "error";
+
+interface Sequenced {
+  seq?: number;
+  ts?: string;
+}
+
+export type AgentEventBody =
+  | { type: "status"; state: AgentState; detail?: string | null }
+  | { type: "user_message"; id: string; text: string }
+  | { type: "assistant_text_delta"; message_id: string; block_index: number; delta: string }
+  | { type: "assistant_text"; message_id: string; block_index: number; text: string }
+  | { type: "thinking"; message_id: string; block_index: number; text: string }
+  | { type: "tool_call"; message_id: string; tool_call_id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_call_id: string; output: string; is_error: boolean }
+  | { type: "question"; question_id: string; message_id?: string; questions: Question[] }
+  | { type: "question_answered"; question_id: string; answers: Answers; response?: string | null }
+  | { type: "turn_end"; is_error: boolean; result: string | null; cost_usd: number | null; duration_ms: number | null }
+  | { type: "log"; level: LogLevel; message: string };
+
+export type AgentEvent = Sequenced & AgentEventBody;
+
+export type ServerFrame =
+  | AgentEvent
+  | { type: "session"; session: Session }
+  | { type: "harness_log"; level: LogLevel; message: string; ts: string };
+
+export type ClientCommand =
+  | { type: "user_message"; text: string }
+  | { type: "answer"; question_id: string; answers: Answers; response: string | null }
+  | { type: "interrupt" };
+
+export interface NewSessionRequest {
+  repo: string;
+  /** Omit to start an open session on the repository. */
+  issue?: number;
+  title?: string;
+  instructions?: string;
+  autopilot?: boolean;
+}
