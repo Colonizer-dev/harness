@@ -41,7 +41,10 @@ cargo build --release
 Then open **Settings**:
 
 - **GitHub** – uses your `gh auth login` session automatically, or paste a token.
-- **Claude** – run `claude setup-token` and paste the token (an `sk-ant-api…` key works too).
+- **Claude** – press **Log in with Claude subscription** (Pro/Max). The harness runs the official
+  `claude setup-token` flow on the host: open the sign-in link it shows, approve, and paste the code back.
+  The resulting 1-year token is saved on the host and never sent to the browser. Pasting an existing
+  token or an `sk-ant-api…` API key also works.
 
 ## Configuration
 

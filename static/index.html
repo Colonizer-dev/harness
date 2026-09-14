@@ -20,6 +20,10 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
+.login-flow { margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+.login-flow p { margin: 0; }
+summary { cursor: pointer; color: var(--muted); margin-top: 12px; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
 header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
@@ -133,12 +137,27 @@ legend { padding: 0 6px; font-weight: 600; }
   <fieldset>
     <legend>Claude</legend>
     <p id="clState"></p>
-    <p>Run <code>claude setup-token</code> and paste the token (an <code>sk-ant-api…</code> key also works). The microVM only sees a placeholder: microsandbox's TLS proxy swaps in the real value for requests to api.anthropic.com.</p>
+    <p>Sign in with your Claude Pro or Max subscription. This runs <code>claude setup-token</code> on this machine and saves a 1-year token. The microVM only ever sees a placeholder: microsandbox's TLS proxy swaps in the real token for requests to api.anthropic.com.</p>
     <div class="row">
-      <input id="clToken" type="password" placeholder="sk-ant-oat01-…" autocomplete="off">
-      <button class="primary" id="clSave">Save</button>
-      <button id="clClear">Remove</button>
+      <button class="primary" id="clLogin">Log in with Claude subscription</button>
+      <button id="clClear">Remove saved token</button>
     </div>
+    <div id="clFlow" class="login-flow" hidden>
+      <a id="clUrl" target="_blank" rel="noopener" hidden>1. Open the Claude sign-in page ↗</a>
+      <div class="row" id="clCodeRow" hidden>
+        <input id="clCode" placeholder="2. Paste the code shown after approving" autocomplete="off">
+        <button class="primary" id="clCodeSubmit">Submit</button>
+        <button id="clCancel">Cancel</button>
+      </div>
+      <p id="clMsg"></p>
+    </div>
+    <details>
+      <summary>Use an existing token or API key instead</summary>
+      <div class="row" style="margin-top: 8px">
+        <input id="clToken" type="password" placeholder="sk-ant-oat01-… or sk-ant-api…" autocomplete="off">
+        <button id="clSave">Save</button>
+      </div>
+    </details>
   </fieldset>
   <div class="row" style="justify-content: flex-end"><button id="closeSettings">Close</button></div>
 </dialog>
@@ -217,7 +236,66 @@ async function loadStatus() {
     chip(!!s.sandbox.msb_version && !!s.sandbox.claude_bin, s.sandbox.msb_version ? `${s.sandbox.msb_version} · ${s.sandbox.image}` : 'microsandbox missing'),
   );
   $('#ghState').textContent = s.github.connected ? `Connected as @${s.github.login} (${s.github.source}).` : `Not connected: ${s.github.error || ''}`;
-  $('#clState').textContent = s.claude.configured ? `Configured from ${s.claude.source} (${s.claude.kind}).` : 'Not configured.';
+  $('#clState').textContent = s.claude.configured ? `Connected via ${s.claude.source}.` : 'Not connected.';
+}
+
+// ---- Claude subscription login ----
+let loginPoll = null;
+
+async function startClaudeLogin() {
+  $('#clFlow').hidden = false;
+  $('#clUrl').hidden = true;
+  $('#clCodeRow').hidden = true;
+  $('#clCode').value = '';
+  $('#clMsg').textContent = 'Starting claude setup-token…';
+  try {
+    renderLogin(await api('/api/claude-login/start', { method: 'POST' }));
+  } catch (e) {
+    $('#clMsg').textContent = e.message;
+    return;
+  }
+  clearInterval(loginPoll);
+  loginPoll = setInterval(async () => {
+    try { renderLogin(await api('/api/claude-login')); } catch { /* retry on next tick */ }
+  }, 1000);
+}
+
+function renderLogin(view) {
+  const link = $('#clUrl');
+  if (view.url && view.url.startsWith('https://')) {
+    link.href = view.url;
+    link.hidden = false;
+  }
+  $('#clCodeRow').hidden = !['awaiting_code', 'verifying'].includes(view.state);
+  $('#clCodeSubmit').disabled = view.state === 'verifying';
+  const messages = {
+    starting: 'Starting claude setup-token…',
+    awaiting_code: 'Approve access on the sign-in page, then paste the code it shows here.',
+    verifying: 'Verifying the code…',
+  };
+  $('#clMsg').textContent = messages[view.state] ?? view.message ?? '';
+  if (['done', 'error', 'idle'].includes(view.state)) {
+    clearInterval(loginPoll);
+    loginPoll = null;
+  }
+  if (view.state === 'done') {
+    $('#clFlow').hidden = true;
+    toast(view.message || 'Claude subscription connected');
+    loadStatus();
+  }
+  if (view.state === 'idle') $('#clFlow').hidden = true;
+}
+
+async function submitLoginCode() {
+  try {
+    renderLogin(await api('/api/claude-login/code', { method: 'POST', body: JSON.stringify({ code: $('#clCode').value }) }));
+  } catch (e) {
+    $('#clMsg').textContent = e.message;
+  }
+}
+
+async function cancelClaudeLogin() {
+  try { renderLogin(await api('/api/claude-login/cancel', { method: 'POST' })); } catch (e) { toast(e.message); }
 }
 
 async function saveToken(kind, input) {
@@ -431,6 +509,10 @@ $('#ghSave').addEventListener('click', () => saveToken('github', $('#ghToken')))
 $('#clSave').addEventListener('click', () => saveToken('claude', $('#clToken')));
 $('#ghClear').addEventListener('click', () => clearToken('github'));
 $('#clClear').addEventListener('click', () => clearToken('claude'));
+$('#clLogin').addEventListener('click', startClaudeLogin);
+$('#clCodeSubmit').addEventListener('click', submitLoginCode);
+$('#clCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitLoginCode(); });
+$('#clCancel').addEventListener('click', cancelClaudeLogin);
 
 (async () => {
   await Promise.all([loadStatus(), loadJobs()]);
