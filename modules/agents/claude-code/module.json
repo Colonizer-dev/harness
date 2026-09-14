@@ -1,0 +1,38 @@
+{
+  "kind": "agent",
+  "id": "claude-code",
+  "name": "Claude Code",
+  "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
+  "protocol": "legion-runner/1",
+  "entry": ["node", "runner.mjs"],
+  "requires": {
+    "binaries": ["claude"],
+    "image": "glibc + node >= 20"
+  },
+  "secrets": [
+    {
+      "env": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      "hosts": ["api.anthropic.com"]
+    }
+  ],
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Model",
+        "description": "Claude model alias or ID. Empty uses Claude Code's default.",
+        "default": "",
+        "env": "LEGION_MODEL"
+      },
+      "effort": {
+        "type": "string",
+        "title": "Effort",
+        "description": "Reasoning effort. Empty uses the model default.",
+        "enum": ["", "low", "medium", "high", "xhigh", "max"],
+        "default": "",
+        "env": "LEGION_EFFORT"
+      }
+    }
+  }
+}

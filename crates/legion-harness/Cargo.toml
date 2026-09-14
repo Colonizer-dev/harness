@@ -1,0 +1,19 @@
+[package]
+name = "legion-harness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-socks = "0.5.3"
+tokio-stream = "0.1.19"
+tokio-tungstenite = "0.30.0"
+toml = "1.1.6"
+tower-http = { version = "0.7.1", features = ["fs"] }
+uuid = { version = "1.26.1", features = ["v4"] }
