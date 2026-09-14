@@ -2,6 +2,10 @@
 name = "colonizer"
 version = "0.1.0"
 edition = "2024"
+description = "The Colonizer harness: coding agents in private microVMs, linked by a private mesh, returning pull requests"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
+homepage = "https://colonizer.dev"
 
 [dependencies]
 anyhow = "1.0.104"

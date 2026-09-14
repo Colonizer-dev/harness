@@ -3,6 +3,8 @@ name = "colonizer-agentd"
 version = "0.1.0"
 edition = "2024"
 description = "Daemon inside every Colonizer microVM: agent runner bridge, event log, terminals"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }

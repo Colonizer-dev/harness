@@ -6,7 +6,7 @@
     "test": "node --test test/",
     "start": "node runner.mjs"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "dependencies": {
