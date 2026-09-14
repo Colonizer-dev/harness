@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 6] = ["source", "sandbox", "mesh", "agent", "interfaces", "publish"];
+pub const KINDS: [&str; 8] = ["source", "sandbox", "mesh", "agent", "interfaces", "publish", "memory", "watchdog"];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
 #[derive(Clone, Debug)]
@@ -137,6 +137,24 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             "Commit on the host, push the branch and open a pull request",
             json!({"type": "object", "properties": {
                 "draft": {"type": "boolean", "title": "Open as draft", "default": false}
+            }}),
+        )],
+        "memory" => vec![p(
+            "files",
+            "Shared memory",
+            "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes",
+            json!({"type": "object", "properties": {
+                "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context", "default": true}
+            }}),
+        )],
+        "watchdog" => vec![p(
+            "default",
+            "Watchdog",
+            "Nudges colonies that stop making progress and flags the ones that need you",
+            json!({"type": "object", "properties": {
+                "stall_minutes": {"type": "integer", "title": "Nudge after minutes without progress", "minimum": 1, "maximum": 1440, "default": 15},
+                "max_nudges": {"type": "integer", "title": "Nudges before flagging", "minimum": 0, "maximum": 20, "default": 3},
+                "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30}
             }}),
         )],
         _ => Vec::new(),

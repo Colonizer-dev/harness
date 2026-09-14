@@ -9,11 +9,15 @@
 mod claude_login;
 mod config;
 mod github;
+mod memory;
 mod mesh;
 mod modules;
+mod orgs;
+mod providers;
 mod sandbox;
 mod sessions;
 mod util;
+mod watchdog;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::{
@@ -21,7 +25,7 @@ use axum::{
     http::{header, Method, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use config::{setting_u64, ModulesConfig, Settings};
@@ -30,7 +34,7 @@ use modules::AgentModule;
 use serde_json::{json, Value};
 use sessions::Session;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path as FsPath, PathBuf},
     sync::Arc,
     time::Duration,
@@ -64,6 +68,9 @@ pub struct App {
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     mesh: Mutex<Option<Arc<Mesh>>>,
     pub login: claude_login::LoginManager,
+    pub memory: memory::MemoryStore,
+    /// Owners seen in the repository list, so org workspaces can be offered before any colony exists.
+    pub repo_owners: RwLock<BTreeSet<String>>,
 }
 
 pub type Shared = Arc<App>;
@@ -279,13 +286,18 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = Settings::from_env()?;
-    for dir in ["sessions", "repos", "worktrees"] {
+    for dir in ["sessions", "repos", "worktrees", "memory"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
-    let sessions: Vec<Session> = std::fs::read(cfg.data_dir.join("sessions.json"))
+    let mut sessions: Vec<Session> = std::fs::read(cfg.data_dir.join("sessions.json"))
         .ok()
         .and_then(|data| serde_json::from_slice(&data).ok())
         .unwrap_or_default();
+    for s in &mut sessions {
+        if s.org.is_empty() {
+            s.org = s.repo.split('/').next().unwrap_or_default().to_string();
+        }
+    }
     let modules = ModulesConfig::load(&cfg.config_dir.join("modules.json"));
     let agents = modules::discover_agents(cfg.assets.as_deref());
 
@@ -298,6 +310,8 @@ async fn main() -> Result<()> {
         repo_locks: Mutex::new(HashMap::new()),
         mesh: Mutex::new(None),
         login: Default::default(),
+        memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
+        repo_owners: RwLock::new(BTreeSet::new()),
         cfg,
     });
 
@@ -311,6 +325,17 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
+        .route("/api/providers", get(providers::list))
+        .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
+        .route("/api/models", get(providers::models))
+        .route("/api/orgs", get(orgs::list))
+        .route("/api/orgs/{org}", put(orgs::put))
+        .route("/api/memory", get(memory::get))
+        .route("/api/memory/proposals", get(memory::list_proposals))
+        .route("/api/memory/proposals/{id}/approve", post(memory::approve))
+        .route("/api/memory/proposals/{id}/reject", post(memory::reject))
+        .route("/api/memory/notes", post(memory::create_note))
+        .route("/api/memory/notes/{id}", delete(memory::delete_note))
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
@@ -337,6 +362,7 @@ async fn main() -> Result<()> {
 
     let recovery = app.clone();
     tokio::spawn(async move { sessions::recover(&recovery).await });
+    tokio::spawn(watchdog::run(app.clone()));
     if app.modules.read().await.mesh_enabled() && app.cfg.assets.is_some() {
         let mesh_app = app.clone();
         tokio::spawn(async move {

@@ -221,3 +221,134 @@ Byte-for-byte proxy of agentd `/v1/pty` (same binary/text frame rules).
   card collapses to a summary of the chosen answers.
 - The composer sends `user_message`; a Stop button sends `interrupt` while the agent is working.
 - Light and dark themes via `prefers-color-scheme`; usable at 400 px width.
+
+---
+
+## 6. v1.1 additions: model routing, org workspaces, shared memory, watchdog
+
+### 6.1 Model routing (runner)
+
+Model strings are `<provider>/<model-id>` for non-Anthropic providers (e.g. `deepseek/deepseek-flash`,
+`local/deepseek-flash`). Anything without a known provider prefix (`opus`, `claude-opus-5`, …) goes to
+Anthropic unchanged.
+
+Runner environment set by the mothership:
+
+| Variable | Meaning |
+| --- | --- |
+| `COLONIZER_MODEL` | Orchestrator (main thread) model |
+| `COLONIZER_SUBAGENT_MODEL` | Default model for subagents (maps to `CLAUDE_CODE_SUBAGENT_MODEL`) |
+| `COLONIZER_BACKGROUND_MODEL` | Model for background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
+| `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
+
+```json
+[{"provider": "deepseek", "prefix": "deepseek/", "base_url": "https://api.deepseek.com/anthropic",
+  "auth": "x-api-key", "key_env": "COLONIZER_PROVIDER_KEY_DEEPSEEK"}]
+```
+
+`auth` is `x-api-key`, `bearer` or `none`. `key_env` names an env var holding the key (a microsandbox
+placeholder for https upstreams). When any route or non-default model is configured, the runner starts
+a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at it:
+
+- Requests whose JSON `model` matches a route prefix: strip the prefix, send to `base_url` + the request
+  path (`/v1/messages`, `/v1/messages/count_tokens`), replace `authorization`/`x-api-key` with the route's
+  credential, drop Anthropic OAuth betas from `anthropic-beta`, stream the response back unchanged.
+  If the upstream has no `count_tokens`, answer `{"input_tokens": ceil(chars / 4)}`.
+- Everything else: forward to `https://api.anthropic.com` with headers unchanged.
+
+### 6.2 Shared memory (runner ⇄ mothership)
+
+Approved notes are mounted read-only in every colony:
+
+```
+/colonizer/memory/global/  MEMORY.md  notes/<id>.md
+/colonizer/memory/org/     MEMORY.md  notes/<id>.md     (the colony's GitHub org)
+/colonizer/memory/repo/    MEMORY.md  notes/<id>.md     (the colony's repository)
+```
+
+`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`). `COLONIZER_MEMORY_DIR=/colonizer/memory`
+tells the runner memory is enabled. The runner exposes two tools to the agent: `memory_search`
+(search the mounted notes) and `memory_propose` (scope `repo` | `org` | `global`, `title`, `content`).
+Proposing emits a runner event; nothing is written inside the colony:
+
+```jsonc
+{"type":"memory_proposal","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
+```
+
+The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
+(no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
+mount immediately.
+
+### 6.3 Mothership API additions
+
+**Model providers** (credentials stay on the mothership, keys stored 0600):
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/providers` | `[{id, name, base_url, auth, has_key, models: [string], preset: "deepseek"\|"local"\|"custom"}]` |
+| `PUT /api/providers/{id}` | `{name, base_url, auth, models, api_key?}`: `api_key` omitted keeps the saved key, `""` removes it |
+| `DELETE /api/providers/{id}` | Remove a provider |
+| `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
+
+Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
+`deepseek-v4-pro`. `local` = `http://127.0.0.1:8080`, `none`, no models. Loopback base URLs are rewritten
+to `host.microsandbox.internal` inside colonies.
+
+The agent module schema gains `subagent_model` and `background_model` next to `model` (all free-text
+strings; UIs offer `GET /api/models` as suggestions).
+
+**Org workspaces.** `Session` gains `"org": "<repo owner>"`.
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings}]` for every org seen in repositories, colonies or saved settings |
+| `PUT /api/orgs/{org}` | `{settings}`; every field optional, missing or `null` inherits the global module setting |
+
+```json
+{"settings": {
+  "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null},
+  "max_parallel": 2,
+  "memory": {"enabled": true},
+  "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
+}}
+```
+
+**Shared memory.** `scope` is `global`, `org` (key = org) or `repo` (key = `owner/repo`).
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/memory?scope=&key=` | `{scope, key, notes: [Note], proposals: [Proposal]}` |
+| `GET /api/memory/proposals` | Every pending proposal, newest first |
+| `POST /api/memory/proposals/{id}/approve` | Optional `{title, content}` edits; creates the note |
+| `POST /api/memory/proposals/{id}/reject` | Discard |
+| `POST /api/memory/notes` | `{scope, key, title, content}`: a note written by you |
+| `DELETE /api/memory/notes/{id}?scope=&key=` | Remove a note |
+
+`Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
+(`pending`). `source` = `{session_id, repo}` or `{user: true}`.
+
+**Watchdog.** New module kind `watchdog` (provider `default`; settings `enabled` = true,
+`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30) and kind `memory` (provider `files`;
+settings `enabled` = true, `require_review` = true). `Session` gains `last_activity_at` and
+`attention`:
+
+```json
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted", "since": "…", "nudges": 2}}
+```
+
+Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
+`stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
+notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
+`nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. Any new
+agent event clears `attention`.
+
+### 6.4 UI additions
+
+- Sidebar org switcher (All orgs, then each org) filtering repositories and colonies; org chip on
+  colonies; per-org settings dialog with an "inherit" state for every field.
+- Settings → Connections → Model providers: add from preset (DeepSeek, Local) or custom, base URL, auth,
+  key (write-only), model list. Agent module model fields get suggestions from `GET /api/models`.
+- Memory view with pending proposals (approve, edit then approve, reject), notes per scope (global, org,
+  repo), and a pending count badge in the sidebar.
+- Watchdog: amber attention badge on colonies, the reason in the colony header, and `watchdog-` messages
+  rendered as notices.

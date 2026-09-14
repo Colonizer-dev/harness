@@ -172,9 +172,15 @@ protocol on stdio, so an agent module can be written in anything.
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs) | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request | review-comment follow-ups `PLANNED` |
+| `memory` | Shared notes per repository, org and globally; agents propose, you approve | semantic search `PLANNED` |
+| `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
+
+Every GitHub org is a workspace with its own overrides for models, the parallel limit, memory and the
+watchdog. Model providers (DeepSeek, a local server, any Anthropic-compatible endpoint) are added in
+Settings; their keys stay on the mothership like every other credential.
 
 ---
 
@@ -211,6 +217,10 @@ Stated here rather than buried.
   encrypted traffic crosses Tailscale's public DERP servers.
 - **Not yet exercised end to end:** opening a pull request from a colony, and `install.sh --install`. Both
   are implemented; neither has been run against the real world yet.
+- **Cross-provider subagents are off the beaten path.** Anthropic doesn't support routing Claude Code to
+  non-Claude models. Routing is verified with a stub Anthropic-compatible provider inside a real colony,
+  not yet against DeepSeek's API, and Claude-specific request fields are forwarded as they are.
+- **Memory search is plain text matching**, not semantic search.
 - **No CI yet**, and nothing is published to crates.io or npm.
 
 ---
@@ -220,6 +230,10 @@ Stated here rather than buried.
 | Capability | Status |
 | :--- | :--- |
 | Colonies, private mesh, choice cards, terminal, Claude Code module, GitHub source and publish | `SHIPPING` |
+| Orchestrator and subagents on different providers ([#1](https://github.com/Colonizer-dev/harness/issues/1)) | `SHIPPING` |
+| Org workspaces ([#2](https://github.com/Colonizer-dev/harness/issues/2)) | `SHIPPING` |
+| Shared memory with review ([#3](https://github.com/Colonizer-dev/harness/issues/3)) | `SHIPPING` |
+| Watchdog for stalled colonies ([#4](https://github.com/Colonizer-dev/harness/issues/4)) | `SHIPPING` |
 | CI running the Rust, runner and UI test suites | `PLANNED` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |

@@ -443,7 +443,10 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
         "--jq", ".[] | {full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}",
     ]))
     .await?;
-    Ok(Json(out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()))
+    let repos: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let owners = repos.iter().filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
+    app.repo_owners.write().await.extend(owners);
+    Ok(Json(repos))
 }
 
 pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {

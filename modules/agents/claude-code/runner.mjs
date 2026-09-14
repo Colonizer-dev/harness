@@ -7,6 +7,9 @@ import { realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
+import { routingPlan, startRouter } from './router.mjs';
+
 export const SYSTEM_PROMPT_APPEND = [
   'You are running inside the Colonizer; the user follows along in a web UI.',
   '- Whenever you need a decision, a clarification or any other input from the user, call the AskUserQuestion tool with 2-4 concrete options. Never ask the user in plain text, and never end a turn with a plain-text question. The UI always adds a free-text "Other" choice, so do not add one yourself.',
@@ -101,20 +104,42 @@ export function childEnv(env) {
   return out;
 }
 
-/** SDK options from the environment. Returns warnings instead of logging so stdout stays protocol-only. */
-export function buildOptions(env = process.env) {
+/**
+ * SDK options from the environment. Returns warnings instead of logging so stdout stays protocol-only.
+ * @param {object} [extras]
+ * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
+ * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
+ * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
+ */
+export function buildOptions(env = process.env, { routerUrl, memoryServer, hiddenEnv = [] } = {}) {
   const warnings = [];
+  const claudeEnv = childEnv(env);
+  for (const key of hiddenEnv) delete claudeEnv[key];
+  if (routerUrl) claudeEnv.ANTHROPIC_BASE_URL = routerUrl;
+  if (env.COLONIZER_SUBAGENT_MODEL) claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
+  if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
+  const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
+
   const options = {
     cwd: process.cwd(),
     pathToClaudeCodeExecutable: env.COLONIZER_CLAUDE_BIN || '/opt/claude/bin/claude',
     // Not bypassPermissions: AskUserQuestion only reaches canUseTool when nothing auto-approves it.
     permissionMode: 'default',
     includePartialMessages: true,
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: SYSTEM_PROMPT_APPEND },
+    systemPrompt: {
+      type: 'preset',
+      preset: 'claude_code',
+      append: memory ? `${SYSTEM_PROMPT_APPEND}\n${MEMORY_PROMPT_APPEND}` : SYSTEM_PROMPT_APPEND,
+    },
     settingSources: ['project'],
-    env: childEnv(env),
+    env: claudeEnv,
     stderr: (data) => process.stderr.write(data),
   };
+  if (memory) {
+    // No allowedTools entry: canUseTool already allows every tool except AskUserQuestion, and listing
+    // them would make the SDK warn that canUseTool is shadowed.
+    options.mcpServers = { [MEMORY_SERVER]: memoryServer };
+  }
   if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
   if (env.COLONIZER_EFFORT) {
     if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
@@ -424,12 +449,33 @@ async function main() {
   lines.on('close', () => commands.close());
   for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => commands.push({ type: 'shutdown' }));
 
-  const { query } = await import('@anthropic-ai/claude-agent-sdk');
-  const { options, warnings } = buildOptions();
+  const { query, createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+
+  const plan = routingPlan(process.env);
+  for (const message of plan.warnings) emit({ type: 'log', level: 'warn', message });
+  let router = null;
+  if (plan.needsRouter) {
+    router = await startRouter({ routes: plan.routes, env: process.env });
+    const served = plan.routes.map((route) => route.prefix).join(', ') || 'none';
+    emit({ type: 'log', level: 'info', message: `model router listening on ${router.url} (provider routes: ${served})` });
+  }
+
+  let memoryServer;
+  if (process.env.COLONIZER_MEMORY_DIR) {
+    const { z } = await import('zod');
+    memoryServer = createMemoryServer({ dir: process.env.COLONIZER_MEMORY_DIR, emit, createSdkMcpServer, tool, z });
+  }
+
+  const { options, warnings } = buildOptions(process.env, {
+    routerUrl: router?.url,
+    memoryServer,
+    hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
+  });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
   await runAgent({ query, commands, emit, options, enforceChoices });
+  await router?.close();
   process.exit(0);
 }
 
