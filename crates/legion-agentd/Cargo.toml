@@ -1,0 +1,17 @@
+[package]
+name = "legion-agentd"
+version = "0.1.0"
+edition = "2024"
+description = "Daemon inside every Legion microVM: agent runner bridge, event log, terminals"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = "0.3.34"
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.30.0"

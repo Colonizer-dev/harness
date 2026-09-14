@@ -2,7 +2,11 @@
 //! pseudo-terminal so the web UI can show the sign-in link and relay the code back. The
 //! resulting long-lived OAuth token is saved on the host and never sent to the browser.
 
-use crate::{client_error, resolve_claude_bin, shell_quote, truncate, write_secret, ApiResult, Shared};
+use crate::{
+    client_error, resolve_claude_bin,
+    util::{shell_quote, truncate, write_secret},
+    ApiResult, Shared,
+};
 use anyhow::Context;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};

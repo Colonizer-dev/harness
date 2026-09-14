@@ -1,81 +1,90 @@
-# legion-harness
+# Legion harness
 
-A small Rust harness with a web UI: connect GitHub, browse the open issues of any repository you can
-access, and send an issue to Claude Code. Each run:
+Turn a task into a pull request by running a coding agent inside a disposable microVM, and follow
+along in the browser:
 
-1. creates a fresh **git worktree** on a new `legion/issue-<n>-<id>` branch from the default branch,
-2. boots a **[microsandbox](https://microsandbox.dev) microVM** (libkrun/KVM, rootless) with that worktree
-   mounted at `/workspace`,
-3. runs Claude Code headless inside the VM (`--dangerously-skip-permissions`, streamed live to the UI),
-4. commits the result on the host, pushes the branch and **opens a pull request** that closes the issue.
+- **Sessions** — start from a GitHub issue or just a repository. Each session gets a fresh git
+  worktree on a `legion/…` branch and its own microVM.
+- **Chat** — watch the agent work; its questions always arrive as **multiple-choice cards** (with an
+  "Other…" answer), never as buried plain-text questions. Send follow-ups at any time.
+- **Terminal** — a shell inside the same microVM, right next to the chat.
+- **Private mesh** — every microVM joins a private Tailscale-compatible network with the harness,
+  automatically. It runs on bundled Headscale and never touches your own tailnet.
+- **Create PR** — the host commits, pushes and opens the pull request (or let autopilot do it when the
+  agent finishes).
+
+Everything is a **module** you choose in Settings → Modules: source (GitHub), sandbox (microsandbox),
+mesh (private mesh / loopback), agent (Claude Code), interfaces (chat, terminal) and publish (GitHub PR).
+
+See [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
+
+## Requirements
+
+- Linux x86_64 with KVM (`/dev/kvm` readable and writable by your user)
+- [microsandbox](https://docs.microsandbox.dev) (`curl -fsSL https://get.microsandbox.dev | sh`)
+- `git`, `gh`, Node.js ≥ 20 + npm, a Rust toolchain, and a native Claude Code install (its binary is
+  mounted read-only into microVMs)
+
+## Install
+
+```sh
+scripts/install.sh --install     # builds dist/ and installs ~/.local/share/legion-harness/app
+legion-harness                   # open http://127.0.0.1:7878
+```
+
+`install.sh` bundles everything the app needs, so nothing is downloaded at runtime:
+
+| Piece | How it's built |
+| --- | --- |
+| Headscale, Tailscale | Pinned in `vendor/vendor.lock`, sha256-verified (`scripts/fetch-vendor.sh`) |
+| `legion-agentd` | Static musl binary built inside a `rust:alpine` microVM (`scripts/build-agentd.sh`) |
+| Agent modules | `modules/agents/*` with production `node_modules` |
+| Web UI | `web/` (React + assistant-ui + xterm.js) |
+| Harness | `crates/legion-harness` |
+
+Then open **Settings**:
+
+- **GitHub** – uses your `gh auth login` session automatically, or paste a token.
+- **Claude** – **Log in with Claude subscription** runs the official `claude setup-token` flow; the
+  token stays on the host.
 
 ## Trust model
 
 | What | Where it lives |
 | --- | --- |
 | GitHub token | Host only. Commit, push and `gh pr create` run on the host after the VM is gone. |
-| Claude token | Host only. The guest env holds a placeholder (`$MSB_CLAUDE_CODE_OAUTH_TOKEN`); microsandbox's TLS proxy substitutes the real value only for requests to `api.anthropic.com`. |
-| Worktree | Mounted read-write. |
-| Git objects & worktree metadata | Mounted **read-only** (so `git status/diff/log` work in the VM, but commits don't). |
-| VM outputs | Treated as untrusted: `.git` is rewritten, nested `.git` dirs are removed, host git runs with hooks and fsmonitor disabled, and `pr.md` is read only if it is a regular file. |
+| Claude token | Host only. The guest sees a placeholder; microsandbox's TLS proxy swaps in the real value for `api.anthropic.com` only. |
+| Worktree | Mounted read-write at `/workspace`. |
+| Git objects & worktree metadata | Mounted read-only (`git status/diff/log` work in the VM, commits don't). |
+| VM output | Untrusted: `.git` is rewritten, nested `.git` dirs removed, host git runs without hooks/fsmonitor, `pr.md` must be a regular file. |
+| Mesh | Separate Headscale + userspace tailscaled (own state and socket, `--no-logs-no-support`). The harness may reach VMs; VMs can't reach each other. VMs get one extra network rule: UDP to the harness node's port, for direct WireGuard. |
+| agentd | Per-session bearer token, even inside the mesh. |
+| Web API | Loopback by default; rejects unexpected `Host` headers and cross-origin writes and WebSocket upgrades. |
 
-The web API has no login. It binds to `127.0.0.1` by default, rejects unexpected `Host` headers
-(DNS rebinding) and cross-origin writes.
-
-## Requirements
-
-- Linux with KVM (`/dev/kvm` readable and writable by your user)
-- [microsandbox](https://docs.microsandbox.dev) installed as `msb` (`curl -fsSL https://get.microsandbox.dev | sh`)
-- `git`, `gh`, and a native Claude Code binary on the host (it is mounted read-only into the VM, so
-  the sandbox image must be glibc-based)
-- Rust toolchain to build
-
-## Run
-
-```sh
-cargo build --release
-./target/release/legion-harness
-# open http://127.0.0.1:7878
-```
-
-Then open **Settings**:
-
-- **GitHub** – uses your `gh auth login` session automatically, or paste a token.
-- **Claude** – press **Log in with Claude subscription** (Pro/Max). The harness runs the official
-  `claude setup-token` flow on the host: open the sign-in link it shows, approve, and paste the code back.
-  The resulting 1-year token is saved on the host and never sent to the browser. Pasting an existing
-  token or an `sk-ant-api…` API key also works.
+microVMs are detached: they keep running when the harness restarts, and sessions reconnect.
 
 ## Configuration
 
-All optional, via environment variables:
+Module settings live in `~/.config/legion-harness/modules.json` (edit them in the UI). Process
+settings come from the environment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HARNESS_BIND` | `127.0.0.1:7878` | Listen address |
-| `HARNESS_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated (e.g. a Tailscale name) |
-| `HARNESS_IMAGE` | `node:24-bookworm` | OCI image for the microVM |
-| `HARNESS_CPUS` / `HARNESS_MEMORY` / `HARNESS_ROOT_DISK` | `4` / `8G` / `16G` | VM resources |
-| `HARNESS_MAX_DURATION` | `2h` | Hard limit per run |
-| `HARNESS_MAX_PARALLEL` | `3` | Concurrent microVMs; further runs queue |
-| `HARNESS_MODEL` | Claude Code default | `--model` passed to Claude Code |
+| `HARNESS_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated |
+| `HARNESS_DATA_DIR` | `~/.local/share/legion-harness` | Bare clones, worktrees, sessions, mesh state |
+| `HARNESS_CONFIG_DIR` | `~/.config/legion-harness` | Module config and saved tokens (0600) |
 | `HARNESS_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
-| `HARNESS_DATA_DIR` | `~/.local/share/legion-harness` | Bare clones, worktrees, job logs |
-| `HARNESS_CONFIG_DIR` | `~/.config/legion-harness` | Saved tokens (mode 0600) |
+| `LEGION_HOME` | next to the binary / `dist/` | Bundled app assets |
 
-`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are honoured when no token
-is saved in Settings.
+## Development
 
-## Layout on disk
-
-```
-~/.local/share/legion-harness/
-  repos/<owner>/<repo>.git          bare clone shared by all runs of a repository
-  worktrees/<owner>/<repo>/issue-*  one worktree per run (remove with "Clean up")
-  jobs/<id>/in/{prompt.md,run.sh}   mounted read-only at /harness/in
-  jobs/<id>/out/pr.md               written by Claude: PR title + body
-  jobs/<id>/log.jsonl               harness events + Claude stream-json
-  jobs.json                         run history
+```sh
+scripts/install.sh                         # build dist/ in the checkout
+cargo test --workspace                     # harness + agentd tests
+(cd modules/agents/claude-code && node --test test/)
+(cd web && npm run dev)                    # UI dev server, proxies /api to 127.0.0.1:7878
+open 'http://127.0.0.1:5173/?mock=1'       # UI against an in-browser mock backend
 ```
 
 ## Run as a user service
@@ -83,10 +92,10 @@ is saved in Settings.
 ```ini
 # ~/.config/systemd/user/legion-harness.service
 [Unit]
-Description=legion-harness
+Description=Legion harness
 
 [Service]
-ExecStart=%h/Projects/legion-harness/target/release/legion-harness
+ExecStart=%h/.local/share/legion-harness/app/bin/legion-harness
 Environment=PATH=%h/.local/bin:%h/.local/share/mise/installs/claude/latest:/usr/bin
 Restart=on-failure
 

@@ -1,0 +1,89 @@
+# Legion harness architecture
+
+Legion harness turns a task (a GitHub issue today) into a pull request by running a coding agent
+inside a disposable microVM, with a web UI to watch, answer the agent's questions, and open a
+terminal in the VM.
+
+```
+ browser ──HTTP/WS──▶ legion-harness (host, Rust)
+                        │  modules: source · sandbox · mesh · agent · interfaces · publish
+                        │
+                        ├─ headscale (bundled, 127.0.0.1)          private mesh control plane
+                        ├─ tailscaled --tun=userspace (bundled)    the harness's own mesh node
+                        │        │ SOCKS5 127.0.0.1
+                        │        ▼
+                        │   ═══ private mesh (never the user's own tailnet) ═══
+                        │        │
+                        └─ msb run -d ─▶ microVM legion-<id>
+                                          ├─ tailscaled (bundled, static)   joins mesh at boot
+                                          ├─ legion-agentd :7070 (bundled)  events · pty · shutdown
+                                          │     └─ agent runner (module)    e.g. Claude Code via Agent SDK
+                                          └─ /workspace = git worktree (rw)
+```
+
+## Modules
+
+Every moving part is a module selected and configured in the harness (`~/.config/legion-harness/config.toml`,
+editable in Settings → Modules). A module kind has one active provider:
+
+| Kind | Providers (v1) | Responsibility |
+| --- | --- | --- |
+| `source` | `github` | List repositories and issues, fetch an issue for the prompt |
+| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules |
+| `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
+| `agent` | `claude-code` | Runner that speaks the Legion agent protocol inside the VM |
+| `interfaces` | `chat`, `terminal` (toggles) | Panels in the session view |
+| `publish` | `github-pr` | Commit on the host, push, open the pull request |
+
+## Session lifecycle
+
+1. **Create** – source module fetches the issue; the host creates a bare clone + git worktree on a
+   `legion/issue-<n>-<id>` branch; the harness writes the session directory (`session.json`, `token`,
+   `prompt.md`, `boot.sh`, mesh auth key).
+2. **Boot** – sandbox module runs `msb run -d` with the image command `sh /legion/boot.sh`. The boot
+   script starts `tailscaled`, joins the mesh (`--accept-dns=false`, so microsandbox's DNS-based
+   secret injection keeps working), then `exec`s `legion-agentd`.
+3. **Connect** – the harness waits until headscale reports the node online, then connects to
+   `ws://<mesh-ip>:7070/v1/events` through its SOCKS5 proxy, persists events, and fans them out to
+   browsers. agentd sends the initial prompt to the agent runner.
+4. **Interact** – the user watches the chat, answers questions (always multiple choice + "Other"),
+   sends follow-ups, and opens terminals (`/v1/pty`) — all over the mesh.
+5. **Publish** – "Create PR" (or autopilot when a turn ends with changes and no open question): agentd
+   shuts the runner down, the VM is removed, and the host commits, pushes and opens the PR with the
+   hardened publish step. The mesh node is deleted.
+
+## Mesh design
+
+- Headscale listens on `127.0.0.1`; VMs reach it as `http://host.microsandbox.internal:<port>`
+  (microsandbox `host` network profile).
+- The harness node is a separate userspace `tailscaled` (own state dir, socket under
+  `/run/user/<uid>/legion-harness/`, fixed UDP port, `--no-logs-no-support`). It never touches the
+  system tailscaled or the user's tailnet.
+- VMs get one narrow extra rule, `allow@<host-lan-ip>:udp:<harness-udp-port>`, so WireGuard
+  connects directly (≈1 ms) instead of through a public DERP relay. LAN access stays blocked.
+- Users: `harness` and `vms`. Policy: `harness@` may reach `vms@:*`; VMs cannot reach each other.
+- VM keys are single-use, ephemeral, 30-minute pre-auth keys; nodes are deleted on session end.
+
+## Trust boundaries
+
+- GitHub token: host only. Claude credential: host only, injected by microsandbox's TLS proxy for
+  `api.anthropic.com`; the guest sees a placeholder.
+- Git objects and worktree metadata are mounted read-only; publish treats VM output as untrusted.
+- agentd requires a per-session bearer token even inside the private mesh.
+- Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
+
+## Packaging
+
+`scripts/install.sh` produces a self-contained app directory (`LEGION_HOME`, default
+`~/.local/share/legion-harness/app`):
+
+```
+bin/legion-harness            host server
+bin/legion-agentd             static musl build (built in a rust:alpine microVM)
+vendor/headscale              pinned + sha256-verified (vendor/vendor.lock)
+vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified
+modules/agents/claude-code/   runner + production node_modules
+web/                          built UI
+```
+
+Nothing is downloaded at runtime.
