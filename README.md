@@ -1,9 +1,9 @@
-# claude-harness
+# legion-harness
 
 A small Rust harness with a web UI: connect GitHub, browse the open issues of any repository you can
 access, and send an issue to Claude Code. Each run:
 
-1. creates a fresh **git worktree** on a new `claude/issue-<n>-<id>` branch from the default branch,
+1. creates a fresh **git worktree** on a new `legion/issue-<n>-<id>` branch from the default branch,
 2. boots a **[microsandbox](https://microsandbox.dev) microVM** (libkrun/KVM, rootless) with that worktree
    mounted at `/workspace`,
 3. runs Claude Code headless inside the VM (`--dangerously-skip-permissions`, streamed live to the UI),
@@ -34,7 +34,7 @@ The web API has no login. It binds to `127.0.0.1` by default, rejects unexpected
 
 ```sh
 cargo build --release
-./target/release/claude-harness
+./target/release/legion-harness
 # open http://127.0.0.1:7878
 ```
 
@@ -57,8 +57,8 @@ All optional, via environment variables:
 | `HARNESS_MAX_PARALLEL` | `3` | Concurrent microVMs; further runs queue |
 | `HARNESS_MODEL` | Claude Code default | `--model` passed to Claude Code |
 | `HARNESS_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
-| `HARNESS_DATA_DIR` | `~/.local/share/claude-harness` | Bare clones, worktrees, job logs |
-| `HARNESS_CONFIG_DIR` | `~/.config/claude-harness` | Saved tokens (mode 0600) |
+| `HARNESS_DATA_DIR` | `~/.local/share/legion-harness` | Bare clones, worktrees, job logs |
+| `HARNESS_CONFIG_DIR` | `~/.config/legion-harness` | Saved tokens (mode 0600) |
 
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are honoured when no token
 is saved in Settings.
@@ -66,7 +66,7 @@ is saved in Settings.
 ## Layout on disk
 
 ```
-~/.local/share/claude-harness/
+~/.local/share/legion-harness/
   repos/<owner>/<repo>.git          bare clone shared by all runs of a repository
   worktrees/<owner>/<repo>/issue-*  one worktree per run (remove with "Clean up")
   jobs/<id>/in/{prompt.md,run.sh}   mounted read-only at /harness/in
@@ -78,12 +78,12 @@ is saved in Settings.
 ## Run as a user service
 
 ```ini
-# ~/.config/systemd/user/claude-harness.service
+# ~/.config/systemd/user/legion-harness.service
 [Unit]
-Description=claude-harness
+Description=legion-harness
 
 [Service]
-ExecStart=%h/Projects/claude-harness/target/release/claude-harness
+ExecStart=%h/Projects/legion-harness/target/release/legion-harness
 Environment=PATH=%h/.local/bin:%h/.local/share/mise/installs/claude/latest:/usr/bin
 Restart=on-failure
 
@@ -92,5 +92,5 @@ WantedBy=default.target
 ```
 
 ```sh
-systemctl --user daemon-reload && systemctl --user enable --now claude-harness
+systemctl --user daemon-reload && systemctl --user enable --now legion-harness
 ```
