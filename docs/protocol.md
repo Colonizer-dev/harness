@@ -400,6 +400,10 @@ Provider keys never enter colonies.
 - Connection failure: `502` `api_error` with `x-colonizer-fallback: unreachable`. No response headers within
   `timeout_secs`: `504` with `x-colonizer-fallback: timeout`. A response body silent for `timeout_secs`
   is ended.
+- For a `text/event-stream` response, a silence of 15 s between provider bytes gets a `: keep-alive\n\n`
+  comment line (ignored by any SSE parser) instead of ending the body; this covers a long, silent GGUF
+  prefill. Pings don't reset the `timeout_secs` deadline, so a provider that never sends a real byte still
+  times out. Non-SSE bodies are never pinged.
 - Errors use the Anthropic error shape so Claude Code reports them normally.
 - A colony with a request in flight through the gateway counts as making progress for the watchdog.
 
