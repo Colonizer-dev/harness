@@ -221,7 +221,7 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str) -> String {
     if !s.instructions.trim().is_empty() {
         let _ = writeln!(p, "Additional instructions from the maintainer who started this session:\n{}\n", s.instructions.trim());
     }
-    if !s.autopilot {
+    if !s.autopilot || s.issue.is_none() {
         let _ = writeln!(
             p,
             "A maintainer is following this session live. When a decision is genuinely theirs to make, ask them \
@@ -240,7 +240,8 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str) -> String {
          4. Don't leave build artifacts, logs or scratch files in /workspace unless .gitignore covers them.\n\
          5. When you're done, write the pull request description to /harness/out/pr.md: the first line is a concise \
             PR title (no leading '#'), then a blank line, then a Markdown body covering what changed and why, how you \
-            verified it, and anything reviewers should look at closely.\n\
+            verified it, and anything reviewers should look at closely. Don't add attribution, \"Generated with\" or \
+            co-author lines: Colonizer signs the commit and the pull request.\n\
          6. If the task is unclear, already done, or shouldn't be changed, leave /workspace untouched and explain \
             why in /harness/out/pr.md.\n"
     );
@@ -252,11 +253,29 @@ pub enum Published {
     PullRequest(String),
 }
 
+const COLONIZER_CO_AUTHOR: &str = "Co-Authored-By: Colonizer <noreply@colonizer.dev>";
+
+/// A colony only ever publishes its own `colonizer/` branch, never the base branch.
+pub fn check_publish_branch(branch: &str, base: &str) -> Result<()> {
+    let own = branch.strip_prefix("colonizer/").is_some_and(|rest| !rest.is_empty());
+    if !own || branch.eq_ignore_ascii_case(base) {
+        bail!("refusing to push `{branch}`: colonies only publish their own colonizer/ branch");
+    }
+    Ok(())
+}
+
+/// Identifies the current `pr.md` (a non-empty regular file), so autopilot can tell whether a turn wrote it.
+pub fn pr_description_mark(out: &FsPath) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::symlink_metadata(out.join("pr.md")).ok().filter(|m| m.is_file() && m.len() > 0)?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 /// Commits the worktree on the host, pushes the branch and opens the pull request.
 /// The microVM must already be gone: everything it left behind is treated as untrusted data.
-pub async fn publish(app: &App, s: &Session, agent_name: &str, log: &SessionLogger) -> Result<Published> {
+pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Published> {
     let admin = PathBuf::from(s.git_admin_dir.as_deref().context("session has no worktree yet")?);
     let base = s.base.clone().context("session has no base branch")?;
+    check_publish_branch(&s.branch, &base)?;
     let wt = PathBuf::from(&s.worktree);
     let bare = app.bare_repo(&s.repo);
     let session_dir = app.session_dir(&s.id);
@@ -281,14 +300,11 @@ pub async fn publish(app: &App, s: &Session, agent_name: &str, log: &SessionLogg
     let login = viewer["login"].as_str().unwrap_or("colonizer");
     let name = viewer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
     let email = format!("{}+{login}@users.noreply.github.com", viewer["id"]);
-    let mut trailers = Vec::new();
-    if let Some(number) = s.issue {
-        trailers.push(format!("Refs #{number}"));
-    }
-    if agent_name.contains("Claude") {
-        trailers.push("Co-Authored-By: Claude <noreply@anthropic.com>".to_string());
-    }
-    let trailer = if trailers.is_empty() { format!("Colonizer session {}", s.id) } else { trailers.join("\n\n") };
+    let reference = match s.issue {
+        Some(number) => format!("Refs #{number}"),
+        None => format!("Colonizer session {}", s.id),
+    };
+    let trailer = format!("{reference}\n\n{COLONIZER_CO_AUTHOR}");
     exec(
         wt_git()
             .arg("-c").arg(format!("user.name={name}"))
@@ -307,7 +323,7 @@ pub async fn publish(app: &App, s: &Session, agent_name: &str, log: &SessionLogg
     exec(app.git(&bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
 
     let body_path = session_dir.join("pr-body.md");
-    tokio::fs::write(&body_path, compose_pr_body(&body, s.issue, agent_name)).await?;
+    tokio::fs::write(&body_path, compose_pr_body(&body, s.issue)).await?;
     let draft = app.modules.read().await.publish.settings.get("draft").and_then(Value::as_bool).unwrap_or(false);
     let mut create = app.gh([
         "pr", "create", "-R", s.repo.as_str(), "--base", base.as_str(),
@@ -393,8 +409,28 @@ fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
     (title, body)
 }
 
-fn compose_pr_body(body: &str, issue: Option<u64>, agent_name: &str) -> String {
-    let mut out = body.trim().to_string();
+/// Agents sign the end of their PR description ("Generated with Claude Code", co-author lines); Colonizer signs
+/// the pull request instead. Only that trailing signature block is removed.
+fn strip_agent_attribution(body: &str) -> String {
+    let mut lines: Vec<&str> = body.trim_end().lines().collect();
+    while let Some(line) = lines.last() {
+        let trimmed = line.trim();
+        let words = trimmed.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).to_lowercase();
+        let signature = trimmed.is_empty()
+            || trimmed == "---"
+            || words.starts_with("co-authored-by:")
+            || words.starts_with("generated with [claude code]")
+            || words.starts_with("generated with claude code");
+        if !signature {
+            break;
+        }
+        lines.pop();
+    }
+    lines.join("\n").trim().to_string()
+}
+
+fn compose_pr_body(body: &str, issue: Option<u64>) -> String {
+    let mut out = strip_agent_attribution(body);
     if let Some(number) = issue {
         let lower = out.to_lowercase();
         let reference = format!("#{number}");
@@ -405,7 +441,7 @@ fn compose_pr_body(body: &str, issue: Option<u64>, agent_name: &str) -> String {
             out.push_str(&format!("Closes {reference}"));
         }
     }
-    out.push_str(&format!("\n\n---\n🤖 Generated with {agent_name} in a microVM by Colonizer\n"));
+    out.push_str("\n\n---\n🤖 Generated by [Colonizer](https://colonizer.dev) in a microVM\n");
     out
 }
 
@@ -475,4 +511,55 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
     ]))
     .await?;
     Ok(Json(serde_json::from_str(&out)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::short_id;
+
+    #[test]
+    fn publishes_only_the_colonys_own_branch() {
+        assert!(check_publish_branch("colonizer/issue-5-4a4ff109", "main").is_ok());
+        for branch in ["main", "master", "colonizer/", "feature/x", "Colonizer-dev/main"] {
+            assert!(check_publish_branch(branch, "main").is_err(), "{branch}");
+        }
+        assert!(check_publish_branch("colonizer/release", "Colonizer/Release").is_err());
+    }
+
+    #[test]
+    fn pr_description_mark_tracks_a_non_empty_regular_file() {
+        let dir = std::env::temp_dir().join(format!("colonizer-github-test-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pr = dir.join("pr.md");
+        assert_eq!(pr_description_mark(&dir), None);
+        std::fs::write(&pr, "").unwrap();
+        assert_eq!(pr_description_mark(&dir), None);
+        std::fs::write(&pr, "Title\n\nBody").unwrap();
+        let first = pr_description_mark(&dir);
+        assert!(first.is_some());
+        std::fs::write(&pr, "Title\n\nA longer body").unwrap();
+        assert_ne!(pr_description_mark(&dir), first);
+        std::fs::remove_file(&pr).unwrap();
+        let target = dir.join("secret");
+        std::fs::write(&target, "not a PR description").unwrap();
+        std::os::unix::fs::symlink(&target, &pr).unwrap();
+        assert_eq!(pr_description_mark(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pr_body_is_signed_by_colonizer_not_the_agent() {
+        let body = "Change\n\n---\nCo-Authored-By: Claude <noreply@anthropic.com>\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n";
+        let out = compose_pr_body(body, Some(5));
+        assert!(!out.to_lowercase().contains("claude"), "{out}");
+        assert!(out.starts_with("Change\n\nCloses #5"), "{out}");
+        assert!(out.contains("Generated by [Colonizer]"), "{out}");
+    }
+
+    #[test]
+    fn attribution_inside_the_description_is_kept() {
+        let body = "Fixtures generated with the claude-api mock.\n\n```\nCo-Authored-By: Colonizer <noreply@colonizer.dev>\n```";
+        assert_eq!(strip_agent_attribution(body), body);
+    }
 }

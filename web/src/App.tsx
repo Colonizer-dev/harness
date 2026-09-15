@@ -18,6 +18,7 @@ export function App() {
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() => stored("colonizer.session"));
   const [interfaces, setInterfaces] = useState<InterfaceFlags>({ chat: true, terminal: true });
+  const [autopilotDefault, setAutopilotDefault] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
@@ -62,6 +63,8 @@ export function App() {
   }, [api]);
 
   const applyModules = useCallback((modules: ModuleInfo[]) => {
+    const publish = modules.find((m) => m.kind === "publish");
+    setAutopilotDefault((publish?.settings?.autopilot ?? publish?.schema?.properties?.autopilot?.default) === true);
     const module = modules.find((m) => m.kind === "interfaces");
     if (!module || !module.enabled) {
       setInterfaces({ chat: true, terminal: true });
@@ -169,6 +172,7 @@ export function App() {
       view={view}
       onOpenMemory={openMemory}
       pendingMemory={pendingMemory}
+      autopilotDefault={autopilotDefault}
     />
   );
 

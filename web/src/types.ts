@@ -11,9 +11,9 @@ export type SessionStatus =
   | "stopped"
   | "failed";
 
-export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted";
+export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted" | "autopilot_held";
 
-/** Set by the watchdog (§6.3); cleared by the next agent event. */
+/** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
   reason: AttentionReason;
   since: string;

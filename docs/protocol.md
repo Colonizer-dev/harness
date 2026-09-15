@@ -142,9 +142,9 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on) |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default) |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
-| `POST /api/sessions/{id}/publish` | Stop the agent, commit, push, open PR |
+| `POST /api/sessions/{id}/publish` | Stop the agent, commit (co-authored by Colonizer), push the colony's own `colonizer/…` branch (never the base or default branch), open PR |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
@@ -335,14 +335,21 @@ settings `enabled` = true, `require_review` = true). `Session` gains `last_activ
 `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held", "since": "…", "nudges": 2}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
 `stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
-`nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. Any new
-agent event clears `attention`.
+`nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
+autopilot colony whose turn ends with an error (not an interrupt) is not published and gets
+`autopilot_held`. Any new agent event clears `attention`; a disabled watchdog clears only the reasons
+it sets itself.
+
+**Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
+error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn
+ended. An unchanged `pr.md` from an earlier turn doesn't publish a colony the maintainer is still
+talking to.
 
 ### 6.4 UI additions
 

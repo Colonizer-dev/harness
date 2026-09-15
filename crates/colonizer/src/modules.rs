@@ -136,6 +136,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             "GitHub pull request",
             "Commit on the host, push the branch and open a pull request",
             json!({"type": "object", "properties": {
+                "autopilot": {"type": "boolean", "title": "Open the PR automatically", "description": "Default for new colonies: when the agent finishes cleanly and has written its PR description, push its colonizer/ branch and open the pull request. Can be switched off per colony at launch.", "default": true},
                 "draft": {"type": "boolean", "title": "Open as draft", "default": false}
             }}),
         )],

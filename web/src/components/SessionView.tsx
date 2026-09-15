@@ -189,6 +189,9 @@ export function SessionView({
             {attention.reason === "nudges_exhausted" && (
               <span className="opacity-80">Check the terminal, message the agent, or stop the colony.</span>
             )}
+            {attention.reason === "autopilot_held" && (
+              <span className="opacity-80">The agent's turn ended with an error. Check the chat, then press Create PR or message the agent.</span>
+            )}
           </div>
         )}
         {session.error && (

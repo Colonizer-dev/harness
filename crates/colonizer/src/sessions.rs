@@ -6,7 +6,7 @@
 
 use crate::{
     client_error,
-    config::{setting, setting_str, setting_u64},
+    config::{setting, setting_str, setting_u64, ModulesConfig},
     github, memory,
     modules::{schema_for, AgentModule},
     orgs, providers, resolve_claude_bin,
@@ -124,6 +124,9 @@ pub struct Runtime {
     last_seq: AtomicU64,
     logs: Mutex<VecDeque<Value>>,
     open_question: Mutex<Option<String>>,
+    /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
+    pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
+    interrupted: std::sync::atomic::AtomicBool,
     stop: watch::Sender<bool>,
     file_lock: Mutex<()>,
     events_path: PathBuf,
@@ -158,6 +161,8 @@ impl Runtime {
             last_seq: AtomicU64::new(last_seq),
             logs: Mutex::new(logs),
             open_question: Mutex::new(None),
+            pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
+            interrupted: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
             file_lock: Mutex::new(()),
             events_path,
@@ -288,8 +293,37 @@ pub struct NewSession {
     title: String,
     #[serde(default)]
     instructions: String,
+    /// Omitted uses the publish module's `autopilot` setting.
     #[serde(default)]
-    autopilot: bool,
+    autopilot: Option<bool>,
+}
+
+fn autopilot_default(app: &App, modules: &ModulesConfig) -> bool {
+    let schema = schema_for("publish", &modules.publish.provider, &app.agents);
+    setting(&modules.publish, &schema, "autopilot").and_then(Value::as_bool).unwrap_or(false)
+}
+
+#[derive(Debug, PartialEq)]
+enum Autopilot {
+    Publish,
+    Wait(&'static str),
+    /// Flags the colony for the maintainer.
+    Hold(&'static str),
+}
+
+/// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
+fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
+    if open_question {
+        Autopilot::Wait("a question is open")
+    } else if interrupted {
+        Autopilot::Wait("the turn was interrupted")
+    } else if errored {
+        Autopilot::Hold("the agent's turn ended with an error")
+    } else if !pr_written {
+        Autopilot::Wait("the agent didn't write or update its PR description this turn")
+    } else {
+        Autopilot::Publish
+    }
 }
 
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
@@ -356,7 +390,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         mesh: None,
         local_port: None,
         agent: agent.id.clone(),
-        autopilot: req.autopilot,
+        autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app, &modules)),
         pr_url: None,
         error: None,
         cost_usd: None,
@@ -763,10 +797,31 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
             })
             .await
             {
-                let finished_cleanly = !event["is_error"].as_bool().unwrap_or(false) && rt.open_question.lock().await.is_none();
-                if s.autopilot && s.status.is_live() && finished_cleanly {
-                    app.session_log(id, "info", "autopilot: the agent finished its turn, publishing".into()).await;
-                    tokio::spawn(publish_session(app.clone(), id.to_string()));
+                let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
+                let pr_written = {
+                    let mut last = rt.pr_mark.lock().await;
+                    let written = mark.is_some() && *last != mark;
+                    *last = mark;
+                    written
+                };
+                let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
+                if s.autopilot && s.status.is_live() {
+                    let errored = event["is_error"].as_bool().unwrap_or(false);
+                    let open_question = rt.open_question.lock().await.is_some();
+                    match autopilot_step(errored, interrupted, open_question, pr_written) {
+                        Autopilot::Publish => {
+                            app.session_log(id, "info", "autopilot: the agent finished and wrote its PR description, publishing".into()).await;
+                            tokio::spawn(publish_session(app.clone(), id.to_string()));
+                        }
+                        Autopilot::Wait(reason) => app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}")).await,
+                        Autopilot::Hold(reason) => {
+                            app.session_log(id, "warn", format!("autopilot: not publishing, {reason}; press Create PR when the work is ready")).await;
+                            app.update_session(id, |x| {
+                                x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                            })
+                            .await;
+                        }
+                    }
                 }
             }
         }
@@ -844,6 +899,14 @@ async fn teardown_vm(app: &Shared, s: &Session) {
 }
 
 pub async fn publish_session(app: Shared, id: String) {
+    // Checked before claiming and tearing down, so a refused push leaves the colony running.
+    let Some(current) = app.session(&id).await else { return };
+    if let Err(e) = github::check_publish_branch(&current.branch, current.base.as_deref().unwrap_or_default()) {
+        let message = format!("{e:#}");
+        app.session_log(&id, "error", format!("not publishing: {message}")).await;
+        app.update_session(&id, |x| x.error = Some(message)).await;
+        return;
+    }
     let Some((s, claimed)) = app
         .update_session(&id, |x| {
             let allowed = (x.status.is_live() || x.status == SessionStatus::Stopped) && !x.cleaned_up && x.git_admin_dir.is_some();
@@ -863,8 +926,7 @@ pub async fn publish_session(app: Shared, id: String) {
     let log = app.logger(&id);
     log.info("publishing: stopping the agent and removing the microVM").await;
     teardown_vm(&app, &s).await;
-    let agent_name = app.agents.iter().find(|a| a.id == s.agent).map(|a| a.name.clone()).unwrap_or_else(|| s.agent.clone());
-    match github::publish(&app, &s, &agent_name, &log).await {
+    match github::publish(&app, &s, &log).await {
         Ok(github::Published::NoChanges) => {
             app.update_session(&id, |x| x.status = SessionStatus::NoChanges).await;
         }
@@ -1141,7 +1203,10 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
                 "response": command.get("response").cloned().unwrap_or(Value::Null),
             })
         }
-        Some("interrupt") => json!({"type": "interrupt"}),
+        Some("interrupt") => {
+            rt.interrupted.store(true, Ordering::SeqCst);
+            json!({"type": "interrupt"})
+        }
         _ => return,
     };
     let _ = rt.commands.send(forward);
@@ -1213,4 +1278,20 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
     }
     let _ = up_tx.close().await;
     let _ = down_tx.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
+        // (errored, interrupted, open_question, pr_written)
+        assert_eq!(autopilot_step(false, false, false, true), Autopilot::Publish);
+        assert!(matches!(autopilot_step(false, false, false, false), Autopilot::Wait(_)));
+        assert!(matches!(autopilot_step(false, false, true, true), Autopilot::Wait(_)));
+        assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
+        assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
+        assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+    }
 }
