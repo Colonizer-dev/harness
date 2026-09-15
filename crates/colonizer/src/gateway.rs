@@ -37,6 +37,10 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const FORWARD_HEADERS: [&str; 3] = ["content-type", "accept", "anthropic-version"];
 const DROP_RESPONSE_HEADERS: [&str; 6] = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "content-length"];
+/// How long an SSE response may go silent before the gateway sends a comment line to keep the
+/// connection (and any byte-level idle watchdog downstream) alive during a long prefill.
+const SSE_PING_INTERVAL: Duration = Duration::from_secs(15);
+const SSE_PING: &[u8] = b": keep-alive\n\n";
 
 /// Counts up while alive; used for in-flight and queued requests.
 struct Counted(Arc<AtomicU64>);
@@ -159,6 +163,39 @@ fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallbac
     response
 }
 
+/// Busy/in-flight counters and the provider's concurrency permit, held for as long as the response body.
+type Guards = (Counted, Counted, Option<OwnedSemaphorePermit>);
+
+/// Streams `chunks` downstream, translating provider errors and enforcing `timeout` as an overall
+/// silence deadline. For an SSE response (`is_sse`), a `: keep-alive` comment line — ignored by any
+/// spec-compliant SSE parser — is sent every `SSE_PING_INTERVAL` of silence, so the connection and any
+/// byte-level idle watchdog downstream see activity through a long prefill. A ping doesn't reset the
+/// deadline: a provider that never produces a real byte still times out after `timeout`.
+fn stream_body(
+    chunks: impl futures_util::Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+    guards: Guards,
+    timeout: Duration,
+    is_sse: bool,
+) -> impl futures_util::Stream<Item = std::io::Result<Bytes>> {
+    let chunks = Box::pin(chunks);
+    // tokio::time::Instant (not std::time::Instant) so this respects a paused clock under test.
+    futures_util::stream::unfold((chunks, Some(guards), tokio::time::Instant::now()), move |(mut chunks, guards, silent_since)| async move {
+        guards.as_ref()?;
+        let remaining = timeout.saturating_sub(silent_since.elapsed());
+        if remaining.is_zero() {
+            return Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since)));
+        }
+        let wait = if is_sse { remaining.min(SSE_PING_INTERVAL) } else { remaining };
+        match tokio::time::timeout(wait, chunks.next()).await {
+            Ok(Some(Ok(chunk))) => Some((Ok(chunk), (chunks, guards, tokio::time::Instant::now()))),
+            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), (chunks, None, silent_since))),
+            Ok(None) => None,
+            Err(_) if is_sse && wait < remaining => Some((Ok(Bytes::from_static(SSE_PING)), (chunks, guards, silent_since))),
+            Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since))),
+        }
+    })
+}
+
 /// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`.
 fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> Option<String> {
     let clean = rest.starts_with('/')
@@ -278,18 +315,13 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
             response_headers.append(name.clone(), value.clone());
         }
     }
+    // A GGUF server can sit silent for minutes during prefill before its first SSE event; stream_body
+    // keeps the connection alive with comment lines in that case, which only makes sense for SSE:
+    // injecting bytes into a non-streaming JSON body would corrupt it.
+    let is_sse = response_headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("text/event-stream"));
     // The guards live as long as the body, so slots and activity cover the whole streamed response.
     let guards = (busy, in_flight, permit);
-    let chunks = Box::pin(upstream.bytes_stream());
-    let body = futures_util::stream::unfold((chunks, Some(guards)), move |(mut chunks, guards)| async move {
-        guards.as_ref()?;
-        match tokio::time::timeout(timeout, chunks.next()).await {
-            Ok(Some(Ok(chunk))) => Some((Ok(chunk), (chunks, guards))),
-            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), (chunks, None))),
-            Ok(None) => None,
-            Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None))),
-        }
-    });
+    let body = stream_body(upstream.bytes_stream(), guards, timeout, is_sse);
     let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
@@ -403,5 +435,72 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    fn guards() -> Guards {
+        (Counted::new(&Default::default()), Counted::new(&Default::default()), None)
+    }
+
+    /// A mock provider stream that yields `items` spaced out by their delays.
+    fn delayed_chunks(items: Vec<(Duration, Bytes)>) -> impl futures_util::Stream<Item = reqwest::Result<Bytes>> {
+        futures_util::stream::unfold(items.into_iter(), |mut it| async move {
+            let (delay, chunk) = it.next()?;
+            tokio::time::sleep(delay).await;
+            Some((Ok(chunk), it))
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sse_streams_get_pinged_through_a_silent_prefill() {
+        let chunks = delayed_chunks(vec![
+            (Duration::ZERO, Bytes::from_static(b"event: message_start\n\n")),
+            // Long enough silence to cross two SSE_PING_INTERVAL (15s) ticks before the real byte.
+            (Duration::from_secs(40), Bytes::from_static(b"event: message_stop\n\n")),
+        ]);
+        let body = stream_body(chunks, guards(), Duration::from_secs(120), true);
+        tokio::pin!(body);
+
+        let mut pings = 0;
+        let mut reals = 0;
+        while let Some(chunk) = body.next().await {
+            if chunk.unwrap().as_ref() == SSE_PING {
+                pings += 1;
+            } else {
+                reals += 1;
+            }
+        }
+        assert_eq!(reals, 2, "both real chunks should still arrive");
+        assert_eq!(pings, 2, "one ping per 15s tick of the 40s silent gap, not reset by pings themselves");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_sse_responses_never_get_pinged() {
+        let chunks = delayed_chunks(vec![(Duration::from_secs(40), Bytes::from_static(b"{\"ok\":true}"))]);
+        let body = stream_body(chunks, guards(), Duration::from_secs(120), false);
+        tokio::pin!(body);
+        let chunk = body.next().await.unwrap().unwrap();
+        assert_eq!(chunk.as_ref(), b"{\"ok\":true}");
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_silent_past_the_overall_timeout_still_errors_despite_pings() {
+        let chunks = delayed_chunks(vec![(Duration::from_secs(600), Bytes::from_static(b"too late"))]);
+        let body = stream_body(chunks, guards(), Duration::from_secs(50), true);
+        tokio::pin!(body);
+        let mut pings = 0;
+        loop {
+            match body.next().await.unwrap() {
+                Ok(chunk) => {
+                    assert_eq!(chunk.as_ref(), SSE_PING);
+                    pings += 1;
+                }
+                Err(e) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+                    break;
+                }
+            }
+        }
+        assert!(pings >= 3, "expected pings while waiting, got {pings}");
     }
 }
