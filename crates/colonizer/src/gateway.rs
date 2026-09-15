@@ -167,10 +167,11 @@ fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallbac
 type Guards = (Counted, Counted, Option<OwnedSemaphorePermit>);
 
 /// Streams `chunks` downstream, translating provider errors and enforcing `timeout` as an overall
-/// silence deadline. For an SSE response (`is_sse`), a `: keep-alive` comment line — ignored by any
-/// spec-compliant SSE parser — is sent every `SSE_PING_INTERVAL` of silence, so the connection and any
-/// byte-level idle watchdog downstream see activity through a long prefill. A ping doesn't reset the
-/// deadline: a provider that never produces a real byte still times out after `timeout`.
+/// silence deadline. For an SSE response (`is_sse`), a `: keep-alive` comment — ignored by any
+/// spec-compliant SSE parser — is sent every `SSE_PING_INTERVAL` of silence between events, so the
+/// connection and any byte-level idle watchdog downstream see activity through a long prefill. A ping is
+/// never sent inside a partly forwarded event, where it would corrupt a field or end the event early. A
+/// ping doesn't reset the deadline: a provider that never produces a real byte still times out after `timeout`.
 fn stream_body(
     chunks: impl futures_util::Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
     guards: Guards,
@@ -179,21 +180,32 @@ fn stream_body(
 ) -> impl futures_util::Stream<Item = std::io::Result<Bytes>> {
     let chunks = Box::pin(chunks);
     // tokio::time::Instant (not std::time::Instant) so this respects a paused clock under test.
-    futures_util::stream::unfold((chunks, Some(guards), tokio::time::Instant::now()), move |(mut chunks, guards, silent_since)| async move {
+    let start = (chunks, Some(guards), tokio::time::Instant::now(), true);
+    futures_util::stream::unfold(start, move |(mut chunks, guards, silent_since, at_boundary)| async move {
         guards.as_ref()?;
         let remaining = timeout.saturating_sub(silent_since.elapsed());
         if remaining.is_zero() {
-            return Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since)));
+            return Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since, at_boundary)));
         }
-        let wait = if is_sse { remaining.min(SSE_PING_INTERVAL) } else { remaining };
+        let can_ping = is_sse && at_boundary;
+        let wait = if can_ping { remaining.min(SSE_PING_INTERVAL) } else { remaining };
         match tokio::time::timeout(wait, chunks.next()).await {
-            Ok(Some(Ok(chunk))) => Some((Ok(chunk), (chunks, guards, tokio::time::Instant::now()))),
-            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), (chunks, None, silent_since))),
+            Ok(Some(Ok(chunk))) => {
+                let boundary = if chunk.is_empty() { at_boundary } else { ends_sse_event(&chunk) };
+                Some((Ok(chunk), (chunks, guards, tokio::time::Instant::now(), boundary)))
+            }
+            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), (chunks, None, silent_since, at_boundary))),
             Ok(None) => None,
-            Err(_) if is_sse && wait < remaining => Some((Ok(Bytes::from_static(SSE_PING)), (chunks, guards, silent_since))),
-            Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since))),
+            Err(_) if can_ping && wait < remaining => Some((Ok(Bytes::from_static(SSE_PING)), (chunks, guards, silent_since, true))),
+            Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since, at_boundary))),
         }
     })
+}
+
+/// An SSE event ends with a blank line. An event boundary split across two chunks reads as "inside an
+/// event", which only skips a ping, never corrupts the stream.
+fn ends_sse_event(chunk: &[u8]) -> bool {
+    chunk.ends_with(b"\n\n") || chunk.ends_with(b"\r\n\r\n") || chunk.ends_with(b"\r\r")
 }
 
 /// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`.
@@ -481,6 +493,23 @@ mod tests {
         let chunk = body.next().await.unwrap().unwrap();
         assert_eq!(chunk.as_ref(), b"{\"ok\":true}");
         assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pings_never_land_inside_a_partly_forwarded_event() {
+        let chunks = delayed_chunks(vec![
+            (Duration::ZERO, Bytes::from_static(b"event: content_block_delta\ndata: {\"delta\":")),
+            (Duration::from_secs(40), Bytes::from_static(b"\"hi\"}\n\n")),
+            (Duration::from_secs(40), Bytes::from_static(b"event: message_stop\n\n")),
+        ]);
+        let body = stream_body(chunks, guards(), Duration::from_secs(120), true);
+        tokio::pin!(body);
+        let mut forwarded = Vec::new();
+        while let Some(chunk) = body.next().await {
+            forwarded.extend_from_slice(&chunk.unwrap());
+        }
+        let expected = b"event: content_block_delta\ndata: {\"delta\":\"hi\"}\n\n: keep-alive\n\n: keep-alive\n\nevent: message_stop\n\n";
+        assert_eq!(String::from_utf8_lossy(&forwarded), String::from_utf8_lossy(expected));
     }
 
     #[tokio::test(start_paused = true)]
