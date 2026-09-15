@@ -174,7 +174,7 @@ protocol on stdio, so an agent module can be written in anything.
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
 | `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
-| `publish` | GitHub pull request | review-comment follow-ups `PLANNED` |
+| `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve | semantic search `PLANNED` |
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 
