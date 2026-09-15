@@ -49,6 +49,9 @@ pub enum Decision {
     Clear,
 }
 
+/// Attention reasons the watchdog sets and may clear; others (such as `autopilot_held`) belong to their setter.
+const WATCHDOG_REASONS: [&str; 3] = ["stalled", "waiting_for_answer", "nudges_exhausted"];
+
 pub fn decide(
     settings: &WatchdogSettings,
     now: DateTime<Utc>,
@@ -57,7 +60,8 @@ pub fn decide(
     attention: Option<&str>,
 ) -> Decision {
     if !settings.enabled {
-        return if attention.is_some() { Decision::Clear } else { Decision::Nothing };
+        let ours = attention.is_some_and(|reason| WATCHDOG_REASONS.contains(&reason));
+        return if ours { Decision::Clear } else { Decision::Nothing };
     }
     match state {
         Observed::WaitingForAnswer => {
@@ -222,10 +226,12 @@ mod tests {
     }
 
     #[test]
-    fn disabled_watchdog_clears_attention() {
+    fn disabled_watchdog_clears_only_its_own_attention() {
         let settings = WatchdogSettings { enabled: false, ..SETTINGS };
         let activity = Activity::new(at(0));
         assert_eq!(decide(&settings, at(500), Observed::Working, &activity, None), Decision::Nothing);
         assert_eq!(decide(&settings, at(500), Observed::Working, &activity, Some("stalled")), Decision::Clear);
+        assert_eq!(decide(&settings, at(500), Observed::Other, &activity, Some("autopilot_held")), Decision::Nothing);
+        assert_eq!(decide(&SETTINGS, at(500), Observed::Other, &activity, Some("autopilot_held")), Decision::Nothing);
     }
 }

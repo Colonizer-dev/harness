@@ -930,8 +930,14 @@ export function createMockApi(): Api {
       provider: "github-pr",
       providers: [{ id: "github-pr", name: "GitHub pull request" }],
       enabled: true,
-      settings: { draft: false },
-      schema: { type: "object", properties: { draft: { type: "boolean", title: "Open PRs as drafts", default: false } } },
+      settings: { autopilot: true, draft: false },
+      schema: {
+        type: "object",
+        properties: {
+          autopilot: { type: "boolean", title: "Open the PR automatically", default: true },
+          draft: { type: "boolean", title: "Open PRs as drafts", default: false },
+        },
+      },
     },
   ];
 
@@ -982,7 +988,7 @@ export function createMockApi(): Api {
       const issue = ISSUES[body.repo]?.find((i) => i.number === issueNumber);
       const title = issueNumber == null ? "Open colony" : (body.title ?? issue?.title ?? `Issue #${issueNumber}`);
       const session = new MockSession(
-        { ...baseSession(id, body.repo, issueNumber, title), autopilot: Boolean(body.autopilot) },
+        { ...baseSession(id, body.repo, issueNumber, title), autopilot: body.autopilot ?? true },
         false,
         body.instructions ?? null,
       );
