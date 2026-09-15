@@ -62,9 +62,12 @@ Two settings layers sit next to the modules:
    browsers. agentd sends the initial prompt to the agent runner.
 4. **Interact** – the user watches the chat, answers questions (always multiple choice + "Other"),
    sends follow-ups, and opens terminals (`/v1/pty`) — all over the mesh.
-5. **Publish** – "Create PR" (or autopilot when a turn ends with changes and no open question): agentd
-   shuts the runner down, the VM is removed, and the host commits, pushes and opens the PR with the
-   hardened publish step. The mesh node is deleted.
+5. **Publish** – "Create PR", or autopilot (the `publish` module's `autopilot` setting, on by default)
+   when a turn ends without an error or open question and the agent wrote or updated `pr.md` during
+   it: agentd shuts the runner down, the VM is removed, and the host commits (co-authored by Colonizer),
+   pushes the colony's own `colonizer/…` branch and opens the PR with the hardened publish step. It
+   refuses to push anything else, checked before the VM is removed. A turn that ends with an error
+   (not an interrupt) holds autopilot and flags the colony (`autopilot_held`). The mesh node is deleted.
 
 ## Mesh design
 

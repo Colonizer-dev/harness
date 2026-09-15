@@ -64,6 +64,7 @@ export function Sidebar({
   view,
   onOpenMemory,
   pendingMemory,
+  autopilotDefault,
 }: {
   status: HarnessStatus | null;
   statusError: boolean;
@@ -82,6 +83,7 @@ export function Sidebar({
   view: MainView;
   onOpenMemory: () => void;
   pendingMemory: number;
+  autopilotDefault: boolean;
 }) {
   const api = useApi();
   const [tab, setTab] = useState<"sessions" | "new">(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
@@ -165,6 +167,7 @@ export function Sidebar({
             githubConnected={status?.github.connected ?? false}
             statusKnown={status !== null}
             onOpenSettings={onOpenSettings}
+            autopilotDefault={autopilotDefault}
             onCreated={(session) => {
               setTab("sessions");
               onCreated(session);
@@ -492,12 +495,14 @@ function NewSession({
   githubConnected,
   statusKnown,
   onOpenSettings,
+  autopilotDefault,
   onCreated,
 }: {
   org: string | null;
   githubConnected: boolean;
   statusKnown: boolean;
   onOpenSettings: () => void;
+  autopilotDefault: boolean;
   onCreated: (session: Session) => void;
 }) {
   const api = useApi();
@@ -640,7 +645,7 @@ function NewSession({
 
       {activeRepo && !showPicker && (
         <>
-          <OpenSessionRow repo={activeRepo} onCreated={onCreated} />
+          <OpenSessionRow repo={activeRepo} autopilotDefault={autopilotDefault} onCreated={onCreated} />
           <div className="flex items-center justify-between px-1 pt-3">
             <SectionLabel>Open issues</SectionLabel>
             {issues && <span className="text-[11.5px] text-faint">{issues.length}</span>}
@@ -667,6 +672,7 @@ function NewSession({
                 key={issue.number}
                 repo={activeRepo}
                 issue={issue}
+                autopilotDefault={autopilotDefault}
                 open={openIssue === issue.number}
                 onToggle={() => setOpenIssue(openIssue === issue.number ? null : issue.number)}
                 onCreated={onCreated}
@@ -679,17 +685,27 @@ function NewSession({
   );
 }
 
-function OpenSessionRow({ repo, onCreated }: { repo: string; onCreated: (session: Session) => void }) {
+function OpenSessionRow({
+  repo,
+  autopilotDefault,
+  onCreated,
+}: {
+  repo: string;
+  autopilotDefault: boolean;
+  onCreated: (session: Session) => void;
+}) {
   const api = useApi();
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [instructions, setInstructions] = useState("");
+  // null follows the server default until the switch is touched.
+  const [autopilot, setAutopilot] = useState<boolean | null>(null);
   const [starting, setStarting] = useState(false);
 
   const start = async () => {
     setStarting(true);
     try {
-      const session = await api.createSession({ repo, instructions: instructions.trim() || undefined });
+      const session = await api.createSession({ repo, instructions: instructions.trim() || undefined, autopilot: autopilot ?? undefined });
       toast(`Colony launched on ${repo}`);
       onCreated(session);
     } catch (error) {
@@ -732,6 +748,7 @@ function OpenSessionRow({ repo, onCreated }: { repo: string; onCreated: (session
         aria-label="Colony instructions"
         className={cx(inputClass, "resize-y text-[13px]")}
       />
+      <AutopilotSwitch checked={autopilot ?? autopilotDefault} onChange={setAutopilot} />
       <Button variant="primary" className="w-full" disabled={starting} onClick={start}>
         {starting ? <Spinner /> : <IconPlus size={15} />} Launch colony
       </Button>
@@ -755,12 +772,14 @@ function RepoRow({ name, meta, onClick }: { name: string; meta: string; onClick:
 function IssueRow({
   repo,
   issue,
+  autopilotDefault,
   open,
   onToggle,
   onCreated,
 }: {
   repo: string;
   issue: Issue;
+  autopilotDefault: boolean;
   open: boolean;
   onToggle: () => void;
   onCreated: (session: Session) => void;
@@ -768,7 +787,7 @@ function IssueRow({
   const api = useApi();
   const toast = useToast();
   const [instructions, setInstructions] = useState("");
-  const [autopilot, setAutopilot] = useState(false);
+  const [autopilot, setAutopilot] = useState<boolean | null>(null);
   const [starting, setStarting] = useState(false);
 
   const start = async () => {
@@ -779,7 +798,7 @@ function IssueRow({
         issue: issue.number,
         title: issue.title,
         instructions: instructions.trim() || undefined,
-        autopilot,
+        autopilot: autopilot ?? undefined,
       });
       toast(`Colony launched for #${issue.number}`);
       onCreated(session);
@@ -827,18 +846,24 @@ function IssueRow({
             aria-label="Extra instructions"
             className={cx(inputClass, "resize-y text-[13px]")}
           />
-          <div className="flex items-start gap-2.5">
-            <Switch checked={autopilot} onChange={setAutopilot} label="Autopilot" />
-            <span className="text-[12.5px] leading-snug">
-              <span className="font-medium text-text">Autopilot</span>
-              <span className="block text-muted">Open the PR automatically when the agent finishes with changes.</span>
-            </span>
-          </div>
+          <AutopilotSwitch checked={autopilot ?? autopilotDefault} onChange={setAutopilot} />
           <Button variant="primary" className="w-full" disabled={starting} onClick={start}>
             {starting ? <Spinner /> : <IconPlus size={15} />} Launch colony
           </Button>
         </div>
       )}
     </li>
+  );
+}
+
+function AutopilotSwitch({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <div className="flex items-start gap-2.5">
+      <Switch checked={checked} onChange={onChange} label="Autopilot" />
+      <span className="text-[12.5px] leading-snug">
+        <span className="font-medium text-text">Autopilot</span>
+        <span className="block text-muted">Open the PR automatically when the agent finishes and writes its PR description.</span>
+      </span>
+    </div>
   );
 }

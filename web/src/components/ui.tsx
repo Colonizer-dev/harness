@@ -153,6 +153,8 @@ export function attentionText(attention: Attention): string {
       return `Still stalled after ${n} nudge${n === 1 ? "" : "s"}`;
     case "waiting_for_answer":
       return "Waiting for your answer";
+    case "autopilot_held":
+      return "Autopilot held the PR";
     default:
       return "Needs attention";
   }
