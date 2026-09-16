@@ -388,6 +388,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { sessions::recover(&recovery).await });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
+    let queue = app.clone();
+    tokio::spawn(async move { sessions::run_queue(queue).await });
     tokio::spawn(watchdog::run(app.clone()));
     if app.modules.read().await.mesh_enabled() && app.cfg.assets.is_some() {
         let mesh_app = app.clone();
