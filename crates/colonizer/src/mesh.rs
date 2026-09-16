@@ -49,12 +49,24 @@ pub struct Node {
     pub ip: String,
 }
 
+/// Whether the mesh binaries were vendored for this platform. `scripts/fetch-vendor.sh` creates
+/// `vendor/tailscale/` whatever happens, so the directory existing proves nothing — only the three
+/// binaries do. Tailscale publishes no macOS `tailscaled` to vendor, so on a Mac this is false and
+/// colonies are reached on a loopback port instead.
+pub fn binaries_present(assets: &Path) -> bool {
+    [MESH_HEADSCALE, MESH_TAILSCALE, MESH_TAILSCALED].iter().all(|rel| assets.join(rel).exists())
+}
+
+const MESH_HEADSCALE: &str = "vendor/headscale";
+const MESH_TAILSCALE: &str = "vendor/tailscale/tailscale";
+const MESH_TAILSCALED: &str = "vendor/tailscale/tailscaled";
+
 impl Mesh {
     pub fn new(assets: &Path, data_dir: &Path, runtime_dir: &Path, ports: Ports) -> Self {
         Self {
-            headscale_bin: assets.join("vendor/headscale"),
-            tailscale_bin: assets.join("vendor/tailscale/tailscale"),
-            tailscaled_bin: assets.join("vendor/tailscale/tailscaled"),
+            headscale_bin: assets.join(MESH_HEADSCALE),
+            tailscale_bin: assets.join(MESH_TAILSCALE),
+            tailscaled_bin: assets.join(MESH_TAILSCALED),
             derp_map: assets.join("vendor/derpmap.yaml"),
             state_dir: data_dir.join("mesh"),
             runtime_dir: runtime_dir.to_path_buf(),

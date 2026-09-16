@@ -204,13 +204,17 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let (user, msb_version, claude_bin) = tokio::join!(github::viewer(&app), exec(&mut msb), resolve_guest_claude_bin(&app.cfg));
     let cred = app.claude_cred();
     let modules = app.modules.read().await.clone();
-    let mesh = if modules.mesh_enabled() {
+    let mesh = if !modules.mesh_enabled() {
+        json!({"enabled": false, "provider": "none"})
+    } else if !app.cfg.assets.as_deref().is_some_and(mesh::binaries_present) {
+        // Not an error the operator can clear: this platform has no mesh binaries to vendor.
+        json!({"enabled": true, "provider": "headscale", "state": "unavailable",
+               "error": "no mesh binaries for this platform; colonies use a loopback port"})
+    } else {
         match app.mesh().await {
             Ok(mesh) => mesh.status().await,
             Err(e) => json!({"enabled": true, "provider": "headscale", "state": "error", "error": format!("{e:#}")}),
         }
-    } else {
-        json!({"enabled": false, "provider": "none"})
     };
     let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
@@ -412,7 +416,13 @@ async fn main() -> Result<()> {
     let queue = app.clone();
     tokio::spawn(async move { sessions::run_queue(queue).await });
     tokio::spawn(watchdog::run(app.clone()));
-    if app.modules.read().await.mesh_enabled() && app.cfg.assets.is_some() {
+    let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
+    if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
+        // Retrying would never help: no mesh binary is published for this platform, so there is
+        // nothing for another `scripts/install.sh` to fetch. Colonies use a loopback port instead.
+        println!("mesh: no mesh binaries for this platform; colonies will use a loopback port");
+    }
+    if app.modules.read().await.mesh_enabled() && mesh_vendored {
         let mesh_app = app.clone();
         tokio::spawn(async move {
             let mut delay = Duration::from_secs(2);

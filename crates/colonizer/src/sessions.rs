@@ -538,7 +538,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     // The private mesh needs the vendored tailscale, which has no macOS build yet. Without it a colony
     // is reached on a loopback port rather than failing to boot.
-    let mesh_on = modules.mesh_enabled() && app.cfg.asset("vendor/tailscale").is_ok();
+    let mesh_on = modules.mesh_enabled()
+        && app.cfg.assets.as_deref().is_some_and(crate::mesh::binaries_present);
     if modules.mesh_enabled() && !mesh_on {
         app.session_log(id, "warn", "the private mesh is unavailable on this platform; using a loopback port".into()).await;
     }
