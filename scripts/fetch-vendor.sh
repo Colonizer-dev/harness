@@ -8,6 +8,16 @@ cache="$root/vendor/cache"
 out="$root/dist/vendor"
 mkdir -p "$cache" "$out/tailscale"
 
+# GNU calls it sha256sum, macOS ships shasum. Both print "<hash>  <file>".
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+verify() { [ -f "$1" ] && [ "$(sha256_of "$1")" = "$2" ]; }
+
 found=0
 while read -r name version plat kind sha url; do
   case "$name" in ''|'#'*) continue ;; esac
@@ -15,12 +25,12 @@ while read -r name version plat kind sha url; do
   [ "$plat" = "$platform" ] || [ "$plat" = "any" ] || continue
   found=$((found + 1))
   file="$cache/$(basename "$url")"
-  if [ ! -f "$file" ] || ! echo "$sha  $file" | sha256sum -c --quiet - 2>/dev/null; then
+  if ! verify "$file" "$sha"; then
     echo "fetching $name $version"
     curl -fsSL --retry 3 -o "$file.part" "$url"
     mv "$file.part" "$file"
   fi
-  echo "$sha  $file" | sha256sum -c --quiet - || { echo "checksum mismatch for $name" >&2; rm -f "$file"; exit 1; }
+  verify "$file" "$sha" || { echo "checksum mismatch for $name" >&2; rm -f "$file"; exit 1; }
   case "$name" in
     headscale) install -m 755 "$file" "$out/headscale" ;;
     tailscale)
