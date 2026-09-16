@@ -269,16 +269,29 @@ It runs inside the colony and never on the mothership: repository content is att
 the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
 reported and treated as no findings — a broken scanner must not be able to halt every colony.
 
-### `POST /api/sandbox/pull`
+### `POST /api/sandbox/pull` and `GET /api/sandbox/pull`
 
-Downloads the configured colony image into microsandbox's local cache, so a launch boots instead of
-waiting on a registry. No body. Returns `{image, pulled, cached}`; `pulled` is `false` when the image
-was already there.
+Downloads the configured colony image (after the stack preset) into microsandbox's cache, so a launch
+boots instead of waiting on a registry. Settings calls `POST` when the sandbox module is saved, which
+is the moment a stack is chosen.
 
-A launch pulls a cold image itself, announcing it in the log first
-(`pulling <image> — this happens once per image, and can take a while`) and recording it as the
-`image-pull` phase. This endpoint exists so the download can happen when the stack is *chosen*
-rather than when the first colony is started.
+`POST` returns at once — a cold pull of `node:24-bookworm` measured 108 s, too long to hold a request
+open — and the download runs in the background. Calling it again while the same image is pulling
+returns the running pull rather than starting a second. `GET` returns the most recent status:
+
+```json
+{"image": "python:3.13-bookworm", "state": "pulling", "started_at": "…", "finished_at": null, "error": null}
+```
+
+`state` is `idle`, `cached` (already local, nothing done), `pulling`, `done` or `failed`.
+
+**There is no progress percentage.** `msb pull` draws its progress bar only on a terminal; piped, it
+prints one line when it has finished, and `--info` adds only migration logs. Scraping the bar through a
+pty would mean parsing an undocumented format that can change with any msb release, so the API reports
+what is actually known: the image, when it started, and how it ended.
+
+A launch still pulls a cold image itself if nothing got to it first, announcing it in the log and
+recording it as the `image-pull` phase.
 
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 

@@ -10,6 +10,7 @@ import type {
   ProviderHealth,
   ProviderLimits,
   ProviderPreset,
+  PullStatus,
   SchemaField,
 } from "../types";
 import { useModels } from "../useModels";
@@ -385,6 +386,132 @@ function valueOf(settings: Record<string, unknown>, key: string, field: SchemaFi
   return field.type === "boolean" ? false : "";
 }
 
+/**
+ * The colony image's download, kept off the launch path.
+ *
+ * A cold pull of the default image measured 108 s. Started here when a stack is
+ * saved, it happens while someone is looking at Settings instead of while their
+ * first colony sits on a spinner. Polls only while a pull is running.
+ */
+function useImagePull(active: boolean) {
+  const api = useApi();
+  const [status, setStatus] = useState<PullStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    let stop = false;
+    api
+      .sandboxPullStatus()
+      .then((s) => !stop && setStatus(s))
+      .catch(() => {});
+    return () => {
+      stop = true;
+    };
+  }, [active, api]);
+
+  useEffect(() => {
+    if (!active || status?.state !== "pulling") return;
+    const timer = setInterval(() => {
+      api
+        .sandboxPullStatus()
+        .then(setStatus)
+        .catch(() => {});
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [active, api, status?.state]);
+
+  const start = useCallback(async () => {
+    setError(null);
+    try {
+      setStatus(await api.sandboxPull());
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [api]);
+
+  return { status, error, start };
+}
+
+const seconds = (from: string | null, to?: string | null) => {
+  if (!from) return 0;
+  const end = to ? Date.parse(to) : Date.now();
+  return Math.max(0, Math.round((end - Date.parse(from)) / 1000));
+};
+
+function ImagePullRow({ pull }: { pull: ReturnType<typeof useImagePull> }) {
+  const { status, error, start } = pull;
+  // Re-render once a second while pulling so the elapsed time moves.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (status?.state !== "pulling") return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [status?.state]);
+
+  const line = (tone: string, body: ReactNode, action?: ReactNode) => (
+    <div className={cx("flex flex-wrap items-center gap-2 border-t border-border px-4 py-2.5 text-[12.5px]", tone)}>
+      <div className="min-w-0 flex-1">{body}</div>
+      {action}
+    </div>
+  );
+
+  if (error) {
+    return line("text-err", <>Could not start the download: {error}</>, <Button onClick={() => void start()}>Retry</Button>);
+  }
+  if (!status || status.state === "idle") {
+    return line(
+      "text-muted",
+      <>The colony image downloads on first use. Get it now so the first colony boots straight away.</>,
+      <Button onClick={() => void start()}>Download image</Button>,
+    );
+  }
+  if (status.state === "pulling") {
+    return (
+      <div className="border-t border-border px-4 py-2.5 text-[12.5px] text-muted">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <Spinner />
+          <span>
+            Downloading <code className="font-mono text-text">{status.image}</code> · {seconds(status.started_at)}s
+          </span>
+          <span className="text-faint">happens once per image</span>
+        </div>
+        {/* Indeterminate on purpose: msb reports no progress when it is not on a terminal. */}
+        <div className="h-1 overflow-hidden rounded-full bg-border" role="progressbar" aria-label={`Downloading ${status.image}`}>
+          <div className="pull-slide h-full w-1/3 rounded-full bg-accent" />
+        </div>
+      </div>
+    );
+  }
+  if (status.state === "failed") {
+    return line(
+      "text-err",
+      <>
+        Download of <code className="font-mono">{status.image}</code> failed{status.error ? `: ${status.error}` : ""}. A colony will
+        try again when it boots.
+      </>,
+      <Button onClick={() => void start()}>Retry</Button>,
+    );
+  }
+  const ready =
+    status.state === "cached" ? (
+      <>
+        <code className="font-mono text-text">{status.image}</code> is already on this machine.
+      </>
+    ) : (
+      <>
+        <code className="font-mono text-text">{status.image}</code> is ready · downloaded in {seconds(status.started_at, status.finished_at)}s.
+      </>
+    );
+  return line(
+    "text-muted",
+    <span className="inline-flex items-center gap-1.5">
+      <IconCheck size={13} className="text-ok" />
+      {ready}
+    </span>,
+  );
+}
+
 function ModuleCard({
   module,
   models,
@@ -400,6 +527,7 @@ function ModuleCard({
   const [enabled, setEnabled] = useState(module.enabled);
   const [settings, setSettings] = useState<Record<string, unknown>>(module.settings ?? {});
   const [saving, setSaving] = useState(false);
+  const pull = useImagePull(module.kind === "sandbox");
   const info = KIND_INFO[module.kind] ?? { title: module.kind, description: "" };
   const fields = Object.entries(module.schema?.properties ?? {});
   const dirty =
@@ -413,6 +541,8 @@ function ModuleCard({
       setSettings(saved.settings ?? {});
       onSaved(saved);
       toast(`${info.title} module saved`);
+      // Choosing a stack is the moment to download it, not the first launch.
+      if (module.kind === "sandbox") void pull.start();
     } catch (error) {
       toast(errorMessage(error), "error");
     } finally {
@@ -431,6 +561,7 @@ function ModuleCard({
         </div>
         <Switch checked={enabled} onChange={setEnabled} label={`Enable ${info.title} module`} />
       </div>
+      {module.kind === "sandbox" && <ImagePullRow pull={pull} />}
       <div className={cx("space-y-3 border-t border-border px-4 py-3", !enabled && "opacity-60")}>
         <label className="block space-y-1">
           <span className="text-[12.5px] font-medium text-muted">Provider</span>
