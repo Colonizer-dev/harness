@@ -4,15 +4,25 @@
   "name": "Claude Code",
   "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
   "protocol": "colonizer-runner/1",
-  "entry": ["node", "runner.mjs"],
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
   "requires": {
-    "binaries": ["claude"],
+    "binaries": [
+      "claude"
+    ],
     "image": "glibc + node >= 20"
   },
   "secrets": [
     {
-      "env": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-      "hosts": ["api.anthropic.com"]
+      "env": [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY"
+      ],
+      "hosts": [
+        "api.anthropic.com"
+      ]
     }
   ],
   "settings": {
@@ -43,7 +53,14 @@
         "type": "string",
         "title": "Effort",
         "description": "Reasoning effort. Empty uses the model default.",
-        "enum": ["", "low", "medium", "high", "xhigh", "max"],
+        "enum": [
+          "",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
         "default": "",
         "env": "COLONIZER_EFFORT"
       },
@@ -53,6 +70,32 @@
         "description": "If the agent ends a turn with a plain-text question, ask it once to re-ask with choices.",
         "default": true,
         "env": "COLONIZER_ENFORCE_CHOICES"
+      },
+      "plugins": {
+        "type": "string",
+        "title": "Plugin directories",
+        "description": "Comma-separated Claude Code plugin directories to load, read-only, from the mothership's plugins folder. Names only, no paths. Empty loads none.",
+        "default": "",
+        "env": "COLONIZER_PLUGIN_DIRS"
+      },
+      "scan": {
+        "type": "string",
+        "title": "Pre-flight scan",
+        "description": "Scan the repository inside the colony before the agent starts. 'warn' reports findings and carries on; 'block' ends the colony when the scanner exits non-zero. Advisory, not a security boundary: the boundary is the microVM, the publish step and your review of the pull request.",
+        "enum": [
+          "off",
+          "warn",
+          "block"
+        ],
+        "default": "off",
+        "env": "COLONIZER_SCAN"
+      },
+      "scan_command": {
+        "type": "string",
+        "title": "Scanner command",
+        "description": "Command to run for the pre-flight scan, resolved inside the colony \u2014 for example a scanner mounted through 'Plugin directories'. Split on whitespace and run without a shell. Empty means no scan runs.",
+        "default": "",
+        "env": "COLONIZER_SCAN_COMMAND"
       }
     }
   }

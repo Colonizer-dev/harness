@@ -15,9 +15,11 @@ mod memory;
 mod mesh;
 mod modules;
 mod orgs;
+mod presets;
 mod providers;
 mod sandbox;
 mod sessions;
+mod timing;
 mod util;
 mod watchdog;
 
@@ -291,7 +293,7 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = Settings::from_env()?;
-    for dir in ["sessions", "repos", "worktrees", "memory"] {
+    for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
     let mut sessions: Vec<Session> = std::fs::read(cfg.data_dir.join("sessions.json"))
@@ -332,6 +334,7 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
+        .route("/api/sandbox/pull", post(sandbox::pull_configured))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
         .route("/api/providers/{id}/health", get(gateway::health))

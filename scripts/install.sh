@@ -1,14 +1,25 @@
 #!/bin/sh
 # Builds a self-contained Colonizer app directory. Nothing is downloaded at runtime.
 #
-#   scripts/install.sh             build everything into ./dist (run the harness from the checkout)
-#   scripts/install.sh --install   also install to ~/.local/share/colonizer/app and
-#                                  link ~/.local/bin/colonizer
+#   scripts/install.sh              build everything into ./dist (run the harness from the checkout)
+#   scripts/install.sh --install    also install to ~/.local/share/colonizer/app and
+#                                   link ~/.local/bin/colonizer
+#   scripts/install.sh --pull-image also download the default colony image now, so the
+#                                   first colony boots instead of waiting on a download
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 dist="$root/dist"
 install_app=0
-[ "${1:-}" = "--install" ] && install_app=1
+pull_image=0
+# Opt-in on purpose: the colony image is gigabytes, and an installer that
+# downloads that much without being asked is not a good guest on a laptop.
+for arg in "$@"; do
+  case "$arg" in
+    --install) install_app=1 ;;
+    --pull-image) pull_image=1 ;;
+    *) echo "unknown option: $arg" >&2; exit 1 ;;
+  esac
+done
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
 for c in cargo npm node git gh curl tar sha256sum; do need "$c"; done
@@ -62,4 +73,12 @@ if [ "$install_app" = 1 ]; then
   echo "installed: run 'colonizer' and open http://127.0.0.1:7878"
 else
   echo "built: run '$dist/bin/colonizer' and open http://127.0.0.1:7878"
+fi
+
+# The colony image is the one large thing that otherwise arrives lazily, during
+# the first launch, with nothing on screen to explain the wait.
+if [ "$pull_image" = 1 ]; then
+  image=${COLONIZER_IMAGE:-node:24-bookworm}
+  echo "==> pulling colony image $image"
+  "$dist/vendor/microsandbox/bin/msb" pull "$image"
 fi

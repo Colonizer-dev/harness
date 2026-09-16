@@ -22,6 +22,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/bin/colonizer-agentd` | ro | Static agentd binary |
 | `/opt/colonizer/tailscale/{tailscale,tailscaled}` | ro | Static tailscale binaries |
 | `/opt/colonizer/agent/` | ro | Active agent module directory |
+| `/opt/colonizer/plugins/<name>/` | ro | Claude Code plugin directories, one per entry in `COLONIZER_PLUGIN_DIRS`. Absent when none are configured |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
@@ -50,6 +51,35 @@ must be ignored (forward compatibility).
 agentd spawns `agent.command` with `cwd = workspace`, the VM environment plus `agent.env`, stdin/stdout
 piped, stderr captured as `log` events (level `warn`). Right after spawning, if `initial_prompt` is
 non-empty, agentd writes a `user_message` command with `id: "initial"`.
+
+A question travels browser ⇄ harness ⇄ agentd ⇄ runner, and the same four hops carry the answer
+back:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as browser
+  participant H as harness (host)
+  participant A as agentd (VM :7070)
+  participant R as runner (module)
+
+  H->>A: POST /v1/message
+  A->>R: {"type":"user_message"}
+  R-->>A: {"type":"status","state":"working"}
+  A-->>H: events over the mesh (WebSocket)
+  H-->>B: /api/sessions/{id}/events
+
+  R-->>A: {"type":"question", options 2-4}
+  R-->>A: {"type":"status","state":"waiting_for_answer"}
+  A-->>H: question
+  H-->>B: choice card
+
+  B->>H: chosen label, or "Other" free text
+  H->>A: POST /v1/answer
+  A->>R: {"type":"answer"}
+  R-->>A: {"type":"question_answered"}
+  R-->>A: {"type":"turn_end","is_error":false}
+```
 
 ### Commands (agentd → runner stdin)
 
@@ -178,9 +208,56 @@ missing values mean the `default`.
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "error": null, "cost_usd": 0.42, "cleaned_up": false,
+  "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
 }
 ```
+
+`boot_timing` is where the last launch's time went, filled in when the colony finishes booting and
+replaced on resume. The phases are consecutive spans in boot order and partition the launch, so they
+sum to at most `total_ms`:
+
+| Phase | Covers |
+| :--- | :--- |
+| `issue` | Fetching the issue and resolving the base branch |
+| `git` | Syncing the bare clone and laying down the worktree |
+| `providers` | Health probes for the model providers this colony will use |
+| `mesh-start` | Starting the mesh and minting the colony's pre-auth key |
+| `image-pull` | Downloading the colony image, when it was not in the local cache. Near zero once it is |
+| `vm-boot` | `msb run`. The pull is its own phase above, unless it failed and `msb run` had to do it |
+| `mesh-join` | Waiting for the node to come up in headscale |
+| `agentd` | Waiting for the agent daemon to answer `/v1/health` |
+
+The same breakdown is written to the colony's log as one line
+(`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
+reads the API.
+
+### Pre-flight scan
+
+With `COLONIZER_SCAN` set to `warn` or `block` and `COLONIZER_SCAN_COMMAND` naming a scanner, the
+runner scans `/workspace` before the agent sees it. Findings arrive as `log` events. In `block` mode a
+non-zero exit ends the colony with `status error` before the first prompt; the microVM is still up, so
+the terminal remains reachable.
+
+**This is advisory, not a security boundary.** A repository's own `.claude/settings.json` hooks and
+`.mcp.json` servers already run inside colonies by design. The boundary is the microVM, the publish
+step's sanitizing, and a human reading the pull request. What a scan protects is the task outcome —
+prompt injection steering the agent into work nobody asked for.
+
+It runs inside the colony and never on the mothership: repository content is attacker-controlled, and
+the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
+reported and treated as no findings — a broken scanner must not be able to halt every colony.
+
+### `POST /api/sandbox/pull`
+
+Downloads the configured colony image into microsandbox's local cache, so a launch boots instead of
+waiting on a registry. No body. Returns `{image, pulled, cached}`; `pulled` is `false` when the image
+was already there.
+
+A launch pulls a cold image itself, announcing it in the log first
+(`pulling <image> — this happens once per image, and can take a while`) and recording it as the
+`image-pull` phase. This endpoint exists so the download can happen when the stack is *chosen*
+rather than when the first colony is started.
 
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 
@@ -241,6 +318,9 @@ Runner environment set by the mothership:
 | `COLONIZER_SUBAGENT_MODEL` | Default model for subagents (maps to `CLAUDE_CODE_SUBAGENT_MODEL`) |
 | `COLONIZER_BACKGROUND_MODEL` | Model for background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
+| `COLONIZER_SCAN` | `off` (default), `warn` or `block`. Pre-flight scan of the workspace before the agent starts |
+| `COLONIZER_SCAN_COMMAND` | The scanner to run, resolved **inside the colony**. Split on whitespace and run without a shell. Empty means no scan runs |
+| `COLONIZER_PLUGIN_DIRS` | Comma-separated **in-VM** plugin directories. The mothership resolves the configured names under its own plugins folder, mounts each read-only, and rewrites this to the guest paths; the runner turns them into the SDK's `plugins: [{type:'local', path}]`. Empty or absent loads none |
 
 ```json
 [{"provider": "deepseek", "prefix": "deepseek/", "base_url": "https://api.deepseek.com/anthropic",
