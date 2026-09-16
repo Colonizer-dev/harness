@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
+import { runPreflight, shouldBlock } from './preflight.mjs';
 import { routeEnv, routingPlan, startRouter } from './router.mjs';
 
 export const SYSTEM_PROMPT_APPEND = [
@@ -486,6 +487,15 @@ async function main() {
     routes: plan.routes,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
+
+  // Before the agent sees the workspace, not after. In block mode a finding
+  // ends the colony here, with the terminal still reachable for a human.
+  const scan = await runPreflight({ env: process.env, emit });
+  if (shouldBlock(scan)) {
+    emit({ type: 'status', state: 'error', detail: 'pre-flight scan blocked this colony' });
+    await router?.close();
+    process.exit(0);
+  }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
   await runAgent({ query, commands, emit, options, enforceChoices });
