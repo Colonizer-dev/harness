@@ -549,6 +549,43 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         Mount { source: app.cfg.asset("bin/colonizer-agentd")?, target: "/opt/colonizer/bin/colonizer-agentd".into(), read_only: true },
         Mount { source: agent.dir.clone(), target: "/opt/colonizer/agent".into(), read_only: true },
     ];
+    // Claude Code plugin directories, mounted read-only from the mothership.
+    //
+    // Outside /workspace on purpose: publish runs `git add -A`, so a plugin
+    // staged inside the worktree would be committed into the pull request.
+    // Read-only so one colony cannot edit what the next one loads — the same
+    // reason memory scopes are read-only.
+    //
+    // A setting names a directory, never a path: it is resolved under the
+    // mothership's plugins folder, so it cannot reach an arbitrary host path.
+    let plugin_names: Vec<String> = runner_env
+        .get("COLONIZER_PLUGIN_DIRS")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .split(',')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if !plugin_names.is_empty() {
+        let root = app.cfg.data_dir.join("plugins");
+        let mut targets = Vec::new();
+        for name in &plugin_names {
+            if !crate::util::is_plain_name(name) {
+                bail!("plugin directory {name:?} must be a plain name under {}", root.display());
+            }
+            let source = root.join(name);
+            if !source.is_dir() {
+                bail!("plugin directory {name:?} is not in {}", root.display());
+            }
+            let target = format!("/opt/colonizer/plugins/{name}");
+            mounts.push(Mount { source, target: target.clone(), read_only: true });
+            targets.push(target);
+        }
+        // The runner only ever sees in-VM paths, never the mothership's.
+        runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
+        log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
+    }
+
     if memory_on {
         for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
             // Mount points must exist inside the read-only /colonizer mount.

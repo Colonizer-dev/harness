@@ -293,7 +293,7 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = Settings::from_env()?;
-    for dir in ["sessions", "repos", "worktrees", "memory"] {
+    for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
     let mut sessions: Vec<Session> = std::fs::read(cfg.data_dir.join("sessions.json"))
