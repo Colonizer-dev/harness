@@ -207,9 +207,28 @@ missing values mean the `default`.
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "error": null, "cost_usd": 0.42, "cleaned_up": false,
+  "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
 }
 ```
+
+`boot_timing` is where the last launch's time went, filled in when the colony finishes booting and
+replaced on resume. The phases are consecutive spans in boot order and partition the launch, so they
+sum to at most `total_ms`:
+
+| Phase | Covers |
+| :--- | :--- |
+| `issue` | Fetching the issue and resolving the base branch |
+| `git` | Syncing the bare clone and laying down the worktree |
+| `providers` | Health probes for the model providers this colony will use |
+| `mesh-start` | Starting the mesh and minting the colony's pre-auth key |
+| `vm-boot` | `msb run`, **including the image pull when the image is not local yet** |
+| `mesh-join` | Waiting for the node to come up in headscale |
+| `agentd` | Waiting for the agent daemon to answer `/v1/health` |
+
+The same breakdown is written to the colony's log as one line
+(`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
+reads the API.
 
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 
