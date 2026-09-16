@@ -506,6 +506,7 @@ function NewSession({
   onCreated: (session: Session) => void;
 }) {
   const api = useApi();
+  const toast = useToast();
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [repoQuery, setRepoQuery] = useState("");
@@ -515,6 +516,8 @@ function NewSession({
   const [issuesError, setIssuesError] = useState<string | null>(null);
   const [issueQuery, setIssueQuery] = useState("");
   const [openIssue, setOpenIssue] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [launching, setLaunching] = useState(false);
 
   const inOrg = (name: string) => !org || sameOrg(name.split("/")[0], org);
   // A remembered repository from another org doesn't belong in this workspace.
@@ -538,6 +541,7 @@ function NewSession({
     let cancelled = false;
     setIssues(null);
     setIssuesError(null);
+    setSelected(new Set());
     api
       .issues(activeRepo)
       .then((list) => !cancelled && setIssues(list))
@@ -588,6 +592,57 @@ function NewSession({
   const matchingIssues = (issues ?? []).filter(
     (i) => !issueFilter || i.title.toLowerCase().includes(issueFilter) || String(i.number).includes(issueFilter),
   );
+
+  const toggleSelected = (number: number, on: boolean) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (on) {
+        next.add(number);
+      } else {
+        next.delete(number);
+      }
+      return next;
+    });
+
+  // One colony per issue, launched in the order they appear. Past the parallel limit the harness
+  // queues them, so a batch is a plan rather than a burst.
+  const launchSelected = async () => {
+    if (!activeRepo) return;
+    const batch = matchingIssues.filter((i) => selected.has(i.number));
+    setLaunching(true);
+    let started = 0;
+    let queued = 0;
+    const failures: string[] = [];
+    let last: Session | null = null;
+    for (const issue of batch) {
+      try {
+        const session = await api.createSession({
+          repo: activeRepo,
+          issue: issue.number,
+          title: issue.title,
+          autopilot: autopilotDefault,
+        });
+        if (session.status === "queued") {
+          queued += 1;
+        } else {
+          started += 1;
+        }
+        last = session;
+      } catch (error) {
+        failures.push(`#${issue.number}: ${errorMessage(error)}`);
+      }
+    }
+    setLaunching(false);
+    setSelected(new Set());
+    const summary = [started > 0 ? `${started} started` : null, queued > 0 ? `${queued} queued` : null].filter(Boolean).join(", ");
+    if (failures.length > 0) {
+      toast(`${summary || "Nothing launched"} · ${failures.length} failed — ${failures[0]}`, "error");
+    } else {
+      toast(`${batch.length} ${batch.length === 1 ? "colony" : "colonies"}: ${summary}`);
+    }
+    // The rest arrive with the sidebar's next poll; this one opens so there is something to watch.
+    if (last) onCreated(last);
+  };
 
   return (
     <div className="space-y-2 px-1">
@@ -650,6 +705,20 @@ function NewSession({
             <SectionLabel>Open issues</SectionLabel>
             {issues && <span className="text-[11.5px] text-faint">{issues.length}</span>}
           </div>
+          {selected.size > 0 && (
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-panel px-2.5 py-2 shadow-[var(--shadow)]">
+              <span className="min-w-0 flex-1 text-[12.5px]">
+                {selected.size} selected
+                <span className="block text-[11.5px] text-faint">one colony each, queued past the limit</span>
+              </span>
+              <Button size="sm" variant="ghost" disabled={launching} onClick={() => setSelected(new Set())}>
+                Clear
+              </Button>
+              <Button size="sm" variant="primary" disabled={launching} onClick={launchSelected}>
+                {launching ? <Spinner /> : <IconPlus size={14} />} Launch {selected.size}
+              </Button>
+            </div>
+          )}
           {issues && issues.length > 6 && (
             <input
               value={issueQuery}
@@ -673,6 +742,8 @@ function NewSession({
                 repo={activeRepo}
                 issue={issue}
                 autopilotDefault={autopilotDefault}
+                selected={selected.has(issue.number)}
+                onSelect={(on) => toggleSelected(issue.number, on)}
                 open={openIssue === issue.number}
                 onToggle={() => setOpenIssue(openIssue === issue.number ? null : issue.number)}
                 onCreated={onCreated}
@@ -773,6 +844,8 @@ function IssueRow({
   repo,
   issue,
   autopilotDefault,
+  selected,
+  onSelect,
   open,
   onToggle,
   onCreated,
@@ -780,6 +853,8 @@ function IssueRow({
   repo: string;
   issue: Issue;
   autopilotDefault: boolean;
+  selected: boolean;
+  onSelect: (on: boolean) => void;
   open: boolean;
   onToggle: () => void;
   onCreated: (session: Session) => void;
@@ -814,26 +889,47 @@ function IssueRow({
   };
 
   return (
-    <li className={cx("rounded-xl border transition-colors", open ? "border-border bg-panel shadow-[var(--shadow)]" : "border-transparent hover:bg-panel-2")}>
-      <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full cursor-pointer items-start gap-2 px-3 py-2.5 text-left">
-        <span className="mt-px shrink-0 font-mono text-[12px] text-faint">#{issue.number}</span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[13.5px] font-medium leading-snug">{issue.title}</span>
-          <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-faint">
-            {issue.labels.slice(0, 3).map((label) => (
-              <span key={label.name} className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 leading-4 text-muted">
-                <span
-                  className="size-1.5 rounded-full"
-                  style={{ background: /^[0-9a-f]{6}$/i.test(label.color) ? `#${label.color}` : "var(--faint)" }}
-                />
-                {label.name}
-              </span>
-            ))}
-            <span>{timeAgo(issue.updatedAt)}</span>
+    <li
+      className={cx(
+        "rounded-xl border transition-colors",
+        open || selected ? "border-border bg-panel shadow-[var(--shadow)]" : "border-transparent hover:bg-panel-2",
+      )}
+    >
+      <div className="flex items-start">
+        <label className="flex cursor-pointer items-start py-2.5 pl-3" title="Select for a batch launch">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(e) => onSelect(e.target.checked)}
+            aria-label={`Select issue #${issue.number} for a batch launch`}
+            className="mt-1 size-3.5 cursor-pointer accent-[var(--accent)]"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 py-2.5 pl-2 pr-3 text-left"
+        >
+          <span className="mt-px shrink-0 font-mono text-[12px] text-faint">#{issue.number}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[13.5px] font-medium leading-snug">{issue.title}</span>
+            <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-faint">
+              {issue.labels.slice(0, 3).map((label) => (
+                <span key={label.name} className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 leading-4 text-muted">
+                  <span
+                    className="size-1.5 rounded-full"
+                    style={{ background: /^[0-9a-f]{6}$/i.test(label.color) ? `#${label.color}` : "var(--faint)" }}
+                  />
+                  {label.name}
+                </span>
+              ))}
+              <span>{timeAgo(issue.updatedAt)}</span>
+            </span>
           </span>
-        </span>
-        <IconChevron size={14} className={cx("mt-1 shrink-0 text-faint transition-transform", open && "rotate-90")} />
-      </button>
+          <IconChevron size={14} className={cx("mt-1 shrink-0 text-faint transition-transform", open && "rotate-90")} />
+        </button>
+      </div>
       {open && (
         <div className="space-y-3 border-t border-border px-3 pb-3 pt-2.5">
           {issue.body?.trim() && (
