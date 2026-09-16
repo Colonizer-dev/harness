@@ -232,6 +232,22 @@ The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
 
+### Pre-flight scan
+
+With `COLONIZER_SCAN` set to `warn` or `block` and `COLONIZER_SCAN_COMMAND` naming a scanner, the
+runner scans `/workspace` before the agent sees it. Findings arrive as `log` events. In `block` mode a
+non-zero exit ends the colony with `status error` before the first prompt; the microVM is still up, so
+the terminal remains reachable.
+
+**This is advisory, not a security boundary.** A repository's own `.claude/settings.json` hooks and
+`.mcp.json` servers already run inside colonies by design. The boundary is the microVM, the publish
+step's sanitizing, and a human reading the pull request. What a scan protects is the task outcome —
+prompt injection steering the agent into work nobody asked for.
+
+It runs inside the colony and never on the mothership: repository content is attacker-controlled, and
+the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
+reported and treated as no findings — a broken scanner must not be able to halt every colony.
+
 ### `POST /api/sandbox/pull`
 
 Downloads the configured colony image into microsandbox's local cache, so a launch boots instead of
@@ -302,6 +318,8 @@ Runner environment set by the mothership:
 | `COLONIZER_SUBAGENT_MODEL` | Default model for subagents (maps to `CLAUDE_CODE_SUBAGENT_MODEL`) |
 | `COLONIZER_BACKGROUND_MODEL` | Model for background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
+| `COLONIZER_SCAN` | `off` (default), `warn` or `block`. Pre-flight scan of the workspace before the agent starts |
+| `COLONIZER_SCAN_COMMAND` | The scanner to run, resolved **inside the colony**. Split on whitespace and run without a shell. Empty means no scan runs |
 | `COLONIZER_PLUGIN_DIRS` | Comma-separated **in-VM** plugin directories. The mothership resolves the configured names under its own plugins folder, mounts each read-only, and rewrites this to the guest paths; the runner turns them into the SDK's `plugins: [{type:'local', path}]`. Empty or absent loads none |
 
 ```json
