@@ -217,12 +217,12 @@ Stated here rather than buried.
 - **Colony images need glibc.** The host's native Claude Code binary is mounted read-only into the microVM.
 - **Relays are Tailscale's.** Direct connections don't need them; when a colony falls back to a relay,
   encrypted traffic crosses Tailscale's public DERP servers.
-- **Not yet exercised end to end:** opening a pull request from a colony, and `install.sh --install`. Both
-  are implemented; neither has been run against the real world yet.
+- **`install.sh --install` is not exercised yet.** It is implemented, but it hasn't been run against the
+  real world. Colonies opening pull requests has been.
 - **Cross-provider subagents are off the beaten path.** Anthropic doesn't support routing Claude Code to
   non-Claude models. Routing and the gateway are tested with stub Anthropic-compatible providers inside
-  real colonies, not yet against DeepSeek's API or `ds4-server`, and Claude-specific request fields are
-  forwarded as they are.
+  real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
+  API, and Claude-specific request fields are forwarded as they are.
 - **Memory search is plain text matching**, not semantic search.
 - **No CI yet**, and nothing is published to crates.io or npm.
 
