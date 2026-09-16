@@ -200,7 +200,8 @@ dist/bin/colonizer           # open http://127.0.0.1:7878
 
 In **Settings**, connect GitHub (your `gh` login is picked up automatically) and press **Log in with
 Claude subscription**. Then **Launch** a colony on an issue, or on a repository with nothing but a
-sentence of instructions.
+sentence of instructions. Launch as many as you like: past the parallel limit (Settings → Modules →
+sandbox) a colony is queued, and starts on its own when one ahead of it finishes.
 
 `scripts/install.sh --install` additionally copies the app to `~/.local/share/colonizer/app` and links
 `~/.local/bin/colonizer`.

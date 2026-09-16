@@ -77,7 +77,10 @@ Two settings layers sit next to the modules:
 ```mermaid
 stateDiagram-v2
   direction LR
+  [*] --> Queued: past the parallel limit
   [*] --> Create
+  Queued --> Create: a slot frees up
+  Queued --> Stopped: left the queue
   Create --> Boot: worktree, session dir, mesh key
   Boot --> Connect: agentd up on the mesh
   Connect --> Interact: prompt sent
@@ -88,6 +91,10 @@ stateDiagram-v2
   Publish --> [*]: VM removed, then host commits and pushes
 ```
 
+0. **Queued** – a colony launched past the parallel limit (global, or the org's own) is created
+   `queued`: no worktree, no microVM, nothing claimed. Every five seconds the harness starts the oldest
+   queued colony that fits, so a queue drains on its own as colonies finish.
+   An org at its own limit doesn't hold up the colonies behind it, and leaving the queue is just Stop.
 1. **Create** – source module fetches the issue; the host creates a bare clone + git worktree on a
    `colonizer/issue-<n>-<id>` branch; the harness writes the session directory (`session.json`, `token`,
    `prompt.md`, `boot.sh`, mesh auth key).

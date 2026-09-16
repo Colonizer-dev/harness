@@ -53,6 +53,8 @@ const MAX_LOGS: usize = 200;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
+    /// Waiting for a free slot: no microVM, no worktree, nothing claimed yet.
+    Queued,
     Starting,
     Running,
     WaitingForAnswer,
@@ -330,6 +332,19 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
     }
 }
 
+/// Whether another colony can start right now. A queued colony holds no microVM, so it counts towards
+/// neither the global limit nor the org's.
+fn has_room(sessions: &[Session], org: &str, max_parallel: usize, org_limit: Option<u64>) -> bool {
+    let busy = |s: &&Session| s.status.is_live() || s.status == SessionStatus::Publishing;
+    if sessions.iter().filter(busy).count() >= max_parallel {
+        return false;
+    }
+    match org_limit {
+        Some(limit) => (sessions.iter().filter(busy).filter(|s| s.org == org).count() as u64) < limit,
+        None => true,
+    }
+}
+
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
@@ -348,25 +363,10 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
+    // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     let existing = app.sessions.read().await.clone();
-    let busy = |s: &&Session| s.status.is_live() || s.status == SessionStatus::Publishing;
-    let active = existing.iter().filter(busy).count();
-    if active >= max_parallel {
-        return Err(client_error(
-            StatusCode::CONFLICT,
-            &format!("{active} colonies are already running (limit {max_parallel}); stop one or raise the limit in Settings → Modules"),
-        ));
-    }
-    if let Some(limit) = orgs::org_max_parallel(&app.org_settings(owner)) {
-        let in_org = existing.iter().filter(busy).filter(|s| s.org == owner).count() as u64;
-        if in_org >= limit {
-            return Err(client_error(
-                StatusCode::CONFLICT,
-                &format!("{in_org} colonies are already running in {owner} (org limit {limit})"),
-            ));
-        }
-    }
+    let queued = !has_room(&existing, owner, max_parallel, orgs::org_max_parallel(&app.org_settings(owner)));
 
     let id = short_id();
     let slug = match req.issue {
@@ -385,7 +385,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         issue: req.issue,
         issue_title: title,
         instructions: truncate(req.instructions.trim(), 20_000),
-        status: SessionStatus::Starting,
+        status: if queued { SessionStatus::Queued } else { SessionStatus::Starting },
         branch: format!("colonizer/{slug}"),
         base: None,
         worktree: app.cfg.data_dir.join("worktrees").join(owner).join(name).join(&slug).display().to_string(),
@@ -411,7 +411,13 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     app.sessions.write().await.push(session.clone());
     app.persist_sessions().await;
     app.runtime(&id).await;
-    tokio::spawn(boot(app.clone(), id, false));
+    if queued {
+        let waiting = existing.iter().filter(|s| s.status == SessionStatus::Queued).count();
+        let ahead = if waiting == 0 { String::new() } else { format!(", behind {waiting} already waiting") };
+        app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}")).await;
+    } else {
+        tokio::spawn(boot(app.clone(), id, false));
+    }
     Ok(Json(session))
 }
 
@@ -1112,6 +1118,51 @@ pub async fn watch_sandboxes(app: Shared) {
     }
 }
 
+/// Starts queued colonies as slots free up, oldest first. A colony whose org is at its own limit doesn't
+/// hold up the ones behind it.
+pub async fn run_queue(app: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        start_queued(&app).await;
+    }
+}
+
+async fn start_queued(app: &Shared) {
+    let modules = app.modules.read().await.clone();
+    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    // Several slots can free at once, so keep going until nothing else fits.
+    loop {
+        let sessions = app.sessions.read().await.clone();
+        let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
+        waiting.sort_by_key(|s| s.created_at);
+        let Some(next) = waiting
+            .into_iter()
+            .find(|s| has_room(&sessions, &s.org, max_parallel, orgs::org_max_parallel(&app.org_settings(&s.org))))
+            .cloned()
+        else {
+            return;
+        };
+        // Claimed under the write lock, so two ticks can't start the same colony twice.
+        let claimed = app
+            .update_session(&next.id, |x| {
+                let queued = x.status == SessionStatus::Queued;
+                if queued {
+                    x.status = SessionStatus::Starting;
+                }
+                queued
+            })
+            .await
+            .is_some_and(|(_, queued)| queued);
+        if !claimed {
+            return;
+        }
+        app.session_log(&next.id, "info", "a slot came free; starting".into()).await;
+        tokio::spawn(boot(app.clone(), next.id.clone(), false));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // agentd transport
 // ---------------------------------------------------------------------------
@@ -1238,19 +1289,24 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
 }
 
 pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let Some((s, was_live)) = app
+    let Some((s, was)) = app
         .update_session(&id, |x| {
-            let live = x.status.is_live();
-            if live {
+            let was = x.status;
+            if was.is_live() || was == SessionStatus::Queued {
                 x.status = SessionStatus::Stopped;
             }
-            live
+            was
         })
         .await
     else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
-    if !was_live {
+    // A queued colony never started, so there is no microVM to remove.
+    if was == SessionStatus::Queued {
+        app.session_log(&id, "info", "left the queue before it started".into()).await;
+        return Ok(Json(app.session(&id).await.unwrap_or(s)));
+    }
+    if !was.is_live() {
         return Err(client_error(StatusCode::CONFLICT, "session is not running"));
     }
     app.session_log(&id, "info", "stopping: removing the microVM (the worktree is kept)".into()).await;
@@ -1461,6 +1517,62 @@ mod tests {
         assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
         assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
         assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+    }
+
+    fn colony(org: &str, status: SessionStatus) -> Session {
+        Session {
+            id: String::new(),
+            repo: format!("{org}/repo"),
+            org: org.into(),
+            issue: None,
+            issue_title: String::new(),
+            instructions: String::new(),
+            status,
+            branch: String::new(),
+            base: None,
+            worktree: String::new(),
+            git_admin_dir: None,
+            sandbox: String::new(),
+            mesh: None,
+            local_port: None,
+            agent: String::new(),
+            autopilot: false,
+            pr_url: None,
+            error: None,
+            cost_usd: None,
+            cleaned_up: false,
+            attention: None,
+            last_activity_at: None,
+            boot_timing: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn the_queue_waits_for_a_slot_and_queued_colonies_hold_none() {
+        let running = vec![
+            colony("acme", SessionStatus::Running),
+            colony("acme", SessionStatus::Idle),
+            colony("acme", SessionStatus::Publishing),
+        ];
+        assert!(!has_room(&running, "acme", 3, None), "publishing still holds its slot");
+        assert!(has_room(&running, "acme", 4, None));
+
+        // Queued and finished colonies are not occupying anything.
+        let waiting = vec![
+            colony("acme", SessionStatus::Queued),
+            colony("acme", SessionStatus::Queued),
+            colony("acme", SessionStatus::PrOpened),
+            colony("acme", SessionStatus::Stopped),
+            colony("acme", SessionStatus::Failed),
+        ];
+        assert!(has_room(&waiting, "acme", 1, None), "a queue of five holds no slots");
+
+        // An org limit applies on top of the global one, and only to that org.
+        let mixed = vec![colony("acme", SessionStatus::Running), colony("other", SessionStatus::Running)];
+        assert!(!has_room(&mixed, "acme", 5, Some(1)), "acme is at its own limit");
+        assert!(has_room(&mixed, "third", 5, Some(1)), "another org still has room");
     }
 
     #[test]
