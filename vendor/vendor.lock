@@ -5,3 +5,14 @@ tailscale    1.102.4   linux-x86_64  tgz     50748df1045e60b5b695f19f4c56b0da36c
 microsandbox 0.6.18    linux-x86_64  msb     b001b3c6b980ab1ffcceb817496648c1520dba36b9e0caac37ea8d2f4acd9bdd  https://github.com/microsandbox/microsandbox/releases/download/v0.6.18/microsandbox-linux-x86_64.tar.gz
 microsandbox 0.6.18    linux-aarch64 msb     e53098e7601fddd85af7e943d4af3d4370ace276d9e863a89456338f2d076d1b  https://github.com/microsandbox/microsandbox/releases/download/v0.6.18/microsandbox-linux-aarch64.tar.gz
 microsandbox 0.6.18    darwin-arm64  msb     1e8c40859142cd38fb99b301bdb1fb4095a985a4065d080f99b3a3e7cb9a6305  https://github.com/microsandbox/microsandbox/releases/download/v0.6.18/microsandbox-darwin-aarch64.tar.gz
+
+# Claude Code plugin directories, staged read-only into the app and loadable per
+# colony with the claude-code module's `plugins` setting. Platform `any`.
+#
+# ECC is github.com/affaan-m/ECC at tag v2.2.1, commit
+# 5064474d4d762dc9640234a41617cccb79185cec. MIT (LICENSE is staged with it).
+# Staging drops the whole hooks/ directory: see scripts/fetch-vendor.sh.
+#
+# If GitHub ever regenerates this archive the checksum fails loudly and the
+# pin has to be refreshed by hand, which is the correct failure.
+ecc          2.2.1     any           plugin  578c1ead4d8e6a50e3dd943f5a8069eeb04880ae09e186ee5d949c5190d7ab4c  https://codeload.github.com/affaan-m/ECC/tar.gz/refs/tags/v2.2.1
