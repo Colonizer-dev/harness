@@ -573,9 +573,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             if !crate::util::is_plain_name(name) {
                 bail!("plugin directory {name:?} must be a plain name under {}", root.display());
             }
-            let source = root.join(name);
+            // Two places, in this order: what the operator dropped in the data
+            // directory, then what shipped with the app. A local copy therefore
+            // overrides a vendored one of the same name, and neither can be
+            // named by a path.
+            let source = match root.join(name) {
+                local if local.is_dir() => local,
+                _ => app
+                    .cfg
+                    .asset(&format!("plugins/{name}"))
+                    .with_context(|| format!("plugin directory {name:?} is not in {}", root.display()))?,
+            };
             if !source.is_dir() {
-                bail!("plugin directory {name:?} is not in {}", root.display());
+                bail!("plugin {name:?} is not a directory");
             }
             let target = format!("/opt/colonizer/plugins/{name}");
             mounts.push(Mount { source, target: target.clone(), read_only: true });
@@ -583,6 +593,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
+        // Belt and braces for ECC, whose hooks are dropped at staging time. Its
+        // own flag is checked only after a hook process has already spawned, so
+        // this is the second line of defence, not the first.
+        env.push(("ECC_HOOKS_ENABLED".into(), "false".into()));
         log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
     }
 

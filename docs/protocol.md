@@ -232,6 +232,27 @@ The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
 
+### Plugin directories
+
+`COLONIZER_PLUGIN_DIRS` names directories the mothership resolves in two places, in order: what the
+operator put in `<data>/plugins/<name>`, then what shipped with the app in `<COLONIZER_HOME>/plugins/<name>`.
+A local copy therefore overrides a vendored one of the same name. Each is a plain name, never a path,
+and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
+
+`scripts/install.sh` stages one vendored plugin today:
+
+| Plugin | Source | Staged |
+| :--- | :--- | :--- |
+| `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE` — 8.2 MB of the 58 MB source |
+
+**ECC's hooks are not staged.** Its plugin manifest sets `userConfig.hooks_enabled` to `true` by
+default and Claude Code discovers `hooks/hooks.json` by convention, so "skills and agents only" cannot
+be expressed as a setting: every ECC hook is a `node -e` bootstrap that spawns first and reads
+`ECC_HOOKS_ENABLED` second. The staging step removes the directory, and `fetch-vendor.sh` fails if it
+survives. `ECC_HOOKS_ENABLED=false` is also set in any colony that loads a plugin, as a second line.
+
+Set `plugins` to `ecc` on the `claude-code` module to load it. Empty, the default, loads nothing.
+
 ### Pre-flight scan
 
 With `COLONIZER_SCAN` set to `warn` or `block` and `COLONIZER_SCAN_COMMAND` naming a scanner, the
