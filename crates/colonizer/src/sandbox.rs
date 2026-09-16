@@ -1,5 +1,7 @@
 //! Sandbox module: microsandbox provider.
 
+use axum::extract::State;
+
 use crate::util::{exec, mount_spec};
 use anyhow::{Context, Result};
 use std::{collections::HashSet, path::PathBuf};
@@ -76,4 +78,103 @@ pub async fn remove(msb: &str, name: &str) {
 pub async fn running(msb: &str) -> Result<HashSet<String>> {
     let out = exec(Command::new(msb).args(["ls", "--running", "--quiet"])).await?;
     Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+}
+
+/// Images already in the local cache, as `msb image list` reports them.
+///
+/// Used to decide whether a launch is about to pay for a download. A failure
+/// here is not fatal anywhere it is used: the worst case is pulling an image
+/// that was already cached, which `msb pull` turns into a no-op.
+pub async fn cached_images(msb: &str) -> Result<HashSet<String>> {
+    let out = exec(Command::new(msb).args(["image", "list"])).await?;
+    Ok(out
+        .lines()
+        .skip(1) // header
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect())
+}
+
+/// A bare `name` is cached as `name:latest`, so a lookup has to try both.
+fn matches_cache(image: &str, cached: &HashSet<String>) -> bool {
+    if cached.contains(image) {
+        return true;
+    }
+    if image.contains(':') {
+        false
+    } else {
+        cached.contains(&format!("{image}:latest"))
+    }
+}
+
+pub async fn is_cached(msb: &str, image: &str) -> bool {
+    // A cache check that fails is reported as "not cached": pulling an image
+    // that was already there is a no-op, but skipping a pull that was needed
+    // puts the download back on the launch path unannounced.
+    match cached_images(msb).await {
+        Ok(images) => matches_cache(image, &images),
+        Err(_) => false,
+    }
+}
+
+/// Downloads an image into the local cache. A no-op when it is already there.
+pub async fn pull(msb: &str, image: &str) -> Result<()> {
+    exec(Command::new(msb).args(["pull", "--quiet", image])).await?;
+    Ok(())
+}
+
+/// `POST /api/sandbox/pull` — download the configured colony image now.
+///
+/// Pulling is what turns a first launch from a multi-gigabyte wait into a boot.
+/// Exposed as its own call so Settings can warm an image when the stack is
+/// chosen, rather than leaving the download on the critical path of whichever
+/// colony happens to be started first.
+pub async fn pull_configured(State(app): State<crate::Shared>) -> crate::ApiResult<serde_json::Value> {
+    let modules = app.modules.read().await.clone();
+    let schema = crate::modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    let preset = crate::config::setting_str(&modules.sandbox, &schema, "preset");
+    let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
+    let image = crate::config::setting_str(&settings, &schema, "image");
+
+    if image.is_empty() {
+        return Err(crate::client_error(axum::http::StatusCode::BAD_REQUEST, "no colony image is configured"));
+    }
+    if is_cached(&app.cfg.msb, &image).await {
+        return Ok(axum::Json(serde_json::json!({ "image": image, "pulled": false, "cached": true })));
+    }
+    pull(&app.cfg.msb, &image)
+        .await
+        .map_err(|e| crate::client_error(axum::http::StatusCode::BAD_GATEWAY, &format!("{e:#}")))?;
+    Ok(axum::Json(serde_json::json!({ "image": image, "pulled": true, "cached": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_exact_reference_matches() {
+        assert!(matches_cache("node:24-bookworm", &cache(&["node:24-bookworm"])));
+    }
+
+    #[test]
+    fn a_bare_name_matches_the_latest_tag() {
+        assert!(matches_cache("python", &cache(&["python:latest"])));
+    }
+
+    #[test]
+    fn a_tagged_reference_does_not_fall_back_to_latest() {
+        // Asking for :24-bookworm and finding :latest is a different image.
+        assert!(!matches_cache("node:24-bookworm", &cache(&["node:latest"])));
+    }
+
+    #[test]
+    fn an_empty_cache_matches_nothing() {
+        assert!(!matches_cache("node:24-bookworm", &cache(&[])));
+    }
 }
