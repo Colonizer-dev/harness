@@ -27,7 +27,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "stop" | "cleanup";
+type Action = "publish" | "resume" | "stop" | "cleanup";
 
 export function SessionView({
   sessionId,
@@ -160,6 +160,16 @@ export function SessionView({
                 title="Stop the agent, commit, push and open the pull request"
               >
                 {busy === "publish" ? <Spinner /> : <IconGitPR size={15} />} Create PR
+              </Button>
+            )}
+            {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed") && (
+              <Button
+                variant="primary"
+                disabled={busy !== null}
+                onClick={() => act("resume", (a, id) => a.resumeSession(id))}
+                title="Boot a fresh microVM on this colony's worktree and continue where it stopped"
+              >
+                {busy === "resume" ? <Spinner /> : <IconPower size={15} />} Resume
               </Button>
             )}
             <Button

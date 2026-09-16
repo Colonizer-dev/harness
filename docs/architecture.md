@@ -68,6 +68,11 @@ Two settings layers sit next to the modules:
    pushes the colony's own `colonizer/…` branch and opens the PR with the hardened publish step. It
    refuses to push anything else, checked before the VM is removed. A turn that ends with an error
    (not an interrupt) holds autopilot and flags the colony (`autopilot_held`). The mesh node is deleted.
+6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
+   leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
+   a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM
+   on the same worktree and branch and tells the agent to continue from what is already there. The new
+   agentd numbers its events from 1, so the previous transcript is rotated to `events-<n>.jsonl` first.
 
 ## Mesh design
 

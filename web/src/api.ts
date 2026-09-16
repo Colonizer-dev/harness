@@ -53,6 +53,7 @@ export interface Api {
   session(id: string): Promise<Session>;
   createSession(body: NewSessionRequest): Promise<Session>;
   publishSession(id: string): Promise<Session>;
+  resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
   setGithubToken(token: string): Promise<{ login: string }>;
@@ -132,6 +133,7 @@ export const httpApi: Api = {
   session: (id) => request(`/api/sessions/${enc(id)}`),
   createSession: (body) => post("/api/sessions", body),
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
+  resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   setGithubToken: (token) => post("/api/settings/github-token", { token }),

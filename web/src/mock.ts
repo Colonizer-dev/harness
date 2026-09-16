@@ -995,6 +995,15 @@ export function createMockApi(): Api {
       sessions.set(id, session);
       return clone(session.session);
     },
+    resumeSession: async (id) => {
+      await sleep(250);
+      const s = find(id);
+      if (s.session.status !== "stopped" && s.session.status !== "failed") {
+        throw new ApiError("this colony can't be resumed", 409);
+      }
+      s.patch({ status: "starting", error: null });
+      return clone(s.session);
+    },
     publishSession: async (id) => {
       const s = find(id);
       if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
