@@ -279,6 +279,16 @@ come from the environment:
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
 
+A few things belong in neither the UI nor the environment. They live in `~/.config/colonizer/colonizer.toml`,
+which you write and Colonizer only reads — a missing file means the defaults:
+
+```toml
+[publish]
+# Colonizer signs the commit it publishes a colony's work as:
+#   Co-Authored-By: Colonizer <noreply@colonizer.dev>
+co_author = true
+```
+
 ## Development
 
 ```sh
