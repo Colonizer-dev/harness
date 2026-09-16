@@ -15,6 +15,7 @@ mod memory;
 mod mesh;
 mod modules;
 mod orgs;
+mod presets;
 mod providers;
 mod sandbox;
 mod sessions;
