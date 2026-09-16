@@ -299,3 +299,24 @@ test('tool result text handles strings, parts and short output', () => {
   assert.equal(toolResultText([{ type: 'text', text: 'a' }, { type: 'image' }]), 'a\n[image]');
   assert.equal(toolResultText(undefined), '');
 });
+
+test('plugin directories become local plugin entries, and are absent by default', () => {
+  // Default: nothing mounted, nothing loaded. A colony that was never told to
+  // load a plugin must not get one.
+  assert.equal(buildOptions({}).options.plugins, undefined);
+  assert.equal(buildOptions({ COLONIZER_PLUGIN_DIRS: '' }).options.plugins, undefined);
+  assert.equal(buildOptions({ COLONIZER_PLUGIN_DIRS: '  ,  ' }).options.plugins, undefined);
+
+  // The mothership has already rewritten these to in-VM paths.
+  const { options } = buildOptions({
+    COLONIZER_PLUGIN_DIRS: '/opt/colonizer/plugins/ecc, /opt/colonizer/plugins/house-style',
+  });
+  assert.deepEqual(options.plugins, [
+    { type: 'local', path: '/opt/colonizer/plugins/ecc' },
+    { type: 'local', path: '/opt/colonizer/plugins/house-style' },
+  ]);
+
+  // Loading a plugin must not quietly widen where settings come from: a
+  // project-scope install would land in the pull request.
+  assert.deepEqual(options.settingSources, ['project']);
+});
