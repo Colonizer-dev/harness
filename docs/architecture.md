@@ -4,21 +4,44 @@ Colonizer turns a task (a GitHub issue today) into a pull request by running a c
 inside a disposable microVM, with a web UI to watch, answer the agent's questions, and open a
 terminal in the VM.
 
-```
- browser ──HTTP/WS──▶ colonizer (host, Rust)
-                        │  modules: source · sandbox · mesh · agent · interfaces · publish
-                        │
-                        ├─ headscale (bundled, 127.0.0.1)          private mesh control plane
-                        ├─ tailscaled --tun=userspace (bundled)    the harness's own mesh node
-                        │        │ SOCKS5 127.0.0.1
-                        │        ▼
-                        │   ═══ private mesh (never the user's own tailnet) ═══
-                        │        │
-                        └─ msb run -d ─▶ microVM colonizer-<id>
-                                          ├─ tailscaled (bundled, static)   joins mesh at boot
-                                          ├─ colonizer-agentd :7070 (bundled)  events · pty · shutdown
-                                          │     └─ agent runner (module)    e.g. Claude Code via Agent SDK
-                                          └─ /workspace = git worktree (rw)
+```mermaid
+flowchart TB
+  browser["browser"]
+
+  subgraph mothership["mothership — your machine"]
+    direction TB
+    host["colonizer (Rust)<br/>source · sandbox · mesh<br/>agent · interfaces · publish"]
+    hs["headscale<br/>127.0.0.1 · control plane"]
+    ts["tailscaled --tun=userspace<br/>the harness's own mesh node"]
+    gw["provider gateway<br/>127.0.0.1:41750"]
+  end
+
+  mesh{{"private mesh<br/>never your own tailnet"}}
+
+  subgraph colony["microVM colonizer-&lt;id&gt;"]
+    direction TB
+    vmts["tailscaled (static)<br/>joins the mesh at boot"]
+    agentd["colonizer-agentd :7070<br/>events · pty · shutdown"]
+    runner["agent runner (module)<br/>Claude Code via the Agent SDK"]
+    ws["/workspace<br/>git worktree (rw)"]
+  end
+
+  browser -->|HTTP/WS| host
+  host --> hs
+  host --> ts
+  host --> gw
+  ts -->|SOCKS5| mesh
+  hs -.->|control| mesh
+  mesh --> vmts
+  vmts --> agentd
+  agentd --> runner
+  runner --> ws
+  runner -.->|"&lt;provider&gt;/&lt;model&gt;"| gw
+
+  classDef box fill:#12151d,stroke:#2a3040,color:#e7e9ef
+  classDef edge fill:#0f1218,stroke:#ff7b2c,color:#ff7b2c
+  class browser,host,hs,ts,gw,vmts,agentd,runner,ws box
+  class mesh edge
 ```
 
 ## Modules
@@ -32,7 +55,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
-| `interfaces` | `chat`, `terminal` (toggles) | Panels in the session view |
+| `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit on the host, push, open the pull request |
 | `memory` | `files` | Shared notes per repository, org and globally; agents propose, the user approves |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
@@ -50,6 +73,20 @@ Two settings layers sit next to the modules:
   and the watchdog. A colony belongs to its repository owner's org.
 
 ## Session lifecycle
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> Create
+  Create --> Boot: worktree, session dir, mesh key
+  Boot --> Connect: agentd up on the mesh
+  Connect --> Interact: prompt sent
+  Interact --> Interact: questions, follow-ups, terminals
+  Interact --> Publish: autopilot, or "Create PR"
+  Interact --> Stopped: microVM gone
+  Stopped --> Boot: Resume, same worktree
+  Publish --> [*]: VM removed, then host commits and pushes
+```
 
 1. **Create** – source module fetches the issue; the host creates a bare clone + git worktree on a
    `colonizer/issue-<n>-<id>` branch; the harness writes the session directory (`session.json`, `token`,

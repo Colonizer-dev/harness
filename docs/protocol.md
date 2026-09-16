@@ -51,6 +51,35 @@ agentd spawns `agent.command` with `cwd = workspace`, the VM environment plus `a
 piped, stderr captured as `log` events (level `warn`). Right after spawning, if `initial_prompt` is
 non-empty, agentd writes a `user_message` command with `id: "initial"`.
 
+A question travels browser ⇄ harness ⇄ agentd ⇄ runner, and the same four hops carry the answer
+back:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as browser
+  participant H as harness (host)
+  participant A as agentd (VM :7070)
+  participant R as runner (module)
+
+  H->>A: POST /v1/message
+  A->>R: {"type":"user_message"}
+  R-->>A: {"type":"status","state":"working"}
+  A-->>H: events over the mesh (WebSocket)
+  H-->>B: /api/sessions/{id}/events
+
+  R-->>A: {"type":"question", options 2-4}
+  R-->>A: {"type":"status","state":"waiting_for_answer"}
+  A-->>H: question
+  H-->>B: choice card
+
+  B->>H: chosen label, or "Other" free text
+  H->>A: POST /v1/answer
+  A->>R: {"type":"answer"}
+  R-->>A: {"type":"question_answered"}
+  R-->>A: {"type":"turn_end","is_error":false}
+```
+
 ### Commands (agentd → runner stdin)
 
 ```jsonc
