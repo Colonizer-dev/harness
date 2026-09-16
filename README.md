@@ -170,7 +170,7 @@ protocol on stdio, so an agent module can be written in anything.
 | Kind | Providers today | Next |
 | :--- | :--- | :--- |
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
-| `sandbox` | microsandbox (KVM microVMs) | other VMMs `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
 | `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
@@ -239,6 +239,7 @@ Stated here rather than buried.
 | Watchdog for stalled colonies ([#4](https://github.com/Colonizer-dev/harness/issues/4)) | `SHIPPING` |
 | Provider gateway: private-network models, queues, long timeouts, health, Claude fallback ([#5](https://github.com/Colonizer-dev/harness/issues/5)) | `SHIPPING` |
 | CI running the Rust, runner and UI test suites | `PLANNED` |
+| Local Claude Code plugins mounted read-only into colonies ([#6](https://github.com/Colonizer-dev/harness/issues/6)) | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |

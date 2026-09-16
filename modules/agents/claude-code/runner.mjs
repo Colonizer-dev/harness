@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
+import { runPreflight, shouldBlock } from './preflight.mjs';
 import { routeEnv, routingPlan, startRouter } from './router.mjs';
 
 export const SYSTEM_PROMPT_APPEND = [
@@ -141,6 +142,17 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     // No allowedTools entry: canUseTool already allows every tool except AskUserQuestion, and listing
     // them would make the SDK warn that canUseTool is shadowed.
     options.mcpServers = { [MEMORY_SERVER]: memoryServer };
+  }
+  // Plugin directories arrive already mounted read-only in the VM; the mothership
+  // rewrites COLONIZER_PLUGIN_DIRS to the in-VM paths. settingSources stays
+  // ['project'], so this is the only way a plugin reaches a colony — a user-scope
+  // install would be invisible, and a project-scope one would land in the PR.
+  const pluginDirs = (env.COLONIZER_PLUGIN_DIRS || '')
+    .split(',')
+    .map((dir) => dir.trim())
+    .filter(Boolean);
+  if (pluginDirs.length) {
+    options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
   }
   if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
   if (env.COLONIZER_EFFORT) {
@@ -475,6 +487,15 @@ async function main() {
     routes: plan.routes,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
+
+  // Before the agent sees the workspace, not after. In block mode a finding
+  // ends the colony here, with the terminal still reachable for a human.
+  const scan = await runPreflight({ env: process.env, emit });
+  if (shouldBlock(scan)) {
+    emit({ type: 'status', state: 'error', detail: 'pre-flight scan blocked this colony' });
+    await router?.close();
+    process.exit(0);
+  }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
   await runAgent({ query, commands, emit, options, enforceChoices });
