@@ -162,7 +162,7 @@ protocol on stdio, so an agent module can be written in anything.
 | [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
-| [`vendor`](vendor) | Pinned, sha256-verified Headscale and Tailscale, plus a DERP map snapshot | `SHIPPING` |
+| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, plus a DERP map snapshot | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build | `SHIPPING` |
 
 ## Modules
@@ -188,9 +188,9 @@ Claude when a provider is down or busy.
 
 ## Run it
 
-Linux x86_64 with `/dev/kvm` readable and writable by your user,
-[microsandbox](https://docs.microsandbox.dev), `git`, `gh`, Node.js ≥ 20, a Rust toolchain, and a native
-Claude Code install.
+Linux x86_64 with `/dev/kvm` readable and writable by your user, `git`, `gh`, Node.js ≥ 20, a Rust
+toolchain, and a native Claude Code install. [microsandbox](https://docs.microsandbox.dev) ships with
+the app like the mesh binaries, so there is nothing else to install.
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness && cd harness
