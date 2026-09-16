@@ -49,12 +49,24 @@ pub struct Node {
     pub ip: String,
 }
 
+/// Whether the mesh binaries were vendored for this platform. `scripts/fetch-vendor.sh` creates
+/// `vendor/tailscale/` whatever happens, so the directory existing proves nothing — only the three
+/// binaries do. Tailscale publishes no macOS `tailscaled` to vendor, so on a Mac this is false and
+/// colonies are reached on a loopback port instead.
+pub fn binaries_present(assets: &Path) -> bool {
+    [MESH_HEADSCALE, MESH_TAILSCALE, MESH_TAILSCALED].iter().all(|rel| assets.join(rel).exists())
+}
+
+const MESH_HEADSCALE: &str = "vendor/headscale";
+const MESH_TAILSCALE: &str = "vendor/tailscale/tailscale";
+const MESH_TAILSCALED: &str = "vendor/tailscale/tailscaled";
+
 impl Mesh {
     pub fn new(assets: &Path, data_dir: &Path, runtime_dir: &Path, ports: Ports) -> Self {
         Self {
-            headscale_bin: assets.join("vendor/headscale"),
-            tailscale_bin: assets.join("vendor/tailscale/tailscale"),
-            tailscaled_bin: assets.join("vendor/tailscale/tailscaled"),
+            headscale_bin: assets.join(MESH_HEADSCALE),
+            tailscale_bin: assets.join(MESH_TAILSCALE),
+            tailscaled_bin: assets.join(MESH_TAILSCALED),
             derp_map: assets.join("vendor/derpmap.yaml"),
             state_dir: data_dir.join("mesh"),
             runtime_dir: runtime_dir.to_path_buf(),
@@ -392,19 +404,44 @@ fn write_pid(path: &Path, pid: Option<u32>) {
     }
 }
 
+/// The executable behind a pid: `/proc` where there is one, `ps` otherwise. Not `cfg`-gated on purpose —
+/// one code path means the fallback macOS depends on is exercised on Linux too.
+fn exe_path(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok().or_else(|| exe_path_via_ps(pid))
+}
+
+/// macOS has no `/proc`, and its `ps` reports the executable's full path.
+fn exe_path_via_ps(pid: u32) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "comm="]).output().ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(path))
+}
+
+/// Whether a pid is still around. `kill -0` answers that everywhere.
+fn alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Kills a leftover process from a previous harness run, but only if it is the bundled binary.
 fn kill_stale(pid_file: &Path, bin: &Path) {
     let Some(pid) = std::fs::read_to_string(pid_file).ok().and_then(|p| p.trim().parse::<u32>().ok()) else { return };
     let expected = std::fs::canonicalize(bin).unwrap_or_else(|_| bin.to_path_buf());
-    let actual = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
-    let matches = actual.is_some_and(|exe| {
+    let matches = exe_path(pid).is_some_and(|exe| {
         let exe = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
         Path::new(&exe) == expected
     });
     if matches {
         let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
         for _ in 0..30 {
-            if !Path::new(&format!("/proc/{pid}")).exists() {
+            if !alive(pid) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -441,4 +478,23 @@ where
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     bail!("timed out after {}s", timeout.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `kill_stale` only kills a pid it can prove is the bundled binary, so both of its answers matter:
+    /// which executable a pid is, and whether it is still there. macOS gets the `ps` half.
+    #[test]
+    fn a_pid_can_be_identified_and_checked_without_proc() {
+        let me = std::process::id();
+        let via_ps = exe_path_via_ps(me).expect("ps knows about this process");
+        let name = via_ps.file_name().unwrap_or_default().to_string_lossy().to_string();
+        assert!(name.starts_with("colonizer"), "ps reported {via_ps:?}");
+
+        assert!(alive(me));
+        // A pid that cannot exist: the kernel's maximum is far below this.
+        assert!(!alive(u32::MAX - 1));
+    }
 }

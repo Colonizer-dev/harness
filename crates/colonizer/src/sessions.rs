@@ -9,7 +9,7 @@ use crate::{
     config::{setting, setting_str, setting_u64, ModulesConfig},
     github, memory,
     modules::{schema_for, AgentModule},
-    orgs, providers, resolve_claude_bin,
+    orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     util::{random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
     watchdog::Activity,
@@ -536,7 +536,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
-    let mesh_on = modules.mesh_enabled();
+    // The private mesh needs the vendored tailscale, which has no macOS build yet. Without it a colony
+    // is reached on a loopback port rather than failing to boot.
+    let mesh_on = modules.mesh_enabled()
+        && app.cfg.assets.as_deref().is_some_and(crate::mesh::binaries_present);
+    if modules.mesh_enabled() && !mesh_on {
+        app.session_log(id, "warn", "the private mesh is unavailable on this platform; using a loopback port".into()).await;
+    }
     let mut env: Vec<(String, String)> = vec![
         ("IS_SANDBOX".into(), "1".into()),
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
@@ -617,7 +623,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let mut secrets = Vec::new();
     if agent.needs_claude {
         let cred = app.claude_cred().context("log in with Claude in Settings first")?;
-        mounts.push(Mount { source: resolve_claude_bin(&app.cfg).await?, target: "/opt/claude/bin/claude".into(), read_only: true });
+        mounts.push(Mount { source: resolve_guest_claude_bin(&app.cfg).await?, target: "/opt/claude/bin/claude".into(), read_only: true });
         secrets.push(Secret { env: cred.env.into(), value: cred.value, hosts: vec![CLAUDE_API_HOST.into()] });
     }
     let mut net_profiles = vec!["public".to_string()];
@@ -1207,14 +1213,55 @@ async fn agentd_http(app: &App, s: &Session, method: &str, path: &str) -> Result
             "{method} {path} HTTP/1.1\r\nHost: agentd\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(head.as_bytes()).await?;
+        // Framed on Content-Length, not on EOF. The reply is complete and says `Connection: close`,
+        // but on macOS microsandbox's published-port forwarder does not pass the guest's FIN along,
+        // so waiting for the socket to close waits for the timeout instead.
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await?;
-        let text = String::from_utf8_lossy(&response).into_owned();
+        let head_end = loop {
+            if let Some(at) = find_headers_end(&response) {
+                break at;
+            }
+            let mut chunk = [0u8; 4096];
+            match stream.read(&mut chunk).await? {
+                0 => bail!("agentd closed the connection before sending headers"),
+                n => response.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let text = String::from_utf8_lossy(&response[..head_end]).into_owned();
         let status = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).context("malformed agentd response")?;
-        let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
-        anyhow::Ok((status, body))
+        let length = content_length(&text);
+        let mut body = response.split_off(head_end);
+        match length {
+            // No Content-Length: the body is whatever arrives before the peer hangs up.
+            None => {
+                stream.read_to_end(&mut body).await?;
+            }
+            Some(want) => {
+                while body.len() < want {
+                    let mut chunk = [0u8; 4096];
+                    match stream.read(&mut chunk).await? {
+                        0 => break,
+                        n => body.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                body.truncate(want);
+            }
+        }
+        anyhow::Ok((status, String::from_utf8_lossy(&body).into_owned()))
     };
     tokio::time::timeout(Duration::from_secs(10), request).await.context("agentd request timed out")?
+}
+
+/// The offset just past the blank line that ends the response headers.
+fn find_headers_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|at| at + 4)
+}
+
+/// `Content-Length` from a response head, if it declares one.
+fn content_length(head: &str) -> Option<usize> {
+    head.lines()
+        .find_map(|line| line.split_once(':').filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length")))
+        .and_then(|(_, value)| value.trim().parse().ok())
 }
 
 async fn agentd_ws(app: &App, s: &Session, path: &str) -> Result<WebSocketStream<Box<dyn Io>>> {
