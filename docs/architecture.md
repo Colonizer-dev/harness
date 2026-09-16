@@ -8,7 +8,7 @@ terminal in the VM.
 flowchart TB
   browser["browser"]
 
-  subgraph mothership["mothership — your machine"]
+  subgraph mothership["mothership"]
     direction TB
     host["colonizer (Rust)<br/>source · sandbox · mesh<br/>agent · interfaces · publish"]
     hs["headscale<br/>127.0.0.1 · control plane"]
@@ -18,7 +18,7 @@ flowchart TB
 
   mesh{{"private mesh<br/>never your own tailnet"}}
 
-  subgraph colony["microVM colonizer-&lt;id&gt;"]
+  subgraph colony["colony · one microVM"]
     direction TB
     vmts["tailscaled (static)<br/>joins the mesh at boot"]
     agentd["colonizer-agentd :7070<br/>events · pty · shutdown"]
