@@ -195,14 +195,23 @@ async fn kill_tree(child: &mut Child) {
     let _ = child.wait().await;
 }
 
+/// Every descendant of `pid`. `/proc` is Linux-only; `ps` tells the same story on macOS too.
 fn collect_descendants(pid: u32, out: &mut Vec<u32>) {
-    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return };
-    for task in tasks.flatten() {
-        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else { continue };
-        for child in children.split_whitespace().filter_map(|c| c.parse::<u32>().ok()) {
-            if !out.contains(&child) {
-                out.push(child);
-                collect_descendants(child, out);
+    let Ok(output) = std::process::Command::new("ps").args(["-Ao", "pid=,ppid="]).output() else { return };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pairs: Vec<(u32, u32)> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut stack = vec![pid];
+    while let Some(parent) = stack.pop() {
+        for (child, _) in pairs.iter().filter(|(_, ppid)| *ppid == parent) {
+            if !out.contains(child) {
+                out.push(*child);
+                stack.push(*child);
             }
         }
     }

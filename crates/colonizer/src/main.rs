@@ -126,6 +126,11 @@ impl App {
 
 /// Finds a native Claude Code binary on the host to mount read-only into microVMs.
 pub async fn resolve_claude_bin(cfg: &Settings) -> Result<PathBuf> {
+    // A colony is a Linux microVM, so the binary mounted into it has to be a Linux one. On a Mac the
+    // host's own is Mach-O, and `scripts/install.sh` fetches the Linux build beside the app instead.
+    if let Ok(guest) = cfg.asset("bin/claude-guest") {
+        return Ok(guest);
+    }
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = &cfg.claude_bin {

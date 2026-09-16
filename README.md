@@ -192,6 +192,12 @@ Linux x86_64 with `/dev/kvm` readable and writable by your user, `git`, `gh`, No
 toolchain, and a native Claude Code install. [microsandbox](https://docs.microsandbox.dev) ships with
 the app like the mesh binaries, so there is nothing else to install.
 
+Apple Silicon is being brought up in [#32](https://github.com/Colonizer-dev/harness/issues/32) and is
+**not verified yet**. `scripts/install.sh` runs there, fetches the Linux build of Claude Code for the
+guest to run, and builds `colonizer-agentd` for the guest's architecture. The bundled private mesh is
+the gap: Tailscale publishes no macOS `tailscaled` to vendor, so colonies are reached on a loopback
+port until that is solved.
+
 ```sh
 git clone https://github.com/Colonizer-dev/harness && cd harness
 scripts/install.sh           # builds everything into ./dist; nothing is downloaded at runtime
@@ -212,7 +218,9 @@ sandbox) a colony is queued, and starts on its own when one ahead of it finishes
 
 Stated here rather than buried.
 
-- **One machine.** Colonies run on the host that launched them. Linux x86_64 with KVM only; no macOS.
+- **One machine.** Colonies run on the host that launched them. Linux x86_64 with KVM; Apple Silicon is
+  in progress and unverified ([#32](https://github.com/Colonizer-dev/harness/issues/32)), and the private
+  mesh does not work there yet.
 - **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
 - **The web UI has no login.** It binds to `127.0.0.1`, checks `Host` and `Origin` headers, and should stay there.
 - **Colony images need glibc.** The host's native Claude Code binary is mounted read-only into the microVM.

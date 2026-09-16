@@ -25,7 +25,13 @@ members = ["crates/colonizer-agentd"]
 strip = true
 EOF
 
-echo "building colonizer-agentd (x86_64-unknown-linux-musl) in a rust:1-alpine microVM..."
+# The build runs inside the microVM, which has the host's architecture, so the target follows the
+# machine: x86_64 on a Linux box, aarch64 on Apple Silicon. cargo picks it up from the guest itself.
+case "$(uname -m)" in
+  arm64|aarch64) target="aarch64-unknown-linux-musl" ;;
+  *) target="x86_64-unknown-linux-musl" ;;
+esac
+echo "building colonizer-agentd ($target) in a rust:1-alpine microVM..."
 "$MSB" run --no-tty -q -m 4G -c 8 \
   -v "$SRC:/src" \
   -v "$REPO/target/alpine:/build-target" \

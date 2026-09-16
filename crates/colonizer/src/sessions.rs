@@ -536,7 +536,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
-    let mesh_on = modules.mesh_enabled();
+    // The private mesh needs the vendored tailscale, which has no macOS build yet. Without it a colony
+    // is reached on a loopback port rather than failing to boot.
+    let mesh_on = modules.mesh_enabled() && app.cfg.asset("vendor/tailscale").is_ok();
+    if modules.mesh_enabled() && !mesh_on {
+        app.session_log(id, "warn", "the private mesh is unavailable on this platform; using a loopback port".into()).await;
+    }
     let mut env: Vec<(String, String)> = vec![
         ("IS_SANDBOX".into(), "1".into()),
         ("DISABLE_AUTOUPDATER".into(), "1".into()),

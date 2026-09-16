@@ -22,11 +22,35 @@ for arg in "$@"; do
 done
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
-for c in cargo npm node git gh curl tar sha256sum; do need "$c"; done
-[ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "/dev/kvm is not accessible; microVMs need KVM" >&2; exit 1; }
+for c in cargo npm node git gh curl tar; do need "$c"; done
+# GNU calls it sha256sum, macOS ships shasum; either will do.
+command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
+  { echo "missing required command: sha256sum or shasum" >&2; exit 1; }
+
+# One rule per platform, and nothing pretends to work where it cannot.
+case "$(uname -s)" in
+  Linux)
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "/dev/kvm is not accessible; microVMs need KVM" >&2; exit 1; }
+    ;;
+  Darwin)
+    [ "$(uname -m)" = "arm64" ] ||
+      { echo "Apple Silicon only: microsandbox's libkrun backend has no x86_64 macOS support" >&2; exit 1; }
+    ;;
+  *)
+    echo "unsupported platform: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
 
 echo "==> vendored binaries (pinned, sha256-verified)"
 "$root/scripts/fetch-vendor.sh"
+
+# A colony is a Linux microVM, so the agent binary mounted into it has to be a Linux one. On Linux that
+# is the host's own install; a Mac's is Mach-O and cannot run in the guest, so fetch the Linux build.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo "==> Claude Code for the guest (Linux build, sha256-verified)"
+  "$root/scripts/fetch-agent-binary.sh"
+fi
 
 # microsandbox ships with the app, so there is nothing to install separately. COLONIZER_MSB still
 # wins, for a host that would rather run its own build.
