@@ -172,7 +172,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default) |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `POST /api/sessions/{id}/publish` | Stop the agent, commit (co-authored by Colonizer), push the colony's own `colonizer/…` branch (never the base or default branch), open PR |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
@@ -203,7 +203,7 @@ missing values mean the `default`.
 ```json
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
-  "status": "starting|running|waiting_for_answer|idle|publishing|pr_opened|no_changes|stopped|failed",
+  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|no_changes|stopped|failed",
   "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
