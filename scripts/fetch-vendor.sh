@@ -11,7 +11,8 @@ mkdir -p "$cache" "$out/tailscale"
 found=0
 while read -r name version plat kind sha url; do
   case "$name" in ''|'#'*) continue ;; esac
-  [ "$plat" = "$platform" ] || continue
+  # `any` entries are platform-independent (source, not binaries).
+  [ "$plat" = "$platform" ] || [ "$plat" = "any" ] || continue
   found=$((found + 1))
   file="$cache/$(basename "$url")"
   if [ ! -f "$file" ] || ! echo "$sha  $file" | sha256sum -c --quiet - 2>/dev/null; then
@@ -27,6 +28,32 @@ while read -r name version plat kind sha url; do
       tar -xzf "$file" -C "$tmp"
       install -m 755 "$tmp"/tailscale_*/tailscale "$out/tailscale/tailscale"
       install -m 755 "$tmp"/tailscale_*/tailscaled "$out/tailscale/tailscaled"
+      rm -rf "$tmp"
+      ;;
+    ecc)
+      # Staged as a Claude Code plugin directory, not a binary.
+      #
+      # The whole hooks/ directory is dropped. ECC's plugin manifest sets
+      # userConfig.hooks_enabled default true and Claude Code discovers
+      # hooks/hooks.json by convention, so "skills and agents only" cannot be
+      # expressed as a flag: every ECC hook is a `node -e` bootstrap that spawns
+      # first and checks ECC_HOOKS_ENABLED second. Removing the files is the
+      # only version of this that is true by construction.
+      #
+      # Also dropped: docs/ and the per-harness copies under .kiro, .cursor,
+      # .opencode and .agents, which duplicate the same skills for other tools.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/ECC-*)
+      dest="$out/plugins/ecc"
+      rm -rf "$dest"
+      mkdir -p "$dest"
+      for keep in .claude-plugin skills agents commands scripts LICENSE; do
+        [ -e "$src/$keep" ] || { echo "ecc $version has no $keep" >&2; exit 1; }
+        cp -R "$src/$keep" "$dest/$keep"
+      done
+      # Fail loudly rather than shipping hooks by accident.
+      if [ -e "$dest/hooks" ]; then echo "ecc staging leaked hooks/" >&2; exit 1; fi
       rm -rf "$tmp"
       ;;
     microsandbox)
