@@ -222,13 +222,25 @@ sum to at most `total_ms`:
 | `git` | Syncing the bare clone and laying down the worktree |
 | `providers` | Health probes for the model providers this colony will use |
 | `mesh-start` | Starting the mesh and minting the colony's pre-auth key |
-| `vm-boot` | `msb run`, **including the image pull when the image is not local yet** |
+| `image-pull` | Downloading the colony image, when it was not in the local cache. Near zero once it is |
+| `vm-boot` | `msb run`. The pull is its own phase above, unless it failed and `msb run` had to do it |
 | `mesh-join` | Waiting for the node to come up in headscale |
 | `agentd` | Waiting for the agent daemon to answer `/v1/health` |
 
 The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
+
+### `POST /api/sandbox/pull`
+
+Downloads the configured colony image into microsandbox's local cache, so a launch boots instead of
+waiting on a registry. No body. Returns `{image, pulled, cached}`; `pulled` is `false` when the image
+was already there.
+
+A launch pulls a cold image itself, announcing it in the log first
+(`pulling <image> — this happens once per image, and can take a while`) and recording it as the
+`image-pull` phase. This endpoint exists so the download can happen when the stack is *chosen*
+rather than when the first colony is started.
 
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 
