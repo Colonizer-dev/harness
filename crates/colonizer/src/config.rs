@@ -207,10 +207,72 @@ pub fn setting<'a>(choice: &'a ModuleChoice, schema: &'a Value, key: &str) -> Op
     choice.settings.get(key).or_else(|| schema["properties"][key].get("default"))
 }
 
+/// A [`ModuleChoice`] with a preset's defaults filled in underneath what the
+/// user actually set.
+///
+/// Precedence is explicit setting, then preset, then schema default. An
+/// existing `modules.json` therefore keeps every value it names, whichever
+/// preset is selected — the preset only reaches keys nobody chose.
+pub fn with_preset(choice: &ModuleChoice, preset_defaults: &Value) -> ModuleChoice {
+    let mut merged = choice.clone();
+    if let Some(defaults) = preset_defaults.as_object() {
+        for (key, value) in defaults {
+            merged.settings.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    merged
+}
+
 pub fn setting_str(choice: &ModuleChoice, schema: &Value, key: &str) -> String {
     setting(choice, schema, key).and_then(Value::as_str).unwrap_or_default().to_string()
 }
 
 pub fn setting_u64(choice: &ModuleChoice, schema: &Value, key: &str) -> u64 {
     setting(choice, schema, key).and_then(Value::as_u64).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn choice(settings: Value) -> ModuleChoice {
+        ModuleChoice {
+            provider: "microsandbox".into(),
+            enabled: true,
+            settings: settings.as_object().cloned().unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn an_explicit_setting_beats_the_preset() {
+        // Somebody who already pinned an image keeps it, whichever stack is
+        // selected. This is the whole backwards-compatibility promise.
+        let c = choice(json!({"image": "ghcr.io/me/my-toolchain:1"}));
+        let merged = with_preset(&c, &crate::presets::defaults("rust"));
+        assert_eq!(merged.settings["image"], "ghcr.io/me/my-toolchain:1");
+        // Keys they did not set still come from the preset.
+        assert_eq!(merged.settings["cpus"], 6);
+    }
+
+    #[test]
+    fn the_preset_fills_in_what_was_never_set() {
+        let merged = with_preset(&choice(json!({})), &crate::presets::defaults("python"));
+        assert_eq!(merged.settings["image"], "python:3.13-bookworm");
+        assert_eq!(merged.settings["memory"], "8G");
+    }
+
+    #[test]
+    fn custom_leaves_the_choice_untouched() {
+        let c = choice(json!({"image": "debian:bookworm"}));
+        let merged = with_preset(&c, &crate::presets::defaults(crate::presets::CUSTOM));
+        assert_eq!(merged.settings, c.settings, "custom must not inject anything");
+    }
+
+    #[test]
+    fn setting_falls_back_from_choice_to_schema() {
+        let schema = json!({"properties": {"memory": {"default": "8G"}}});
+        assert_eq!(setting_str(&choice(json!({"memory": "16G"})), &schema, "memory"), "16G");
+        assert_eq!(setting_str(&choice(json!({})), &schema, "memory"), "8G");
+    }
 }

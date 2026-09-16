@@ -590,13 +590,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
 
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    // The chosen stack fills in image and machine size; anything set explicitly
+    // in modules.json still wins. See crates/colonizer/src/presets.rs.
+    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
+    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
     let spec = BootSpec {
         name: s.sandbox.clone(),
-        image: setting_str(&modules.sandbox, &sandbox_schema, "image"),
-        cpus: setting_u64(&modules.sandbox, &sandbox_schema, "cpus").max(1),
-        memory: setting_str(&modules.sandbox, &sandbox_schema, "memory"),
-        root_disk: setting_str(&modules.sandbox, &sandbox_schema, "root_disk"),
-        max_duration: setting_str(&modules.sandbox, &sandbox_schema, "max_duration"),
+        image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
+        cpus: setting_u64(&sandbox_settings, &sandbox_schema, "cpus").max(1),
+        memory: setting_str(&sandbox_settings, &sandbox_schema, "memory"),
+        root_disk: setting_str(&sandbox_settings, &sandbox_schema, "root_disk"),
+        max_duration: setting_str(&sandbox_settings, &sandbox_schema, "max_duration"),
         workdir: "/workspace".into(),
         mounts,
         env,
