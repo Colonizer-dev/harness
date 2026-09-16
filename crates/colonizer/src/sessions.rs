@@ -612,9 +612,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     };
     timing.mark("mesh-start");
 
+    // `msb run` pulls an uncached image itself, so this is not what makes the
+    // download happen — it is what stops it being an unexplained wait. On a cold
+    // image the first colony otherwise sits on a spinner for gigabytes with
+    // nothing said. Pre-warm from Settings (POST /api/sandbox/pull) to keep the
+    // download off the launch path entirely.
+    //
+    // Hoisting the pull out of `msb run` also splits it out of the vm-boot
+    // timing, which #15 could not separate without an extra call on every
+    // launch. The cache check is that call, and it is already paid for here.
+    if !sandbox::is_cached(&app.cfg.msb, &spec.image).await {
+        log.info(format!("pulling {} — this happens once per image, and can take a while", spec.image)).await;
+        if let Err(e) = sandbox::pull(&app.cfg.msb, &spec.image).await {
+            // Not fatal: `msb run` will try the pull again and report properly.
+            log.info(format!("pre-pull of {} did not finish ({e:#}); the boot will pull it", spec.image)).await;
+        }
+    }
+    timing.mark("image-pull");
+
     log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
-    // Includes the image pull on a cold image, which is the number #17 is about.
+    // The pull is its own phase above, so this is the VM itself — unless the
+    // pre-pull failed, in which case `msb run` pulls and this absorbs it.
     timing.mark("vm-boot");
     let s = ensure_starting(app, id).await?;
 
