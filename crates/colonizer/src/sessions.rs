@@ -9,7 +9,7 @@ use crate::{
     config::{setting, setting_str, setting_u64, ModulesConfig},
     github, memory,
     modules::{schema_for, AgentModule},
-    orgs, providers, resolve_claude_bin,
+    orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     util::{random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
     watchdog::Activity,
@@ -622,7 +622,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let mut secrets = Vec::new();
     if agent.needs_claude {
         let cred = app.claude_cred().context("log in with Claude in Settings first")?;
-        mounts.push(Mount { source: resolve_claude_bin(&app.cfg).await?, target: "/opt/claude/bin/claude".into(), read_only: true });
+        mounts.push(Mount { source: resolve_guest_claude_bin(&app.cfg).await?, target: "/opt/claude/bin/claude".into(), read_only: true });
         secrets.push(Secret { env: cred.env.into(), value: cred.value, hosts: vec![CLAUDE_API_HOST.into()] });
     }
     let mut net_profiles = vec!["public".to_string()];

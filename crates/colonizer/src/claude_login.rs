@@ -3,7 +3,7 @@
 //! resulting long-lived OAuth token is saved on the host and never sent to the browser.
 
 use crate::{
-    client_error, resolve_claude_bin,
+    client_error, resolve_host_claude_bin,
     util::{shell_quote, truncate, write_secret},
     ApiResult, Shared,
 };
@@ -57,11 +57,18 @@ pub async fn status(State(app): State<Shared>) -> Json<LoginView> {
 }
 
 pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
-    let bin = resolve_claude_bin(&app.cfg).await?;
+    let bin = resolve_host_claude_bin(&app.cfg).await?;
     // A very wide terminal keeps the sign-in URL and the token on single lines.
     let script = format!("stty cols 4000 rows 60; exec {} setup-token", shell_quote(&bin.display().to_string()));
+    // util-linux and BSD `script` disagree on everything but the name: the command is `-c CMD FILE`
+    // there and `FILE CMD...` here, and unbuffered output is `-f` there and `-F` here.
     let mut cmd = Command::new("script");
-    cmd.args(["-qfec", script.as_str(), "/dev/null"])
+    let args: &[&str] = if cfg!(target_os = "macos") {
+        &["-qFe", "/dev/null", "sh", "-c", script.as_str()]
+    } else {
+        &["-qfec", script.as_str(), "/dev/null"]
+    };
+    cmd.args(args)
         // Don't pop a browser on the host; the web UI shows the link instead.
         .env("BROWSER", "true")
         .env_remove("DISPLAY")
