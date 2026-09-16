@@ -172,6 +172,17 @@ export interface SaveProviderRequest {
 }
 
 /** GET /api/providers/{id}/health */
+/** A background pull of the colony image. No percentage: msb reports none when piped. */
+export type PullState = "idle" | "cached" | "pulling" | "done" | "failed";
+
+export interface PullStatus {
+  image: string;
+  state: PullState;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 export interface ProviderHealth {
   reachable: boolean;
   /** HTTP status of the probe, when a response arrived. */

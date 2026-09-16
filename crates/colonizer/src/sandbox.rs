@@ -124,34 +124,137 @@ pub async fn pull(msb: &str, image: &str) -> Result<()> {
     Ok(())
 }
 
-/// `POST /api/sandbox/pull` — download the configured colony image now.
+/// Where a background image pull has got to.
 ///
-/// Pulling is what turns a first launch from a multi-gigabyte wait into a boot.
-/// Exposed as its own call so Settings can warm an image when the stack is
-/// chosen, rather than leaving the download on the critical path of whichever
-/// colony happens to be started first.
-pub async fn pull_configured(State(app): State<crate::Shared>) -> crate::ApiResult<serde_json::Value> {
-    let modules = app.modules.read().await.clone();
+/// There is no percentage here on purpose. `msb pull` draws its progress bar
+/// only on a terminal; piped, it prints a single line when it is finished, and
+/// `--info` adds nothing but migration logs. Scraping the bar through a pty
+/// would parse an undocumented format that can change with any msb release, so
+/// the UI shows what is actually known: which image, since when, and the
+/// outcome.
+#[derive(Clone, Debug, Default, serde::Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PullState {
+    #[default]
+    Idle,
+    /// Already in the local cache; nothing to do.
+    Cached,
+    Pulling,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct PullStatus {
+    pub image: String,
+    pub state: PullState,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub error: Option<String>,
+    /// Bumped for every pull started, so a slow pull that finishes after a newer
+    /// one was requested cannot overwrite the newer one's status.
+    #[serde(skip)]
+    pub generation: u64,
+}
+
+/// The image the sandbox module is configured to boot, after the stack preset.
+fn configured_image(app: &crate::App, modules: &crate::config::ModulesConfig) -> String {
     let schema = crate::modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let preset = crate::config::setting_str(&modules.sandbox, &schema, "preset");
     let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
-    let image = crate::config::setting_str(&settings, &schema, "image");
+    crate::config::setting_str(&settings, &schema, "image")
+}
 
+/// `POST /api/sandbox/pull` — start downloading the configured colony image.
+///
+/// Returns at once. A cold pull of the default image measured 108 s, which is
+/// too long to hold a request open, so the download runs in the background and
+/// `GET /api/sandbox/pull` reports on it. Calling this again while the same
+/// image is already pulling returns the running pull rather than starting a
+/// second one.
+pub async fn pull_configured(State(app): State<crate::Shared>) -> crate::ApiResult<PullStatus> {
+    let modules = app.modules.read().await.clone();
+    let image = configured_image(&app, &modules);
     if image.is_empty() {
         return Err(crate::client_error(axum::http::StatusCode::BAD_REQUEST, "no colony image is configured"));
     }
-    if is_cached(&app.cfg.msb, &image).await {
-        return Ok(axum::Json(serde_json::json!({ "image": image, "pulled": false, "cached": true })));
+
+    {
+        let status = app.pull.lock().await;
+        if status.state == PullState::Pulling && status.image == image {
+            return Ok(axum::Json(status.clone()));
+        }
     }
-    pull(&app.cfg.msb, &image)
-        .await
-        .map_err(|e| crate::client_error(axum::http::StatusCode::BAD_GATEWAY, &format!("{e:#}")))?;
-    Ok(axum::Json(serde_json::json!({ "image": image, "pulled": true, "cached": true })))
+
+    if is_cached(&app.cfg.msb, &image).await {
+        let mut status = app.pull.lock().await;
+        *status = PullStatus { image, state: PullState::Cached, generation: status.generation, ..Default::default() };
+        return Ok(axum::Json(status.clone()));
+    }
+
+    let started = {
+        let mut status = app.pull.lock().await;
+        let generation = status.generation + 1;
+        *status = PullStatus {
+            image: image.clone(),
+            state: PullState::Pulling,
+            started_at: Some(chrono::Utc::now()),
+            finished_at: None,
+            error: None,
+            generation,
+        };
+        status.clone()
+    };
+
+    let background = app.clone();
+    tokio::spawn(async move {
+        let result = pull(&background.cfg.msb, &image).await;
+        let mut status = background.pull.lock().await;
+        if status.generation != started.generation {
+            return; // superseded by a pull for a different image
+        }
+        status.finished_at = Some(chrono::Utc::now());
+        match result {
+            Ok(()) => status.state = PullState::Done,
+            Err(e) => {
+                status.state = PullState::Failed;
+                status.error = Some(crate::util::truncate(&format!("{e:#}"), 2000));
+            }
+        }
+    });
+
+    Ok(axum::Json(started))
+}
+
+/// `GET /api/sandbox/pull` — the status of the most recent pull.
+pub async fn pull_status(State(app): State<crate::Shared>) -> axum::Json<PullStatus> {
+    axum::Json(app.pull.lock().await.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_states_serialise_as_the_ui_expects() {
+        // web/src/types.ts spells these out as a string union. A rename here
+        // without that file following would leave Settings stuck on a state it
+        // does not recognise, with no compile error on either side.
+        let spelled: Vec<String> = [PullState::Idle, PullState::Cached, PullState::Pulling, PullState::Done, PullState::Failed]
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(spelled, ["idle", "cached", "pulling", "done", "failed"]);
+    }
+
+    #[test]
+    fn the_generation_guard_is_not_part_of_the_api() {
+        // It exists so a slow pull cannot overwrite a newer one's status; it is
+        // bookkeeping, and the UI has no use for it.
+        let v = serde_json::to_value(PullStatus { generation: 7, ..Default::default() }).unwrap();
+        assert!(v.get("generation").is_none(), "{v}");
+        assert_eq!(v["state"], "idle");
+    }
 
     fn cache(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
