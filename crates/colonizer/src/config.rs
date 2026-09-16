@@ -33,6 +33,7 @@ impl Settings {
         let runtime_dir = env_nonempty("XDG_RUNTIME_DIR")
             .map(|d| PathBuf::from(d).join("colonizer"))
             .unwrap_or_else(|| PathBuf::from(format!("/tmp/colonizer-{uid}")));
+        let assets = resolve_assets();
         let settings = Settings {
             bind: env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into()),
             data_dir: env_nonempty("COLONIZER_DATA_DIR")
@@ -42,10 +43,15 @@ impl Settings {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".config/colonizer")),
             runtime_dir,
-            assets: resolve_assets(),
             msb: env_nonempty("COLONIZER_MSB").unwrap_or_else(|| {
-                if local_msb.exists() { local_msb.display().to_string() } else { "msb".into() }
+                // Vendored with the app, then a host install, then whatever is on PATH.
+                match assets.as_ref().map(|dir| dir.join("vendor/microsandbox/bin/msb")) {
+                    Some(path) if path.exists() => path.display().to_string(),
+                    _ if local_msb.exists() => local_msb.display().to_string(),
+                    _ => "msb".into(),
+                }
             }),
+            assets,
             claude_bin: env_nonempty("COLONIZER_CLAUDE_BIN"),
             gateway_bind: env_nonempty("COLONIZER_GATEWAY_BIND").unwrap_or_else(|| "127.0.0.1:41750".into()),
             allowed_hosts: env_nonempty("COLONIZER_ALLOWED_HOSTS")
