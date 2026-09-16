@@ -15,6 +15,7 @@ import type {
   ModuleInfo,
   OrgInfo,
   OrgSettings,
+  PullStatus,
   Question,
   Repo,
   Session,
@@ -604,6 +605,15 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
   };
 }
 
+const MOCK_PRESET_IMAGES: Record<string, string> = {
+  node: "node:24-bookworm",
+  python: "python:3.13-bookworm",
+  rust: "rust:1-bookworm",
+  go: "golang:1-bookworm",
+};
+const mockPulled = new Set<string>(["node:24-bookworm"]);
+let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finished_at: null, error: null };
+
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
   const demo = new MockSession({
@@ -976,6 +986,28 @@ export function createMockApi(): Api {
       Object.assign(module, { provider: body.provider, enabled: body.enabled, settings: body.settings });
       return clone(module);
     },
+    // Simulates a cold pull that takes a few seconds, so the Settings row can be
+    // seen going through pulling -> done against the mock backend.
+    sandboxPull: async () => {
+      const sandbox = modules.find((m) => m.kind === "sandbox");
+      const preset = String(sandbox?.settings?.preset ?? "node");
+      const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm");
+      if (mockPulled.has(image)) {
+        mockPull = { image, state: "cached", started_at: null, finished_at: null, error: null };
+        return clone(mockPull);
+      }
+      if (mockPull.state !== "pulling" || mockPull.image !== image) {
+        mockPull = { image, state: "pulling", started_at: new Date().toISOString(), finished_at: null, error: null };
+        const started = mockPull.started_at;
+        setTimeout(() => {
+          if (mockPull.image !== image || mockPull.started_at !== started) return;
+          mockPulled.add(image);
+          mockPull = { ...mockPull, state: "done", finished_at: new Date().toISOString() };
+        }, 4000);
+      }
+      return clone(mockPull);
+    },
+    sandboxPullStatus: async () => clone(mockPull),
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
     sessions: () =>
