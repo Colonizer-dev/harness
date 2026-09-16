@@ -348,6 +348,7 @@ async fn main() -> Result<()> {
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get))
+        .route("/api/sessions/{id}/resume", post(sessions::resume))
         .route("/api/sessions/{id}/publish", post(sessions::publish))
         .route("/api/sessions/{id}/stop", post(sessions::stop))
         .route("/api/sessions/{id}/cleanup", post(sessions::cleanup))
@@ -382,6 +383,8 @@ async fn main() -> Result<()> {
 
     let recovery = app.clone();
     tokio::spawn(async move { sessions::recover(&recovery).await });
+    let sandbox_watch = app.clone();
+    tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
     if app.modules.read().await.mesh_enabled() && app.cfg.assets.is_some() {
         let mesh_app = app.clone();

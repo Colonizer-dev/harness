@@ -162,7 +162,7 @@ pub async fn remove_worktree(app: &App, s: &Session) -> Result<()> {
     Ok(())
 }
 
-pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str) -> String {
+pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: bool) -> String {
     use std::fmt::Write;
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
 
@@ -175,13 +175,24 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str) -> String {
             let _ = writeln!(p, "You are working in the repository {} in an interactive session with its maintainer.\n", s.repo);
         }
     }
+    let branch = if resumed {
+        format!("`{}`, which already carries this colony's earlier work on top of `origin/{base}`", s.branch)
+    } else {
+        format!("`{}`, freshly created from `origin/{base}`", s.branch)
+    };
     let _ = writeln!(
         p,
-        "The repository is checked out at /workspace on the branch `{}`, freshly created from `origin/{base}`. \
-         You are running inside a disposable microVM sandbox with internet access: install whatever you need and \
-         run builds and tests freely.\n",
-        s.branch
+        "The repository is checked out at /workspace on the branch {branch}. You are running inside a disposable \
+         microVM sandbox with internet access: install whatever you need and run builds and tests freely.\n"
     );
+    if resumed {
+        let _ = writeln!(
+            p,
+            "This colony was resumed after its microVM stopped, so nothing from the earlier session is in your \
+             context, but the worktree is as it was left. Run `git status` and `git diff` first and continue from \
+             there rather than starting the task over. `/harness/out/pr.md` may already exist.\n"
+        );
+    }
     if let Some(issue) = issue {
         let labels = issue["labels"]
             .as_array()
