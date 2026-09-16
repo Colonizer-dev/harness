@@ -231,9 +231,71 @@ pub fn setting_u64(choice: &ModuleChoice, schema: &Value, key: &str) -> u64 {
     setting(choice, schema, key).and_then(Value::as_u64).unwrap_or_default()
 }
 
+/// `colonizer.toml`: hand-edited settings with no place in the UI. Colonizer never writes this file, so
+/// a missing file, a missing key or a key we don't know are all the same thing — the default.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct FileConfig {
+    pub publish: PublishConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct PublishConfig {
+    /// Signs the commit a colony's work is published as with `Co-Authored-By: Colonizer`.
+    pub co_author: bool,
+}
+
+impl Default for PublishConfig {
+    fn default() -> Self {
+        Self { co_author: true }
+    }
+}
+
+impl FileConfig {
+    /// Read where it is used rather than cached at startup, so editing the file doesn't need a restart.
+    pub fn load(config_dir: &Path) -> Self {
+        let path = config_dir.join("colonizer.toml");
+        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        toml::from_str(&text).unwrap_or_else(|e| {
+            eprintln!("{}: {e}; using defaults", path.display());
+            Self::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(text: &str) -> FileConfig {
+        toml::from_str(text).expect("valid toml")
+    }
+
+    #[test]
+    fn colonizer_toml_defaults_to_signing_and_can_turn_it_off() {
+        assert!(FileConfig::default().publish.co_author);
+        assert!(parse("").publish.co_author);
+        assert!(parse("[publish]\n").publish.co_author);
+        assert!(!parse("[publish]\nco_author = false\n").publish.co_author);
+        // A key we don't know is not a reason to refuse the file.
+        assert!(parse("[publish]\nco_author = true\nsomething_else = 3\n").publish.co_author);
+    }
+
+    #[test]
+    fn load_reads_colonizer_toml_from_the_config_dir() {
+        let dir = std::env::temp_dir().join(format!("colonizer-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(FileConfig::load(&dir).publish.co_author, "no file means defaults");
+
+        std::fs::write(dir.join("colonizer.toml"), "[publish]\nco_author = false\n").unwrap();
+        assert!(!FileConfig::load(&dir).publish.co_author, "the file is read from config_dir/colonizer.toml");
+
+        std::fs::write(dir.join("colonizer.toml"), "[publish\nco_author = ").unwrap();
+        assert!(FileConfig::load(&dir).publish.co_author, "a broken file falls back rather than failing a publish");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use serde_json::json;
 
     fn choice(settings: Value) -> ModuleChoice {
