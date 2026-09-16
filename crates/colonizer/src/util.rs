@@ -129,6 +129,32 @@ pub fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_names_accept_only_a_single_segment() {
+        for good in ["ecc", "house-style", "team_rules", "v2.2.1"] {
+            assert!(is_plain_name(good), "{good} should be accepted");
+        }
+    }
+
+    #[test]
+    fn plain_names_reject_anything_that_escapes_the_directory() {
+        // Each of these is a way for a settings string to name something the
+        // harness never intended to mount.
+        for bad in [
+            "",
+            "..",
+            "../../etc",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "has:colon",
+            "has,comma",
+            "/absolute",
+        ] {
+            assert!(!is_plain_name(bad), "{bad:?} should be rejected");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -146,4 +172,20 @@ mod tests {
         assert_eq!(mount_spec(Path::new("/a/b"), "/c", true).unwrap(), "/a/b:/c:ro");
         assert!(mount_spec(Path::new("/a:b"), "/c", false).is_err());
     }
+}
+
+/// A single path segment with no separators, no traversal and no leading dot.
+///
+/// Used where a setting names something the harness will resolve under a
+/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
+/// reach the rest of the host's filesystem.
+pub fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains(':')
+        && !name.contains(',')
+        && !name.contains('\0')
 }

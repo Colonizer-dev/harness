@@ -22,6 +22,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/bin/colonizer-agentd` | ro | Static agentd binary |
 | `/opt/colonizer/tailscale/{tailscale,tailscaled}` | ro | Static tailscale binaries |
 | `/opt/colonizer/agent/` | ro | Active agent module directory |
+| `/opt/colonizer/plugins/<name>/` | ro | Claude Code plugin directories, one per entry in `COLONIZER_PLUGIN_DIRS`. Absent when none are configured |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
@@ -301,6 +302,7 @@ Runner environment set by the mothership:
 | `COLONIZER_SUBAGENT_MODEL` | Default model for subagents (maps to `CLAUDE_CODE_SUBAGENT_MODEL`) |
 | `COLONIZER_BACKGROUND_MODEL` | Model for background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
+| `COLONIZER_PLUGIN_DIRS` | Comma-separated **in-VM** plugin directories. The mothership resolves the configured names under its own plugins folder, mounts each read-only, and rewrites this to the guest paths; the runner turns them into the SDK's `plugins: [{type:'local', path}]`. Empty or absent loads none |
 
 ```json
 [{"provider": "deepseek", "prefix": "deepseek/", "base_url": "https://api.deepseek.com/anthropic",

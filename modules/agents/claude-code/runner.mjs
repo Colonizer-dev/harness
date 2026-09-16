@@ -142,6 +142,17 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     // them would make the SDK warn that canUseTool is shadowed.
     options.mcpServers = { [MEMORY_SERVER]: memoryServer };
   }
+  // Plugin directories arrive already mounted read-only in the VM; the mothership
+  // rewrites COLONIZER_PLUGIN_DIRS to the in-VM paths. settingSources stays
+  // ['project'], so this is the only way a plugin reaches a colony — a user-scope
+  // install would be invisible, and a project-scope one would land in the PR.
+  const pluginDirs = (env.COLONIZER_PLUGIN_DIRS || '')
+    .split(',')
+    .map((dir) => dir.trim())
+    .filter(Boolean);
+  if (pluginDirs.length) {
+    options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
+  }
   if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
   if (env.COLONIZER_EFFORT) {
     if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
