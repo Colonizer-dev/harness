@@ -112,6 +112,10 @@ pub struct Session {
     /// Last agent progress (filled from the runtime for live colonies).
     #[serde(default)]
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
+    /// Set when a colony finishes booting, and replaced on resume.
+    #[serde(default)]
+    pub boot_timing: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -397,6 +401,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         cleaned_up: false,
         attention: None,
         last_activity_at: None,
+        boot_timing: None,
         created_at: now,
         updated_at: now,
     };
@@ -436,6 +441,8 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
 
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
+    // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
+    let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
     let modules = app.modules.read().await.clone();
     let agent = app.agents.iter().find(|a| a.id == s.agent).cloned().context("agent module is not installed")?;
@@ -462,6 +469,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     .await;
     ensure_starting(app, id).await?;
 
+    timing.mark("issue");
+
     let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
     let admin = if resume {
@@ -477,6 +486,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     };
     app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string())).await;
     let s = ensure_starting(app, id).await?;
+
+    timing.mark("git");
 
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
@@ -503,6 +514,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             app.session_log(id, "warn", format!("model provider {} is unreachable ({error}); {then}", provider.id)).await;
         }
     }
+    timing.mark("providers");
+
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
@@ -536,6 +549,43 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         Mount { source: app.cfg.asset("bin/colonizer-agentd")?, target: "/opt/colonizer/bin/colonizer-agentd".into(), read_only: true },
         Mount { source: agent.dir.clone(), target: "/opt/colonizer/agent".into(), read_only: true },
     ];
+    // Claude Code plugin directories, mounted read-only from the mothership.
+    //
+    // Outside /workspace on purpose: publish runs `git add -A`, so a plugin
+    // staged inside the worktree would be committed into the pull request.
+    // Read-only so one colony cannot edit what the next one loads — the same
+    // reason memory scopes are read-only.
+    //
+    // A setting names a directory, never a path: it is resolved under the
+    // mothership's plugins folder, so it cannot reach an arbitrary host path.
+    let plugin_names: Vec<String> = runner_env
+        .get("COLONIZER_PLUGIN_DIRS")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .split(',')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if !plugin_names.is_empty() {
+        let root = app.cfg.data_dir.join("plugins");
+        let mut targets = Vec::new();
+        for name in &plugin_names {
+            if !crate::util::is_plain_name(name) {
+                bail!("plugin directory {name:?} must be a plain name under {}", root.display());
+            }
+            let source = root.join(name);
+            if !source.is_dir() {
+                bail!("plugin directory {name:?} is not in {}", root.display());
+            }
+            let target = format!("/opt/colonizer/plugins/{name}");
+            mounts.push(Mount { source, target: target.clone(), read_only: true });
+            targets.push(target);
+        }
+        // The runner only ever sees in-VM paths, never the mothership's.
+        runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
+        log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
+    }
+
     if memory_on {
         for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
             // Mount points must exist inside the read-only /colonizer mount.
@@ -577,13 +627,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
 
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    // The chosen stack fills in image and machine size; anything set explicitly
+    // in modules.json still wins. See crates/colonizer/src/presets.rs.
+    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
+    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
     let spec = BootSpec {
         name: s.sandbox.clone(),
-        image: setting_str(&modules.sandbox, &sandbox_schema, "image"),
-        cpus: setting_u64(&modules.sandbox, &sandbox_schema, "cpus").max(1),
-        memory: setting_str(&modules.sandbox, &sandbox_schema, "memory"),
-        root_disk: setting_str(&modules.sandbox, &sandbox_schema, "root_disk"),
-        max_duration: setting_str(&modules.sandbox, &sandbox_schema, "max_duration"),
+        image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
+        cpus: setting_u64(&sandbox_settings, &sandbox_schema, "cpus").max(1),
+        memory: setting_str(&sandbox_settings, &sandbox_schema, "memory"),
+        root_disk: setting_str(&sandbox_settings, &sandbox_schema, "root_disk"),
+        max_duration: setting_str(&sandbox_settings, &sandbox_schema, "max_duration"),
         workdir: "/workspace".into(),
         mounts,
         env,
@@ -593,8 +647,31 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish,
         command: vec!["sh".into(), "/colonizer/boot.sh".into()],
     };
+    timing.mark("mesh-start");
+
+    // `msb run` pulls an uncached image itself, so this is not what makes the
+    // download happen — it is what stops it being an unexplained wait. On a cold
+    // image the first colony otherwise sits on a spinner for gigabytes with
+    // nothing said. Pre-warm from Settings (POST /api/sandbox/pull) to keep the
+    // download off the launch path entirely.
+    //
+    // Hoisting the pull out of `msb run` also splits it out of the vm-boot
+    // timing, which #15 could not separate without an extra call on every
+    // launch. The cache check is that call, and it is already paid for here.
+    if !sandbox::is_cached(&app.cfg.msb, &spec.image).await {
+        log.info(format!("pulling {} — this happens once per image, and can take a while", spec.image)).await;
+        if let Err(e) = sandbox::pull(&app.cfg.msb, &spec.image).await {
+            // Not fatal: `msb run` will try the pull again and report properly.
+            log.info(format!("pre-pull of {} did not finish ({e:#}); the boot will pull it", spec.image)).await;
+        }
+    }
+    timing.mark("image-pull");
+
     log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
+    // The pull is its own phase above, so this is the VM itself — unless the
+    // pre-pull failed, in which case `msb run` pulls and this absorbs it.
+    timing.mark("vm-boot");
     let s = ensure_starting(app, id).await?;
 
     if mesh_on {
@@ -604,6 +681,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
         app.update_session(id, |x| x.mesh = Some(MeshInfo { name: x.sandbox.clone(), ip: Some(node.ip.clone()) })).await;
     }
+
+    timing.mark("mesh-join");
 
     let s = ensure_starting(app, id).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
@@ -615,6 +694,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
     }
     log.info("agent daemon is ready").await;
+    timing.mark("agentd");
+
+    log.info(timing.summary()).await;
+    let breakdown = timing.to_json();
+    app.update_session(id, |x| x.boot_timing = Some(breakdown)).await;
+
     ensure_starting(app, id).await?;
     start_link(app, id).await;
     Ok(())
