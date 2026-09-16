@@ -12,15 +12,18 @@ install_app=0
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
 for c in cargo npm node git gh curl tar sha256sum; do need "$c"; done
-msb="${COLONIZER_MSB:-$HOME/.local/bin/msb}"
-[ -x "$msb" ] || { echo "microsandbox not found at $msb; install it: curl -fsSL https://get.microsandbox.dev | sh" >&2; exit 1; }
 [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "/dev/kvm is not accessible; microVMs need KVM" >&2; exit 1; }
 
 echo "==> vendored binaries (pinned, sha256-verified)"
 "$root/scripts/fetch-vendor.sh"
 
+# microsandbox ships with the app, so there is nothing to install separately. COLONIZER_MSB still
+# wins, for a host that would rather run its own build.
+msb="${COLONIZER_MSB:-$dist/vendor/microsandbox/bin/msb}"
+[ -x "$msb" ] || { echo "microsandbox is missing from $msb after vendoring" >&2; exit 1; }
+
 echo "==> colonizer-agentd (static musl build inside a microVM)"
-"$root/scripts/build-agentd.sh"
+MSB="$msb" "$root/scripts/build-agentd.sh"
 
 echo "==> agent modules"
 mkdir -p "$dist/modules/agents"
