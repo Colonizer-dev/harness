@@ -52,7 +52,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | Kind | Providers (v1) | Responsibility |
 | --- | --- | --- |
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
-| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules |
+| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image and machine size; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
