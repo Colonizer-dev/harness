@@ -170,7 +170,7 @@ protocol on stdio, so an agent module can be written in anything.
 | Kind | Providers today | Next |
 | :--- | :--- | :--- |
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
-| `sandbox` | microsandbox (KVM microVMs) | other VMMs `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
 | `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
