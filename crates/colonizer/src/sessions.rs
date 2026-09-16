@@ -112,6 +112,10 @@ pub struct Session {
     /// Last agent progress (filled from the runtime for live colonies).
     #[serde(default)]
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
+    /// Set when a colony finishes booting, and replaced on resume.
+    #[serde(default)]
+    pub boot_timing: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -397,6 +401,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         cleaned_up: false,
         attention: None,
         last_activity_at: None,
+        boot_timing: None,
         created_at: now,
         updated_at: now,
     };
@@ -436,6 +441,8 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
 
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
+    // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
+    let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
     let modules = app.modules.read().await.clone();
     let agent = app.agents.iter().find(|a| a.id == s.agent).cloned().context("agent module is not installed")?;
@@ -462,6 +469,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     .await;
     ensure_starting(app, id).await?;
 
+    timing.mark("issue");
+
     let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
     let admin = if resume {
@@ -477,6 +486,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     };
     app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string())).await;
     let s = ensure_starting(app, id).await?;
+
+    timing.mark("git");
 
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
@@ -503,6 +514,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             app.session_log(id, "warn", format!("model provider {} is unreachable ({error}); {then}", provider.id)).await;
         }
     }
+    timing.mark("providers");
+
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
@@ -593,8 +606,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish,
         command: vec!["sh".into(), "/colonizer/boot.sh".into()],
     };
+    timing.mark("mesh-start");
+
     log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
+    // Includes the image pull on a cold image, which is the number #17 is about.
+    timing.mark("vm-boot");
     let s = ensure_starting(app, id).await?;
 
     if mesh_on {
@@ -604,6 +621,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
         app.update_session(id, |x| x.mesh = Some(MeshInfo { name: x.sandbox.clone(), ip: Some(node.ip.clone()) })).await;
     }
+
+    timing.mark("mesh-join");
 
     let s = ensure_starting(app, id).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
@@ -615,6 +634,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
     }
     log.info("agent daemon is ready").await;
+    timing.mark("agentd");
+
+    log.info(timing.summary()).await;
+    let breakdown = timing.to_json();
+    app.update_session(id, |x| x.boot_timing = Some(breakdown)).await;
+
     ensure_starting(app, id).await?;
     start_link(app, id).await;
     Ok(())
