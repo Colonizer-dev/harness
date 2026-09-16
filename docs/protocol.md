@@ -182,6 +182,16 @@ missing values mean the `default`.
 }
 ```
 
+### `POST /api/sandbox/pull`
+
+Downloads the configured colony image into microsandbox's local cache, so a launch boots instead of
+waiting on a registry. No body. Returns `{image, pulled, cached}`; `pulled` is `false` when the image
+was already there.
+
+A launch pulls a cold image itself, announcing it in the log first
+(`pulling <image> — this happens once per image, and can take a while`). This endpoint exists so the
+download can happen when the stack is *chosen* rather than when the first colony is started.
+
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 
 Server → client:

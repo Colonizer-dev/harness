@@ -597,6 +597,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish,
         command: vec!["sh".into(), "/colonizer/boot.sh".into()],
     };
+    // `msb run` pulls an uncached image itself, so this is not what makes the
+    // download happen — it is what stops it being an unexplained wait. On a cold
+    // image the first colony otherwise sits on a spinner for gigabytes with
+    // nothing said. Pre-warm from Settings (POST /api/sandbox/pull) to keep the
+    // download off the launch path entirely.
+    if !sandbox::is_cached(&app.cfg.msb, &spec.image).await {
+        log.info(format!("pulling {} — this happens once per image, and can take a while", spec.image)).await;
+        if let Err(e) = sandbox::pull(&app.cfg.msb, &spec.image).await {
+            // Not fatal: `msb run` will try the pull again and report properly.
+            log.info(format!("pre-pull of {} did not finish ({e:#}); the boot will pull it", spec.image)).await;
+        }
+    }
+
     log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
     let s = ensure_starting(app, id).await?;

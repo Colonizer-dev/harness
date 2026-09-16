@@ -333,6 +333,7 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
+        .route("/api/sandbox/pull", post(sandbox::pull_configured))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
         .route("/api/providers/{id}/health", get(gateway::health))
