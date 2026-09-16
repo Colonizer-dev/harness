@@ -188,9 +188,20 @@ Claude when a provider is down or busy.
 
 ## Run it
 
-Linux x86_64 with `/dev/kvm` readable and writable by your user, `git`, `gh`, Node.js ≥ 20, a Rust
-toolchain, and a native Claude Code install. [microsandbox](https://docs.microsandbox.dev) ships with
-the app like the mesh binaries, so there is nothing else to install.
+Linux x86_64 with `/dev/kvm` readable and writable by your user, or an Apple Silicon Mac. Either way:
+`git`, `gh`, Node.js ≥ 20 and a Rust toolchain of 1.88 or newer — Homebrew's `rust` can lag a long way
+behind, so `rustup` is the safe bet. On Linux you also need a native Claude Code install;
+[microsandbox](https://docs.microsandbox.dev) ships with the app like the mesh binaries, so there is
+nothing else to install.
+
+**On a Mac**, `scripts/install.sh` additionally fetches the `linux-arm64` build of Claude Code — pinned
+to the `stable` channel and checked against Anthropic's own manifest — because a colony is a Linux
+microVM and the Mac's own binary is Mach-O. `colonizer-agentd` is built for the guest's architecture.
+A colony has been taken end to end on Apple Silicon, from install to an open pull request
+([#36](https://github.com/Colonizer-dev/harness/issues/36)); an Intel Mac cannot run this at all,
+because microsandbox's libkrun backend is aarch64-only. The one gap is the bundled private mesh:
+Tailscale publishes no macOS `tailscaled` to vendor, so colonies are reached on a loopback port
+instead ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness && cd harness
@@ -212,10 +223,13 @@ sandbox) a colony is queued, and starts on its own when one ahead of it finishes
 
 Stated here rather than buried.
 
-- **One machine.** Colonies run on the host that launched them. Linux x86_64 with KVM only; no macOS.
+- **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
+  Silicon Mac — where the private mesh does not work yet, so colonies use a loopback port
+  ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
 - **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
 - **The web UI has no login.** It binds to `127.0.0.1`, checks `Host` and `Origin` headers, and should stay there.
-- **Colony images need glibc.** The host's native Claude Code binary is mounted read-only into the microVM.
+- **Colony images need glibc.** A Linux Claude Code binary is mounted read-only into the microVM: the
+  host's own on Linux, the `linux-arm64` build fetched at install time on a Mac.
 - **Relays are Tailscale's.** Direct connections don't need them; when a colony falls back to a relay,
   encrypted traffic crosses Tailscale's public DERP servers.
 - **`install.sh --install` is not exercised yet.** It is implemented, but it hasn't been run against the

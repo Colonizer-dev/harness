@@ -3,7 +3,7 @@
 //! resulting long-lived OAuth token is saved on the host and never sent to the browser.
 
 use crate::{
-    client_error, resolve_claude_bin,
+    client_error, resolve_host_claude_bin,
     util::{shell_quote, truncate, write_secret},
     ApiResult, Shared,
 };
@@ -57,11 +57,18 @@ pub async fn status(State(app): State<Shared>) -> Json<LoginView> {
 }
 
 pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
-    let bin = resolve_claude_bin(&app.cfg).await?;
+    let bin = resolve_host_claude_bin(&app.cfg).await?;
     // A very wide terminal keeps the sign-in URL and the token on single lines.
     let script = format!("stty cols 4000 rows 60; exec {} setup-token", shell_quote(&bin.display().to_string()));
+    // util-linux and BSD `script` disagree on everything but the name: the command is `-c CMD FILE`
+    // there and `FILE CMD...` here, and unbuffered output is `-f` there and `-F` here.
     let mut cmd = Command::new("script");
-    cmd.args(["-qfec", script.as_str(), "/dev/null"])
+    let args: &[&str] = if cfg!(target_os = "macos") {
+        &["-qFe", "/dev/null", "sh", "-c", script.as_str()]
+    } else {
+        &["-qfec", script.as_str(), "/dev/null"]
+    };
+    cmd.args(args)
         // Don't pop a browser on the host; the web UI shows the link instead.
         .env("BROWSER", "true")
         .env_remove("DISPLAY")
@@ -195,14 +202,23 @@ async fn kill_tree(child: &mut Child) {
     let _ = child.wait().await;
 }
 
+/// Every descendant of `pid`. `/proc` is Linux-only; `ps` tells the same story on macOS too.
 fn collect_descendants(pid: u32, out: &mut Vec<u32>) {
-    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return };
-    for task in tasks.flatten() {
-        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else { continue };
-        for child in children.split_whitespace().filter_map(|c| c.parse::<u32>().ok()) {
-            if !out.contains(&child) {
-                out.push(child);
-                collect_descendants(child, out);
+    let Ok(output) = std::process::Command::new("ps").args(["-Ao", "pid=,ppid="]).output() else { return };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pairs: Vec<(u32, u32)> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut stack = vec![pid];
+    while let Some(parent) = stack.pop() {
+        for (child, _) in pairs.iter().filter(|(_, ppid)| *ppid == parent) {
+            if !out.contains(child) {
+                out.push(*child);
+                stack.push(*child);
             }
         }
     }
