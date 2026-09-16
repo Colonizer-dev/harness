@@ -11,7 +11,7 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { useMemo } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 import { errorMessage, useToast } from "../context";
 import {
   ASK_USER_TOOL,
@@ -27,10 +27,30 @@ import {
   type TurnSummary,
 } from "../sessionStream";
 import type { MemoryScope } from "../types";
+import { describeTool, isNoiseTool, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
-import { IconAlert, IconCheck, IconChevron, IconMemory, IconQuestion, IconSend, IconSpark, IconStop, IconX } from "./icons";
+import {
+  IconAlert,
+  IconBranch,
+  IconCheck,
+  IconChevron,
+  IconCpu,
+  IconMemory,
+  IconMenu,
+  IconNetwork,
+  IconPencil,
+  IconQuestion,
+  IconRefresh,
+  IconSearch,
+  IconSend,
+  IconSpark,
+  IconStop,
+  IconTerminal,
+  IconTrash,
+  IconX,
+} from "./icons";
 import { InlineCode } from "./Markdown";
-import { Spinner, cx, formatDuration } from "./ui";
+import { Spinner, cx, formatDuration, store, stored } from "./ui";
 
 /** The harness sends the session's initial prompt as a user message with this id. */
 const BRIEF_ID = "initial";
@@ -62,6 +82,13 @@ export function ChatPanel({
   const thread = useMemo(() => buildThread(state), [state]);
   const connected = state.connection === "open";
   const isRunning = state.agentState === "working";
+  // Plain language by default: most people watching a colony work are not reading the commands.
+  const [simple, setSimple] = useState(() => stored("colonizer.chat-simple") !== "0");
+  const toggleView = () => {
+    const next = !simple;
+    setSimple(next);
+    store("colonizer.chat-simple", next ? "1" : "0");
+  };
 
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: thread.messages,
@@ -103,6 +130,7 @@ export function ChatPanel({
 
   return (
     <QuestionActionsContext.Provider value={questionActions}>
+      <SimpleViewContext.Provider value={simple}>
       <AssistantRuntimeProvider runtime={runtime}>
         <AskUserToolUI />
         <ThreadPrimitive.Root className="flex h-full min-h-0 flex-col">
@@ -111,6 +139,17 @@ export function ChatPanel({
               <Spinner /> Reconnecting to the colony…
             </div>
           )}
+          <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border px-4 py-1.5">
+            <span className="text-[12px] text-faint">{simple ? "Described in plain language" : "Raw commands and output"}</span>
+            <button
+              type="button"
+              onClick={toggleView}
+              title={simple ? "Show the exact commands the agent ran" : "Describe each step in plain language"}
+              className="cursor-pointer rounded-md border border-border px-2 py-0.5 text-[12px] text-muted hover:bg-panel-2 hover:text-text"
+            >
+              {simple ? "Show detail" : "Simple view"}
+            </button>
+          </div>
           <ThreadPrimitive.Viewport className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2">
             {thread.messages.length === 0 && <EmptyChat connection={state.connection} live={live} />}
             <ThreadPrimitive.Messages>
@@ -141,6 +180,7 @@ export function ChatPanel({
           <Composer isRunning={isRunning} live={live} waiting={thread.hasOpenQuestion} />
         </ThreadPrimitive.Root>
       </AssistantRuntimeProvider>
+      </SimpleViewContext.Provider>
     </QuestionActionsContext.Provider>
   );
 }
@@ -251,6 +291,24 @@ function ReasoningPart({ text }: ReasoningMessagePartProps) {
   );
 }
 
+/** Simple view: one sentence per step, with the exact command one click away. Technical view: the raw call. */
+const SimpleViewContext = createContext(true);
+
+const ACTIVITY_ICONS: Record<ActivityIcon, typeof IconTerminal> = {
+  run: IconTerminal,
+  read: IconSearch,
+  edit: IconPencil,
+  search: IconSearch,
+  download: IconRefresh,
+  web: IconNetwork,
+  memory: IconMemory,
+  test: IconCpu,
+  git: IconBranch,
+  clean: IconTrash,
+  list: IconMenu,
+  agent: IconSpark,
+};
+
 function toolSummary(input: Record<string, unknown>): string {
   const pick = input.command ?? input.file_path ?? input.pattern ?? input.url ?? input.query ?? input.description ?? input.prompt;
   const text = typeof pick === "string" ? pick : JSON.stringify(input);
@@ -258,10 +316,15 @@ function toolSummary(input: Record<string, unknown>): string {
 }
 
 function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartProps) {
+  const simple = useContext(SimpleViewContext);
   const payload = result as ToolResultPayload | undefined;
   const done = payload !== undefined;
   const failed = Boolean(isError || payload?.is_error);
   const input = (args ?? {}) as Record<string, unknown>;
+  // A step that says nothing to a reader, and didn't fail, is just noise in the simple view.
+  if (simple && !failed && isNoiseTool(toolName, input)) return null;
+  const activity = describeTool(toolName, input);
+  const ActivityGlyph = ACTIVITY_ICONS[activity.icon];
   return (
     <details className="group my-1.5 rounded-xl border border-border bg-panel-2/50 text-[13px] open:bg-panel-2">
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-3 py-2 [&::-webkit-details-marker]:hidden">
@@ -273,11 +336,24 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
         >
           {done ? failed ? <IconX size={12} strokeWidth={3} /> : <IconCheck size={12} strokeWidth={3} /> : <Spinner className="size-3" />}
         </span>
-        <span className="shrink-0 font-mono text-[12.5px] font-semibold text-accent">{toolName}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-muted">{toolSummary(input)}</span>
+        {simple ? (
+          <>
+            <ActivityGlyph size={13} className="shrink-0 text-faint" />
+            <span className="min-w-0 flex-1 truncate">
+              {activity.label}
+              {failed && <span className="ml-1.5 text-err">— that didn't work</span>}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="shrink-0 font-mono text-[12.5px] font-semibold text-accent">{toolName}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-muted">{toolSummary(input)}</span>
+          </>
+        )}
         <IconChevron size={14} className="shrink-0 text-faint transition-transform group-open:rotate-90" />
       </summary>
       <div className="space-y-2 border-t border-border px-3 py-2">
+        {simple && <p className="font-mono text-[12px] font-semibold text-accent">{toolName}</p>}
         <pre className="scroll-thin max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-muted">
           {JSON.stringify(input, null, 2)}
         </pre>
