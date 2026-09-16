@@ -10,7 +10,7 @@ flowchart TB
 
   subgraph mothership["mothership"]
     direction TB
-    host["colonizer (Rust)<br/>source · sandbox · mesh<br/>agent · interfaces · publish"]
+    host["colonizer (Rust)<br/>the mothership process"]
     hs["headscale<br/>127.0.0.1 · control plane"]
     ts["tailscaled --tun=userspace<br/>the harness's own mesh node"]
     gw["provider gateway<br/>127.0.0.1:41750"]
