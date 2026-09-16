@@ -78,6 +78,8 @@ pub struct App {
     pub repo_owners: RwLock<BTreeSet<String>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// The most recent background image pull, so Settings can show it.
+    pub pull: Mutex<sandbox::PullStatus>,
 }
 
 pub type Shared = Arc<App>;
@@ -346,6 +348,7 @@ async fn main() -> Result<()> {
         gateway: gateway::Gateway::new()?,
         repo_owners: RwLock::new(BTreeSet::new()),
         orgs_refreshed: Mutex::new(None),
+        pull: Mutex::new(Default::default()),
         cfg,
     });
 
@@ -359,7 +362,7 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
-        .route("/api/sandbox/pull", post(sandbox::pull_configured))
+        .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
         .route("/api/providers/{id}/health", get(gateway::health))

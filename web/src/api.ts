@@ -10,11 +10,12 @@ import type {
   ModelOption,
   ModelProvider,
   ModuleInfo,
-  ProviderHealth,
   NewNoteRequest,
   NewSessionRequest,
   OrgInfo,
   OrgSettings,
+  ProviderHealth,
+  PullStatus,
   Repo,
   SaveProviderRequest,
   Session,
@@ -47,6 +48,8 @@ export interface Api {
   status(): Promise<HarnessStatus>;
   modules(): Promise<ModuleInfo[]>;
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
+  sandboxPull(): Promise<PullStatus>;
+  sandboxPullStatus(): Promise<PullStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   sessions(): Promise<Session[]>;
@@ -124,6 +127,8 @@ export const httpApi: Api = {
   status: () => request("/api/status"),
   modules: () => request("/api/modules"),
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
+  sandboxPull: () => post("/api/sandbox/pull"),
+  sandboxPullStatus: () => request("/api/sandbox/pull"),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

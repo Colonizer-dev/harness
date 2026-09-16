@@ -217,6 +217,27 @@ body {
   animation: pulse-soft 1.4s ease-in-out infinite;
 }
 
+/* An image download with no progress to report: msb prints none when it is not
+   on a terminal, so this says "working" rather than inventing a percentage. */
+@keyframes pull-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.pull-slide {
+  animation: pull-slide 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pull-slide {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
 @keyframes blink-caret {
   50% {
     opacity: 0;
