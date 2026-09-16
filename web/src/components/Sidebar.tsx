@@ -706,7 +706,7 @@ function OpenSessionRow({
     setStarting(true);
     try {
       const session = await api.createSession({ repo, instructions: instructions.trim() || undefined, autopilot: autopilot ?? undefined });
-      toast(`Colony launched on ${repo}`);
+      toast(session.status === "queued" ? `Queued on ${repo} — it starts when a colony finishes` : `Colony launched on ${repo}`);
       onCreated(session);
     } catch (error) {
       toast(errorMessage(error), "error");
@@ -800,7 +800,11 @@ function IssueRow({
         instructions: instructions.trim() || undefined,
         autopilot: autopilot ?? undefined,
       });
-      toast(`Colony launched for #${issue.number}`);
+      toast(
+        session.status === "queued"
+          ? `#${issue.number} is queued — it starts when a colony finishes`
+          : `Colony launched for #${issue.number}`,
+      );
       onCreated(session);
     } catch (error) {
       toast(errorMessage(error), "error");

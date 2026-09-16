@@ -63,6 +63,7 @@ export function Badge({
 }
 
 export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; live: boolean }> = {
+  queued: { label: "Queued", tone: "neutral", live: false },
   starting: { label: "Starting", tone: "info", live: true },
   running: { label: "Working", tone: "info", live: true },
   waiting_for_answer: { label: "Needs your answer", tone: "accent", live: true },

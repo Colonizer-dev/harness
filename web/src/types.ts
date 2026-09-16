@@ -1,6 +1,7 @@
 // Types for the harness browser API (docs/protocol.md §4, §6.3) and the agent event vocabulary (§2–3).
 
 export type SessionStatus =
+  | "queued"
   | "starting"
   | "running"
   | "waiting_for_answer"

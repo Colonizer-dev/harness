@@ -173,10 +173,16 @@ export function SessionView({
               </Button>
             )}
             <Button
-              disabled={!live || busy !== null}
-              onClick={() => act("stop", (a, id) => a.stopSession(id), "Stop and remove this colony's microVM? The worktree is kept.")}
+              disabled={(!live && session.status !== "queued") || busy !== null}
+              onClick={() =>
+                act(
+                  "stop",
+                  (a, id) => a.stopSession(id),
+                  session.status === "queued" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.",
+                )
+              }
             >
-              {busy === "stop" ? <Spinner /> : <IconPower size={15} />} Stop
+              {busy === "stop" ? <Spinner /> : <IconPower size={15} />} {session.status === "queued" ? "Leave the queue" : "Stop"}
             </Button>
             <Button
               variant="danger"
