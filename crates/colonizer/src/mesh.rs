@@ -167,7 +167,7 @@ impl Mesh {
             .context("harness tailscaled did not start (see mesh/tailscaled.log)")?;
 
         if self.backend_state().await? != "Running" {
-            let key = self.create_key(harness_user, false).await?;
+            let key = self.create_key(harness_user).await?;
             let key_file = self.runtime_dir.join("harness-authkey");
             write_private(&key_file, key.as_bytes())?;
             let result = exec(
@@ -278,22 +278,22 @@ taildrop:
         Ok(users.as_array().into_iter().flatten().find(|u| u["name"] == name).and_then(|u| as_u64(&u["id"])))
     }
 
-    async fn create_key(&self, user: u64, ephemeral: bool) -> Result<String> {
+    async fn create_key(&self, user: u64) -> Result<String> {
         let mut cmd = self.headscale();
         cmd.args(["preauthkeys", "create", "--user", &user.to_string(), "--expiration", "30m", "-o", "json"]);
-        if ephemeral {
-            cmd.arg("--ephemeral");
-        }
         let out = exec(&mut cmd).await?;
         let key: Value = serde_json::from_str(&out).context("unexpected headscale preauthkeys output")?;
         key["key"].as_str().map(String::from).context("headscale returned no key")
     }
 
-    /// A single-use, ephemeral key for one microVM.
+    /// A single-use key for one microVM. Deliberately not ephemeral: headscale deletes an ephemeral node
+    /// once it disconnects, so a colony that outlives a mothership restart — or whose microVM is stopped and
+    /// later resumed — would find its node gone and its single-use key spent, with no way back onto the mesh.
+    /// Colony nodes are deleted explicitly when the colony is torn down.
     pub async fn mint_vm_key(&self) -> Result<String> {
         self.ensure_started().await?;
         let user = self.running.lock().await.as_ref().map(|r| r.vms_user).context("mesh is not running")?;
-        self.create_key(user, true).await
+        self.create_key(user).await
     }
 
     async fn nodes(&self) -> Result<Vec<Value>> {

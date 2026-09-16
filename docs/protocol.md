@@ -146,6 +146,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `POST /api/sessions/{id}/publish` | Stop the agent, commit (co-authored by Colonizer), push the colony's own `colonizer/…` branch (never the base or default branch), open PR |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
+| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree) |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 

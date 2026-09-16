@@ -406,12 +406,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     app.sessions.write().await.push(session.clone());
     app.persist_sessions().await;
     app.runtime(&id).await;
-    tokio::spawn(boot(app.clone(), id));
+    tokio::spawn(boot(app.clone(), id, false));
     Ok(Json(session))
 }
 
-async fn boot(app: Shared, id: String) {
-    if let Err(e) = boot_inner(&app, &id).await {
+async fn boot(app: Shared, id: String, resume: bool) {
+    if let Err(e) = boot_inner(&app, &id, resume).await {
         let message = format!("{e:#}");
         let Some(s) = app.session(&id).await else { return };
         if s.status != SessionStatus::Starting {
@@ -434,7 +434,7 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
     }
 }
 
-async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
+async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     let s = ensure_starting(app, id).await?;
     let modules = app.modules.read().await.clone();
@@ -447,7 +447,11 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
         }
         None => None,
     };
-    let base = github::default_branch(app, &s.repo).await?;
+    // A resumed colony keeps the base it started from; its branch already exists on top of it.
+    let base = match s.base.clone().filter(|_| resume) {
+        Some(base) => base,
+        None => github::default_branch(app, &s.repo).await?,
+    };
     let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
     app.update_session(id, |x| {
         if let Some(title) = title {
@@ -460,7 +464,11 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
 
     let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
-    let admin = {
+    let admin = if resume {
+        // The worktree and branch outlive the microVM, so a resumed colony picks them up as they are.
+        log.info(format!("resuming on the kept worktree, branch {}", s.branch)).await;
+        PathBuf::from(s.git_admin_dir.as_deref().context("this colony has no worktree to resume")?)
+    } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
         github::sync_repo(app, &s.repo, &bare, &log).await?;
@@ -473,7 +481,7 @@ async fn boot_inner(app: &Shared, id: &str) -> Result<()> {
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
     let out_dir = dir.join("out");
-    let prompt = github::build_prompt(&s, issue.as_ref(), &base);
+    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let org_settings = app.org_settings(&s.org);
     let mut runner_env = agent_env(&agent, &orgs::effective_agent(&modules, &org_settings));
@@ -990,6 +998,35 @@ pub async fn recover(app: &Shared) {
     }
 }
 
+/// microsandbox stops a colony's microVM on its own when the sandbox's max session length runs out, and the
+/// host can stop one too. Without this the colony keeps whatever status it last had — usually `idle` — and
+/// looks alive in the UI while nothing can reach it. Checking once a minute turns that into a `stopped`
+/// colony the maintainer can resume, since the worktree outlives the microVM.
+pub async fn watch_sandboxes(app: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        // A failed `msb ls` says nothing about the colonies, so leave them alone until it answers again.
+        let Ok(running) = sandbox::running(&app.cfg.msb).await else { continue };
+        // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
+        // deadlock against update_session's write lock.
+        let sessions = app.sessions.read().await.clone();
+        for s in sessions {
+            if !s.status.is_live() || s.status == SessionStatus::Starting || running.contains(&s.sandbox) {
+                continue;
+            }
+            app.session_log(&s.id, "error", "the microVM stopped; the worktree is kept, so this colony can be resumed".into()).await;
+            teardown_vm(&app, &s).await;
+            app.update_session(&s.id, |x| {
+                x.status = SessionStatus::Stopped;
+                x.error = Some("the microVM stopped (its max session length, or the host stopped it); press Resume to continue".into());
+            })
+            .await;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // agentd transport
 // ---------------------------------------------------------------------------
@@ -1066,6 +1103,52 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         return Err(client_error(StatusCode::CONFLICT, "this session can't be published right now"));
     }
     tokio::spawn(publish_session(app.clone(), id.clone()));
+    Ok(Json(s))
+}
+
+/// A colony can be resumed while its worktree is still on disk and no microVM is running for it.
+fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
+    matches!(status, SessionStatus::Stopped | SessionStatus::Failed) && !cleaned_up && has_worktree
+}
+
+/// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1 again.
+fn rotate_events(dir: &std::path::Path) {
+    let events = dir.join("events.jsonl");
+    if !events.exists() {
+        return;
+    }
+    for n in 1..1000 {
+        let target = dir.join(format!("events-{n}.jsonl"));
+        if !target.exists() {
+            let _ = std::fs::rename(&events, &target);
+            return;
+        }
+    }
+}
+
+pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
+        return Err(client_error(StatusCode::CONFLICT, "this colony can't be resumed: it has to be stopped and still have its worktree"));
+    }
+    if let Some(rt) = app.runtimes.lock().await.remove(&id) {
+        rt.stop.send_replace(true);
+    }
+    rotate_events(&app.session_dir(&id));
+    let Some((s, ())) = app
+        .update_session(&id, |x| {
+            x.status = SessionStatus::Starting;
+            x.error = None;
+            x.attention = None;
+            x.mesh = None;
+            x.local_port = None;
+        })
+        .await
+    else {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
+    };
+    app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
+    tokio::spawn(boot(app.clone(), id, true));
     Ok(Json(s))
 }
 
@@ -1293,5 +1376,24 @@ mod tests {
         assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
         assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
         assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+    }
+
+    #[test]
+    fn only_a_stopped_colony_that_still_has_its_worktree_can_be_resumed() {
+        assert!(can_resume(SessionStatus::Stopped, false, true));
+        assert!(can_resume(SessionStatus::Failed, false, true));
+        assert!(!can_resume(SessionStatus::Stopped, true, true), "cleaned up");
+        assert!(!can_resume(SessionStatus::Stopped, false, false), "no worktree");
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Running,
+            SessionStatus::WaitingForAnswer,
+            SessionStatus::Idle,
+            SessionStatus::Publishing,
+            SessionStatus::PrOpened,
+            SessionStatus::NoChanges,
+        ] {
+            assert!(!can_resume(status, false, true), "{status:?}");
+        }
     }
 }
