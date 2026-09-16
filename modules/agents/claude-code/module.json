@@ -4,15 +4,25 @@
   "name": "Claude Code",
   "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
   "protocol": "colonizer-runner/1",
-  "entry": ["node", "runner.mjs"],
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
   "requires": {
-    "binaries": ["claude"],
+    "binaries": [
+      "claude"
+    ],
     "image": "glibc + node >= 20"
   },
   "secrets": [
     {
-      "env": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-      "hosts": ["api.anthropic.com"]
+      "env": [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY"
+      ],
+      "hosts": [
+        "api.anthropic.com"
+      ]
     }
   ],
   "settings": {
@@ -43,7 +53,14 @@
         "type": "string",
         "title": "Effort",
         "description": "Reasoning effort. Empty uses the model default.",
-        "enum": ["", "low", "medium", "high", "xhigh", "max"],
+        "enum": [
+          "",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
         "default": "",
         "env": "COLONIZER_EFFORT"
       },
@@ -53,6 +70,13 @@
         "description": "If the agent ends a turn with a plain-text question, ask it once to re-ask with choices.",
         "default": true,
         "env": "COLONIZER_ENFORCE_CHOICES"
+      },
+      "plugins": {
+        "type": "string",
+        "title": "Plugin directories",
+        "description": "Comma-separated Claude Code plugin directories to load, read-only, from the mothership's plugins folder. Names only, no paths. Empty loads none.",
+        "default": "",
+        "env": "COLONIZER_PLUGIN_DIRS"
       }
     }
   }

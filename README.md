@@ -239,6 +239,7 @@ Stated here rather than buried.
 | Watchdog for stalled colonies ([#4](https://github.com/Colonizer-dev/harness/issues/4)) | `SHIPPING` |
 | Provider gateway: private-network models, queues, long timeouts, health, Claude fallback ([#5](https://github.com/Colonizer-dev/harness/issues/5)) | `SHIPPING` |
 | CI running the Rust, runner and UI test suites | `PLANNED` |
+| Local Claude Code plugins mounted read-only into colonies ([#6](https://github.com/Colonizer-dev/harness/issues/6)) | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
