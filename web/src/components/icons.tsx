@@ -140,6 +140,13 @@ export const IconKey = make(
   </>,
 );
 export const IconPencil = make(<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z" />);
+export const IconInfo = make(
+  <>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 11v5" />
+    <path d="M12 8h.01" />
+  </>,
+);
 export const IconCpu = make(
   <>
     <rect x="6" y="6" width="12" height="12" rx="2" />
