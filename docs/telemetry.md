@@ -35,7 +35,7 @@ periods can't be linked. Stopping the mothership sends the same message, but kee
 ## What the service keeps
 
 The service is a Cloudflare Worker with a D1 database. Its source is
-[services/telemetry](../services/telemetry). It keeps one row per mothership:
+[services/telemetry](https://github.com/Colonizer-dev/harness/tree/main/services/telemetry). It keeps one row per mothership:
 
 | Column | What it is |
 | :--- | :--- |

@@ -441,7 +441,7 @@ completely. A mismatch or an interrupted download ends `failed` and leaves no pa
 
 ### `GET /api/telemetry` and `PUT /api/telemetry`
 
-The live map on colonizer.dev ([telemetry.md](telemetry.md)). It is off until the user switches it on, and
+The live map on colonizer.dev (`docs/telemetry.md`). It is off until the user switches it on, and
 the web UI asks once while `enabled` is `null`. `GET` returns:
 
 ```json
