@@ -3,7 +3,8 @@
 // commands arrive as JSON lines on stdin, protocol events leave as JSON lines on stdout.
 // Diagnostics go to stderr only.
 
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +22,44 @@ export const DELEGATE_PROMPT_APPEND = [
   '- You are the orchestrator of this colony. Plan the work, split it into tasks, and start a subagent with the Task tool for each one. Read the subagent\'s report, decide what follows, and keep a subagent going until its task is genuinely done.',
   '- Do the thinking yourself: what to build, in what order, whether a result is good enough, and what to tell the user. Leave reading, searching, editing, running commands and tests to subagents.',
 ].join('\n');
+
+/** Where a superpowers plugin keeps the skill its SessionStart hook injects. */
+export const SUPERPOWERS_SKILL = 'skills/using-superpowers/SKILL.md';
+
+/**
+ * Other superpowers skills name the two that aren't staged (scripts/fetch-vendor.sh); this says why they are
+ * missing and what to do at those steps instead.
+ */
+export const SUPERPOWERS_COLONIZER_NOTE = [
+  "- superpowers' using-git-worktrees and finishing-a-development-branch skills are not installed in this colony, on purpose. You already work in an isolated git worktree on the branch the harness publishes, so a step that asks for an isolated workspace is already done.",
+  '- Where a skill tells you to use finishing-a-development-branch, or to merge, push or open a pull request, stop at that step: the harness commits your changes and opens the pull request.',
+].join('\n');
+
+/**
+ * superpowers switches itself on with a SessionStart hook that injects its using-superpowers skill. Colonizer
+ * doesn't run plugin hooks, so the same text goes into the system prompt, which also survives compaction
+ * (the hook re-ran on `compact`). The wrapper is the hook's own.
+ */
+export function superpowersBootstrap(skill) {
+  return [
+    '<EXTREMELY_IMPORTANT>',
+    'You have superpowers.',
+    '',
+    "**Below is the full content of your 'superpowers:using-superpowers' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**",
+    '',
+    skill,
+    '</EXTREMELY_IMPORTANT>',
+    SUPERPOWERS_COLONIZER_NOTE,
+  ].join('\n');
+}
+
+function readText(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
 
 export const CHOICE_NUDGE =
   'You ended your turn with a question in plain text. Ask it again with the AskUserQuestion tool, offering 2-4 concrete options, and wait for the answer.';
@@ -154,9 +193,22 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
   // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
   const delegate = ['encourage', 'enforce'].includes(env.COLONIZER_DELEGATE) ? env.COLONIZER_DELEGATE : 'off';
+  // Plugin directories arrive already mounted read-only in the VM; the mothership
+  // rewrites COLONIZER_PLUGIN_DIRS to the in-VM paths. settingSources stays
+  // ['project'], so this is the only way a plugin reaches a colony — a user-scope
+  // install would be invisible, and a project-scope one would land in the PR.
+  const pluginDirs = (env.COLONIZER_PLUGIN_DIRS || '')
+    .split(',')
+    .map((dir) => dir.trim())
+    .filter(Boolean);
   const appended = [SYSTEM_PROMPT_APPEND];
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
+  // Keyed on the skill file, not the directory name, so an operator's own copy of superpowers switches on too.
+  for (const dir of pluginDirs) {
+    const skill = readText(join(dir, SUPERPOWERS_SKILL));
+    if (skill !== null) appended.push(superpowersBootstrap(skill.trimEnd()));
+  }
 
   const options = {
     cwd: process.cwd(),
@@ -199,14 +251,6 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
       ],
     };
   }
-  // Plugin directories arrive already mounted read-only in the VM; the mothership
-  // rewrites COLONIZER_PLUGIN_DIRS to the in-VM paths. settingSources stays
-  // ['project'], so this is the only way a plugin reaches a colony — a user-scope
-  // install would be invisible, and a project-scope one would land in the PR.
-  const pluginDirs = (env.COLONIZER_PLUGIN_DIRS || '')
-    .split(',')
-    .map((dir) => dir.trim())
-    .filter(Boolean);
   if (pluginDirs.length) {
     options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
   }
