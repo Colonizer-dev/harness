@@ -6,6 +6,7 @@
  */
 
 import { settlerName } from "../settlers";
+import type { AntActivity } from "./AntAvatar";
 
 export type ActivityIcon = "run" | "read" | "edit" | "search" | "download" | "web" | "memory" | "test" | "git" | "clean" | "list" | "agent";
 
@@ -165,4 +166,36 @@ export function describeTool(toolName: string, input: Record<string, unknown>): 
       if (toolName.startsWith("mcp__")) return { icon: "run", label: "Using a connected tool" };
       return { icon: "run", label: toolName };
   }
+}
+
+/** What a settler's ant carries for a step: a lens to search or read, a leaf to edit, a block to build or install, a flag to test. */
+export function antActivity({ icon, label }: Activity): AntActivity {
+  switch (icon) {
+    case "search":
+    case "list":
+    case "memory":
+      return "search";
+    case "read":
+    case "web":
+    case "git":
+      return "read";
+    case "edit":
+    case "clean":
+      return "edit";
+    case "download":
+      return "build";
+    case "test":
+      return "test";
+    default:
+      return /^Building\b/.test(label) ? "build" : "run";
+  }
+}
+
+/** The exact thing a step acted on, shown beside its sentence: the command, the path, the pattern or the address. */
+export function toolDetail(toolName: string, input: Record<string, unknown>): string {
+  const pick =
+    toolName === "Bash"
+      ? str(input.command).split("\n")[0]
+      : str(input.file_path) || str(input.path) || str(input.notebook_path) || str(input.pattern) || str(input.url) || str(input.query);
+  return pick.length > 120 ? `${pick.slice(0, 120)}…` : pick;
 }
