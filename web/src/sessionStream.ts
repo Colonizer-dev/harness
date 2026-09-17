@@ -3,6 +3,7 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { SOCKET_OPEN, type Api, type SocketLike } from "./api";
+import { settlerName } from "./settlers";
 import type {
   AgentEvent,
   AgentRef,
@@ -455,10 +456,52 @@ export interface ToolResultPayload {
   is_error: boolean;
 }
 
+/**
+ * What a subagent is doing, as its card shows it. `working`: a tool is running. `thinking`: between steps, waiting on
+ * its model. `writing`: its report is streaming in. `done`: it ended on text, its report. `continued`: the orchestrator
+ * spoke in between, and this subagent's later work is in a card further down.
+ */
+export type SubagentState = "working" | "thinking" | "writing" | "done" | "continued";
+
+export interface ToolRef {
+  name: string;
+  input: Record<string, unknown>;
+}
+
+export interface SubagentView {
+  agent: AgentRef;
+  /** The settler name shown for it, numbered when a colony has several of one role. */
+  name: string;
+  state: SubagentState;
+  /** The tool running now, when `working`. */
+  current: ToolRef | null;
+  /** The last tool it started, for the status line between steps. */
+  last: ToolRef | null;
+  /** Tool calls in this card. */
+  steps: number;
+}
+
+/** Reads a subagent card's state from its blocks, as they stand now. */
+export function subagentState(blocks: Block[]): Pick<SubagentView, "state" | "current" | "last" | "steps"> {
+  const tools = blocks.filter((b): b is ToolBlock => b.kind === "tool");
+  const running = [...tools].reverse().find((t) => t.output === null);
+  const lastTool = tools[tools.length - 1];
+  const ref = (t: ToolBlock | undefined): ToolRef | null => (t ? { name: t.name, input: t.input } : null);
+  const lastBlock = blocks[blocks.length - 1];
+  const state: SubagentState = running
+    ? "working"
+    : lastBlock?.kind === "text"
+      ? lastBlock.streaming
+        ? "writing"
+        : "done"
+      : "thinking";
+  return { state, current: ref(running), last: ref(lastTool), steps: tools.length };
+}
+
 export interface ThreadView {
   messages: ThreadMessageLike[];
   /** The subagent behind a rendered message, keyed by its id; absent means the orchestrator. */
-  agents: Record<string, AgentRef>;
+  subagents: Record<string, SubagentView>;
   /** Turn summaries keyed by the id of the (grouped) message they follow. */
   turns: Record<string, TurnSummary[]>;
   /** Memory proposals keyed the same way. */
@@ -517,7 +560,23 @@ export function buildThread(state: StreamState): ThreadView {
   const emitted = new Set<string>();
   let lastEmitted: string | null = null;
   let hasOpenQuestion = false;
-  const agents: Record<string, AgentRef> = {};
+  const subagents: Record<string, SubagentView> = {};
+  // Settler names are numbered per role in order of first appearance: the second Explore is "Scout Settler 2".
+  const names = new Map<string, string>();
+  const perRole = new Map<string, number>();
+  const nameOf = (agent: AgentRef): string => {
+    let name = names.get(agent.id);
+    if (!name) {
+      // The runner falls back to the task description when the Task call named no type.
+      const type = agent.name === agent.description ? null : agent.name;
+      const role = settlerName(type);
+      const ordinal = (perRole.get(role) ?? 0) + 1;
+      perRole.set(role, ordinal);
+      name = settlerName(type, ordinal);
+      names.set(agent.id, name);
+    }
+    return name;
+  };
   let group: { id: string; blocks: Block[]; ts: string | null; prev: string | null; agent?: AgentRef } | null = null;
 
   const flush = () => {
@@ -530,7 +589,9 @@ export function buildThread(state: StreamState): ThreadView {
         content: parts,
         createdAt: group.ts ? new Date(group.ts) : undefined,
       });
-      if (group.agent) agents[group.id] = group.agent;
+      if (group.agent) {
+        subagents[group.id] = { agent: group.agent, name: nameOf(group.agent), ...subagentState(group.blocks) };
+      }
       emitted.add(group.id);
       lastEmitted = group.id;
     } else {
@@ -580,5 +641,14 @@ export function buildThread(state: StreamState): ThreadView {
   for (const turn of state.turns) (turns[placement(turn.afterMessageId)] ??= []).push(turn);
   for (const notice of state.memoryNotices) (notices[placement(notice.afterMessageId)] ??= []).push(notice);
 
-  return { messages, agents, turns, notices, hasOpenQuestion };
+  // Only a subagent's latest card is live; an earlier one was interrupted by the orchestrator and carries on below.
+  const latest = new Set<string>();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const view = subagents[messages[i].id ?? ""];
+    if (!view) continue;
+    if (latest.has(view.agent.id)) view.state = "continued";
+    else latest.add(view.agent.id);
+  }
+
+  return { messages, subagents, turns, notices, hasOpenQuestion };
 }
