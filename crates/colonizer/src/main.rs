@@ -23,6 +23,7 @@ mod presets;
 mod providers;
 mod sandbox;
 mod sessions;
+mod telemetry;
 mod timing;
 mod util;
 mod watchdog;
@@ -86,6 +87,8 @@ pub struct App {
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<headroom::Status>,
+    /// The live map on colonizer.dev, off until the user switches it on.
+    pub telemetry: telemetry::Telemetry,
 }
 
 pub type Shared = Arc<App>;
@@ -356,6 +359,7 @@ async fn main() -> Result<()> {
         orgs_refreshed: Mutex::new(None),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
+        telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
         cfg,
     });
 
@@ -372,6 +376,7 @@ async fn main() -> Result<()> {
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
+        .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -429,6 +434,7 @@ async fn main() -> Result<()> {
     let queue = app.clone();
     tokio::spawn(async move { sessions::run_queue(queue).await });
     tokio::spawn(watchdog::run(app.clone()));
+    tokio::spawn(telemetry::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
         // Retrying would never help: no mesh binary is published for this platform, so there is
@@ -462,6 +468,7 @@ async fn main() -> Result<()> {
         // microVMs are detached and keep running; sessions reconnect on the next start.
         _ = shutdown_signal() => {
             println!("shutting down; running sessions keep their microVMs");
+            app.telemetry.goodbye().await;
             let mesh = app.mesh.lock().await.clone();
             if let Some(mesh) = mesh {
                 mesh.shutdown().await;
