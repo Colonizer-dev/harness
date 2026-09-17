@@ -1,22 +1,53 @@
 # Install
 
-Colonizer runs on your own machine, and today you build it from this repository. There are no prebuilt
-releases yet.
+Colonizer runs on your own machine. Install a prebuilt release with one command, or build it from this
+repository.
 
 ## What you need
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
   or an Apple Silicon Mac. An Intel Mac can't run Colonizer, because microsandbox's libkrun backend is
   aarch64-only.
-- **Tools**: `git`, `gh`, `curl`, `tar`, Node.js 20 or newer, and a Rust toolchain of 1.88 or newer.
-  Homebrew's `rust` can lag a long way behind, so `rustup` is the safe bet.
+- **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar`. A build from source also needs
+  Node.js 20 or newer and a Rust toolchain of 1.88 or newer. Homebrew's `rust` can lag a long way
+  behind, so `rustup` is the safe bet.
 - **Claude Code**: on Linux, a native Claude Code install, which colonies use. On a Mac the installer
   fetches the Linux build a colony needs ([On a Mac](#on-a-mac)).
 
 [microsandbox](https://docs.microsandbox.dev), Headscale and Tailscale ship with the app, pinned and
 checked by sha256, so there is nothing else to install.
 
-## Build and run
+## Install a release
+
+```sh
+curl -fsSL https://colonizer.dev/install.sh | sh
+```
+
+Then run `colonizer` and open <http://127.0.0.1:7878>.
+
+The installer picks the app for your machine from the latest
+[release](https://github.com/Colonizer-dev/harness/releases) and checks it against the release's
+`SHA256SUMS`. It installs the app to `~/.local/share/colonizer/app` and links `~/.local/bin/colonizer`.
+The script is `scripts/install-release.sh`, published with each release as `install.sh`.
+
+A release contains no Anthropic code, which isn't ours to redistribute. So the installer fetches two
+things from Anthropic's own channels and checks each one:
+
+- the Claude Agent SDK, from the npm registry, against the checksum the release recorded from
+  `package-lock.json`;
+- on a Mac, the Linux build of Claude Code that colonies run ([On a Mac](#on-a-mac)).
+
+Run the same command again to update. Two variations:
+
+```sh
+# install a particular release instead of the latest
+curl -fsSL https://colonizer.dev/install.sh | COLONIZER_VERSION=v0.1.0 sh
+
+# also download the default colony image now, so the first colony boots straight away
+curl -fsSL https://colonizer.dev/install.sh | sh -s -- --pull-image
+```
+
+## Build from source
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness
@@ -48,7 +79,7 @@ sandbox), a colony is queued and starts on its own when one ahead of it finishes
 
 ## On a Mac
 
-`scripts/install.sh` also fetches the `linux-arm64` build of Claude Code. It follows the `stable`
+The installer, for a release or a build from source, also fetches the `linux-arm64` build of Claude Code. It follows the `stable`
 channel and is checked against Anthropic's own manifest. This is needed because a colony is a Linux
 microVM and the Mac's own binary is Mach-O. `colonizer-agentd` is built for the guest's architecture.
 
@@ -61,7 +92,7 @@ port instead ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
 
 | What | Where | Change it with |
 | :--- | :--- | :--- |
-| The app | `./dist`, or `~/.local/share/colonizer/app` after `--install` | |
+| The app | `~/.local/share/colonizer/app` for a release; `./dist` for a build from source, or that same place after `--install` | `COLONIZER_APP` for a release |
 | Settings, org settings, providers, and the GitHub, Claude and provider credentials | `~/.config/colonizer` | `COLONIZER_CONFIG_DIR` |
 | Colonies and their worktrees, shared memory, your own plugins, the Headroom bundle | `~/.local/share/colonizer` | `COLONIZER_DATA_DIR` |
 | The web UI | `127.0.0.1:7878` | `COLONIZER_BIND` |
@@ -70,10 +101,12 @@ Every setting is listed under [Configuration](https://github.com/Colonizer-dev/h
 
 ## Updating
 
+For a release, run the install command again. For a build from source:
+
 ```sh
 git pull
 scripts/install.sh
 ```
 
-Then restart `colonizer`. Settings and colonies live outside the checkout, so a rebuild leaves them
+Either way, restart `colonizer` afterwards. Settings and colonies live outside the checkout, so a rebuild leaves them
 alone, and the colony list is read back when the harness starts.
