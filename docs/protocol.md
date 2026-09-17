@@ -402,13 +402,14 @@ mount immediately.
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/providers` | `[{id, name, base_url, auth, has_key, models: [string], preset: "deepseek"\|"local"\|"custom"}]` |
-| `PUT /api/providers/{id}` | `{name, base_url, auth, models, api_key?}`: `api_key` omitted keeps the saved key, `""` removes it |
+| `GET /api/providers` | `[{id, name, base_url, auth, wire: "anthropic"\|"openai", has_key, models: [string], preset: "deepseek"\|"openai"\|"local"\|"custom"}]` |
+| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?}`: `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
-`deepseek-v4-pro`. `local` = `http://127.0.0.1:8080`, `none`, no models. Loopback base URLs are rewritten
+`deepseek-v4-pro`. `openai` = `https://api.openai.com`, `bearer`, wire `openai`, models `gpt-5.6`, `gpt-5.5`,
+`context_tokens` 272000. `local` = `http://127.0.0.1:8080`, `none`, no models. Loopback base URLs are rewritten
 to `host.microsandbox.internal` inside colonies.
 
 The agent module schema gains `subagent_model` and `background_model` next to `model` (all free-text
@@ -514,7 +515,7 @@ Provider keys never enter colonies.
 **Gateway endpoint** `ANY /providers/{id}/{path}`:
 
 - Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
-- Forwards to the provider's `base_url` + `/{path}` + query, with `content-type`, `accept`,
+- `wire: anthropic` (the default): forwards to the provider's `base_url` + `/{path}` + query, with `content-type`, `accept`,
   `anthropic-version` and `anthropic-beta` (minus `oauth-*` betas) plus the provider credential. It never
   forwards the client's `authorization` or `x-api-key`.
 - `max_concurrent`: waits up to `queue_timeout_secs` for a slot, then answers `503`
@@ -529,6 +530,35 @@ Provider keys never enter colonies.
   bodies are never pinged.
 - Errors use the Anthropic error shape so Claude Code reports them normally.
 - A colony with a request in flight through the gateway counts as making progress for the watchdog.
+
+**`openai` wire.** A provider with `wire: "openai"` speaks OpenAI's Chat Completions API, and the gateway
+translates in both directions (`crates/colonizer/src/openai.rs`). The runner's fallback resends its own,
+untranslated request, so it is unaffected.
+
+- Only `POST /v1/messages` is translated, to `{base_url}/v1/chat/completions`, sent with `content-type` and
+  the provider credential only. Any other path, including `/v1/messages/count_tokens`, answers `404`, and
+  the runner estimates the token count itself.
+- The request is rebuilt from an allowlist. `system`, and system messages inside `messages`, become
+  `system` messages; text, images (base64 or URL) and PDF documents become content parts; `tool_use` becomes
+  `tool_calls`, and `tool_result` becomes `tool` messages directly after them (images in a tool result move
+  to a user message after the tool messages); tools with an `input_schema` become functions (server tools
+  are dropped); `tool_choice` and `disable_parallel_tool_use` map across; `max_tokens` becomes
+  `max_completion_tokens`; `stream` adds `stream_options.include_usage`. Everything else is dropped:
+  `thinking`, `context_management`, `output_config`, `metadata`, `cache_control`, thinking blocks, and
+  `temperature`, `top_p` and `stop_sequences`, which OpenAI's reasoning models refuse unless left at their
+  defaults.
+- A stream becomes the Anthropic event sequence, one content block at a time; each parallel tool call gets
+  its own `tool_use` block. Usage arrives in `message_delta`, with cached prompt tokens reported as
+  `cache_read_input_tokens`. `finish_reason` maps `stop` → `end_turn`, `length` → `max_tokens`,
+  `tool_calls` → `tool_use`, `content_filter` → `refusal`.
+- Once the stream has started there is no fallback. An error inside the stream, a stream that ends without
+  a finish reason, or a provider that interleaves the arguments of parallel tool calls ends with an
+  `event: error`, never a silently truncated message. Keep-alive pings and the silence deadline work as
+  above; upstream chunks that translate to nothing still count as activity.
+- Error responses keep their status and map to Anthropic error types. `context_length_exceeded` becomes
+  `400` "prompt is too long: …", so Claude Code compacts; `insufficient_quota` becomes `403`
+  `permission_error`, so it isn't retried. Of the upstream headers only `retry-after` is kept. None of
+  these errors carries `x-colonizer-fallback`.
 
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
