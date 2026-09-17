@@ -60,7 +60,10 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
 
   return (
     <form
-      className="my-1 overflow-hidden rounded-2xl border border-border bg-panel shadow-[var(--shadow)]"
+      // The one open card in the thread, so the activity line at the foot can find and scroll to it.
+      data-open-question=""
+      tabIndex={-1}
+      className="my-1 overflow-hidden rounded-2xl border border-border bg-panel shadow-[var(--shadow)] focus:outline-none"
       onSubmit={(e) => {
         e.preventDefault();
         submit();

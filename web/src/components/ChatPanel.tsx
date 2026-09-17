@@ -11,7 +11,7 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { errorMessage, useToast } from "../context";
 import {
   ASK_USER_TOOL,
@@ -418,14 +418,63 @@ function TurnNotice({ turn }: { turn: TurnSummary }) {
   );
 }
 
+const OPEN_QUESTION = "[data-open-question]";
+
+/**
+ * The foot of the thread while a question is open. The card itself sits wherever the agent asked,
+ * which can be tens of thousands of characters up if the agent kept writing afterwards, so this
+ * offers the way back to it — but only when it is actually out of sight.
+ */
+function WaitingForAnswer() {
+  const [offscreen, setOffscreen] = useState(false);
+
+  useEffect(() => {
+    let observer: IntersectionObserver | null = null;
+    // The status event can arrive before the card has rendered, so keep looking for a moment.
+    const attach = () => {
+      const card = document.querySelector(OPEN_QUESTION);
+      if (!card) return false;
+      observer = new IntersectionObserver(([entry]) => setOffscreen(!entry.isIntersecting), { threshold: 0.15 });
+      observer.observe(card);
+      return true;
+    };
+    if (attach()) return () => observer?.disconnect();
+    const timer = setInterval(() => {
+      if (attach()) clearInterval(timer);
+    }, 250);
+    return () => {
+      clearInterval(timer);
+      observer?.disconnect();
+    };
+  }, []);
+
+  const jump = () => {
+    const card = document.querySelector<HTMLElement>(OPEN_QUESTION);
+    if (!card) return;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.focus({ preventScroll: true });
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent">
+      <IconQuestion size={15} /> Waiting for your answer
+      {offscreen && (
+        <button
+          type="button"
+          onClick={jump}
+          className="cursor-pointer rounded-md border border-accent/40 px-2 py-0.5 text-[12px] font-medium hover:bg-accent-soft"
+        >
+          Jump to the question
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ActivityLine({ state, hasOpenQuestion, live }: { state: StreamState; hasOpenQuestion: boolean; live: boolean }) {
   if (!live) return null;
   if (hasOpenQuestion || state.agentState === "waiting_for_answer") {
-    return (
-      <div className="flex items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent">
-        <IconQuestion size={15} /> Waiting for your answer
-      </div>
-    );
+    return <WaitingForAnswer />;
   }
   if (state.agentState === "working") {
     return (
