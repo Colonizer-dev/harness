@@ -109,7 +109,8 @@ whole question card instead.
    "options":[{"label":"Postgres","description":"…","preview":null},{"label":"SQLite","description":"…"}]}
 ]}
 {"type":"question_answered","question_id":"toolu_…","answers":{…},"response":null}
-{"type":"turn_end","is_error":false,"result":"final text or null","cost_usd":0.42,"duration_ms":81234}
+{"type":"turn_end","is_error":false,"result":"final text or null","cost_usd":0.42,"duration_ms":81234,
+ "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}}}  // model_usage optional
 {"type":"log","level":"info|warn|error","message":"…"}
 ```
 
@@ -120,6 +121,10 @@ Rules:
   entirely rather than sending null. `assistant_text(_delta)`, `thinking`, `tool_call` and
   `tool_result` can all carry it; `question`, `turn_end` and `status` are the colony's own and never
   do. A UI groups consecutive events by `agent.id` to show each subagent as its own speaker.
+- `turn_end.cost_usd` and `model_usage` are cumulative for the colony. When `model_usage` is present, `cost_usd` sums
+  only the Claude models in it (keys without a `/`): Claude Code prices a model it does not know, such as a routed
+  `zai/glm-5.3-flash`, at the main model's rate, so its estimate for routed models is dropped and they are reported
+  as tokens instead. Without `model_usage`, `cost_usd` is the SDK's total.
 - A question is **never** also emitted as `tool_call`/`tool_result`; use `question` / `question_answered`.
 - Agents must ask the user only through `question` events (the Claude Code runner appends a system
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
@@ -492,7 +497,8 @@ Runner environment set by the mothership:
 | Variable | Meaning |
 | --- | --- |
 | `COLONIZER_MODEL` | Orchestrator (main thread) model |
-| `COLONIZER_SUBAGENT_MODEL` | Default model for subagents (maps to `CLAUDE_CODE_SUBAGENT_MODEL`) |
+| `COLONIZER_SUBAGENT_MODEL` | Model for every subagent (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model — Claude Code's built-in Explore is `inherit` — use it too) |
+| `COLONIZER_IMAGE` | The container image the colony booted; the runner tells the agent what it can and cannot run |
 | `COLONIZER_BACKGROUND_MODEL` | Model for background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
 | `COLONIZER_SCAN` | `off` (default), `warn` or `block`. Pre-flight scan of the workspace before the agent starts |
