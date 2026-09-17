@@ -104,6 +104,28 @@ while read -r name version plat kind sha url; do
       done
       rm -rf "$tmp"
       ;;
+    rtk)
+      # Source, verified and left in the cache: scripts/build-rtk.sh builds the static binary from it.
+      ;;
+    caveman)
+      # Staged at dist/vendor/caveman: only the MIT skill text and LICENSE. The claude-code runner puts
+      # the ruleset in the system prompt of colonies that switch on terse replies, instead of the
+      # plugin's SessionStart and UserPromptSubmit hooks. The rest of the repository — its compression
+      # engine, proxy and MCP server — is BSL-1.1, and none of it is staged.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/caveman-*)
+      dest="$out/caveman"
+      rm -rf "$dest"
+      mkdir -p "$dest"
+      for keep in skills/caveman/SKILL.md LICENSE; do
+        [ -f "$src/$keep" ] || { echo "caveman $version has no $keep" >&2; exit 1; }
+      done
+      cp "$src/skills/caveman/SKILL.md" "$dest/SKILL.md"
+      cp "$src/LICENSE" "$dest/LICENSE"
+      grep -q '^name: caveman$' "$dest/SKILL.md" || { echo "caveman $version: SKILL.md is not the caveman skill" >&2; exit 1; }
+      rm -rf "$tmp"
+      ;;
     google-skills)
       # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
       # of google/skills would put ~17k tokens of skill descriptions into every

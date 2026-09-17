@@ -259,6 +259,7 @@ Stated here rather than buried.
 | superpowers vendored, with its bootstrap in the system prompt instead of a hook ([#44](https://github.com/Colonizer-dev/harness/issues/44)) | `SHIPPING` |
 | Google's skills vendored and loaded on demand from a pinned local catalog ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
 | Daily proposals for vendored plugin updates, described in skills added, removed and changed ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
+| Token savings: terse replies (caveman) and compact command output (rtk), each a switch | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
