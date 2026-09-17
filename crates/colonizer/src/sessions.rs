@@ -106,6 +106,10 @@ pub struct Session {
     pub pr_url: Option<String>,
     pub error: Option<String>,
     pub cost_usd: Option<f64>,
+    /// Tokens per model from the last turn end, cumulative: `{model: {input_tokens, output_tokens, cache_read_tokens,
+    /// cache_write_tokens}}`. `cost_usd` covers only the Claude models among them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<Value>,
     #[serde(default)]
     pub cleaned_up: bool,
     /// Set by the watchdog: `{reason, since, nudges}`.
@@ -313,6 +317,14 @@ fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     setting(&modules.publish, &schema, "file_findings").and_then(Value::as_bool).unwrap_or(true)
 }
 
+/// The container image a colony boots: the stack preset's, unless modules.json names one.
+fn colony_image(app: &App, modules: &ModulesConfig) -> String {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    let preset = setting_str(&modules.sandbox, &schema, "preset");
+    let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
+    setting_str(&settings, &schema, "image")
+}
+
 fn autopilot_default(app: &App, modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, &app.agents);
     setting(&modules.publish, &schema, "autopilot").and_then(Value::as_bool).unwrap_or(false)
@@ -407,6 +419,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         pr_url: None,
         error: None,
         cost_usd: None,
+        model_usage: None,
         cleaned_up: false,
         attention: None,
         last_activity_at: None,
@@ -538,15 +551,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
     }
-    let session_json = json!({
-        "session_id": id,
-        "workspace": "/workspace",
-        "listen": format!("0.0.0.0:{AGENTD_PORT}"),
-        "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
-        "initial_prompt": prompt,
-    });
-    std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
-    std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
+    // What the colony can and cannot run is part of the agent's brief (runner.mjs).
+    runner_env.insert("COLONIZER_IMAGE".into(), Value::String(colony_image(app, &modules)));
 
     // The private mesh needs the vendored tailscale, which has no macOS build yet. Without it a colony
     // is reached on a loopback port rather than failing to boot.
@@ -633,6 +639,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             }
         }
     }
+
+    // Written only now, after the last change to `runner_env`: the plugin paths and the token-savings
+    // switches above are decided here, and a session.json written earlier carried a plugin's bare name
+    // instead of its in-VM path, and switches the install could not honour.
+    let session_json = json!({
+        "session_id": id,
+        "workspace": "/workspace",
+        "listen": format!("0.0.0.0:{AGENTD_PORT}"),
+        "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
+        "initial_prompt": prompt,
+    });
+    std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
+    std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
     if memory_on {
         for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
@@ -935,9 +954,13 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
         }
         Some("turn_end") => {
             let cost = event["cost_usd"].as_f64();
+            let usage = event.get("model_usage").filter(|u| u.is_object()).cloned();
             if let Some((s, ())) = app.update_session(id, |x| {
                 if cost.is_some() {
                     x.cost_usd = cost;
+                }
+                if usage.is_some() {
+                    x.model_usage = usage;
                 }
             })
             .await
@@ -1675,6 +1698,7 @@ mod tests {
             pr_url: None,
             error: None,
             cost_usd: None,
+            model_usage: None,
             cleaned_up: false,
             attention: None,
             last_activity_at: None,
