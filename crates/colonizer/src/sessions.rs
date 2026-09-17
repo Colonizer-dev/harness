@@ -653,7 +653,22 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
-    if memory_on {
+    if memory_on && memory::uses_mem0(app).await {
+        // mem0's notes are written into the session directory, which is already the colony's
+        // read-only /colonizer, so there is nothing to mount and nothing of mem0's inside.
+        let root = vm_dir.join("memory");
+        let task = memory::task_query(&s.issue_title, issue.as_ref(), &s.instructions);
+        match memory::materialize_mem0(app, &root, &s.org, &s.repo, &task).await {
+            Ok(m) => {
+                let order = if m.ranked { ", most relevant to this task first" } else { "" };
+                app.session_log(id, "info", format!("shared memory: {} notes from mem0{order}", m.notes)).await;
+            }
+            Err(e) => {
+                app.session_log(id, "warn", format!("shared memory from mem0 is unavailable ({e:#}); this colony starts without it")).await;
+                memory::write_empty_scopes(&root, &s.org, &s.repo)?;
+            }
+        }
+    } else if memory_on {
         for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
             // Mount points must exist inside the read-only /colonizer mount.
             std::fs::create_dir_all(vm_dir.join("memory").join(scope))?;
@@ -1027,11 +1042,19 @@ async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
     let stored = if orgs::memory_requires_review(&modules) {
         app.memory.add_proposal(note).await.map(|proposal| json!(proposal))
     } else {
-        app.memory.add_note(note).await.map(|note| {
-            let mut value = json!(note);
-            value["status"] = json!("approved");
-            value
-        })
+        match memory::store_note(app, note.clone()).await {
+            Ok(note) => {
+                let mut value = json!(note);
+                value["status"] = json!("approved");
+                Ok(value)
+            }
+            // With review off there is no queue to fall back on, so make one: a store that is down
+            // (mem0 unreachable, a rejected key) must not cost the colony its proposal.
+            Err(e) => {
+                app.session_log(id, "warn", format!("could not store the note ({e:#}); queued it for review instead")).await;
+                app.memory.add_proposal(note).await.map(|proposal| json!(proposal))
+            }
+        }
     };
     match stored {
         Ok(proposal) => {

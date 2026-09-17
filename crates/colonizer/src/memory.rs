@@ -4,12 +4,19 @@
 //! Colonies never write memory directly: a proposal arrives as an agent event over the existing
 //! colony link, and only an approved proposal becomes a note other colonies can read. That review
 //! step is what keeps one colony from injecting instructions into every future colony.
+//!
+//! Approved notes live in one of two places, picked as the memory module's provider: `files`, this
+//! file's own store, or `mem0` (see `mem0.rs`). Proposals stay here either way, and a colony reads
+//! the same layout either way.
 
 use crate::{
     client_error,
+    config::setting_str,
+    mem0::{self, Mem0},
+    modules::schema_for,
     orgs::valid_org,
-    util::{short_id, truncate, valid_repo},
-    ApiResult, Shared,
+    util::{env_nonempty, read_trimmed, short_id, truncate, valid_repo, write_secret},
+    ApiResult, App, Shared,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -105,7 +112,7 @@ impl MemoryStore {
         let dir = self.scope_dir(scope, key)?;
         std::fs::create_dir_all(dir.join("notes"))?;
         if !dir.join("MEMORY.md").exists() {
-            write_index(&dir, scope, key, &[])?;
+            write_index(&dir, scope, key, &[], false)?;
         }
         Ok(dir)
     }
@@ -118,7 +125,7 @@ impl MemoryStore {
         let tmp = dir.join("notes.json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(notes)?)?;
         std::fs::rename(&tmp, dir.join("notes.json"))?;
-        write_index(dir, scope, key, notes)
+        write_index(dir, scope, key, notes, false)
     }
 
     pub async fn notes(&self, scope: &str, key: &str) -> Result<Vec<Note>> {
@@ -198,15 +205,16 @@ impl MemoryStore {
     }
 }
 
-/// `MEMORY.md`: the index agents read first.
-fn write_index(dir: &FsPath, scope: &str, key: &str, notes: &[Note]) -> Result<()> {
+/// `MEMORY.md`: the index agents read first. `ranked` says the notes arrive most relevant first.
+fn write_index(dir: &FsPath, scope: &str, key: &str, notes: &[Note], ranked: bool) -> Result<()> {
     let label = match scope {
         "global" => "every colony".to_string(),
         "org" => format!("colonies in the {key} org"),
         _ => format!("colonies on {key}"),
     };
+    let order = if ranked { " They are listed most relevant to this colony's task first." } else { "" };
     let mut index = format!(
-        "# Shared memory for {label}\n\nApproved notes from earlier colonies and the maintainer. Read the ones that matter for your task.\n\n"
+        "# Shared memory for {label}\n\nApproved notes from earlier colonies and the maintainer. Read the ones that matter for your task.{order}\n\n"
     );
     if notes.is_empty() {
         index.push_str("No notes yet.\n");
@@ -221,6 +229,130 @@ fn write_index(dir: &FsPath, scope: &str, key: &str, notes: &[Note]) -> Result<(
 }
 
 // ---------------------------------------------------------------------------
+// Where approved notes live
+// ---------------------------------------------------------------------------
+
+pub const MEM0: &str = "mem0";
+
+fn mem0_key_file(app: &App) -> PathBuf {
+    app.cfg.config_dir.join("memory-keys").join(MEM0)
+}
+
+/// The saved mem0 key, else `MEM0_API_KEY`. Lives beside the model provider keys and, like them,
+/// is never written to modules.json, never returned by the API and never sent into a colony.
+fn mem0_key(app: &App) -> Option<(String, &'static str)> {
+    read_trimmed(&mem0_key_file(app))
+        .map(|key| (key, "saved"))
+        .or_else(|| env_nonempty("MEM0_API_KEY").map(|key| (key, "MEM0_API_KEY")))
+}
+
+pub async fn uses_mem0(app: &App) -> bool {
+    app.modules.read().await.memory.provider == MEM0
+}
+
+async fn mem0_client(app: &App) -> Result<Mem0> {
+    let base_url = {
+        let modules = app.modules.read().await;
+        setting_str(&modules.memory, &schema_for("memory", MEM0, &app.agents), "base_url")
+    };
+    let (key, _) = mem0_key(app).context("add a mem0 API key in Settings → Modules → Memory")?;
+    Mem0::new(if base_url.is_empty() { mem0::DEFAULT_BASE_URL } else { &base_url }, key)
+}
+
+pub async fn list_notes(app: &App, scope: &str, key: &str) -> Result<Vec<Note>> {
+    if uses_mem0(app).await {
+        mem0::scope_id(scope, key)?;
+        return mem0_client(app).await?.list(scope, key).await;
+    }
+    app.memory.notes(scope, key).await
+}
+
+/// Stores an approved note in whichever place the memory module points at.
+pub async fn store_note(app: &App, mut note: Note) -> Result<Note> {
+    if uses_mem0(app).await {
+        note.id = mem0_client(app).await?.add(&note).await?;
+        return Ok(note);
+    }
+    app.memory.add_note(note).await
+}
+
+pub async fn remove_note(app: &App, scope: &str, key: &str, id: &str) -> Result<bool> {
+    if uses_mem0(app).await {
+        return mem0_client(app).await?.delete(scope, key, id).await;
+    }
+    app.memory.delete_note(scope, key, id).await
+}
+
+/// What a colony is for, as a relevance query: the issue and the instructions, never the prompt
+/// around them. That prompt is mostly harness boilerplate identical for every colony, which would
+/// pull every ranking toward the same notes, and it puts the task far enough in that a long preamble
+/// could push it past the query length mem0 is sent.
+pub fn task_query(title: &str, issue: Option<&Value>, instructions: &str) -> String {
+    let text = |v: &Value| v.as_str().unwrap_or_default().trim().to_string();
+    let issue_title = issue.map(|i| text(&i["title"])).unwrap_or_default();
+    let issue_body = issue.map(|i| text(&i["body"])).unwrap_or_default();
+    let title = if issue_title.is_empty() { title.trim().to_string() } else { issue_title };
+    [title, instructions.trim().to_string(), issue_body].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n")
+}
+
+pub struct Materialized {
+    pub notes: usize,
+    pub ranked: bool,
+}
+
+/// Writes a colony's shared memory from mem0 into `root/{global,org,repo}`, in exactly the layout
+/// the `files` provider mounts: `MEMORY.md` plus `notes/<id>.md`. `root` is inside the colony's
+/// read-only session directory, so this is the whole of what the colony sees — mem0 itself stays
+/// on this side, with the key.
+///
+/// Relevance to `task` orders each index. That ranking is a nicety, so a failed search keeps the
+/// oldest-first order rather than costing the colony its memory.
+pub async fn materialize_mem0(app: &App, root: &FsPath, org: &str, repo: &str, task: &str) -> Result<Materialized> {
+    materialize(&mem0_client(app).await?, root, org, repo, task).await
+}
+
+async fn materialize(client: &Mem0, root: &FsPath, org: &str, repo: &str, task: &str) -> Result<Materialized> {
+    let scopes = [("global", ""), ("org", org), ("repo", repo)];
+    let mut listed = Vec::new();
+    for (scope, key) in scopes {
+        listed.push(client.list(scope, key).await?);
+    }
+    let total: usize = listed.iter().map(Vec::len).sum();
+    let ranks = if total == 0 || task.trim().is_empty() { None } else { client.rank(task, &scopes, total.min(100)).await.ok() };
+    for ((scope, key), mut notes) in scopes.into_iter().zip(listed) {
+        if let Some(ranks) = &ranks {
+            // Stable: notes mem0 did not rank keep their oldest-first order after the ranked ones.
+            notes.sort_by_key(|n| ranks.get(&n.id).copied().unwrap_or(usize::MAX));
+        }
+        write_scope(&root.join(scope), scope, key, &notes, ranks.is_some())?;
+    }
+    Ok(Materialized { notes: total, ranked: ranks.is_some() })
+}
+
+/// Replaces one scope directory with `notes`. A note whose id could not be a file name is left out
+/// rather than written somewhere unexpected.
+fn write_scope(dir: &FsPath, scope: &str, key: &str, notes: &[Note], ranked: bool) -> Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir.join("notes"))?;
+    let notes: Vec<Note> = notes.iter().filter(|n| mem0::safe_id(&n.id)).cloned().collect();
+    for note in &notes {
+        std::fs::write(dir.join("notes").join(format!("{}.md", note.id)), format!("# {}\n\n{}\n", note.title, note.content))?;
+    }
+    write_index(dir, scope, key, &notes, ranked)
+}
+
+/// An empty, valid layout, for a colony whose memory could not be fetched: the prompt tells the
+/// agent to read each `MEMORY.md`, and a missing file would read as a broken colony.
+pub fn write_empty_scopes(root: &FsPath, org: &str, repo: &str) -> Result<()> {
+    for (scope, key) in [("global", ""), ("org", org), ("repo", repo)] {
+        write_scope(&root.join(scope), scope, key, &[], false)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------
 
@@ -231,8 +363,15 @@ pub struct ScopeQuery {
     key: String,
 }
 
+/// A note store that could not answer: a bad scope is the caller's fault, anything else (mem0 down,
+/// a rejected key) is upstream's.
+fn store_error(scope: &str, key: &str, e: &anyhow::Error) -> crate::AppError {
+    let status = if mem0::scope_id(scope, key).is_err() { StatusCode::BAD_REQUEST } else { StatusCode::BAD_GATEWAY };
+    client_error(status, &format!("{e:#}"))
+}
+
 pub async fn get(State(app): State<Shared>, Query(query): Query<ScopeQuery>) -> ApiResult<Value> {
-    let notes = app.memory.notes(&query.scope, &query.key).await.map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
+    let notes = list_notes(&app, &query.scope, &query.key).await.map_err(|e| store_error(&query.scope, &query.key, &e))?;
     let proposals: Vec<Proposal> = app
         .memory
         .proposals()
@@ -240,7 +379,8 @@ pub async fn get(State(app): State<Shared>, Query(query): Query<ScopeQuery>) -> 
         .into_iter()
         .filter(|p| p.note.scope == query.scope && p.note.key == query.key)
         .collect();
-    Ok(Json(json!({"scope": query.scope, "key": query.key, "notes": notes, "proposals": proposals})))
+    let provider = app.modules.read().await.memory.provider.clone();
+    Ok(Json(json!({"scope": query.scope, "key": query.key, "provider": provider, "notes": notes, "proposals": proposals})))
 }
 
 pub async fn list_proposals(State(app): State<Shared>) -> Json<Vec<Proposal>> {
@@ -280,7 +420,14 @@ pub async fn approve(State(app): State<Shared>, Path(id): Path<String>, body: By
             return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
         }
     };
-    Ok(Json(app.memory.add_note(note).await?))
+    match store_note(&app, note).await {
+        Ok(stored) => Ok(Json(stored)),
+        Err(e) => {
+            // Same reason: mem0 being down or refusing the key must not cost a reviewed proposal.
+            let _ = app.memory.add_proposal(original).await;
+            Err(client_error(StatusCode::BAD_GATEWAY, &format!("{e:#}")))
+        }
+    }
 }
 
 pub async fn reject(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
@@ -302,7 +449,7 @@ pub struct NewNote {
 pub async fn create_note(State(app): State<Shared>, Json(req): Json<NewNote>) -> ApiResult<Note> {
     let note = draft(&req.scope, &req.key, &req.title, &req.content, &req.tags, json!({"user": true}))
         .map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
-    Ok(Json(app.memory.add_note(note).await?))
+    Ok(Json(store_note(&app, note).await.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("{e:#}")))?))
 }
 
 pub async fn delete_note(
@@ -310,15 +457,48 @@ pub async fn delete_note(
     Path(id): Path<String>,
     Query(query): Query<ScopeQuery>,
 ) -> ApiResult<Value> {
-    let removed = app
-        .memory
-        .delete_note(&query.scope, &query.key, &id)
-        .await
-        .map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
+    let removed = remove_note(&app, &query.scope, &query.key, &id).await.map_err(|e| store_error(&query.scope, &query.key, &e))?;
     if !removed {
         return Err(client_error(StatusCode::NOT_FOUND, "no such note"));
     }
     Ok(Json(json!({"ok": true})))
+}
+
+/// Whether a mem0 key is set, and where from. Never the key.
+pub async fn mem0_status(State(app): State<Shared>) -> Json<Value> {
+    let source = mem0_key(&app).map(|(_, source)| source);
+    Json(json!({"has_key": source.is_some(), "source": source, "active": uses_mem0(&app).await}))
+}
+
+#[derive(Deserialize)]
+pub struct Mem0Key {
+    api_key: String,
+}
+
+/// Saves the mem0 key on this machine, or removes it when empty.
+pub async fn put_mem0_key(State(app): State<Shared>, Json(req): Json<Mem0Key>) -> ApiResult<Value> {
+    let key = req.api_key.trim();
+    let path = mem0_key_file(&app);
+    if key.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else if key.len() > 512 || !key.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "that doesn't look like a mem0 API key"));
+    } else {
+        write_secret(&path, key)?;
+    }
+    Ok(mem0_status(State(app)).await)
+}
+
+/// Tries the saved key against the configured endpoint.
+pub async fn check_mem0(State(app): State<Shared>) -> Json<Value> {
+    let result = match mem0_client(&app).await {
+        Ok(client) => client.check().await,
+        Err(e) => Err(e),
+    };
+    Json(match result {
+        Ok(()) => json!({"ok": true}),
+        Err(e) => json!({"ok": false, "error": format!("{e:#}")}),
+    })
 }
 
 #[cfg(test)]
@@ -353,6 +533,47 @@ mod tests {
         assert!(store.delete_note("repo", "Colonizer-dev/harness", &taken.note.id).await.unwrap());
         assert!(store.notes("repo", "Colonizer-dev/harness").await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_colony_gets_mem0_notes_in_the_files_layout_most_relevant_first() {
+        let mock = crate::mem0::mock::Mock::default();
+        let base = crate::mem0::mock::serve(mock.clone()).await;
+        let client = Mem0::new(&base, crate::mem0::mock::KEY.into()).unwrap();
+        let older = client.add(&draft("repo", "o/r", "Commit style", "keep commits small", &[], Value::Null).unwrap()).await.unwrap();
+        let newer = client.add(&draft("repo", "o/r", "Deploys", "deploy to staging before production", &[], Value::Null).unwrap()).await.unwrap();
+        client.add(&draft("org", "o", "Org rule", "sign every commit", &[], Value::Null).unwrap()).await.unwrap();
+        client.add(&draft("repo", "o/elsewhere", "Not this repo", "deploy something else entirely", &[], Value::Null).unwrap()).await.unwrap();
+
+        let root = temp_root();
+        let result = materialize(&client, &root, "o", "o/r", "Fix the staging deploy").await.unwrap();
+        assert_eq!(result.notes, 3, "global, this org and this repo; not another repo");
+        assert!(result.ranked);
+
+        let index = std::fs::read_to_string(root.join("repo/MEMORY.md")).unwrap();
+        assert!(index.contains("most relevant to this colony's task first"));
+        let deploys = index.find(&format!("(notes/{newer}.md)")).unwrap();
+        let commits = index.find(&format!("(notes/{older}.md)")).unwrap();
+        assert!(deploys < commits, "the deploy note is the relevant one:\n{index}");
+        assert_eq!(std::fs::read_to_string(root.join(format!("repo/notes/{newer}.md"))).unwrap(), "# Deploys\n\ndeploy to staging before production\n");
+        assert!(std::fs::read_to_string(root.join("org/MEMORY.md")).unwrap().contains("Org rule"));
+        assert!(std::fs::read_to_string(root.join("global/MEMORY.md")).unwrap().contains("No notes yet."));
+
+        // A resume rewrites the scope rather than leaving a deleted note behind.
+        assert!(client.delete("repo", "o/r", &older).await.unwrap());
+        materialize(&client, &root, "o", "o/r", "Fix the staging deploy").await.unwrap();
+        assert!(!root.join(format!("repo/notes/{older}.md")).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_relevance_query_is_the_task_not_the_prompt() {
+        let issue = json!({"title": "Fix the staging deploy", "body": "It fails on the migrate step."});
+        let query = task_query("ignored when there is an issue", Some(&issue), "Keep the diff small.");
+        assert_eq!(query, "Fix the staging deploy\n\nKeep the diff small.\n\nIt fails on the migrate step.");
+        // Instructions come before the body: a long issue body is what gets cut, not what was asked.
+        assert_eq!(task_query("Tidy the README", None, ""), "Tidy the README");
+        assert_eq!(task_query("", None, ""), "");
     }
 
     #[test]

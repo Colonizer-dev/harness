@@ -200,7 +200,7 @@ protocol on stdio, so an agent module can be written in anything.
 | `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
-| `memory` | Shared notes per repository, org and globally; agents propose, you approve | semantic search `PLANNED` |
+| `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 
 Every GitHub org is a workspace with its own overrides for models, the parallel limit, memory and the
@@ -231,7 +231,9 @@ Stated here rather than buried.
   real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
   API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
   wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
-- **Memory search is plain text matching**, not semantic search.
+- **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
+  is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
+  given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
 - **No CI yet**, and nothing is published to crates.io or npm.
 
 ---

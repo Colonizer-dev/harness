@@ -146,14 +146,25 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "file_findings": {"type": "boolean", "title": "File validated findings as issues", "description": "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.", "default": true}
             }}),
         )],
-        "memory" => vec![p(
-            "files",
-            "Shared memory",
-            "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes",
-            json!({"type": "object", "properties": {
-                "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context", "default": true}
-            }}),
-        )],
+        "memory" => vec![
+            p(
+                "files",
+                "Shared memory",
+                "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes",
+                json!({"type": "object", "properties": {
+                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context", "default": true}
+                }}),
+            ),
+            p(
+                "mem0",
+                "mem0",
+                "Approved notes stored in your mem0 project. Colonies read them exactly as they read files, most relevant to the task first; the key never enters a colony",
+                json!({"type": "object", "properties": {
+                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context", "default": true},
+                    "base_url": {"type": "string", "title": "API base URL", "description": "The mem0 Platform API. Self-hosted mem0 serves a different API and is not supported", "default": "https://api.mem0.ai"}
+                }}),
+            ),
+        ],
         "watchdog" => vec![p(
             "default",
             "Watchdog",
