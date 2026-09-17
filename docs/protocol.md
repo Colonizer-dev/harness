@@ -241,17 +241,31 @@ and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
 
 `scripts/fetch-vendor.sh` stages vendored plugins at `dist/plugins/<name>`, which `install.sh` copies to
 `<COLONIZER_HOME>/plugins/<name>`, and `install.sh` fails if a `plugin` entry in `vendor/vendor.lock` didn't
-land there. It stages one vendored plugin today:
+land there. It stages two vendored plugins today:
 
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
 | `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE` — 8.2 MB of the 58 MB source |
+| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.3.0, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (12 of 14), `LICENSE` — 468 KB of the 2.1 MB source |
 
 **ECC's hooks are not staged.** Its plugin manifest sets `userConfig.hooks_enabled` to `true` by
 default and Claude Code discovers `hooks/hooks.json` by convention, so "skills and agents only" cannot
 be expressed as a setting: every ECC hook is a `node -e` bootstrap that spawns first and reads
 `ECC_HOOKS_ENABLED` second. The staging step removes the directory, and `fetch-vendor.sh` fails if it
 survives. `ECC_HOOKS_ENABLED=false` is also set in any colony that loads a plugin, as a second line.
+
+**superpowers' hook becomes system-prompt text.** Its one hook, `SessionStart` on
+`startup|clear|compact`, injects `skills/using-superpowers/SKILL.md`, and that is what makes the agent
+reach for the other skills. `hooks/` is removed as for ECC. Instead, for every loaded plugin directory
+that contains `skills/using-superpowers/SKILL.md`, the claude-code runner appends that text to the system
+prompt inside the hook's own `<EXTREMELY_IMPORTANT>` wrapper. The system prompt survives compaction,
+which is what the hook's `compact` matcher was for.
+
+**Two superpowers skills are not staged.** `using-git-worktrees` creates another worktree and
+`finishing-a-development-branch` merges, pushes or opens a pull request — from inside the colony, around
+the worktree, branch and publish step Colonizer already owns. Other skills name them, so the appended
+text says they are missing on purpose and to stop at those steps. `fetch-vendor.sh` fails if either, or
+`hooks/`, survives staging.
 
 **Skillsets are switches, all off by default.** Settings shows the `claude-code` module's `plugins`
 setting (schema `"format": "plugin-dirs"`) as one switch per plugin directory from `GET /api/plugins`,

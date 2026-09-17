@@ -24,7 +24,8 @@ while read -r name version plat kind sha url; do
   # `any` entries are platform-independent (source, not binaries).
   [ "$plat" = "$platform" ] || [ "$plat" = "any" ] || continue
   found=$((found + 1))
-  file="$cache/$(basename "$url")"
+  # Prefixed with the name: two tag archives can share a basename (v2.2.1), and would evict each other.
+  file="$cache/$name-$(basename "$url")"
   if ! verify "$file" "$sha"; then
     echo "fetching $name $version"
     curl -fsSL --retry 3 -o "$file.part" "$url"
@@ -67,6 +68,34 @@ while read -r name version plat kind sha url; do
       done
       # Fail loudly rather than shipping hooks by accident.
       if [ -e "$dest/hooks" ]; then echo "ecc staging leaked hooks/" >&2; exit 1; fi
+      rm -rf "$tmp"
+      ;;
+    superpowers)
+      # Staged as a Claude Code plugin directory at dist/plugins/superpowers.
+      #
+      # hooks/ is dropped, as for ECC. Its one hook is a SessionStart bootstrap
+      # that injects skills/using-superpowers/SKILL.md; the claude-code runner puts
+      # that text in the system prompt instead, so no hook process spawns.
+      #
+      # using-git-worktrees and finishing-a-development-branch are dropped too: a
+      # colony already runs in its own worktree on the branch Colonizer publishes,
+      # and the host commits, pushes and opens the pull request. Other skills name
+      # them, so the runner tells the agent they are missing on purpose.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/superpowers-*)
+      dest="$root/dist/plugins/superpowers"
+      rm -rf "$dest"
+      mkdir -p "$dest"
+      for keep in .claude-plugin skills LICENSE; do
+        [ -e "$src/$keep" ] || { echo "superpowers $version has no $keep" >&2; exit 1; }
+        cp -R "$src/$keep" "$dest/$keep"
+      done
+      rm -rf "$dest/skills/using-git-worktrees" "$dest/skills/finishing-a-development-branch"
+      [ -f "$dest/skills/using-superpowers/SKILL.md" ] || { echo "superpowers $version has no using-superpowers skill to bootstrap from" >&2; exit 1; }
+      for leak in hooks skills/using-git-worktrees skills/finishing-a-development-branch; do
+        if [ -e "$dest/$leak" ]; then echo "superpowers staging leaked $leak" >&2; exit 1; fi
+      done
       rm -rf "$tmp"
       ;;
     microsandbox)

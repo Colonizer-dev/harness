@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -9,6 +12,9 @@ import {
   endsWithQuestion,
   MAX_TOOL_OUTPUT,
   runAgent,
+  SUPERPOWERS_COLONIZER_NOTE,
+  SUPERPOWERS_SKILL,
+  superpowersBootstrap,
   SYSTEM_PROMPT_APPEND,
   toolResultText,
 } from '../runner.mjs';
@@ -319,4 +325,36 @@ test('plugin directories become local plugin entries, and are absent by default'
   // Loading a plugin must not quietly widen where settings come from: a
   // project-scope install would land in the pull request.
   assert.deepEqual(options.settingSources, ['project']);
+});
+
+test('a loaded superpowers plugin puts its bootstrap in the system prompt, since its hook never runs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'colonizer-plugins-'));
+  try {
+    const superpowers = join(root, 'superpowers');
+    const ecc = join(root, 'ecc');
+    mkdirSync(dirname(join(superpowers, SUPERPOWERS_SKILL)), { recursive: true });
+    writeFileSync(join(superpowers, SUPERPOWERS_SKILL), '---\nname: using-superpowers\n---\n\nCheck for a skill before any response.\n\n');
+    mkdirSync(join(ecc, 'skills'), { recursive: true });
+
+    // A plugin without the skill (ECC) changes nothing about the prompt.
+    assert.equal(buildOptions({ COLONIZER_PLUGIN_DIRS: ecc }).options.systemPrompt.append, SYSTEM_PROMPT_APPEND);
+
+    const { options } = buildOptions({ COLONIZER_PLUGIN_DIRS: `${ecc},${superpowers}` });
+    const append = options.systemPrompt.append;
+    assert.ok(append.startsWith(SYSTEM_PROMPT_APPEND), "Colonizer's own instructions come first");
+    assert.ok(append.includes('<EXTREMELY_IMPORTANT>\nYou have superpowers.\n'), 'the hook\'s own wrapper');
+    assert.ok(append.includes('Check for a skill before any response.\n</EXTREMELY_IMPORTANT>'), 'the skill text, trailing blank lines trimmed');
+    assert.ok(append.endsWith(SUPERPOWERS_COLONIZER_NOTE), 'the note about the two skills that are not staged');
+    assert.equal(append.split('<EXTREMELY_IMPORTANT>').length, 2, 'once, however many plugins load');
+    // Loading it is still just a plugin entry; nothing registers a hook for it.
+    assert.deepEqual(options.plugins, [
+      { type: 'local', path: ecc },
+      { type: 'local', path: superpowers },
+    ]);
+    assert.equal(options.hooks, undefined);
+
+    assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
