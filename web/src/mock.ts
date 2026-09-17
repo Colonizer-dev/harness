@@ -109,6 +109,14 @@ const DEMO_QUESTIONS: Question[] = [
   },
 ];
 
+const GUEST_TEST = `import { checkout } from "../src/checkout/api";
+
+test("lets guests check out", async () => {
+  const order = await checkout({ email: "guest@example.com", items: [{ sku: "mug", qty: 1 }] });
+  expect(order.user).toBeNull();
+});
+`;
+
 const SESSION_TS = `import { createGuestCart } from "./cart";
 
 export async function createSession(req: Request) {
@@ -250,13 +258,14 @@ class MockSession {
     output: string,
     delay = 800,
     agent?: AgentRef,
+    isError = false,
   ): Promise<boolean> {
     if (!this.alive(generation)) return false;
     const by = agent ? { agent } : {};
     this.emit({ type: "tool_call", message_id: messageId, tool_call_id: id, name, input, ...by });
     await sleep(delay);
     if (!this.alive(generation)) return false;
-    this.emit({ type: "tool_result", tool_call_id: id, output, is_error: false, ...by });
+    this.emit({ type: "tool_result", tool_call_id: id, output, is_error: isError, ...by });
     return true;
   }
 
@@ -376,41 +385,125 @@ class MockSession {
       text: `Resolve GitHub issue #${s.issue} in ${s.repo}: ${s.issue_title}.\n\nRead the relevant code, make a focused fix with tests, and ask before making product decisions.`,
     });
     await sleep(600);
-    if (!(await this.streamText(generation, "msg_1", "I'll send a scout to find where guest checkout is handled before deciding anything."))) return;
-    // The orchestrator delegates the reading, as colonies do: a Task call, the subagent's own events, then its report.
-    const scout: AgentRef = { id: "toolu_task1", name: "Explore", description: "Find where guest checkout fails" };
-    const report =
-      "`createSession()` throws when nobody is signed in (`src/checkout/session.ts:5`), so a guest never reaches `createGuestCart()` (`src/checkout/cart.ts:12`), which `src/checkout/api.ts:71` would otherwise call.";
-    this.emit({
-      type: "tool_call",
-      message_id: "msg_1",
-      tool_call_id: scout.id,
-      name: "Task",
-      input: { subagent_type: "Explore", description: scout.description, prompt: "Find where guest checkout fails. Report conclusions with file:line references." },
-    });
-    await sleep(500);
-    if (!this.alive(generation)) return;
-    this.emit({ type: "thinking", message_id: "sub_1", block_index: 0, text: "Guest checkout failing — search for guest handling first.", agent: scout });
-    await sleep(1400);
     if (
-      !(await this.tool(
+      !(await this.streamText(
         generation,
-        "sub_1",
-        "toolu_s1a",
-        "Bash",
-        { command: 'grep -rn "guest" src/checkout --include=*.ts', description: "Find guest checkout code" },
-        'src/checkout/session.ts:5:  if (!user) throw new Error("guest checkout disabled");\nsrc/checkout/cart.ts:12:export async function createGuestCart(email: string) {\nsrc/checkout/api.ts:71:  const cart = await createGuestCart(body.email);',
-        1800,
-        scout,
+        "msg_1",
+        "I'll send three settlers out at once: one to find where guest checkout fails, one to run the checkout suite, and one to review what changed in checkout lately.",
       ))
     )
       return;
-    if (!(await this.tool(generation, "sub_1", "toolu_s1b", "Read", { file_path: "/workspace/src/checkout/session.ts" }, SESSION_TS, 1600, scout))) return;
-    await sleep(1200);
-    if (!(await this.streamText(generation, "sub_2", report, scout))) return;
-    await sleep(300);
-    if (!this.alive(generation)) return;
-    this.emit({ type: "tool_result", tool_call_id: scout.id, output: report, is_error: false });
+    // The orchestrator delegates, as colonies do: Task calls, then the settlers' own events, interleaved while they
+    // work in parallel, then each one's report as its Task result.
+    const scout: AgentRef = { id: "toolu_task1", name: "Explore", description: "Find where guest checkout fails" };
+    const tester: AgentRef = { id: "toolu_task2", name: "test-runner", description: "Run the checkout suite" };
+    const inspector: AgentRef = { id: "toolu_task3", name: "code-reviewer", description: "Review recent checkout changes" };
+    const prompts: [AgentRef, string][] = [
+      [scout, "Find where guest checkout fails. Report conclusions with file:line references."],
+      [tester, "Run the checkout tests and report which fail and why."],
+      [inspector, "Review the last few commits touching src/checkout for anything that explains guest checkout failing."],
+    ];
+    for (const [agent, prompt] of prompts) {
+      this.emit({
+        type: "tool_call",
+        message_id: "msg_1",
+        tool_call_id: agent.id,
+        name: "Task",
+        input: { subagent_type: agent.name, description: agent.description, prompt },
+      });
+    }
+    const finish = async (agent: AgentRef, messageId: string, report: string): Promise<boolean> => {
+      if (!(await this.streamText(generation, messageId, report, agent))) return false;
+      await sleep(200);
+      if (!this.alive(generation)) return false;
+      this.emit({ type: "tool_result", tool_call_id: agent.id, output: report, is_error: false });
+      return true;
+    };
+    const settlers = await Promise.all([
+      (async () => {
+        await sleep(500);
+        if (!this.alive(generation)) return false;
+        this.emit({ type: "thinking", message_id: "sub_s1", block_index: 0, text: "Guest checkout failing — search for guest handling first.", agent: scout });
+        await sleep(1400);
+        if (
+          !(await this.tool(
+            generation,
+            "sub_s1",
+            "toolu_s1a",
+            "Bash",
+            { command: 'grep -rn "guest" src/checkout --include=*.ts', description: "Find guest checkout code" },
+            'src/checkout/session.ts:5:  if (!user) throw new Error("guest checkout disabled");\nsrc/checkout/cart.ts:12:export async function createGuestCart(email: string) {\nsrc/checkout/api.ts:71:  const cart = await createGuestCart(body.email);',
+            1800,
+            scout,
+          ))
+        )
+          return false;
+        if (!(await this.tool(generation, "sub_s1", "toolu_s1b", "Read", { file_path: "/workspace/src/checkout/session.ts" }, SESSION_TS, 1600, scout)))
+          return false;
+        await sleep(1200);
+        return finish(
+          scout,
+          "sub_s2",
+          "`createSession()` throws when nobody is signed in (`src/checkout/session.ts:5`), so a guest never reaches `createGuestCart()` (`src/checkout/cart.ts:12`), which `src/checkout/api.ts:71` would otherwise call.",
+        );
+      })(),
+      (async () => {
+        await sleep(800);
+        if (!this.alive(generation)) return false;
+        this.emit({ type: "thinking", message_id: "sub_t1", block_index: 0, text: "Run the checkout tests as they are.", agent: tester });
+        await sleep(700);
+        if (
+          !(await this.tool(
+            generation,
+            "sub_t1",
+            "toolu_t1a",
+            "Bash",
+            { command: "npm test -- checkout", description: "Run checkout tests" },
+            "FAIL  test/checkout.guest.test.ts\n  ✕ lets guests check out (31 ms)\n    Error: guest checkout disabled\n      at createSession (src/checkout/session.ts:5:21)\n\nTests:       2 failed, 12 passed, 14 total",
+            2400,
+            tester,
+            true,
+          ))
+        )
+          return false;
+        if (!(await this.tool(generation, "sub_t1", "toolu_t1b", "Read", { file_path: "/workspace/test/checkout.guest.test.ts" }, GUEST_TEST, 1500, tester)))
+          return false;
+        await sleep(900);
+        return finish(
+          tester,
+          "sub_t2",
+          "2 of 14 checkout tests fail, both in `test/checkout.guest.test.ts`: each dies with `guest checkout disabled`, thrown from `createSession()` before a cart exists.",
+        );
+      })(),
+      (async () => {
+        await sleep(1100);
+        if (!this.alive(generation)) return false;
+        this.emit({ type: "thinking", message_id: "sub_i1", block_index: 0, text: "Look at recent commits under src/checkout.", agent: inspector });
+        await sleep(900);
+        if (
+          !(await this.tool(
+            generation,
+            "sub_i1",
+            "toolu_i1a",
+            "Bash",
+            { command: "git log --oneline -n 5 -- src/checkout", description: "Recent checkout commits" },
+            "a41c2e9 Let guests start a cart from the checkout form\n7be0d13 Move session handling into session.ts\n2f9a8c1 Validate the email on guest orders",
+            1300,
+            inspector,
+          ))
+        )
+          return false;
+        if (!(await this.tool(generation, "sub_i1", "toolu_i1b", "Read", { file_path: "/workspace/src/checkout/api.ts" }, "// api.ts (excerpt)", 2000, inspector)))
+          return false;
+        await sleep(1500);
+        return finish(
+          inspector,
+          "sub_i2",
+          "`a41c2e9` added the guest path in `src/checkout/api.ts`, but `7be0d13` had already moved session handling into `session.ts`, which still rejects anyone not signed in. The two commits never met in a test.",
+        );
+      })(),
+    ]);
+    if (settlers.includes(false)) return;
     await sleep(300);
     if (
       !(await this.streamText(
