@@ -237,7 +237,8 @@ Stated here rather than buried.
 - **Cross-provider subagents are off the beaten path.** Anthropic doesn't support routing Claude Code to
   non-Claude models. Routing and the gateway are tested with stub Anthropic-compatible providers inside
   real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
-  API, and Claude-specific request fields are forwarded as they are.
+  API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
+  wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
 - **Memory search is plain text matching**, not semantic search.
 - **No CI yet**, and nothing is published to crates.io or npm.
 
