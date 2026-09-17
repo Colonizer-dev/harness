@@ -25,6 +25,7 @@ import type {
 } from "../types";
 import { useModels } from "../useModels";
 import { IconCheck, IconChevron, IconCpu, IconExternal, IconNetwork, IconPencil, IconPlus, IconX } from "./icons";
+import { SkillsetField } from "./Skillsets";
 import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1085,9 @@ function SettingField({
 }) {
   const id = useId();
   const label = field.title ?? name;
+  if (field.format === "plugin-dirs") {
+    return <SkillsetField label={label} description={field.description} value={value} onChange={onChange} />;
+  }
   const info = fieldInfo(field);
   const text = value === undefined || value === null ? "" : String(value);
 
