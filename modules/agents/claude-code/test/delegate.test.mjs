@@ -39,20 +39,21 @@ test('a subagent is not constrained: it is the one doing the work', () => {
   }
 });
 
-test('the gate is only installed when delegation is enforced', () => {
+test('delegation is enforced unless it is explicitly loosened', () => {
   const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude' };
-  assert.equal(buildOptions({ ...base }).options.hooks, undefined);
-  assert.equal(buildOptions({ ...base, COLONIZER_DELEGATE: 'encourage' }).options.hooks, undefined);
-  assert.equal(buildOptions({ ...base, COLONIZER_DELEGATE: 'nonsense' }).options.hooks, undefined);
-
-  const enforced = buildOptions({ ...base, COLONIZER_DELEGATE: 'enforce' }).options;
-  assert.ok(enforced.hooks?.PreToolUse?.[0]?.hooks?.[0], 'a PreToolUse hook is installed');
+  const gated = (env) => Boolean(buildOptions({ ...base, ...env }).options.hooks?.PreToolUse?.[0]?.hooks?.[0]);
+  assert.ok(gated({}), 'unset means enforce');
+  assert.ok(gated({ COLONIZER_DELEGATE: 'enforce' }));
+  assert.ok(gated({ COLONIZER_DELEGATE: 'nonsense' }), 'a typo must not quietly switch the gate off');
+  assert.ok(!gated({ COLONIZER_DELEGATE: 'encourage' }));
+  assert.ok(!gated({ COLONIZER_DELEGATE: 'off' }));
 });
 
 test('both delegating modes tell the agent, and off says nothing', () => {
   const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude' };
   const appendOf = (env) => buildOptions({ ...base, ...env }).options.systemPrompt.append;
-  assert.ok(!appendOf({}).includes(DELEGATE_PROMPT_APPEND));
+  assert.ok(appendOf({}).includes(DELEGATE_PROMPT_APPEND), 'the default delegates');
+  assert.ok(!appendOf({ COLONIZER_DELEGATE: 'off' }).includes(DELEGATE_PROMPT_APPEND));
   assert.ok(appendOf({ COLONIZER_DELEGATE: 'encourage' }).includes(DELEGATE_PROMPT_APPEND));
   assert.ok(appendOf({ COLONIZER_DELEGATE: 'enforce' }).includes(DELEGATE_PROMPT_APPEND));
 });

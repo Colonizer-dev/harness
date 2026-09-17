@@ -233,7 +233,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
   // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
-  const delegate = ['encourage', 'enforce'].includes(env.COLONIZER_DELEGATE) ? env.COLONIZER_DELEGATE : 'off';
+  // Enforced unless someone chose otherwise: an unset or unrecognised value delegates, and only an
+  // explicit 'off' or 'encourage' loosens it.
+  const delegate = ['off', 'encourage'].includes(env.COLONIZER_DELEGATE) ? env.COLONIZER_DELEGATE : 'enforce';
   // Plugin directories arrive already mounted read-only in the VM; the mothership
   // rewrites COLONIZER_PLUGIN_DIRS to the in-VM paths. settingSources stays
   // ['project'], so this is the only way a plugin reaches a colony — a user-scope
