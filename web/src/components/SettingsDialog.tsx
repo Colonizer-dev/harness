@@ -24,17 +24,27 @@ import type {
   PullStatus,
   SchemaField,
 } from "../types";
+import { PROVIDER_CATALOG, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
 import {
   BrandAlibabaCloud,
   BrandClaude,
   BrandDeepSeek,
+  BrandGitHubCopilot,
+  BrandKimi,
+  BrandMiniMax,
+  BrandModelScope,
+  BrandNvidia,
+  BrandOpenRouter,
+  BrandXai,
+  BrandXiaomi,
   IconCheck,
   IconChevron,
   IconExternal,
   IconNetwork,
   IconPencil,
   IconPlug,
+  IconPlus,
   IconServer,
   IconX,
   type IconProps,
@@ -1293,6 +1303,16 @@ const PRESET_MARK: Partial<Record<ProviderPreset | "anthropic", ComponentType<Ic
   alibaba: BrandAlibabaCloud,
   local: IconServer,
   custom: IconPlug,
+  // Catalogue vendors whose mark exists under CC0; the rest fall back to initials.
+  kimi: BrandKimi,
+  "kimi-for-coding": BrandKimi,
+  minimax: BrandMiniMax,
+  modelscope: BrandModelScope,
+  openrouter: BrandOpenRouter,
+  "github-copilot": BrandGitHubCopilot,
+  "xai-grok": BrandXai,
+  nvidia: BrandNvidia,
+  xiaomi: BrandXiaomi,
 };
 
 /** One or two initials: the capitals of the name ("OpenAI" gives OA, "Z.AI" gives ZA), else the first letters of its words. */
@@ -1338,6 +1358,22 @@ const AUTH_LABEL: Record<ProviderAuth, string> = {
 type Editing = { mode: "new"; preset: ProviderPreset } | { mode: "edit"; id: string } | null;
 
 /** Add buttons, in the order the presets are listed. */
+const CATALOG_BY_ID = new Map(PROVIDER_CATALOG.map((entry) => [entry.id, entry]));
+
+/** The starting values for a new provider: a built-in preset, a catalogue entry, or bare Custom. */
+function presetDraft(preset: ProviderPreset): ProviderDraft {
+  const built = PRESETS[preset];
+  if (built) return built;
+  const entry = CATALOG_BY_ID.get(preset);
+  if (!entry) return PRESETS.custom;
+  return { ...PRESETS.custom, id: entry.id, name: entry.name, base_url: entry.base_url, auth: entry.auth, wire: entry.wire };
+}
+
+/** A catalogue entry's label, for the form header and the mark's fallback initials. */
+function presetLabel(preset: ProviderPreset): string {
+  return PRESET_LABEL[preset] ?? CATALOG_BY_ID.get(preset)?.name ?? "Provider";
+}
+
 const ADD_PRESETS: { preset: ProviderPreset; label: string }[] = [
   { preset: "deepseek", label: "DeepSeek" },
   { preset: "openai", label: "OpenAI" },
@@ -1369,6 +1405,8 @@ function ProvidersPane({
   const api = useApi();
   const addLabelId = useId();
   const [editing, setEditing] = useState<Editing>(null);
+  const [browsing, setBrowsing] = useState(false);
+  const [catalogQuery, setCatalogQuery] = useState("");
   const [health, setHealth] = useState<Record<string, HealthView>>({});
 
   // In-flight and queued counts change as colonies work; refresh them quietly.
@@ -1505,12 +1543,33 @@ function ProvidersPane({
                     "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-panel",
                   )}
                 >
-                  <ProviderMark preset={preset} name={PRESET_LABEL[preset]} size="tile" />
+                  <ProviderMark preset={preset} name={presetLabel(preset)} size="tile" />
                   <span className="w-full truncate text-center">{label}</span>
                 </button>
               );
             })}
+            <button
+              type="button"
+              disabled={addDisabled}
+              aria-expanded={browsing}
+              onClick={() => setBrowsing((open) => !open)}
+              className={cx(
+                "flex cursor-pointer select-none flex-col items-center gap-2 rounded-xl border border-dashed border-border-strong bg-panel px-1.5 py-3",
+                "text-[12px] font-medium text-muted transition-colors hover:bg-panel-2 hover:text-text",
+                "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-panel",
+              )}
+            >
+              <span aria-hidden="true" className="grid size-11 shrink-0 place-items-center rounded-xl bg-panel-2">
+                <IconPlus size={22} />
+              </span>
+              <span className="w-full truncate text-center">{browsing ? "Close" : "More"}</span>
+            </button>
           </div>
+          {browsing && <CatalogBrowser query={catalogQuery} onQuery={setCatalogQuery} taken={has} disabled={addDisabled} onPick={(id) => {
+            setBrowsing(false);
+            setCatalogQuery("");
+            setEditing({ mode: "new", preset: id });
+          }} />}
         </div>
         <p className="text-[11.5px] leading-snug text-faint">
           Logos and names are the property of their owners. Colonizer is not affiliated with, endorsed by or connected to any of them.
@@ -1713,6 +1772,76 @@ function FormField({
   );
 }
 
+
+/** The host part of a base URL, which is what tells two endpoints apart in a list. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * The long tail of Anthropic-compatible endpoints, searchable. Kept behind "More" because six
+ * vendors cover almost everyone and seventy would bury them.
+ */
+function CatalogBrowser({
+  query,
+  onQuery,
+  taken,
+  disabled,
+  onPick,
+}: {
+  query: string;
+  onQuery: (value: string) => void;
+  taken: (id: string) => boolean;
+  disabled: boolean;
+  onPick: (id: string) => void;
+}) {
+  const needle = query.trim().toLowerCase();
+  const matches = PROVIDER_CATALOG.filter(
+    (entry: CatalogEntry) =>
+      !taken(entry.id) && (!needle || entry.name.toLowerCase().includes(needle) || entry.base_url.toLowerCase().includes(needle)),
+  );
+  return (
+    <div className="space-y-2 rounded-xl border border-border bg-panel p-2.5">
+      <input
+        value={query}
+        onChange={(e) => onQuery(e.target.value)}
+        placeholder="Search providers"
+        aria-label="Search providers"
+        autoFocus
+        className={inputClass}
+      />
+      <ul className="scroll-thin max-h-64 space-y-0.5 overflow-y-auto">
+        {matches.map((entry) => (
+          <li key={entry.id}>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onPick(entry.id)}
+              className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ProviderMark preset={entry.id} name={entry.name} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium">{entry.name}</span>
+                <span className="block truncate font-mono text-[11.5px] text-faint">{hostOf(entry.base_url)}</span>
+              </span>
+              {entry.wire === "openai" && <Badge tone="info">{WIRE_LABEL.openai}</Badge>}
+            </button>
+          </li>
+        ))}
+        {matches.length === 0 && <li className="px-2 py-3 text-[13px] text-faint">Nothing matches that.</li>}
+      </ul>
+      <p className="px-1 text-[11.5px] leading-snug text-faint">
+        {PROVIDER_CATALOG.length} endpoints, from the cc-switch catalogue. Colonizer neither vets nor endorses them, and many resell
+        access rather than run the model themselves.
+      </p>
+    </div>
+  );
+}
+
 function ProviderForm({
   initial,
   preset,
@@ -1730,8 +1859,8 @@ function ProviderForm({
 }) {
   const api = useApi();
   const toast = useToast();
-  const start = initial ?? PRESETS[preset];
-  const wire = initial?.wire ?? PRESETS[preset].wire;
+  const start = initial ?? presetDraft(preset);
+  const wire = initial?.wire ?? presetDraft(preset).wire;
   const [id, setId] = useState(start.id);
   const [name, setName] = useState(start.name);
   const [baseUrl, setBaseUrl] = useState(start.base_url);
