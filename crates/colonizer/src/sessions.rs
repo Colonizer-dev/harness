@@ -7,7 +7,7 @@
 use crate::{
     client_error,
     config::{setting, setting_str, setting_u64, ModulesConfig},
-    github, memory,
+    findings, github, memory,
     modules::{schema_for, AgentModule},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
@@ -135,6 +135,8 @@ pub struct Runtime {
     interrupted: std::sync::atomic::AtomicBool,
     stop: watch::Sender<bool>,
     file_lock: Mutex<()>,
+    /// Serialises findings, so the per-colony cap holds when two arrive together.
+    findings_lock: Mutex<()>,
     events_path: PathBuf,
     logs_path: PathBuf,
     pub activity: Mutex<Activity>,
@@ -171,6 +173,7 @@ impl Runtime {
             interrupted: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
             file_lock: Mutex::new(()),
+            findings_lock: Mutex::new(()),
             events_path,
             logs_path,
             activity: Mutex::new(Activity::new(Utc::now())),
@@ -302,6 +305,12 @@ pub struct NewSession {
     /// Omitted uses the publish module's `autopilot` setting.
     #[serde(default)]
     autopilot: Option<bool>,
+}
+
+/// Whether colonies may file validated findings as issues. On unless switched off in Settings.
+fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
+    let schema = schema_for("publish", &modules.publish.provider, &app.agents);
+    setting(&modules.publish, &schema, "file_findings").and_then(Value::as_bool).unwrap_or(true)
 }
 
 fn autopilot_default(app: &App, modules: &ModulesConfig) -> bool {
@@ -522,6 +531,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     timing.mark("providers");
 
+    if findings_enabled(app, &modules) {
+        runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
+    }
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
@@ -917,6 +929,10 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
             rt.activity.lock().await.question_since = None;
         }
         Some("memory_proposal") => memory_proposal(app, id, &event).await,
+        // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
+        Some("finding") => {
+            tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
+        }
         Some("turn_end") => {
             let cost = event["cost_usd"].as_f64();
             if let Some((s, ())) = app.update_session(id, |x| {
@@ -1009,6 +1025,54 @@ async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
         }
         Err(e) => app.session_log(id, "error", format!("could not store a memory proposal: {e:#}")).await,
     }
+}
+
+/// A colony's orchestrator confirmed something outside its task: file it as an issue on the
+/// colony's repository, unless findings are off, the colony has hit its cap, or an open issue
+/// already has the same title. Every outcome is recorded and logged; none reaches the agent.
+async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, event: Value) {
+    let Some(s) = app.session(&id).await else { return };
+    let modules = app.modules.read().await.clone();
+    if !findings_enabled(&app, &modules) {
+        app.session_log(&id, "info", "ignored a finding: filing findings is switched off in Settings".into()).await;
+        return;
+    }
+    let finding = match findings::parse(&event) {
+        Ok(finding) => finding,
+        Err(e) => {
+            app.session_log(&id, "warn", format!("did not file a finding: {e:#}")).await;
+            return;
+        }
+    };
+    let _serial = rt.findings_lock.lock().await;
+    let dir = app.session_dir(&id);
+    let record = dir.join("findings.jsonl");
+    if findings::count(&record) >= findings::MAX_PER_COLONY {
+        let message = format!(
+            "did not file \"{}\": this colony has already filed {} findings, the most one colony may",
+            finding.title,
+            findings::MAX_PER_COLONY
+        );
+        app.session_log(&id, "warn", message).await;
+        return;
+    }
+    let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md")).await;
+    let (level, message, entry) = match &outcome {
+        Ok(findings::Filed::Issue(url)) => {
+            ("info", format!("filed finding \"{}\" as {url}", finding.title), json!({"title": finding.title, "issue": url}))
+        }
+        Ok(findings::Filed::Duplicate(url)) => (
+            "info",
+            format!("did not file \"{}\": {url} is already open with that title", finding.title),
+            json!({"title": finding.title, "duplicate_of": url}),
+        ),
+        Err(e) => ("error", format!("could not file finding \"{}\": {e:#}", finding.title), Value::Null),
+    };
+    // Only a filed or matched finding counts toward the cap; a GitHub error should not use one up.
+    if !entry.is_null() {
+        append_line(&record, &entry.to_string()).await;
+    }
+    app.session_log(&id, level, message).await;
 }
 
 /// Stops the agent link, asks agentd to shut the runner down, removes the VM and its mesh node.

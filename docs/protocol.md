@@ -727,3 +727,36 @@ unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_toke
 
 At colony start the mothership probes every used provider and logs a warning for each unreachable one
 (the colony still starts; fallback covers it when configured).
+
+### 6.6 Findings
+
+A colony that notices a real problem outside its task — a bug, a security gap, documentation promising
+what the code does not do — files it as a GitHub issue instead of fixing it in the pull request.
+
+Runner side. When the mothership sets `COLONIZER_FINDINGS=true`, the Claude Code runner adds an
+in-process MCP server `colonizer_findings` with one tool, `finding_file { title, body, evidence }`,
+and a system prompt instruction: confirm a finding with a fresh subagent before filing it, and put
+how it was confirmed in `evidence`. Only the orchestrator may call it — a `PreToolUse` hook refuses a
+call that carries `agent_id`, whatever the delegation mode, and tells the subagent to report the
+finding instead. A call emits:
+
+```jsonc
+{"type":"finding","title":"llms.txt promises career pages the scanner cannot fetch","body":"markdown…","evidence":"A subagent read model.rs:9-14 and providers/mod.rs:4-19…"}
+```
+
+Mothership side. The GitHub token never enters a colony, so filing happens on the host:
+
+- Setting: `publish.settings.file_findings`, default `true`. When it is off the variable is not set, and
+  a `finding` event that arrives anyway is ignored.
+- Validation: `title` (one line, ≤ 200 chars), `body` (≤ 20 000) and `evidence` (≤ 5 000) are all
+  required. A finding without evidence is not filed.
+- Cap: at most 5 per colony, counted from `sessions/<id>/findings.jsonl`. A GitHub error does not use
+  one up.
+- Duplicates: open issues are searched by title words (normalised, so no search qualifiers can be
+  injected), and one whose normalised title matches exactly means nothing is created.
+- Filing: `gh issue create` on the colony's own repository, labelled `colonizer-finding` (created if
+  missing, and dropped if the token cannot apply it). The body carries the finding, a "How it was
+  confirmed" section and a footer naming the colony and the issue it was working on.
+- Every outcome — filed, duplicate, over the cap, rejected, failed — is a line in the colony log. The
+  agent is told only that the finding was handed over.
+
