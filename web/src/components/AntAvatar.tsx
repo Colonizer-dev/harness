@@ -1,4 +1,5 @@
-// A settler's avatar: a worker ant in side profile, facing right, animated by what the settler is doing.
+// A settler's avatar: a pixel-art worker ant in side profile (2 viewBox units per pixel), facing right, animated by what
+// the settler is doing.
 // The motion lives in index.css under `.ant`, keyed on data-s / data-activity / data-error / data-role,
 // and stops under prefers-reduced-motion. Every moving part is a named group pivoting at its own joint.
 import type { CSSProperties } from "react";
@@ -88,120 +89,185 @@ export function AntAvatar({
       aria-label={`${ROLE_NAME[role]} Settler, ${DOING[state]}`}
       style={antPhase(phase)}
     >
-      <line className="ant-ground" x1="2" y1="35" x2="50" y2="35" />
+      <line className="ant-ground" x1="0" y1="35" x2="52" y2="35" />
       <g className="ant-body">
         <g className="ant-legs-far">
-          <path className="ant-leg ant-leg-front-far" d="M27 21.5 30.5 18 33.5 34.5" />
-          <path className="ant-leg ant-leg-mid-far" d="M24 22 24.5 18.5 25.5 34.5" />
-          <path className="ant-leg ant-leg-back-far" d="M21 22 17.5 19 14 34.5" />
+          <g className="ant-leg ant-leg-front-far">
+            <rect x="28" y="26" width="2" height="2" />
+            <rect x="30" y="28" width="2" height="2" />
+            <rect x="30" y="30" width="2" height="2" />
+            <rect x="32" y="32" width="2" height="2" />
+          </g>
+          <g className="ant-leg ant-leg-mid-far">
+            <rect x="24" y="26" width="2" height="2" />
+            <rect x="24" y="28" width="2" height="2" />
+            <rect x="24" y="30" width="2" height="2" />
+            <rect x="24" y="32" width="2" height="2" />
+          </g>
+          <g className="ant-leg ant-leg-back-far">
+            <rect x="20" y="26" width="2" height="2" />
+            <rect x="18" y="28" width="2" height="2" />
+            <rect x="18" y="30" width="2" height="2" />
+            <rect x="16" y="32" width="2" height="2" />
+          </g>
         </g>
-        <ellipse className="ant-fill ant-gaster" cx="13.5" cy="23" rx="8.5" ry="6" transform="rotate(-8 13.5 23)" />
-        <circle className="ant-fill ant-petiole" cx="20.5" cy="21.6" r="1.9" />
-        <ellipse className="ant-fill ant-thorax" cx="25.5" cy="20.5" rx="5.2" ry="3.9" />
+        <g className="ant-fill ant-gaster">
+          <rect x="8" y="18" width="8" height="2" />
+          <rect x="6" y="20" width="12" height="2" />
+          <rect x="4" y="22" width="16" height="2" />
+          <rect x="6" y="24" width="12" height="2" />
+          <rect x="8" y="26" width="8" height="2" />
+        </g>
+        <rect className="ant-seam" x="12" y="20" width="2" height="6" />
+        <rect className="ant-fill ant-petiole" x="20" y="22" width="2" height="2" />
+        <g className="ant-fill ant-thorax">
+          <rect x="24" y="18" width="4" height="2" />
+          <rect x="22" y="20" width="8" height="4" />
+          <rect x="24" y="24" width="4" height="2" />
+        </g>
         {/* Role accessories on the body. Only the one matching data-role is shown. */}
         <g className="ant-role">
           <g className="ant-role-scout">
-            <rect className="ink" x="22.8" y="13.4" width="5.4" height="3.8" rx="1.1" />
-            <path className="ink-line" d="M25.5 13.4v-1.6" strokeWidth="1.1" />
+            <rect className="ink" x="24" y="14" width="4" height="4" />
           </g>
           <g className="ant-role-surveyor">
-            <rect className="ink" x="20.5" y="13.9" width="9.5" height="2.6" rx="1.3" transform="rotate(-10 25.25 15.2)" />
+            <rect className="ink" x="20" y="16" width="10" height="2" />
           </g>
           <g className="ant-role-warden">
-            <path className="ink" d="M22.8 18.3h5.4v2.6q0 2.3-2.7 3.2q-2.7-.9-2.7-3.2z" />
+            <rect className="ink" x="24" y="20" width="4" height="4" />
+            <rect className="ink" x="25" y="24" width="2" height="2" />
           </g>
           <g className="ant-role-tester">
-            <path className="ink-line" d="M11.4 18.3v9.6M14.6 17.8v9.8" strokeWidth="1.4" />
+            <rect className="ink" x="8" y="20" width="2" height="6" />
+            <rect className="ink" x="14" y="20" width="2" height="6" />
           </g>
           <g className="ant-role-mender">
-            <path className="ink-line" d="M9.8 20.6l4.4 4.4M14.2 20.6l-4.4 4.4" strokeWidth="1.4" />
+            <rect className="ink" x="8" y="20" width="2" height="2" />
+            <rect className="ink" x="14" y="20" width="2" height="2" />
+            <rect className="ink" x="10" y="22" width="4" height="2" />
+            <rect className="ink" x="8" y="24" width="2" height="2" />
+            <rect className="ink" x="14" y="24" width="2" height="2" />
           </g>
           <g className="ant-role-mason">
-            <rect className="ink" x="22.6" y="13.5" width="5.8" height="3.4" />
-            <path d="M25.5 13.5v1.7M22.6 15.2h5.8" fill="none" stroke="var(--panel)" strokeWidth="0.7" />
+            <rect className="ink" x="22" y="16" width="8" height="2" />
+            <rect x="26" y="16" width="1" height="2" fill="var(--panel)" opacity="0.7" />
           </g>
           <g className="ant-role-cartographer">
-            <circle cx="13.5" cy="22.8" r="2.7" fill="var(--panel)" stroke="var(--ant-ink)" strokeWidth="1" />
-            <path className="ink" d="M13.5 20.5l1 2.3-1 2.3-1-2.3z" />
+            <rect x="9" y="20" width="6" height="6" fill="var(--panel)" />
+            <rect className="ink" x="11" y="22" width="2" height="2" />
+            <rect className="ink" x="11" y="20" width="2" height="1" />
           </g>
           <g className="ant-role-pioneer">
-            <rect className="ink" x="9.6" y="14.6" width="7.4" height="4.8" rx="2.2" />
-            <path className="ink-line" d="M13.3 19.4v3.2" strokeWidth="1.1" />
+            <rect className="ink" x="8" y="14" width="8" height="4" />
+            <rect className="ink" x="11" y="18" width="2" height="2" />
           </g>
         </g>
         <g className="ant-head">
-          <ellipse className="ant-fill" cx="34.8" cy="18" rx="4.6" ry="4.1" />
-          <path className="ant-jaw" d="M38.9 19.7 40.6 21.1" />
-          <g className="ant-eye">
-            <circle cx="36.2" cy="17" r="1.35" fill="var(--panel)" />
-            <circle className="ant-fill" cx="36.6" cy="17" r="0.7" />
+          <g className="ant-fill ant-skull">
+            <rect x="32" y="16" width="6" height="2" />
+            <rect x="30" y="18" width="10" height="4" />
+            <rect x="32" y="22" width="8" height="2" />
           </g>
-          <g className="ant-antennae">
-            <path d="M36.5 14.3Q38 9.5 43.5 8.2" />
-            <path d="M35.5 14.3Q35.5 9 40 6.3" />
+          <rect className="ant-fill ant-jaw" x="40" y="22" width="2" height="2" />
+          <g className="ant-eye">
+            <rect x="36" y="18" width="2" height="2" fill="var(--panel)" />
+          </g>
+          <g className="ant-antennae ant-fill">
+            <g className="ant-antenna-1">
+              <rect x="34" y="14" width="2" height="2" />
+              <rect x="36" y="12" width="2" height="2" />
+              <rect x="38" y="10" width="2" height="2" />
+              <rect x="40" y="8" width="2" height="2" />
+            </g>
+            <g className="ant-antenna-2">
+              <rect x="32" y="14" width="2" height="2" />
+              <rect x="32" y="12" width="2" height="2" />
+              <rect x="32" y="10" width="2" height="2" />
+              <rect x="34" y="8" width="2" height="2" />
+            </g>
           </g>
           {/* Role accessories on the head move with it. */}
           <g className="ant-role">
             <g className="ant-role-builder">
-              <path className="ink" d="M30.4 16.4A4.5 4.5 0 0 1 39.2 16.4Z" />
-              <path className="ink-line" d="M29.4 16.6H40.3" strokeWidth="1.2" />
+              <rect className="ink" x="32" y="14" width="6" height="2" />
+              <rect className="ink" x="30" y="16" width="2" height="2" />
+              <rect className="ink" x="38" y="16" width="2" height="2" />
             </g>
             <g className="ant-role-inspector">
-              <circle className="ink-line" cx="36.2" cy="17" r="2.5" strokeWidth="1.1" />
-              <path className="ink-line" d="M33.7 17 31.2 15.6" strokeWidth="1.1" />
+              <rect className="ink" x="34" y="16" width="6" height="2" />
+              <rect className="ink" x="34" y="18" width="2" height="2" />
+              <rect className="ink" x="38" y="18" width="2" height="2" />
+              <rect className="ink" x="34" y="20" width="6" height="2" />
             </g>
             <g className="ant-role-tracker">
-              <circle className="ink" cx="33.4" cy="14.4" r="1.4" />
-              <path className="ink" d="M34.6 13.7 40.6 9.4 41 12.6Z" opacity="0.3" />
+              <rect className="ink" x="32" y="16" width="2" height="2" />
+              <rect className="ink" x="40" y="14" width="2" height="2" opacity="0.35" />
+              <rect className="ink" x="42" y="12" width="2" height="2" opacity="0.35" />
             </g>
             <g className="ant-role-scribe">
-              <path className="ink-line" d="M32.6 14.6 29.4 8.6" strokeWidth="1.3" />
-              <circle className="ink" cx="29.1" cy="8.1" r="1" />
+              <rect className="ink" x="30" y="12" width="2" height="4" />
+              <rect className="ink" x="28" y="8" width="2" height="4" />
             </g>
           </g>
         </g>
         <g className="ant-legs-near">
-          <path className="ant-leg ant-leg-front" d="M28.5 21.5 32.5 18 36 34.5" />
-          <path className="ant-leg ant-leg-mid" d="M25.5 22.5 26.5 18.5 28 34.5" />
-          <path className="ant-leg ant-leg-back" d="M22.5 22.5 19 19 15.5 34.5" />
+          <g className="ant-leg ant-leg-front">
+            <rect x="30" y="26" width="2" height="2" />
+            <rect x="32" y="28" width="2" height="2" />
+            <rect x="32" y="30" width="2" height="2" />
+            <rect x="34" y="32" width="2" height="2" />
+          </g>
+          <g className="ant-leg ant-leg-mid">
+            <rect x="26" y="26" width="2" height="2" />
+            <rect x="26" y="28" width="2" height="2" />
+            <rect x="28" y="30" width="2" height="2" />
+            <rect x="28" y="32" width="2" height="2" />
+          </g>
+          <g className="ant-leg ant-leg-back">
+            <rect x="22" y="26" width="2" height="2" />
+            <rect x="20" y="28" width="2" height="2" />
+            <rect x="20" y="30" width="2" height="2" />
+            <rect x="18" y="32" width="2" height="2" />
+          </g>
         </g>
         {/* What it carries while working: search/read → lens, edit → leaf, build → block, test → flag. */}
         <g className="ant-carry">
           <g className="ant-carry-lens">
-            <circle cx="44" cy="17" r="3.2" fill="none" stroke="var(--ant-ink)" strokeWidth="1.2" />
-            <path d="M41.7 19.3 40.5 20.8" stroke="var(--ant-ink)" strokeWidth="1.4" strokeLinecap="round" />
+            <rect className="ink" x="42" y="14" width="6" height="2" />
+            <rect className="ink" x="42" y="18" width="6" height="2" />
+            <rect className="ink" x="42" y="16" width="2" height="2" />
+            <rect className="ink" x="46" y="16" width="2" height="2" />
+            <rect className="ink" x="40" y="20" width="2" height="2" />
           </g>
           <g className="ant-carry-leaf">
-            <path d="M40.5 20.5Q40 13 48 12Q48.5 19.5 40.5 20.5Z" fill="var(--ok)" />
-            <path d="M41 20 46.5 14" fill="none" stroke="var(--ok-soft)" strokeWidth="0.8" />
+            <rect x="42" y="18" width="2" height="2" fill="var(--ok)" />
+            <rect x="44" y="16" width="4" height="4" fill="var(--ok)" />
+            <rect x="46" y="14" width="2" height="2" fill="var(--ok)" />
+            <rect x="44" y="18" width="2" height="2" fill="var(--ok-soft)" opacity="0.6" />
           </g>
           <g className="ant-carry-block">
-            <rect x="40.5" y="14" width="6.5" height="6.5" rx="1" fill="var(--ant-ink)" />
-            <path d="M40.5 17.2h6.5" stroke="var(--panel)" strokeWidth="0.7" />
+            <rect className="ink" x="42" y="14" width="6" height="6" />
+            <rect x="42" y="17" width="6" height="1" fill="var(--panel)" opacity="0.4" />
           </g>
           <g className="ant-carry-flag">
-            <path className="ant-line" d="M41 21V8.5" strokeWidth="1.2" />
-            <path d="M41 8.5h6.5l-2 2.7 2 2.7H41Z" fill="var(--ant-ink)" />
+            <rect className="ant-fill" x="42" y="10" width="2" height="12" />
+            <rect className="ink" x="44" y="10" width="6" height="4" />
           </g>
         </g>
       </g>
-      <g className="ant-thought">
-        <circle className="ant-fill" cx="40.5" cy="10.5" r="1" />
-        <circle className="ant-fill" cx="43.6" cy="7.4" r="1.35" />
-        <circle className="ant-fill" cx="47.4" cy="3.9" r="1.8" />
+      <g className="ant-thought ant-fill">
+        <rect x="40" y="10" width="2" height="2" />
+        <rect x="44" y="6" width="3" height="3" />
+        <rect x="48" y="1" width="4" height="4" />
       </g>
-      <path className="ant-scribble" d="M38.5 33q1.5-2.2 3 0t3 0t3 0" />
-      <circle className="ant-fill ant-pebble" cx="41" cy="34" r="1.2" />
+      <path className="ant-scribble" d="M38 33H48" />
+      <rect className="ant-fill ant-pebble" x="40" y="32" width="2" height="2" />
       <g className="ant-done">
-        <circle cx="45" cy="8" r="4.2" fill="var(--ok)" />
-        <path
-          d="M43 8.1 44.4 9.5 47 6.7"
-          fill="none"
-          stroke="var(--panel)"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        <rect x="42" y="4" width="8" height="8" fill="var(--ok)" />
+        <rect x="43" y="8" width="2" height="2" fill="var(--panel)" />
+        <rect x="45" y="9" width="2" height="2" fill="var(--panel)" />
+        <rect x="47" y="7" width="2" height="2" fill="var(--panel)" />
+        <rect x="48" y="5" width="1" height="2" fill="var(--panel)" />
       </g>
     </svg>
   );

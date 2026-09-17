@@ -261,10 +261,12 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
-   The settler ant (components/AntAvatar.tsx). Side profile, facing right.
-   viewBox 0 0 52 40. Every pivot below is in viewBox units (transform-box:
-   view-box), at the limb's own joint, so the pose holds at any render size.
-   Loops touch transform, opacity and stroke-dashoffset only.
+   The settler ant (components/AntAvatar.tsx). Pixel art in side profile, facing
+   right: viewBox 0 0 52 40, 2 units per pixel, crisp edges. Every pivot below
+   is in viewBox units (transform-box: view-box), at the limb's own joint, so the
+   pose holds at any render size. Loops touch transform, opacity and
+   stroke-dashoffset only; the ground, thought pixels, scribble and lens move a
+   pixel at a time with steps().
    State:     .ant[data-s="working|thinking|writing|done|continued|paused"]
    Activity:  .ant[data-activity="search|read|edit|build|test|run"] (working)
    Error:     .ant[data-error="true"] for ~1.2s, then removed
@@ -274,6 +276,7 @@ body {
 .ant {
   display: block;
   overflow: visible;
+  shape-rendering: crispEdges;
   color: var(--accent);
   --ant-ink: var(--text);
   --ant-phase: 0s;
@@ -284,33 +287,26 @@ body {
 .ant-fill {
   fill: currentColor;
 }
-.ant-leg,
-.ant-antennae path,
-.ant-jaw,
-.ant-scribble,
-.ant-line {
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
+/* pixel grid: 2 viewBox units per pixel, all parts are rects */
 .ant-leg {
-  stroke-width: 1.5;
+  fill: currentColor;
 }
 .ant-legs-far {
-  opacity: 0.5;
+  opacity: 0.45;
 }
-.ant-antennae path {
-  stroke-width: 1.3;
+.ant-seam {
+  fill: var(--panel);
+  opacity: 0.35;
 }
-.ant-jaw {
-  stroke-width: 1.2;
+.ant-scribble {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: butt;
 }
 .ant-ground {
   stroke: currentColor;
-  stroke-width: 1.2;
-  stroke-linecap: round;
-  stroke-dasharray: 2.5 3.5;
+  stroke-width: 2;
+  stroke-dasharray: 2 2;
   opacity: 0.35;
 }
 .ant[data-ground="false"] .ant-ground {
@@ -322,47 +318,47 @@ body {
   transform-origin: 26px 22px;
 }
 .ant-head {
-  transform-origin: 30.5px 19.5px;
+  transform-origin: 30px 20px;
 }
 .ant-eye {
-  transform-origin: 36.2px 17px;
+  transform-origin: 37px 19px;
 }
 .ant-antennae {
-  transform-origin: 36px 14.3px;
+  transform-origin: 34px 16px;
 }
 .ant-leg-front {
-  transform-origin: 28.5px 21.5px;
+  transform-origin: 30px 25px;
 }
 .ant-leg-mid {
-  transform-origin: 25.5px 22.5px;
+  transform-origin: 27px 25px;
 }
 .ant-leg-back {
-  transform-origin: 22.5px 22.5px;
+  transform-origin: 23px 25px;
 }
 .ant-leg-front-far {
-  transform-origin: 27px 21.5px;
+  transform-origin: 28px 25px;
 }
 .ant-leg-mid-far {
-  transform-origin: 24px 22px;
+  transform-origin: 25px 25px;
 }
 .ant-leg-back-far {
-  transform-origin: 21px 22px;
+  transform-origin: 21px 25px;
 }
 .ant-carry {
-  transform-origin: 40px 20px;
+  transform-origin: 42px 20px;
 }
 .ant-carry-flag {
-  transform-origin: 41px 21px;
+  transform-origin: 43px 22px;
 }
 .ant-done {
-  transform-origin: 45px 8px;
+  transform-origin: 46px 8px;
 }
 .ant-pebble {
-  transform-origin: 41px 34px;
+  transform-origin: 41px 33px;
 }
 
 /* hidden until a state or activity asks for them */
-.ant-thought circle,
+.ant-thought rect,
 .ant-scribble,
 .ant-done,
 .ant-pebble,
@@ -371,9 +367,9 @@ body {
   opacity: 0;
 }
 .ant-scribble {
-  stroke-width: 1.2;
-  stroke-dasharray: 13;
-  stroke-dashoffset: 13;
+  stroke-width: 2;
+  stroke-dasharray: 10;
+  stroke-dashoffset: 10;
 }
 
 /* Parts ease between rest poses so a state change reads as the ant stopping, not a cut. */
@@ -423,32 +419,26 @@ body {
 .ant[data-role="warden"] {
   --ant-ink: var(--ok);
 }
-.ant-role .ink {
+.ant .ink {
   fill: var(--ant-ink);
-}
-.ant-role .ink-line {
-  fill: none;
-  stroke: var(--ant-ink);
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 /* working: tripod gait over scrolling ground */
 .ant[data-s="working"] .ant-leg-front,
 .ant[data-s="working"] .ant-leg-back,
 .ant[data-s="working"] .ant-leg-mid-far {
-  animation: ant-step 0.32s ease-in-out var(--ant-phase) infinite alternate;
+  animation: ant-step 0.32s steps(2, jump-none) var(--ant-phase) infinite alternate;
 }
 .ant[data-s="working"] .ant-leg-mid,
 .ant[data-s="working"] .ant-leg-front-far,
 .ant[data-s="working"] .ant-leg-back-far {
-  animation: ant-step 0.32s ease-in-out var(--ant-phase) infinite alternate-reverse;
+  animation: ant-step 0.32s steps(2, jump-none) var(--ant-phase) infinite alternate-reverse;
 }
 .ant[data-s="working"] .ant-body {
-  animation: ant-bob 0.32s ease-in-out var(--ant-phase) infinite alternate;
+  animation: ant-bob 0.32s steps(1, jump-end) var(--ant-phase) infinite alternate;
 }
 .ant[data-s="working"] .ant-ground {
-  animation: ant-ground 0.64s linear var(--ant-phase) infinite;
+  animation: ant-ground 0.32s steps(2, jump-none) var(--ant-phase) infinite;
 }
 .ant[data-s="working"] .ant-antennae {
   animation: ant-sway 0.64s ease-in-out var(--ant-phase) infinite;
@@ -463,12 +453,12 @@ body {
 }
 @keyframes ant-bob {
   to {
-    transform: translateY(-0.6px);
+    transform: translateY(-1px);
   }
 }
 @keyframes ant-ground {
   to {
-    stroke-dashoffset: 6;
+    stroke-dashoffset: 4;
   }
 }
 @keyframes ant-sway {
@@ -498,7 +488,7 @@ body {
   transform: rotate(5deg);
 }
 .ant[data-s="working"] .ant-carry-lens {
-  animation: ant-sweep 1.3s ease-in-out var(--ant-phase) infinite;
+  animation: ant-sweep 1.3s steps(2, jump-none) var(--ant-phase) infinite;
 }
 .ant[data-s="working"] .ant-carry-leaf,
 .ant[data-s="working"] .ant-carry-block {
@@ -513,7 +503,7 @@ body {
     transform: translateX(0);
   }
   50% {
-    transform: translateX(1.4px);
+    transform: translateX(2px);
   }
 }
 @keyframes ant-hold {
@@ -545,8 +535,9 @@ body {
   100% {
     transform: scaleY(1);
   }
-  96% {
-    transform: scaleY(0.15);
+  94%,
+  97% {
+    transform: scaleY(0.5);
   }
 }
 
@@ -559,13 +550,13 @@ body {
 .ant[data-s="thinking"] .ant-antennae {
   animation: ant-sense 1.6s ease-in-out var(--ant-phase) infinite;
 }
-.ant[data-s="thinking"] .ant-thought circle {
-  animation: ant-thought 2.1s ease-in-out var(--ant-phase) infinite;
+.ant[data-s="thinking"] .ant-thought rect {
+  animation: ant-thought 2.1s steps(1, jump-none) var(--ant-phase) infinite;
 }
-.ant[data-s="thinking"] .ant-thought circle:nth-child(2) {
+.ant[data-s="thinking"] .ant-thought rect:nth-child(2) {
   animation-delay: calc(var(--ant-phase) + 0.28s);
 }
-.ant[data-s="thinking"] .ant-thought circle:nth-child(3) {
+.ant[data-s="thinking"] .ant-thought rect:nth-child(3) {
   animation-delay: calc(var(--ant-phase) + 0.56s);
 }
 @keyframes ant-look-up {
@@ -616,7 +607,7 @@ body {
   transform: rotate(6deg);
 }
 .ant[data-s="writing"] .ant-scribble {
-  animation: ant-scribble 1.5s ease-in-out var(--ant-phase) infinite;
+  animation: ant-scribble 1.5s steps(6, jump-none) var(--ant-phase) infinite;
 }
 @keyframes ant-nod {
   from {
@@ -628,10 +619,10 @@ body {
 }
 @keyframes ant-scribble {
   0% {
-    stroke-dashoffset: 13;
+    stroke-dashoffset: 10;
     opacity: 1;
   }
-  75% {
+  80% {
     stroke-dashoffset: 0;
     opacity: 1;
   }
@@ -704,6 +695,7 @@ body {
   transform: translateX(6px);
 }
 .ant[data-s="continued"] .ant-ground {
+  stroke-dasharray: 2 4;
   opacity: 0.6;
 }
 
@@ -882,7 +874,7 @@ body {
   .ant[data-s="thinking"] .ant-head {
     transform: rotate(-9deg);
   }
-  .ant[data-s="thinking"] .ant-thought circle {
+  .ant[data-s="thinking"] .ant-thought rect {
     opacity: 1;
   }
   .ant[data-s="writing"] .ant-head {
