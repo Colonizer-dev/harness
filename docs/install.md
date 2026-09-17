@@ -66,7 +66,7 @@ port instead ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
 | Colonies and their worktrees, shared memory, your own plugins, the Headroom bundle | `~/.local/share/colonizer` | `COLONIZER_DATA_DIR` |
 | The web UI | `127.0.0.1:7878` | `COLONIZER_BIND` |
 
-Every setting is listed under [Configuration](../README.md#configuration) in the README.
+Every setting is listed under [Configuration](https://github.com/Colonizer-dev/harness#configuration) in the README.
 
 ## Updating
 
