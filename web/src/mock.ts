@@ -26,6 +26,17 @@ import type {
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** A small seeded generator, so the mock's stream has the same uneven rhythm on every run. */
+function rhythm(seed: number): () => number {
+  let x = seed || 1;
+  return () => {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    return ((x >>> 0) % 1000) / 1000;
+  };
+}
 const now = () => new Date().toISOString();
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 const clone = <T>(value: T): T => structuredClone(value);
@@ -240,10 +251,18 @@ class MockSession {
   private async streamText(generation: number, messageId: string, text: string, agent?: AgentRef): Promise<boolean> {
     const words = text.match(/\S+\s*/g) ?? [text];
     const by = agent ? { agent } : {};
-    for (let i = 0; i < words.length; i += 2) {
-      if (!this.alive(generation)) return false;
-      this.emit({ type: "assistant_text_delta", message_id: messageId, block_index: 0, delta: words.slice(i, i + 2).join(""), ...by });
-      await sleep(40);
+    // Real deltas arrive the way colonies' event logs show them: several at once (150–250 characters in the same
+    // millisecond), then nothing for 100–570 ms.
+    const next = rhythm(messageId.length * 7919 + text.length);
+    for (let i = 0; i < words.length; ) {
+      const burst = 4 + Math.floor(next() * 8);
+      for (let k = 0; k < burst && i < words.length; k++) {
+        if (!this.alive(generation)) return false;
+        const count = 2 + Math.floor(next() * 3);
+        this.emit({ type: "assistant_text_delta", message_id: messageId, block_index: 0, delta: words.slice(i, i + count).join(""), ...by });
+        i += count;
+      }
+      await sleep(100 + next() * 470);
     }
     if (!this.alive(generation)) return false;
     this.emit({ type: "assistant_text", message_id: messageId, block_index: 0, text, ...by });
@@ -586,7 +605,23 @@ class MockSession {
     await sleep(250);
     this.emit({ type: "user_message", id: `u-${n}`, text });
     this.emit({ type: "status", state: "working" });
-    const reply = `Got it. *(mock reply)* In a real colony I'd now work on “${text.slice(0, 80)}${text.length > 80 ? "…" : ""}” inside the microVM.`;
+    const reply = [
+      `Got it. *(mock reply)* In a real colony I'd now work on “${text.slice(0, 80)}${text.length > 80 ? "…" : ""}” inside the microVM.`,
+      "",
+      "Here is how I would go about it:",
+      "",
+      "1. **Read** `src/checkout/guest.ts` and the session middleware, to see where a guest gets its cart.",
+      "2. **Reproduce** the failure with a test that checks out without signing in.",
+      "3. **Fix** the smallest thing that makes that test pass, and keep the signed-in path unchanged.",
+      "",
+      "The likely culprit is the cart lookup, which assumes a user id:",
+      "",
+      "```ts",
+      "const cart = await carts.findByUser(session.userId!);",
+      "```",
+      "",
+      "For a guest `session.userId` is undefined, so the lookup throws before payment starts. I'd look the cart up by session id instead when there is no user, and add a test for both paths.",
+    ].join("\n");
     if (!(await this.streamText(generation, `msg_u${n}`, reply))) return;
     this.cost += 0.06;
     this.emit({ type: "turn_end", is_error: false, result: reply, cost_usd: Math.round(this.cost * 100) / 100, duration_ms: 4_210 });

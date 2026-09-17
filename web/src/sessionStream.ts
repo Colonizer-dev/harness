@@ -621,11 +621,15 @@ export function buildThread(state: StreamState): ThreadView {
   const emit = (g: Group) => {
     const parts = toParts(g.blocks);
     if (parts.length > 0) {
+      // Text still streaming is "running" wherever it is, not only in the newest bubble: settlers working in parallel
+      // stream into cards above it, and a part that isn't running is drawn in whole chunks instead of revealed smoothly.
+      const streaming = state.agentState === "working" && g.blocks.some((b) => b.kind === "text" && b.streaming);
       messages.push({
         role: "assistant",
         id: g.id,
         content: parts,
         createdAt: g.ts ? new Date(g.ts) : undefined,
+        ...(streaming ? { status: { type: "running" } as const } : {}),
       });
       if (g.agent) {
         subagents[g.id] = {
