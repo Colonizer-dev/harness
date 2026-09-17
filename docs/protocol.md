@@ -241,12 +241,13 @@ and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
 
 `scripts/fetch-vendor.sh` stages vendored plugins at `dist/plugins/<name>`, which `install.sh` copies to
 `<COLONIZER_HOME>/plugins/<name>`, and `install.sh` fails if a `plugin` entry in `vendor/vendor.lock` didn't
-land there. It stages two vendored plugins today:
+land there. It stages three vendored plugins today:
 
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
 | `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE` — 8.2 MB of the 58 MB source |
 | `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.3.0, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (12 of 14), `LICENSE` — 468 KB of the 2.1 MB source |
+| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (142 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE` — 6.5 MB |
 
 **ECC's hooks are not staged.** Its plugin manifest sets `userConfig.hooks_enabled` to `true` by
 default and Claude Code discovers `hooks/hooks.json` by convention, so "skills and agents only" cannot
@@ -266,6 +267,30 @@ which is what the hook's `compact` matcher was for.
 the worktree, branch and publish step Colonizer already owns. Other skills name them, so the appended
 text says they are missing on purpose and to stop at those steps. `fetch-vendor.sh` fails if either, or
 `hooks/`, survives staging.
+
+**Google's skills load on demand.** Claude Code discovers exactly one skill in `google-skills`:
+`finding-google-skills`. The other 142 sit in `catalog/`, outside `skills/`, with upstream's directory
+shape, so their relative links still resolve. `index.json` is upstream's catalog with each `entrypoint`
+rewritten from a `raw.githubusercontent.com` URL to a path relative to the plugin root
+(`catalog/cloud/gke-basics/SKILL.md`). The finder is Colonizer's copy of upstream's
+(`vendor/google-skills/finding-google-skills/SKILL.md`, Apache-2.0, changes noted in the file): it finds
+the plugin root two directories above the base directory Claude Code gives a skill when it loads, filters
+the local catalog and reads only the matching `SKILL.md`. It has no network steps, and it doesn't copy
+anything into the working directory, where the copy would land in the pull request. Its description is
+kept short: Claude Code drops long skill descriptions from the list it shows the model, which left
+upstream's 604-character one as a bare name. Not staged: upstream's `plugins/` (MCP servers, and git
+submodules a codeload archive doesn't include). `fetch-vendor.sh` fails on any catalog entry it can't map
+to a staged file, on a hook or MCP configuration anywhere in the plugin, on a `raw.githubusercontent.com`
+URL left in the catalog or the finder, and on any second skill under `skills/`.
+
+**Keeping vendored plugins current.** `scripts/update-vendored-plugins.mjs` checks every `plugin` entry in
+`vendor/vendor.lock` against its upstream — the latest GitHub release for a `refs/tags/` pin, the default
+branch for a commit pin — and reports skills added, removed and changed between the pinned archive and the
+new one. `--write` rewrites the lock, comments included. `.github/workflows/vendored-plugin-updates.yml`
+runs it daily, stages the result with `VENDOR_KINDS=plugin scripts/fetch-vendor.sh` so a failing check
+stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request — or, while the repository
+doesn't let GitHub Actions open pull requests, keeps an issue open with the same description and a link to
+open it. It never merges.
 
 **Skillsets are switches, all off by default.** Settings shows the `claude-code` module's `plugins`
 setting (schema `"format": "plugin-dirs"`) as one switch per plugin directory from `GET /api/plugins`,
