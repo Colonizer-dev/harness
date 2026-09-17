@@ -261,63 +261,209 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
-   The settler ant (components/AntAvatar.tsx). Walks while a tool runs, twitches
-   its antennae over a thought bubble while it thinks, scribbles while its report
-   streams in, and rests with a check mark when it is done. Coordinates are the
-   SVG's own units, so the pivots stay put at any size.
+   The settler ant (components/AntAvatar.tsx). Side profile, facing right.
+   viewBox 0 0 52 40. Every pivot below is in viewBox units (transform-box:
+   view-box), at the limb's own joint, so the pose holds at any render size.
+   Loops touch transform, opacity and stroke-dashoffset only.
+   State:     .ant[data-s="working|thinking|writing|done|continued|paused"]
+   Activity:  .ant[data-activity="search|read|edit|build|test|run"] (working)
+   Error:     .ant[data-error="true"] for ~1.2s, then removed
+   Role:      .ant[data-role="scout|builder|…"] shows one accessory
+   Stagger:   --ant-phase (negative seconds) offsets every loop
    --------------------------------------------------------------------------- */
-.ant g,
-.ant path,
-.ant line {
+.ant {
+  display: block;
+  overflow: visible;
+  color: var(--accent);
+  --ant-ink: var(--text);
+  --ant-phase: 0s;
+}
+.ant * {
   transform-box: view-box;
 }
-.ant-body {
-  transform-origin: 16px 14px;
+.ant-fill {
+  fill: currentColor;
 }
-.ant-antennae {
-  transform-origin: 23px 14px;
+.ant-leg,
+.ant-antennae path,
+.ant-jaw,
+.ant-scribble,
+.ant-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ant-leg {
+  stroke-width: 1.5;
+}
+.ant-legs-far {
+  opacity: 0.5;
+}
+.ant-antennae path {
+  stroke-width: 1.3;
+}
+.ant-jaw {
+  stroke-width: 1.2;
 }
 .ant-ground {
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
   stroke-dasharray: 2.5 3.5;
+  opacity: 0.35;
 }
-.ant-thought circle,
-.ant-scribble,
-.ant-done {
+.ant[data-ground="false"] .ant-ground {
   opacity: 0;
-  transition: opacity 0.2s ease;
-}
-.ant-scribble {
-  stroke-dasharray: 14;
-  stroke-dashoffset: 14;
-}
-.ant-done {
-  transform-origin: 32px 4.2px;
 }
 
-/* working: a tripod gait — one set of three legs steps forward as the other pushes back — over scrolling ground */
-.ant[data-state="working"] .ant-legs-a {
-  animation: ant-scuttle 0.3s ease-in-out infinite alternate;
+/* pivots */
+.ant-body {
+  transform-origin: 26px 22px;
 }
-.ant[data-state="working"] .ant-legs-b {
-  animation: ant-scuttle 0.3s ease-in-out infinite alternate-reverse;
+.ant-head {
+  transform-origin: 30.5px 19.5px;
 }
-.ant[data-state="working"] .ant-body {
-  animation: ant-bob 0.15s ease-in-out infinite alternate;
+.ant-eye {
+  transform-origin: 36.2px 17px;
 }
-.ant[data-state="working"] .ant-ground {
-  animation: ant-ground 0.6s linear infinite;
+.ant-antennae {
+  transform-origin: 36px 14.3px;
 }
-@keyframes ant-scuttle {
+.ant-leg-front {
+  transform-origin: 28.5px 21.5px;
+}
+.ant-leg-mid {
+  transform-origin: 25.5px 22.5px;
+}
+.ant-leg-back {
+  transform-origin: 22.5px 22.5px;
+}
+.ant-leg-front-far {
+  transform-origin: 27px 21.5px;
+}
+.ant-leg-mid-far {
+  transform-origin: 24px 22px;
+}
+.ant-leg-back-far {
+  transform-origin: 21px 22px;
+}
+.ant-carry {
+  transform-origin: 40px 20px;
+}
+.ant-carry-flag {
+  transform-origin: 41px 21px;
+}
+.ant-done {
+  transform-origin: 45px 8px;
+}
+.ant-pebble {
+  transform-origin: 41px 34px;
+}
+
+/* hidden until a state or activity asks for them */
+.ant-thought circle,
+.ant-scribble,
+.ant-done,
+.ant-pebble,
+.ant-carry > g,
+.ant-role > g {
+  opacity: 0;
+}
+.ant-scribble {
+  stroke-width: 1.2;
+  stroke-dasharray: 13;
+  stroke-dashoffset: 13;
+}
+
+/* Parts ease between rest poses so a state change reads as the ant stopping, not a cut. */
+.ant-body,
+.ant-head,
+.ant-antennae,
+.ant-leg,
+.ant-carry > g,
+.ant-done,
+.ant-ground,
+.ant-role > g {
+  transition:
+    transform 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.35s ease;
+}
+.ant {
+  transition: opacity 0.4s ease;
+}
+
+/* role accessory, tinted within the palette */
+.ant[data-role="scout"] .ant-role-scout,
+.ant[data-role="builder"] .ant-role-builder,
+.ant[data-role="surveyor"] .ant-role-surveyor,
+.ant[data-role="inspector"] .ant-role-inspector,
+.ant[data-role="warden"] .ant-role-warden,
+.ant[data-role="tester"] .ant-role-tester,
+.ant[data-role="tracker"] .ant-role-tracker,
+.ant[data-role="scribe"] .ant-role-scribe,
+.ant[data-role="mender"] .ant-role-mender,
+.ant[data-role="mason"] .ant-role-mason,
+.ant[data-role="cartographer"] .ant-role-cartographer,
+.ant[data-role="pioneer"] .ant-role-pioneer {
+  opacity: 1;
+}
+.ant[data-role="scout"],
+.ant[data-role="surveyor"],
+.ant[data-role="cartographer"],
+.ant[data-role="scribe"] {
+  --ant-ink: var(--info);
+}
+.ant[data-role="builder"],
+.ant[data-role="tracker"],
+.ant[data-role="mender"] {
+  --ant-ink: var(--warn);
+}
+.ant[data-role="tester"],
+.ant[data-role="warden"] {
+  --ant-ink: var(--ok);
+}
+.ant-role .ink {
+  fill: var(--ant-ink);
+}
+.ant-role .ink-line {
+  fill: none;
+  stroke: var(--ant-ink);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* working: tripod gait over scrolling ground */
+.ant[data-s="working"] .ant-leg-front,
+.ant[data-s="working"] .ant-leg-back,
+.ant[data-s="working"] .ant-leg-mid-far {
+  animation: ant-step 0.32s ease-in-out var(--ant-phase) infinite alternate;
+}
+.ant[data-s="working"] .ant-leg-mid,
+.ant[data-s="working"] .ant-leg-front-far,
+.ant[data-s="working"] .ant-leg-back-far {
+  animation: ant-step 0.32s ease-in-out var(--ant-phase) infinite alternate-reverse;
+}
+.ant[data-s="working"] .ant-body {
+  animation: ant-bob 0.32s ease-in-out var(--ant-phase) infinite alternate;
+}
+.ant[data-s="working"] .ant-ground {
+  animation: ant-ground 0.64s linear var(--ant-phase) infinite;
+}
+.ant[data-s="working"] .ant-antennae {
+  animation: ant-sway 0.64s ease-in-out var(--ant-phase) infinite;
+}
+@keyframes ant-step {
   from {
-    transform: translateX(-1.1px);
+    transform: rotate(-12deg);
   }
   to {
-    transform: translateX(1.1px);
+    transform: rotate(12deg);
   }
 }
 @keyframes ant-bob {
   to {
-    transform: translateY(-0.7px);
+    transform: translateY(-0.6px);
   }
 }
 @keyframes ant-ground {
@@ -325,20 +471,119 @@ body {
     stroke-dashoffset: 6;
   }
 }
+@keyframes ant-sway {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-5deg);
+  }
+}
 
-/* thinking: stands still, antennae probing, a thought bubble filling dot by dot */
-.ant[data-state="thinking"] .ant-antennae,
-.ant[data-state="writing"] .ant-antennae {
-  animation: ant-sense 1.1s ease-in-out infinite;
+/* what the tool is: search/read → lens, edit → leaf, build → block, test → flag */
+.ant[data-s="working"][data-activity="search"] .ant-carry-lens,
+.ant[data-s="working"][data-activity="read"] .ant-carry-lens,
+.ant[data-s="working"][data-activity="edit"] .ant-carry-leaf,
+.ant[data-s="working"][data-activity="build"] .ant-carry-block,
+.ant[data-s="working"][data-activity="test"] .ant-carry-flag {
+  opacity: 1;
 }
-.ant[data-state="thinking"] .ant-thought circle {
-  animation: ant-thought 1.5s ease-in-out infinite;
+.ant[data-s="working"][data-activity="edit"] .ant-head,
+.ant[data-s="working"][data-activity="build"] .ant-head {
+  transform: rotate(-6deg);
 }
-.ant[data-state="thinking"] .ant-thought circle:nth-child(2) {
-  animation-delay: 0.2s;
+.ant[data-s="working"][data-activity="search"] .ant-head,
+.ant[data-s="working"][data-activity="read"] .ant-head {
+  transform: rotate(5deg);
 }
-.ant[data-state="thinking"] .ant-thought circle:nth-child(3) {
-  animation-delay: 0.4s;
+.ant[data-s="working"] .ant-carry-lens {
+  animation: ant-sweep 1.3s ease-in-out var(--ant-phase) infinite;
+}
+.ant[data-s="working"] .ant-carry-leaf,
+.ant[data-s="working"] .ant-carry-block {
+  animation: ant-hold 0.64s ease-in-out var(--ant-phase) infinite alternate;
+}
+.ant[data-s="working"] .ant-carry-flag {
+  animation: ant-wave 0.9s ease-in-out var(--ant-phase) infinite alternate;
+}
+@keyframes ant-sweep {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(1.4px);
+  }
+}
+@keyframes ant-hold {
+  from {
+    transform: rotate(-3deg);
+  }
+  to {
+    transform: rotate(3deg);
+  }
+}
+@keyframes ant-wave {
+  from {
+    transform: rotate(-5deg);
+  }
+  to {
+    transform: rotate(5deg);
+  }
+}
+
+/* eye: a slow blink whenever the settler is awake */
+.ant[data-s="working"] .ant-eye,
+.ant[data-s="thinking"] .ant-eye,
+.ant[data-s="writing"] .ant-eye {
+  animation: ant-blink 4.6s linear var(--ant-phase) infinite;
+}
+@keyframes ant-blink {
+  0%,
+  93%,
+  100% {
+    transform: scaleY(1);
+  }
+  96% {
+    transform: scaleY(0.15);
+  }
+}
+
+/* thinking: stops, looks up, antennae probe, a thought fills dot by dot */
+.ant[data-s="thinking"] .ant-head {
+  animation:
+    ant-look-up 0.5s ease-out both,
+    ant-ponder 3.6s ease-in-out 0.5s infinite;
+}
+.ant[data-s="thinking"] .ant-antennae {
+  animation: ant-sense 1.6s ease-in-out var(--ant-phase) infinite;
+}
+.ant[data-s="thinking"] .ant-thought circle {
+  animation: ant-thought 2.1s ease-in-out var(--ant-phase) infinite;
+}
+.ant[data-s="thinking"] .ant-thought circle:nth-child(2) {
+  animation-delay: calc(var(--ant-phase) + 0.28s);
+}
+.ant[data-s="thinking"] .ant-thought circle:nth-child(3) {
+  animation-delay: calc(var(--ant-phase) + 0.56s);
+}
+@keyframes ant-look-up {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-9deg);
+  }
+}
+@keyframes ant-ponder {
+  0%,
+  100% {
+    transform: rotate(-9deg);
+  }
+  50% {
+    transform: rotate(-6deg);
+  }
 }
 @keyframes ant-sense {
   0%,
@@ -346,10 +591,10 @@ body {
     transform: rotate(0deg);
   }
   30% {
-    transform: rotate(-11deg);
+    transform: rotate(-12deg);
   }
   65% {
-    transform: rotate(9deg);
+    transform: rotate(8deg);
   }
 }
 @keyframes ant-thought {
@@ -357,68 +602,304 @@ body {
   100% {
     opacity: 0;
   }
-  35%,
-  75% {
+  30%,
+  70% {
     opacity: 1;
   }
 }
 
-/* writing: head down, a line being written beneath it */
-.ant[data-state="writing"] .ant-scribble {
-  opacity: 1;
-  animation: ant-scribble 1.1s ease-in-out infinite;
+/* writing: head down, a line is written and rewritten */
+.ant[data-s="writing"] .ant-head {
+  animation: ant-nod 0.7s ease-in-out var(--ant-phase) infinite alternate;
 }
-.ant[data-state="writing"] .ant-body {
-  animation: ant-nod 0.55s ease-in-out infinite alternate;
+.ant[data-s="writing"] .ant-antennae {
+  transform: rotate(6deg);
 }
-@keyframes ant-scribble {
-  to {
-    stroke-dashoffset: 0;
-  }
+.ant[data-s="writing"] .ant-scribble {
+  animation: ant-scribble 1.5s ease-in-out var(--ant-phase) infinite;
 }
 @keyframes ant-nod {
+  from {
+    transform: rotate(6deg);
+  }
   to {
-    transform: rotate(4deg);
+    transform: rotate(11deg);
+  }
+}
+@keyframes ant-scribble {
+  0% {
+    stroke-dashoffset: 13;
+    opacity: 1;
+  }
+  75% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
   }
 }
 
-/* done: at rest, with a check that pops in once */
-.ant[data-state="done"] .ant-done {
+/* done: a small hop and antennae up, then rests with the check */
+.ant[data-s="done"] .ant-body {
+  transform: translateY(0.5px);
+  animation: ant-hop 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+}
+.ant[data-s="done"] .ant-antennae {
+  transform: rotate(-16deg);
+  animation: ant-cheer 0.7s ease-out both;
+}
+.ant[data-s="done"] .ant-head {
+  transform: rotate(-4deg);
+}
+.ant[data-s="done"] .ant-done {
   opacity: 1;
-  animation: ant-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+  animation: ant-pop 0.36s cubic-bezier(0.34, 1.56, 0.64, 1) 0.15s both;
+}
+.ant[data-s="done"] .ant-ground {
+  opacity: 0.18;
+}
+@keyframes ant-hop {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-1.8px);
+  }
+  100% {
+    transform: translateY(0.5px);
+  }
+}
+@keyframes ant-cheer {
+  0% {
+    transform: rotate(0deg);
+  }
+  35% {
+    transform: rotate(-26deg);
+  }
+  70% {
+    transform: rotate(-12deg);
+  }
+  100% {
+    transform: rotate(-16deg);
+  }
 }
 @keyframes ant-pop {
   from {
     transform: scale(0.3);
     opacity: 0;
   }
-}
-.ant[data-state="continued"],
-.ant[data-state="paused"] {
-  opacity: 0.55;
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
-/* A new status line fades in rather than snapping. */
+/* continued: has walked on; a trail is left behind */
+.ant[data-s="continued"] {
+  opacity: 0.5;
+}
+.ant[data-s="continued"] .ant-body {
+  transform: translateX(6px);
+}
+.ant[data-s="continued"] .ant-ground {
+  opacity: 0.6;
+}
+
+/* paused: sits, antennae drooped */
+.ant[data-s="paused"] {
+  opacity: 0.55;
+}
+.ant[data-s="paused"] .ant-body {
+  transform: translateY(0.8px);
+}
+.ant[data-s="paused"] .ant-head {
+  transform: rotate(9deg);
+}
+.ant[data-s="paused"] .ant-antennae {
+  transform: rotate(24deg);
+}
+.ant[data-s="paused"] .ant-ground {
+  opacity: 0.15;
+}
+
+/* error: a stumble over a pebble, then carries on */
+.ant[data-s][data-error="true"] .ant-body {
+  animation: ant-stumble 1s cubic-bezier(0.3, 0.7, 0.3, 1) both;
+}
+.ant[data-s][data-error="true"] .ant-antennae {
+  animation: ant-droop 1s ease-in-out both;
+}
+.ant[data-s][data-error="true"] .ant-pebble {
+  animation: ant-pebble 1.2s ease-out both;
+}
+@keyframes ant-stumble {
+  0% {
+    transform: rotate(0deg);
+  }
+  22% {
+    transform: rotate(7deg) translateY(0.7px);
+  }
+  55% {
+    transform: rotate(-3deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+@keyframes ant-droop {
+  0% {
+    transform: rotate(0deg);
+  }
+  30% {
+    transform: rotate(20deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+@keyframes ant-pebble {
+  0% {
+    opacity: 0;
+    transform: translateX(2px);
+  }
+  15%,
+  55% {
+    opacity: 0.7;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The settler card (components/SettlerCard.tsx) and a crew of settlers working
+   in parallel. The ant performs; the card only eases its status line in, runs
+   a trail along its foot while the settler works, and settles its frame to ok.
+   --------------------------------------------------------------------------- */
+/* A new status line eases in rather than snapping (the span is re-keyed on its text). */
 @keyframes status-in {
   from {
     opacity: 0;
-    transform: translateY(2px);
+    transform: translateY(3px);
   }
 }
 .status-in {
-  animation: status-in 0.25s ease-out;
+  animation: status-in 0.28s ease-out both;
 }
 
+/* Footsteps along the card's foot: they move while a tool runs, breathe while it thinks or writes, and fade once done. */
+.settler-trail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  display: block;
+  color: var(--accent);
+  opacity: 0.4;
+  pointer-events: none;
+  transition: opacity 1.2s ease;
+}
+.settler-trail line {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-dasharray: 3 5;
+}
+.settler-trail[data-s="working"] line {
+  animation: trail-scroll 0.8s linear var(--ant-phase, 0s) infinite;
+}
+.settler-trail[data-s="thinking"],
+.settler-trail[data-s="writing"] {
+  animation: trail-breathe 2.6s ease-in-out var(--ant-phase, 0s) infinite;
+}
+.settler-trail[data-s="done"],
+.settler-trail[data-s="continued"],
+.settler-trail[data-s="paused"] {
+  opacity: 0;
+}
+@keyframes trail-scroll {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+@keyframes trail-breathe {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+/* The avatar frame settles from accent to ok once the report is in. */
+.settler-frame {
+  transition: background-color 0.8s ease;
+}
+.settler-frame[data-s="done"] {
+  background-color: var(--ok-soft);
+}
+
+/* A crew's shared ground line, under its ants. */
+.settler-crew-ground {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  width: 100%;
+  height: 2px;
+  display: block;
+  color: var(--accent);
+  opacity: 0.35;
+}
+.settler-crew-ground line {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-dasharray: 3 5;
+}
+
+/* Reduced motion: loops stop, every state keeps a readable pose. */
 @media (prefers-reduced-motion: reduce) {
   .ant *,
-  .status-in {
+  .ant,
+  .status-in,
+  .settler-trail,
+  .settler-trail line,
+  .settler-frame {
     animation: none !important;
+    transition: none !important;
   }
-  /* Still readable without motion: the thought bubble and the scribble simply show. */
-  .ant[data-state="thinking"] .ant-thought circle {
+  .ant[data-s="working"] .ant-leg-front,
+  .ant[data-s="working"] .ant-leg-back,
+  .ant[data-s="working"] .ant-leg-mid-far {
+    transform: rotate(10deg);
+  }
+  .ant[data-s="working"] .ant-leg-mid,
+  .ant[data-s="working"] .ant-leg-front-far,
+  .ant[data-s="working"] .ant-leg-back-far {
+    transform: rotate(-10deg);
+  }
+  .ant[data-s="thinking"] .ant-head {
+    transform: rotate(-9deg);
+  }
+  .ant[data-s="thinking"] .ant-thought circle {
     opacity: 1;
   }
-  .ant[data-state="writing"] .ant-scribble {
+  .ant[data-s="writing"] .ant-head {
+    transform: rotate(9deg);
+  }
+  .ant[data-s="writing"] .ant-scribble {
+    opacity: 1;
     stroke-dashoffset: 0;
+  }
+  .ant[data-s="done"] .ant-done {
+    opacity: 1;
+    transform: none;
+  }
+  .ant[data-s][data-error="true"] .ant-body {
+    transform: rotate(6deg);
+  }
+  .ant[data-s][data-error="true"] .ant-pebble {
+    opacity: 0.7;
   }
 }
