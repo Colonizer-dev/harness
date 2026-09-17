@@ -1,6 +1,9 @@
 #!/bin/sh
 # Downloads the pinned third-party binaries from vendor/vendor.lock, verifies their sha256 and
 # installs them into dist/vendor. Downloads are cached in vendor/cache.
+#
+# VENDOR_KINDS="plugin" limits it to those kinds (space-separated), for checking plugin staging
+# without the platform binaries.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
@@ -23,6 +26,9 @@ while read -r name version plat kind sha url; do
   case "$name" in ''|'#'*) continue ;; esac
   # `any` entries are platform-independent (source, not binaries).
   [ "$plat" = "$platform" ] || [ "$plat" = "any" ] || continue
+  if [ -n "${VENDOR_KINDS:-}" ]; then
+    case " $VENDOR_KINDS " in *" $kind "*) ;; *) continue ;; esac
+  fi
   found=$((found + 1))
   # Prefixed with the name: two tag archives can share a basename (v2.2.1), and would evict each other.
   file="$cache/$name-$(basename "$url")"
@@ -96,6 +102,67 @@ while read -r name version plat kind sha url; do
       for leak in hooks skills/using-git-worktrees skills/finishing-a-development-branch; do
         if [ -e "$dest/$leak" ]; then echo "superpowers staging leaked $leak" >&2; exit 1; fi
       done
+      rm -rf "$tmp"
+      ;;
+    google-skills)
+      # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
+      # of google/skills would put ~17k tokens of skill descriptions into every
+      # colony; instead Claude Code discovers one skill, the finder, which reads
+      # a catalog of the rest from the same read-only mount:
+      #
+      #   skills/finding-google-skills/  Colonizer's copy (vendor/google-skills/):
+      #                                  reads the local catalog, never the network
+      #   catalog/<category>/<name>/     upstream skills/, minus the upstream finder;
+      #                                  same shape, so relative links keep working
+      #   index.json                     upstream catalog, entrypoints rewritten from
+      #                                  raw.githubusercontent.com URLs to catalog/ paths
+      #
+      # Not staged: plugins/ (MCP servers, and git submodules a codeload archive
+      # doesn't contain) and the marketplace manifest.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/skills-*)
+      dest="$root/dist/plugins/google-skills"
+      rm -rf "$dest"
+      mkdir -p "$dest/.claude-plugin" "$dest/skills"
+      for need in skills index.json LICENSE; do
+        [ -e "$src/$need" ] || { echo "google-skills $version has no $need" >&2; exit 1; }
+      done
+      cp -R "$src/skills" "$dest/catalog"
+      rm -rf "$dest/catalog/developers/finding-google-skills"
+      cp "$src/LICENSE" "$dest/LICENSE"
+      cp -R "$root/vendor/google-skills/finding-google-skills" "$dest/skills/finding-google-skills"
+      printf '{\n  "name": "google-skills",\n  "version": "%s",\n  "description": "Agent Skills for Google products and technologies, from github.com/google/skills, loaded on demand",\n  "license": "Apache-2.0"\n}\n' "$version" > "$dest/.claude-plugin/plugin.json"
+      # Rewrites the catalog and fails on anything it can't map to a staged file.
+      node - "$src/index.json" "$dest" <<'NODE' || exit 1
+const fs = require('fs'), path = require('path');
+const [indexPath, dest] = process.argv.slice(2);
+const prefix = 'https://raw.githubusercontent.com/google/skills/main/skills/';
+const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+if (!Array.isArray(index.skills)) throw new Error('google-skills index.json has no skills array');
+const skills = [];
+for (const skill of index.skills) {
+  if (skill.name === 'finding-google-skills') continue;
+  if (typeof skill.entrypoint !== 'string' || !skill.entrypoint.startsWith(prefix)) {
+    throw new Error(`google-skills: ${skill.name} has an entrypoint outside skills/: ${skill.entrypoint}`);
+  }
+  const entrypoint = 'catalog/' + skill.entrypoint.slice(prefix.length);
+  if (!fs.existsSync(path.join(dest, entrypoint))) throw new Error(`google-skills: ${skill.name} points at a missing ${entrypoint}`);
+  skills.push({ name: skill.name, description: skill.description, entrypoint });
+}
+fs.writeFileSync(path.join(dest, 'index.json'), JSON.stringify({ skills }, null, 2) + '\n');
+console.log(`google-skills catalog: ${skills.length} skills`);
+NODE
+      # Fail loudly rather than ship what this staging exists to keep out.
+      if [ -n "$(find "$dest" \( -name hooks -o -name hooks.json -o -name .mcp.json -o -name mcp.json -o -name mcp_config.json \) -print -quit)" ]; then
+        echo "google-skills staging leaked a hook or an MCP server configuration" >&2; exit 1
+      fi
+      if grep -q 'https://raw.githubusercontent.com' "$dest/index.json" "$dest/skills/finding-google-skills/SKILL.md"; then
+        echo "google-skills: the catalog or the finder still points at GitHub" >&2; exit 1
+      fi
+      if [ "$(find "$dest/skills" -name SKILL.md | wc -l)" -ne 1 ]; then
+        echo "google-skills: only the finder may be discoverable under skills/" >&2; exit 1
+      fi
       rm -rf "$tmp"
       ;;
     microsandbox)

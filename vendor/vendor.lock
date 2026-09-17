@@ -22,3 +22,9 @@ ecc          2.2.1     any           plugin  578c1ead4d8e6a50e3dd943f5a8069eeb04
 # claude-code runner instead — and the using-git-worktrees and finishing-a-development-branch skills,
 # which would work around the worktree, branch and publish step Colonizer already owns.
 superpowers  6.3.0     any           plugin  2933703111f44dd1ae0234372cd2a924afb372a682fe3d9acdb6497231213fcb  https://codeload.github.com/obra/superpowers/tar.gz/refs/tags/v6.3.0
+
+# google-skills is github.com/google/skills at commit 569cb1d (2026-09-16); upstream has no tags, so the
+# version is the commit date and short hash. Apache-2.0 (LICENSE is staged with it). Staged for on-demand
+# loading: one discoverable skill, Colonizer's copy of the finder (vendor/google-skills/), reads a local
+# catalog of the other 142. The finder never fetches from GitHub; see scripts/fetch-vendor.sh.
+google-skills 2026.09.16-569cb1d any       plugin  f1e4f9550b3a6e500c7c90b2dd67f02be57cfb1d61b34bd9aac5819cc9ec4d03  https://codeload.github.com/google/skills/tar.gz/569cb1d55ac388c2d1939104a4c52bc594fbb162
