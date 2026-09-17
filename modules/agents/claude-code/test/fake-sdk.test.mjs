@@ -6,7 +6,7 @@ import { test } from 'node:test';
 
 import {
   AsyncQueue,
-  buildOptions,
+  buildOptions as buildOptionsWithDefaults,
   CAVEMAN_LEVELS,
   cavemanPrompt,
   childEnv,
@@ -21,6 +21,10 @@ import {
   SYSTEM_PROMPT_APPEND,
   toolResultText,
 } from '../runner.mjs';
+
+// These tests cover other features. Delegation is enforced by default and has its own tests in
+// delegate.test.mjs, so it is switched off here unless a test asks for it.
+const buildOptions = (env = {}, extra) => buildOptionsWithDefaults({ COLONIZER_DELEGATE: 'off', ...env }, extra);
 
 const stream = (event) => ({ type: 'stream_event', event, parent_tool_use_id: null });
 const assistant = (id, content) => ({ type: 'assistant', message: { id, role: 'assistant', content }, parent_tool_use_id: null });
@@ -294,6 +298,7 @@ test('options come from the environment', () => {
   assert.equal(options.pathToClaudeCodeExecutable, '/opt/claude/bin/claude');
   assert.deepEqual(options.systemPrompt, { type: 'preset', preset: 'claude_code', append: SYSTEM_PROMPT_APPEND });
   assert.deepEqual(options.env, {
+    COLONIZER_DELEGATE: 'off',
     COLONIZER_MODEL: 'haiku',
     COLONIZER_EFFORT: 'extreme',
     CLAUDE_CODE_OAUTH_TOKEN: 'placeholder',

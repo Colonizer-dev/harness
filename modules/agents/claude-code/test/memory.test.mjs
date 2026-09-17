@@ -7,7 +7,11 @@ import { test } from 'node:test';
 import { z } from 'zod';
 
 import { createMemoryServer, formatResults, MEMORY_PROMPT_APPEND, MEMORY_SERVER, MEMORY_TOOLS, PROPOSED_REPLY, searchMemory } from '../memory.mjs';
-import { buildOptions, SYSTEM_PROMPT_APPEND } from '../runner.mjs';
+import { buildOptions as buildOptionsWithDefaults, SYSTEM_PROMPT_APPEND } from '../runner.mjs';
+
+// These tests cover other features. Delegation is enforced by default and has its own tests in
+// delegate.test.mjs, so it is switched off here unless a test asks for it.
+const buildOptions = (env = {}, extra) => buildOptionsWithDefaults({ COLONIZER_DELEGATE: 'off', ...env }, extra);
 
 async function memoryDir() {
   const dir = await mkdtemp(join(tmpdir(), 'colonizer-memory-'));
