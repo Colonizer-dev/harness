@@ -24,7 +24,45 @@ export const SYSTEM_PROMPT_APPEND = [
 export const DELEGATE_PROMPT_APPEND = [
   '- You are the orchestrator of this colony. Plan the work, split it into tasks, and start a subagent with the Task tool for each one. Read the subagent\'s report, decide what follows, and keep a subagent going until its task is genuinely done.',
   '- Do the thinking yourself: what to build, in what order, whether a result is good enough, and what to tell the user. Leave reading, searching, editing, running commands and tests to subagents.',
+  '- Ask each subagent for a focused report: its conclusions, file:line references for every claim, and verbatim snippets only where you need the exact text. Do not ask for exhaustive, verbatim or "in full" dumps of files; everything a report carries stays in your context for the rest of the colony. When you need more detail on one point, start another subagent for it.',
+  '- A subagent started in the background reports back on its own. While you wait, start other work or end your turn; never run placeholder commands such as sleep or echo to pass the time.',
+  '- Subagents do not see this system prompt. When the colony\'s limits below bear on a task, include them in that subagent\'s brief.',
 ].join('\n');
+
+/**
+ * What the colony can and cannot reach, so no model spends a turn discovering it. `image` is the container image the
+ * mothership booted (COLONIZER_IMAGE).
+ */
+export function environmentPrompt(image) {
+  return [
+    '- This colony has no GitHub access: there is no gh CLI and no GitHub credentials, so the GitHub API and private repositories are out of reach. The issue is already in your brief, and the harness publishes the pull request.',
+    `- The colony runs the container image \`${image}\`. Toolchains it does not include (a Rust or Swift toolchain in a Node image, for example) are not installed. Check once with \`command -v\` before relying on one. Install a toolchain only when the task genuinely needs it to build or test; otherwise say in your report what could not be run.`,
+  ].join('\n');
+}
+
+/**
+ * The SDK's per-model usage, reduced to what a colony's cost is made of. Keys are the model names the colony used:
+ * routed providers keep their `provider/model` form, and Claude models have no slash. Claude Code prices a model it
+ * does not know at the main model's rate, so only Claude models' estimates are summed into `claudeCostUsd`; the rest
+ * are reported as tokens.
+ */
+export function summariseUsage(modelUsage) {
+  if (!modelUsage || typeof modelUsage !== 'object') return null;
+  const models = {};
+  let claudeCostUsd = 0;
+  for (const [model, u] of Object.entries(modelUsage)) {
+    if (!u || typeof u !== 'object') continue;
+    const count = (value) => (Number.isFinite(value) ? value : 0);
+    models[model] = {
+      input_tokens: count(u.inputTokens),
+      output_tokens: count(u.outputTokens),
+      cache_read_tokens: count(u.cacheReadInputTokens),
+      cache_write_tokens: count(u.cacheCreationInputTokens),
+    };
+    if (!model.includes('/')) claudeCostUsd += count(u.costUSD);
+  }
+  return Object.keys(models).length ? { models, claudeCostUsd } : null;
+}
 
 /** Where a superpowers plugin keeps the skill its SessionStart hook injects. */
 export const SUPERPOWERS_SKILL = 'skills/using-superpowers/SKILL.md';
@@ -229,7 +267,12 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   for (const key of hiddenEnv) delete claudeEnv[key];
   if (routerUrl) claudeEnv.ANTHROPIC_BASE_URL = routerUrl;
   for (const [key, value] of Object.entries(routeEnv(routes, env))) claudeEnv[key] ??= value;
-  if (env.COLONIZER_SUBAGENT_MODEL) claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
+  if (env.COLONIZER_SUBAGENT_MODEL) {
+    claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
+    // Without FORCE, an agent whose definition names a model keeps it: Claude Code's built-in Explore is `inherit`,
+    // so it ran on the orchestrator's model and did most of a colony's reading at that price.
+    claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1';
+  }
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
@@ -247,6 +290,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
     .map((dir) => dir.trim())
     .filter(Boolean);
   const appended = [SYSTEM_PROMPT_APPEND];
+  if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
@@ -581,12 +625,15 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
       settleStatus();
       return;
     }
+    const usage = summariseUsage(msg.modelUsage);
     emit({
       type: 'turn_end',
       is_error: Boolean(msg.is_error),
       result,
-      cost_usd: typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : null,
+      // Claude models only when the SDK says which model cost what; the SDK's total prices routed models as Claude.
+      cost_usd: usage ? usage.claudeCostUsd : typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : null,
       duration_ms: typeof msg.duration_ms === 'number' ? msg.duration_ms : null,
+      ...(usage ? { model_usage: usage.models } : {}),
     });
     settleStatus();
   };
