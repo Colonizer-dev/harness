@@ -16,6 +16,7 @@ mod mesh;
 mod modules;
 mod openai;
 mod orgs;
+mod plugins;
 mod presets;
 mod providers;
 mod sandbox;
@@ -364,6 +365,7 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
+        .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
         .route("/api/providers/{id}/health", get(gateway::health))
