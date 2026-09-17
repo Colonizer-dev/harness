@@ -63,6 +63,8 @@ export interface Api {
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
+  /** Forgets a colony: worktree, local branch, chat and logs. Its pull request stays on GitHub. */
+  deleteSession(id: string): Promise<unknown>;
   setGithubToken(token: string): Promise<{ login: string }>;
   deleteGithubToken(): Promise<unknown>;
   setClaudeToken(token: string): Promise<unknown>;
@@ -148,6 +150,7 @@ export const httpApi: Api = {
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
+  deleteSession: (id) => del(`/api/sessions/${enc(id)}`),
   setGithubToken: (token) => post("/api/settings/github-token", { token }),
   deleteGithubToken: () => del("/api/settings/github-token"),
   setClaudeToken: (token) => post("/api/settings/claude-token", { token }),
