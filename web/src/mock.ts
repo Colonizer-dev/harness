@@ -4,6 +4,7 @@ import type {
   AgentRef,
   AgentEvent,
   HeadroomStatus,
+  TelemetryStatus,
   AgentEventBody,
   Answers,
   HarnessStatus,
@@ -745,6 +746,17 @@ let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finishe
 // Headroom's bundle: a few seconds of download progress, then installed.
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
+// The live map: not asked yet, so the prompt shows.
+let mockTelemetry: TelemetryStatus = {
+  enabled: null,
+  blocked_by: null,
+  endpoint: "https://telemetry.colonizer.dev",
+  map_url: "https://colonizer.dev/live",
+  last_sent_at: null,
+  last_error: null,
+  heartbeat: { install_id: null, version: "0.1.3", platform: "darwin-arm64", colonies: 1 },
+};
+
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
   const demo = new MockSession({
@@ -1181,6 +1193,18 @@ export function createMockApi(): Api {
         mockHeadroom = { ...mockHeadroom, state: "downloading", bytes: 0, total: 231_330_241, started_at: new Date().toISOString(), finished_at: null, error: null };
       }
       return clone(mockHeadroom);
+    },
+    telemetry: async () => clone(mockTelemetry),
+    setTelemetry: async (enabled) => {
+      await sleep(250);
+      const install_id = enabled ? (mockTelemetry.heartbeat.install_id ?? crypto.randomUUID()) : null;
+      mockTelemetry = {
+        ...mockTelemetry,
+        enabled,
+        last_sent_at: enabled ? new Date().toISOString() : mockTelemetry.last_sent_at,
+        heartbeat: { ...mockTelemetry.heartbeat, install_id },
+      };
+      return clone(mockTelemetry);
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),

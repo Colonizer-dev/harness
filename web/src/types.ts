@@ -215,6 +215,20 @@ export interface HeadroomStatus {
   error: string | null;
 }
 
+/** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */
+export interface TelemetryStatus {
+  /** null until the user has answered. */
+  enabled: boolean | null;
+  /** An environment variable keeping it off whatever Settings says (DO_NOT_TRACK or COLONIZER_TELEMETRY). */
+  blocked_by: string | null;
+  endpoint: string;
+  map_url: string;
+  last_sent_at: string | null;
+  last_error: string | null;
+  /** Exactly what the next heartbeat carries; install_id is null until the live map is first switched on. */
+  heartbeat: { install_id: string | null; version: string; platform: string; colonies: number };
+}
+
 export interface ProviderHealth {
   reachable: boolean;
   /** HTTP status of the probe, when a response arrived. */
