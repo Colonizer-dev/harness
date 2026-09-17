@@ -142,7 +142,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             "Commit on the host, push the branch and open a pull request",
             json!({"type": "object", "properties": {
                 "autopilot": {"type": "boolean", "title": "Open the PR automatically", "description": "Default for new colonies: when the agent finishes cleanly and has written its PR description, push its colonizer/ branch and open the pull request. Can be switched off per colony at launch.", "default": true},
-                "draft": {"type": "boolean", "title": "Open as draft", "default": false}
+                "draft": {"type": "boolean", "title": "Open as draft", "default": false},
+                "file_findings": {"type": "boolean", "title": "File validated findings as issues", "description": "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.", "default": true}
             }}),
         )],
         "memory" => vec![p(

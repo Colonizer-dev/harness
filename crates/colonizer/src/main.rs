@@ -9,6 +9,7 @@
 
 mod claude_login;
 mod config;
+mod findings;
 mod gateway;
 mod github;
 mod headroom;
