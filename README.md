@@ -45,13 +45,21 @@ it's going, is in [docs/vision.md](docs/vision.md).
 
 ## Run it
 
-On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git`, `gh`, Node.js 20+ and Rust 1.88+:
+On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git` and `gh`:
+
+```sh
+curl -fsSL https://colonizer.dev/install.sh | sh
+colonizer               # then open http://127.0.0.1:7878
+```
+
+That installs the latest [release](https://github.com/Colonizer-dev/harness/releases). To build from
+source instead, you also need Node.js 20+ and Rust 1.88+:
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness
 cd harness
 scripts/install.sh      # builds everything into ./dist
-dist/bin/colonizer      # then open http://127.0.0.1:7878
+dist/bin/colonizer
 ```
 
 [docs/install.md](docs/install.md) has the rest: what a Linux machine needs for Claude Code, what the
