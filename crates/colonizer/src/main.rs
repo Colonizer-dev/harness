@@ -83,6 +83,9 @@ pub struct App {
     pub repo_owners: RwLock<BTreeSet<String>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// The last Anthropic profile lookup for the Claude credential, cached so the status poll does not
+    /// hammer Anthropic. Keyed on a fingerprint of the token; the token itself is never stored.
+    pub claude_account: Mutex<Option<claude_login::AccountStatus>>,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
@@ -212,8 +215,13 @@ pub type ApiResult<T> = Result<Json<T>, AppError>;
 async fn status(State(app): State<Shared>) -> Json<Value> {
     let mut msb = Command::new(&app.cfg.msb);
     msb.arg("--version");
-    let (user, msb_version, claude_bin) = tokio::join!(github::viewer(&app), exec(&mut msb), resolve_guest_claude_bin(&app.cfg));
     let cred = app.claude_cred();
+    let (user, msb_version, claude_bin, claude) = tokio::join!(
+        github::viewer(&app),
+        exec(&mut msb),
+        resolve_guest_claude_bin(&app.cfg),
+        claude_login::claude_status(&app, cred.as_ref()),
+    );
     let modules = app.modules.read().await.clone();
     let mesh = if !modules.mesh_enabled() {
         json!({"enabled": false, "provider": "none"})
@@ -231,14 +239,10 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
     Json(json!({
         "github": match user {
-            Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "source": github::token_source(&app)}),
+            Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
             Err(e) => json!({"connected": false, "error": format!("{e:#}")}),
         },
-        "claude": {
-            "configured": cred.is_some(),
-            "source": cred.as_ref().map(|c| c.source),
-            "kind": cred.as_ref().map(|c| c.env),
-        },
+        "claude": claude,
         "sandbox": {
             "provider": modules.sandbox.provider,
             "image": config::setting_str(&modules.sandbox, &sandbox_schema, "image"),
@@ -357,6 +361,7 @@ async fn main() -> Result<()> {
         gateway: gateway::Gateway::new()?,
         repo_owners: RwLock::new(BTreeSet::new()),
         orgs_refreshed: Mutex::new(None),
+        claude_account: Mutex::new(None),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
