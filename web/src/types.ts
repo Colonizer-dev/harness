@@ -127,7 +127,7 @@ export interface ModuleInfo {
 // ---------------------------------------------------------------------------
 
 export type ProviderAuth = "x-api-key" | "bearer" | "none";
-export type ProviderPreset = "deepseek" | "openai" | "local" | "custom";
+export type ProviderPreset = "deepseek" | "openai" | "zai" | "alibaba" | "local" | "custom";
 /** The protocol the endpoint speaks. `anthropic` is proxied as-is; `openai` is translated by the gateway. */
 export type ProviderWire = "anthropic" | "openai";
 
