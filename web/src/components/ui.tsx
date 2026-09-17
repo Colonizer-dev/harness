@@ -1,6 +1,6 @@
-import { useEffect, useId, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import type { Attention, ModelOption, Session, SessionStatus } from "../types";
-import { IconAlert } from "./icons";
+import { IconAlert, IconInfo } from "./icons";
 
 export function cx(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
@@ -42,14 +42,17 @@ export function Badge({
   pulse = false,
   children,
   className,
+  title,
 }: {
   tone?: Tone;
   pulse?: boolean;
   children: ReactNode;
   className?: string;
+  title?: string;
 }) {
   return (
     <span
+      title={title}
       className={cx(
         "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11.5px] font-semibold leading-4",
         TONE[tone],
@@ -106,19 +109,26 @@ export function Switch({
   checked,
   onChange,
   label,
+  labelledBy,
+  id,
   disabled,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
+  /** Accessible name; ignored when a visible label is tied in with `labelledBy`. */
   label: string;
+  labelledBy?: string;
+  id?: string;
   disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="switch"
+      id={id}
       aria-checked={checked}
-      aria-label={label}
+      aria-label={labelledBy ? undefined : label}
+      aria-labelledby={labelledBy}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cx(
@@ -133,6 +143,88 @@ export function Switch({
         )}
       />
     </button>
+  );
+}
+
+/**
+ * A small "i" button that reveals an explanation. Hover and focus peek at it; a click
+ * pins it open so it also works on touch. Escape closes it without closing a parent dialog.
+ */
+export function InfoButton({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+  const id = useId();
+  const wrap = useRef<HTMLSpanElement>(null);
+  const [pinned, setPinned] = useState(false);
+  const [peek, setPeek] = useState(false);
+  const [align, setAlign] = useState<"start" | "end">("start");
+  const open = pinned || peek;
+
+  useEffect(() => {
+    if (!pinned) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setPinned(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [pinned]);
+
+  // Open towards the middle of the window so the popover is not clipped at the pane edge.
+  const place = () => {
+    const rect = wrap.current?.getBoundingClientRect();
+    if (rect) setAlign(rect.left + rect.width / 2 > window.innerWidth / 2 ? "end" : "start");
+  };
+
+  return (
+    <span
+      ref={wrap}
+      className={cx("relative inline-flex", className)}
+      onMouseEnter={() => {
+        place();
+        setPeek(true);
+      }}
+      onMouseLeave={() => setPeek(false)}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && open) {
+          e.preventDefault();
+          e.stopPropagation();
+          setPinned(false);
+          setPeek(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-controls={id}
+        aria-describedby={id}
+        onClick={() => {
+          place();
+          setPinned((p) => !p);
+        }}
+        onFocus={() => {
+          place();
+          setPeek(true);
+        }}
+        onBlur={() => setPeek(false)}
+        className={cx(
+          "grid size-5 shrink-0 cursor-pointer place-items-center rounded-full transition-colors hover:bg-panel-3 hover:text-text",
+          open ? "text-text" : "text-faint",
+        )}
+      >
+        <IconInfo size={13} />
+      </button>
+      <span
+        role="tooltip"
+        id={id}
+        hidden={!open}
+        className={cx(
+          "absolute top-full z-30 mt-1.5 w-max max-w-[min(18rem,calc(100vw-2rem))] space-y-1.5 rounded-lg border border-border bg-panel-2 px-3 py-2 text-left text-[12px] font-normal leading-snug text-text shadow-[var(--shadow)] [overflow-wrap:anywhere]",
+          align === "end" ? "right-0" : "left-0",
+        )}
+      >
+        {children}
+      </span>
+    </span>
   );
 }
 
@@ -195,6 +287,7 @@ export function ModelInput({
   models,
   placeholder,
   ariaLabel,
+  id,
   className,
 }: {
   value: string;
@@ -202,12 +295,14 @@ export function ModelInput({
   models: ModelOption[];
   placeholder?: string;
   ariaLabel?: string;
+  id?: string;
   className?: string;
 }) {
   const listId = useId();
   return (
     <>
       <input
+        id={id}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         list={listId}
