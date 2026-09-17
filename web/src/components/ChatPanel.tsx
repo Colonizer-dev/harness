@@ -7,11 +7,12 @@ import {
   useExternalStoreRuntime,
   type AppendMessage,
   type ReasoningMessagePartProps,
+  type TextMessagePartProps,
   type ThreadMessageLike,
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { createContext, useContext, useEffect, useId, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { errorMessage, useToast } from "../context";
 import {
   ASK_USER_TOOL,
@@ -29,8 +30,8 @@ import {
   type TurnSummary,
 } from "../sessionStream";
 import type { MemoryScope } from "../types";
-import { AntAvatar } from "./AntAvatar";
-import { describeTool, isNoiseTool, type ActivityIcon } from "./activity";
+import { AntAvatar, type AntActivity } from "./AntAvatar";
+import { antActivity, describeTool, isNoiseTool, toolDetail, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
 import {
   IconAlert,
@@ -53,6 +54,7 @@ import {
   IconX,
 } from "./icons";
 import { InlineCode } from "./Markdown";
+import { SettlerCard, useStumble } from "./SettlerCard";
 import { Spinner, cx, formatDuration, store, stored } from "./ui";
 
 /** The harness sends the session's initial prompt as a user message with this id. */
@@ -160,7 +162,7 @@ export function ChatPanel({
                 <>
                   {message.role !== "user" ? (
                     thread.subagents[message.id] ? (
-                      <SubagentMessage view={thread.subagents[message.id]} live={live} />
+                      <SubagentMessage view={thread.subagents[message.id]} subagents={thread.subagents} live={live} />
                     ) : (
                       <AssistantMessage />
                     )
@@ -285,6 +287,14 @@ function MarkdownText() {
   return <MarkdownTextPrimitive className="md break-words text-[14px] leading-relaxed" />;
 }
 
+/** A settler's report, which its card already shows in the report box, so the transcript under it leaves it out. */
+const SettlerReportContext = createContext("");
+
+function SettlerText({ text }: TextMessagePartProps) {
+  const report = useContext(SettlerReportContext);
+  return report && text.trim() && report.includes(text.trim()) ? null : <MarkdownText />;
+}
+
 function ReasoningPart({ text }: ReasoningMessagePartProps) {
   if (!text?.trim()) return null;
   return (
@@ -379,6 +389,16 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
   );
 }
 
+/** What a settler is doing as its card shows it: a colony that is no longer running has no settler still at work. */
+function settlerState(view: SubagentView, live: boolean): SubagentState | "paused" {
+  return !live && view.state !== "done" && view.state !== "continued" ? "paused" : view.state;
+}
+
+/** What the ant carries: only read while it is working. */
+function settlerActivity(view: SubagentView): AntActivity {
+  return view.current ? antActivity(describeTool(view.current.name, view.current.input)) : "run";
+}
+
 /** The line under a settler's name: what it is doing right now, in plain words. */
 function subagentStatus(view: SubagentView, state: SubagentState | "paused"): string {
   const describe = (tool: { name: string; input: Record<string, unknown> } | null) => (tool ? describeTool(tool.name, tool.input).label : null);
@@ -390,7 +410,7 @@ function subagentStatus(view: SubagentView, state: SubagentState | "paused"): st
     case "writing":
       return "Writing its report…";
     case "done":
-      return view.steps === 1 ? "Done · 1 step" : `Done · ${view.steps} steps`;
+      return "Done";
     case "continued":
       return "Carried on further down";
     case "paused":
@@ -400,53 +420,97 @@ function subagentStatus(view: SubagentView, state: SubagentState | "paused"): st
 
 /**
  * A settler — a subagent — as one compact card: an ant animated by what it is doing, its settler name and task, and
- * one live status line. Its full work, every step and its report, opens on request, so a colony that delegates reads
- * as a few busy settlers rather than pages of their output.
+ * one live status line. Its report and steps open on request, so a colony that delegates reads as a few busy settlers
+ * rather than pages of their output. Settlers sent out together hang off one rail under a strip of their ants.
  */
-function SubagentMessage({ view, live }: { view: SubagentView; live: boolean }) {
-  const [open, setOpen] = useState(false);
-  const bodyId = useId();
-  // A colony that is no longer running has no settler still at work, whatever its last event said.
-  const state: SubagentState | "paused" = !live && view.state !== "done" && view.state !== "continued" ? "paused" : view.state;
-  const status = subagentStatus(view, state);
+function SubagentMessage({ view, subagents, live }: { view: SubagentView; subagents: Record<string, SubagentView>; live: boolean }) {
+  const simple = useContext(SimpleViewContext);
+  const state = settlerState(view, live);
+  const error = useStumble(view.errors);
+  const crew = view.crew;
+  // The simple view lists the steps in plain words; the technical view shows the raw calls and everything said between.
+  const stepList = simple
+    ? view.tools
+        .filter((tool) => tool.failed || !isNoiseTool(tool.name, tool.input))
+        .map((tool) => ({
+          label: describeTool(tool.name, tool.input).label,
+          detail: toolDetail(tool.name, tool.input),
+          failed: tool.failed,
+          running: tool.running,
+        }))
+    : [];
+  const card = (
+    <SettlerCard
+      state={state}
+      role={view.role}
+      activity={settlerActivity(view)}
+      error={error}
+      name={view.name}
+      task={view.agent.description ?? undefined}
+      status={subagentStatus(view, state)}
+      steps={view.steps}
+      report={view.report}
+      stepList={stepList}
+      phase={crew?.index ?? 0}
+    >
+      {!simple && (
+        <SettlerReportContext.Provider value={view.report}>
+          <MessagePrimitive.Parts
+            components={{
+              Text: SettlerText,
+              Reasoning: ReasoningPart,
+              tools: { Fallback: ToolCallCard },
+            }}
+          />
+        </SettlerReportContext.Provider>
+      )}
+    </SettlerCard>
+  );
+  if (!crew) return <MessagePrimitive.Root className="my-3 ml-4">{card}</MessagePrimitive.Root>;
+  const first = crew.index === 0;
+  const last = crew.index === crew.ids.length - 1;
   return (
-    <MessagePrimitive.Root className="my-3 ml-4">
-      <div className={cx("rounded-2xl border bg-panel transition-colors", open ? "border-accent/35" : "border-border")}>
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          aria-controls={bodyId}
-          className="flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-2.5 text-left hover:bg-panel-2/60"
-        >
-          <AntAvatar state={state} />
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-baseline gap-x-2">
-              <span className="text-[13px] font-semibold text-accent">{view.name}</span>
-              {view.agent.description && <span className="min-w-0 truncate text-[12.5px] text-muted">{view.agent.description}</span>}
-            </span>
-            <span key={status} className="status-in block truncate text-[12.5px] text-faint">
-              {status}
-            </span>
-          </span>
-          <span className="flex shrink-0 items-center gap-1 text-[12px] text-faint">
-            {open ? "Hide work" : "Show work"}
-            <IconChevron size={13} className={cx("transition-transform", open && "rotate-90")} />
-          </span>
-        </button>
-        {open && (
-          <div id={bodyId} className="space-y-1.5 border-t border-border px-4 py-3">
-            <MessagePrimitive.Parts
-              components={{
-                Text: MarkdownText,
-                Reasoning: ReasoningPart,
-                tools: { Fallback: ToolCallCard },
-              }}
-            />
-          </div>
-        )}
-      </div>
+    <MessagePrimitive.Root className={cx("ml-4", first && "mt-3", last && "mb-3")}>
+      {first && <CrewStrip views={crew.ids.map((id) => subagents[id]).filter(Boolean)} live={live} />}
+      <div className="ml-3.5 border-l-2 border-border pl-3.5 pt-2.5">{card}</div>
     </MessagePrimitive.Root>
+  );
+}
+
+/** The head of a crew: its ants side by side on one trail, so parallel work reads as one crew, not blinking cards. */
+function CrewStrip({ views, live }: { views: SubagentView[]; live: boolean }) {
+  const states = views.map((view) => settlerState(view, live));
+  const count = (match: (state: SubagentState | "paused") => boolean) => states.filter(match).length;
+  const atWork = count((state) => state === "working" || state === "thinking" || state === "writing");
+  const done = count((state) => state === "done");
+  const stopped = count((state) => state === "paused");
+  const summary = [
+    `${views.length} settlers`,
+    atWork > 0 && `${atWork} at work`,
+    done > 0 && (done === views.length ? "all done" : `${done} done`),
+    stopped > 0 && `${stopped} stopped`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="relative flex h-11 items-end gap-1.5 px-3.5 pt-2">
+      <svg className="settler-crew-ground" aria-hidden="true">
+        <line x1="0" y1="1" x2="100%" y2="1" />
+      </svg>
+      {views.map((view, index) => (
+        <CrewAnt key={view.agent.id} view={view} state={states[index]} index={index} />
+      ))}
+      <span className="ml-auto pb-2 font-mono text-[11.5px] text-muted">{summary}</span>
+    </div>
+  );
+}
+
+function CrewAnt({ view, state, index }: { view: SubagentView; state: SubagentState | "paused"; index: number }) {
+  const error = useStumble(view.errors);
+  return (
+    <span className="block h-8" title={view.name}>
+      <AntAvatar state={state} role={view.role} activity={settlerActivity(view)} error={error} phase={index} ground={false} framed={false} size={40} />
+    </span>
   );
 }
 

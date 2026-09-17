@@ -3,7 +3,8 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { SOCKET_OPEN, type Api, type SocketLike } from "./api";
-import { settlerName } from "./settlers";
+import type { AntRole } from "./components/AntAvatar";
+import { settlerName, settlerRole } from "./settlers";
 import type {
   AgentEvent,
   AgentRef,
@@ -459,7 +460,8 @@ export interface ToolResultPayload {
 /**
  * What a subagent is doing, as its card shows it. `working`: a tool is running. `thinking`: between steps, waiting on
  * its model. `writing`: its report is streaming in. `done`: it ended on text, its report. `continued`: the orchestrator
- * spoke in between, and this subagent's later work is in a card further down.
+ * spoke in between, and this subagent's later work is in a card further down. Settlers working in parallel don't
+ * interrupt each other: each keeps one card for the whole burst.
  */
 export type SubagentState = "working" | "thinking" | "writing" | "done" | "continued";
 
@@ -468,10 +470,17 @@ export interface ToolRef {
   input: Record<string, unknown>;
 }
 
+export interface SubagentStep extends ToolRef {
+  running: boolean;
+  failed: boolean;
+}
+
 export interface SubagentView {
   agent: AgentRef;
   /** The settler name shown for it, numbered when a colony has several of one role. */
   name: string;
+  /** Which ant it is. */
+  role: AntRole;
   state: SubagentState;
   /** The tool running now, when `working`. */
   current: ToolRef | null;
@@ -479,10 +488,18 @@ export interface SubagentView {
   last: ToolRef | null;
   /** Tool calls in this card. */
   steps: number;
+  /** Every tool call in this card, in order. */
+  tools: SubagentStep[];
+  /** Tool calls that came back as errors; the ant stumbles each time this grows. */
+  errors: number;
+  /** The text it ended on: its report, or the report so far while `writing`. Empty until then. */
+  report: string;
+  /** Set when this card is one of a crew, settlers the orchestrator sent out together: the crew's cards in order. */
+  crew: { ids: string[]; index: number } | null;
 }
 
 /** Reads a subagent card's state from its blocks, as they stand now. */
-export function subagentState(blocks: Block[]): Pick<SubagentView, "state" | "current" | "last" | "steps"> {
+export function subagentState(blocks: Block[]): Pick<SubagentView, "state" | "current" | "last" | "steps" | "tools" | "errors" | "report"> {
   const tools = blocks.filter((b): b is ToolBlock => b.kind === "tool");
   const running = [...tools].reverse().find((t) => t.output === null);
   const lastTool = tools[tools.length - 1];
@@ -495,7 +512,23 @@ export function subagentState(blocks: Block[]): Pick<SubagentView, "state" | "cu
         ? "writing"
         : "done"
       : "thinking";
-  return { state, current: ref(running), last: ref(lastTool), steps: tools.length };
+  const afterTools = blocks.slice(blocks.lastIndexOf(lastTool as Block) + 1);
+  const report =
+    state === "writing" || state === "done"
+      ? afterTools
+          .map((b) => (b.kind === "text" ? b.text.trim() : ""))
+          .filter(Boolean)
+          .join("\n\n")
+      : "";
+  return {
+    state,
+    current: ref(running),
+    last: ref(lastTool),
+    steps: tools.length,
+    tools: tools.map((t) => ({ name: t.name, input: t.input, running: t.output === null, failed: t.output !== null && t.isError })),
+    errors: tools.filter((t) => t.output !== null && t.isError).length,
+    report,
+  };
 }
 
 export interface ThreadView {
@@ -564,11 +597,12 @@ export function buildThread(state: StreamState): ThreadView {
   // Settler names are numbered per role in order of first appearance: the second Explore is "Scout Settler 2".
   const names = new Map<string, string>();
   const perRole = new Map<string, number>();
+  // The runner falls back to the task description when the Task call named no type.
+  const typeOf = (agent: AgentRef): string | null => (agent.name === agent.description ? null : agent.name);
   const nameOf = (agent: AgentRef): string => {
     let name = names.get(agent.id);
     if (!name) {
-      // The runner falls back to the task description when the Task call named no type.
-      const type = agent.name === agent.description ? null : agent.name;
+      const type = typeOf(agent);
       const role = settlerName(type);
       const ordinal = (perRole.get(role) ?? 0) + 1;
       perRole.set(role, ordinal);
@@ -577,27 +611,42 @@ export function buildThread(state: StreamState): ThreadView {
     }
     return name;
   };
-  let group: { id: string; blocks: Block[]; ts: string | null; prev: string | null; agent?: AgentRef } | null = null;
+  type Group = { id: string; blocks: Block[]; ts: string | null; agent?: AgentRef };
+  // The orchestrator's open bubble.
+  let group: Group | null = null;
+  // Settlers heard from since the orchestrator last spoke, in order of first appearance. Settlers working in parallel
+  // interleave their events; each one still gets a single card.
+  let crew: Group[] = [];
 
-  const flush = () => {
-    if (!group) return;
-    const parts = toParts(group.blocks);
+  const emit = (g: Group) => {
+    const parts = toParts(g.blocks);
     if (parts.length > 0) {
       messages.push({
         role: "assistant",
-        id: group.id,
+        id: g.id,
         content: parts,
-        createdAt: group.ts ? new Date(group.ts) : undefined,
+        createdAt: g.ts ? new Date(g.ts) : undefined,
       });
-      if (group.agent) {
-        subagents[group.id] = { agent: group.agent, name: nameOf(group.agent), ...subagentState(group.blocks) };
+      if (g.agent) {
+        subagents[g.id] = {
+          agent: g.agent,
+          name: nameOf(g.agent),
+          role: settlerRole(typeOf(g.agent)),
+          crew: null,
+          ...subagentState(g.blocks),
+        };
       }
-      emitted.add(group.id);
-      lastEmitted = group.id;
+      emitted.add(g.id);
+      lastEmitted = g.id;
     } else {
-      fallbackOf.set(group.id, group.prev);
+      fallbackOf.set(g.id, lastEmitted);
     }
+  };
+  const flush = () => {
+    if (group) emit(group);
     group = null;
+    for (const g of crew) emit(g);
+    crew = [];
   };
 
   for (const message of state.messages) {
@@ -614,10 +663,24 @@ export function buildThread(state: StreamState): ThreadView {
       lastEmitted = message.id;
       continue;
     }
-    if (group && group.agent?.id !== message.agent?.id) flush();
-    if (!group) group = { id: message.id, blocks: [], ts: message.ts, prev: lastEmitted, agent: message.agent };
-    group.blocks.push(...message.blocks);
-    groupOf.set(message.id, group.id);
+    let target: Group;
+    if (message.agent) {
+      const agent = message.agent;
+      if (group) emit(group);
+      group = null;
+      let member = crew.find((g) => g.agent?.id === agent.id);
+      if (!member) {
+        member = { id: message.id, blocks: [], ts: message.ts, agent };
+        crew.push(member);
+      }
+      target = member;
+    } else {
+      if (crew.length > 0) flush();
+      group ??= { id: message.id, blocks: [], ts: message.ts };
+      target = group;
+    }
+    target.blocks.push(...message.blocks);
+    groupOf.set(message.id, target.id);
     if (message.blocks.some((b) => b.kind === "question" && !b.answer)) hasOpenQuestion = true;
   }
   flush();
@@ -648,6 +711,17 @@ export function buildThread(state: StreamState): ThreadView {
     if (!view) continue;
     if (latest.has(view.agent.id)) view.state = "continued";
     else latest.add(view.agent.id);
+  }
+
+  // Settler cards next to each other in the thread were sent out together: a crew, drawn on one trail.
+  for (let i = 0; i < messages.length; ) {
+    let end = i;
+    while (end < messages.length && subagents[messages[end].id ?? ""]) end++;
+    if (end - i > 1) {
+      const ids = messages.slice(i, end).map((m) => m.id ?? "");
+      ids.forEach((id, index) => (subagents[id].crew = { ids, index }));
+    }
+    i = Math.max(end, i + 1);
   }
 
   return { messages, subagents, turns, notices, hasOpenQuestion };

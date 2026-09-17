@@ -1,5 +1,6 @@
 // Subagents shown as settlers: a colony's orchestrator sends settlers out to do the work, and each one's
 // role says what kind of work it is. Claude Code's agent types stay the source of truth; this only names them.
+import type { AntRole } from "./components/AntAvatar";
 
 /** Roles for the agent types Claude Code ships, and the ones colonies commonly start. */
 const ROLES: Record<string, string> = {
@@ -35,8 +36,34 @@ function titleCase(name: string): string {
  * settlers of the same role in one colony.
  */
 export function settlerName(agentType: string | null | undefined, ordinal = 1): string {
+  const role = roleName(agentType);
+  return ordinal > 1 ? `${role} Settler ${ordinal}` : `${role} Settler`;
+}
+
+function roleName(agentType: string | null | undefined): string {
   const type = (agentType ?? "").trim();
   // No type means Claude Code's default, general-purpose.
-  const role = ROLES[type.toLowerCase()] ?? (type ? titleCase(type) : "Builder");
-  return ordinal > 1 ? `${role} Settler ${ordinal}` : `${role} Settler`;
+  return ROLES[type.toLowerCase()] ?? (type ? titleCase(type) : "Builder");
+}
+
+/** Roles the ant has an accessory for. */
+const DRAWN: ReadonlySet<string> = new Set<AntRole>([
+  "scout",
+  "builder",
+  "surveyor",
+  "inspector",
+  "warden",
+  "tester",
+  "tracker",
+  "scribe",
+  "mender",
+  "mason",
+  "cartographer",
+  "pioneer",
+]);
+
+/** Which ant a subagent type gets. A role the ant has no accessory for, or an unknown type, is a Pioneer. */
+export function settlerRole(agentType: string | null | undefined): AntRole {
+  const role = roleName(agentType).toLowerCase();
+  return DRAWN.has(role) ? (role as AntRole) : "pioneer";
 }
