@@ -4,18 +4,37 @@
  * MIT licensed — see NOTICE. Colonizer does not endorse, vet or have any relationship with the
  * services listed here; several are resellers rather than the company that runs the model.
  *
- * Entries whose base URL is templated in the source (AWS Bedrock, Tencent, Qwen Cloud, Baidu
- * Qianfan) and Gemini's native format are left out: the gateway cannot serve them as they stand.
+ * Left out: AWS Bedrock, whose endpoint speaks Bedrock's own InvokeModel API and signs with SigV4,
+ * and Gemini's native format — the gateway can serve neither as it stands.
+ *
+ * Referral parameters the source carries on some links (`aff=`, `utm_content=`, `from=`) are not
+ * reproduced here: a link from this list credits nobody.
  */
 export interface CatalogEntry {
   id: string;
   name: string;
+  /** May contain `${VAR}` placeholders, one per entry in `variables`. */
   base_url: string;
   /** `bearer` sends the key as Authorization; `x-api-key` as the Anthropic header. */
   auth: "bearer" | "x-api-key";
   /** `openai` endpoints are translated by the Mothership gateway. */
   wire: "anthropic" | "openai";
   site: string;
+  /** Asked for when the provider is added, then substituted into `base_url`. */
+  variables?: CatalogVariable[];
+}
+
+export interface CatalogVariable {
+  /** The name inside `${…}` in the base URL. */
+  name: string;
+  label: string;
+  placeholder: string;
+  default?: string;
+}
+
+/** Substitute `${NAME}` placeholders; an unknown name is left as it stands. */
+export function fillTemplate(url: string, values: Record<string, string>): string {
+  return url.replace(/\$\{(\w+)\}/g, (whole, name: string) => values[name]?.trim() || whole);
 }
 
 export const PROVIDER_CATALOG: CatalogEntry[] = [
@@ -31,7 +50,9 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "apinebula", name: "APINebula", base_url: "https://apinebula.ai", auth: "bearer", wire: "anthropic", site: "https://apinebula.ai" },
   { id: "atlascloud", name: "AtlasCloud", base_url: "https://api.atlascloud.ai", auth: "bearer", wire: "anthropic", site: "https://www.atlascloud.ai/console/coding-plan" },
   { id: "baidu-qianfan-coding-plan", name: "Baidu Qianfan Coding Plan", base_url: "https://qianfan.baidubce.com/anthropic/coding", auth: "bearer", wire: "anthropic", site: "https://cloud.baidu.com/product/qianfan_modelbuilder" },
+  { id: "baidu-qianfan-token-plan", name: "Baidu Qianfan Token Plan", base_url: "https://qianfan.baidubce.com/anthropic/tokenplan/personal", auth: "bearer", wire: "anthropic", site: "https://cloud.baidu.com/product/codingplan.html" },
   { id: "bailing", name: "BaiLing", base_url: "https://api.tbox.cn/api/anthropic", auth: "bearer", wire: "anthropic", site: "https://alipaytbox.yuque.com/sxs0ba/ling/get_started" },
+  { id: "byteplus", name: "BytePlus", base_url: "https://ark.ap-southeast.bytepluses.com/api/coding", auth: "bearer", wire: "anthropic", site: "https://www.byteplus.com/en/product/modelark" },
   { id: "ccsub", name: "CCSub", base_url: "https://www.ccsub.net", auth: "bearer", wire: "anthropic", site: "https://www.ccsub.net" },
   { id: "cherryin", name: "CherryIN", base_url: "https://open.cherryin.net", auth: "bearer", wire: "anthropic", site: "https://open.cherryin.ai" },
   { id: "claudeapi", name: "ClaudeAPI", base_url: "https://gw.apito.ai", auth: "bearer", wire: "anthropic", site: "https://www.apito.ai" },
@@ -49,8 +70,9 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "fennoai", name: "FennoAI", base_url: "https://api.fenno.ai", auth: "bearer", wire: "anthropic", site: "https://api.fenno.ai" },
   { id: "github-copilot", name: "GitHub Copilot", base_url: "https://api.githubcopilot.com", auth: "bearer", wire: "openai", site: "https://github.com/features/copilot" },
   { id: "jiekou-ai", name: "JieKou AI", base_url: "https://api.jiekou.ai/anthropic", auth: "bearer", wire: "anthropic", site: "https://jiekou.ai/#model-library" },
-  { id: "kimi", name: "Kimi", base_url: "https://api.moonshot.cn/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.kimi.com?aff=cc-switch" },
-  { id: "kimi-for-coding", name: "Kimi For Coding", base_url: "https://api.kimi.com/coding", auth: "bearer", wire: "anthropic", site: "https://www.kimi.com/code/?aff=cc-switch" },
+  { id: "kat-coder", name: "KAT-Coder", base_url: "https://vanchin.streamlake.ai/api/gateway/v1/endpoints/${ENDPOINT_ID}/claude-code-proxy", auth: "bearer", wire: "anthropic", site: "https://console.streamlake.ai", variables: [{ name: "ENDPOINT_ID", label: "Vanchin endpoint ID", placeholder: "ep-xxx-xxx" }] },
+  { id: "kimi", name: "Kimi", base_url: "https://api.moonshot.cn/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.kimi.com" },
+  { id: "kimi-for-coding", name: "Kimi For Coding", base_url: "https://api.kimi.com/coding", auth: "bearer", wire: "anthropic", site: "https://www.kimi.com/code/" },
   { id: "longcat", name: "Longcat", base_url: "https://api.longcat.chat/anthropic", auth: "bearer", wire: "anthropic", site: "https://longcat.chat/platform" },
   { id: "micu", name: "Micu", base_url: "https://www.micuapi.ai", auth: "bearer", wire: "anthropic", site: "https://www.micuapi.ai" },
   { id: "minimax", name: "MiniMax", base_url: "https://api.minimaxi.com/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.minimaxi.com" },
@@ -64,11 +86,14 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "patewayai", name: "PatewayAI", base_url: "https://api.pateway.ai", auth: "x-api-key", wire: "anthropic", site: "https://pateway.ai" },
   { id: "pipellm", name: "PIPELLM", base_url: "https://cc-api.pipellm.ai", auth: "bearer", wire: "anthropic", site: "https://code.pipellm.ai" },
   { id: "ppio", name: "PPIO", base_url: "https://api.ppio.com/anthropic", auth: "bearer", wire: "anthropic", site: "https://ppio.com" },
-  { id: "qiniu", name: "Qiniu", base_url: "https://api.qnaigc.com", auth: "bearer", wire: "anthropic", site: "https://s.qiniu.com/nMvAvy" },
+  { id: "qwencloud", name: "QwenCloud", base_url: "https://dashscope-intl.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://home.qwencloud.com" },
+  { id: "qwencloud-for-coding", name: "QwenCloud For Coding", base_url: "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://www.qwencloud.com" },
+  { id: "qwencloud-token-plan", name: "QwenCloud Token Plan", base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://www.qwencloud.com/pricing/token-plan" },
+  { id: "qiniu", name: "Qiniu", base_url: "https://api.qnaigc.com", auth: "bearer", wire: "anthropic", site: "https://www.qiniu.com" },
   { id: "relaxycode", name: "RelaxyCode", base_url: "https://www.relaxycode.com", auth: "bearer", wire: "anthropic", site: "https://www.relaxycode.com" },
   { id: "rightcode", name: "RightCode", base_url: "https://www.rightapi.ai/claude", auth: "bearer", wire: "anthropic", site: "https://www.rightapi.ai" },
   { id: "runapi", name: "RunAPI", base_url: "https://runapi.host", auth: "bearer", wire: "anthropic", site: "https://runapi.host" },
-  { id: "shengsuanyun", name: "Shengsuanyun", base_url: "https://router.shengsuanyun.com/api", auth: "bearer", wire: "anthropic", site: "https://www.shengsuanyun.com/?from=CH_4HHXMRYF" },
+  { id: "shengsuanyun", name: "Shengsuanyun", base_url: "https://router.shengsuanyun.com/api", auth: "bearer", wire: "anthropic", site: "https://www.shengsuanyun.com" },
   { id: "siliconflow", name: "SiliconFlow", base_url: "https://api.siliconflow.cn", auth: "bearer", wire: "anthropic", site: "https://siliconflow.cn" },
   { id: "siliconflow-en", name: "SiliconFlow en", base_url: "https://api.siliconflow.com", auth: "bearer", wire: "anthropic", site: "https://siliconflow.com" },
   { id: "soleapi", name: "SoleAPI", base_url: "https://soleapi.com", auth: "bearer", wire: "anthropic", site: "https://soleapi.com" },
@@ -79,8 +104,12 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "sudocode-chat", name: "SudoCode.chat", base_url: "https://api.sudocode.chat", auth: "bearer", wire: "anthropic", site: "https://sudocode.chat" },
   { id: "sudocode-us", name: "SudoCode.us", base_url: "https://sudocode.us", auth: "bearer", wire: "anthropic", site: "https://sudocode.us" },
   { id: "teamorouter", name: "TeamoRouter", base_url: "https://api.teamorouter.cn", auth: "bearer", wire: "anthropic", site: "https://teamorouter.cn" },
+  { id: "tencent-token-plan", name: "Tencent Token Plan", base_url: "https://api.lkeap.cloud.tencent.com/plan/anthropic", auth: "bearer", wire: "anthropic", site: "https://cloud.tencent.com/product/tokenhub" },
+  { id: "tencent-token-plan-intl", name: "Tencent Token Plan (Intl)", base_url: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic", auth: "bearer", wire: "anthropic", site: "https://www.tencentcloud.com/products/tokenhub" },
   { id: "tencent-token-plan-enterprise-lite", name: "Tencent Token Plan Enterprise Lite", base_url: "https://tokenhub.tencentmaas.com/plan/anthropic", auth: "bearer", wire: "anthropic", site: "https://cloud.tencent.com/product/tokenhub" },
   { id: "tencent-token-plan-enterprise-pro", name: "Tencent Token Plan Enterprise Pro", base_url: "https://tokenhub.tencentmaas.com/plan/anthropic", auth: "bearer", wire: "anthropic", site: "https://cloud.tencent.com/product/tokenhub" },
+  { id: "tencent-token-plan-enterprise-lite-intl", name: "Tencent Token Plan Enterprise Lite (Intl)", base_url: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic", auth: "bearer", wire: "anthropic", site: "https://www.tencentcloud.com/products/tokenhub" },
+  { id: "tencent-token-plan-enterprise-pro-intl", name: "Tencent Token Plan Enterprise Pro (Intl)", base_url: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic", auth: "bearer", wire: "anthropic", site: "https://www.tencentcloud.com/products/tokenhub" },
   { id: "therouter", name: "TheRouter", base_url: "https://api.therouter.ai", auth: "bearer", wire: "anthropic", site: "https://therouter.ai" },
   { id: "volcengine-doubao", name: "Volcengine Doubao", base_url: "https://ark.cn-beijing.volces.com/api/compatible", auth: "bearer", wire: "anthropic", site: "" },
   { id: "xai-grok", name: "xAI (Grok)", base_url: "https://api.x.ai/v1", auth: "bearer", wire: "openai", site: "https://x.ai/grok" },
@@ -90,7 +119,9 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "zetaapi", name: "ZetaAPI", base_url: "https://api.zetaapi.ai", auth: "bearer", wire: "anthropic", site: "https://zetaapi.ai" },
   { id: "zhipu-glm", name: "Zhipu GLM", base_url: "https://open.bigmodel.cn/api/anthropic", auth: "bearer", wire: "anthropic", site: "https://open.bigmodel.cn" },
   { id: "zhipu-glm-en", name: "Zhipu GLM en", base_url: "https://api.z.ai/api/anthropic", auth: "bearer", wire: "anthropic", site: "https://z.ai" },
-  { id: "ai", name: "千问AI平台", base_url: "https://dashscope.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.qianwenai.com/?utm_content=g_20000002971" },
-  { id: "agent-plan", name: "火山 Agent Plan", base_url: "https://ark.cn-beijing.volces.com/api/plan", auth: "bearer", wire: "anthropic", site: "" },
-  { id: "coding-plan", name: "火山 Coding Plan", base_url: "https://ark.cn-beijing.volces.com/api/coding", auth: "bearer", wire: "anthropic", site: "" },
+  { id: "qianwen-ai", name: "千问AI平台", base_url: "https://dashscope.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.qianwenai.com" },
+  { id: "qianwen-coding-plan", name: "千问AI平台 Coding Plan", base_url: "https://coding.dashscope.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://bailian.console.aliyun.com" },
+  { id: "qianwen-token-plan", name: "千问AI平台 Token Plan", base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.qianwenai.com/pricing/token-plan" },
+  { id: "volcengine-agent-plan", name: "火山 Agent Plan", base_url: "https://ark.cn-beijing.volces.com/api/plan", auth: "bearer", wire: "anthropic", site: "" },
+  { id: "volcengine-coding-plan", name: "火山 Coding Plan", base_url: "https://ark.cn-beijing.volces.com/api/coding", auth: "bearer", wire: "anthropic", site: "" },
 ];
