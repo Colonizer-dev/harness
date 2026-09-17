@@ -8,6 +8,8 @@ export type SessionStatus =
   | "idle"
   | "publishing"
   | "pr_opened"
+  | "merged"
+  | "closed"
   | "no_changes"
   | "stopped"
   | "failed";

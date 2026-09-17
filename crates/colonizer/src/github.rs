@@ -264,6 +264,49 @@ pub enum Published {
     PullRequest(String),
 }
 
+/// A pull request's live state on GitHub, as a colony's badge should show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// Maps what `gh pr view --json state,merged` reported to a `PrState`. `merged` wins over `state`,
+/// case is tolerated, and an unrecognised state is `None` so callers leave the colony's status alone.
+pub fn pr_state_from(state: &str, merged: bool) -> Option<PrState> {
+    if merged {
+        return Some(PrState::Merged);
+    }
+    match state.trim().to_ascii_uppercase().as_str() {
+        "OPEN" => Some(PrState::Open),
+        "MERGED" => Some(PrState::Merged),
+        "CLOSED" => Some(PrState::Closed),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct PrView {
+    state: String,
+    #[serde(default)]
+    merged: bool,
+}
+
+/// Asks GitHub for one pull request's state through the user's `gh` login. A deleted PR, no `gh`
+/// binary, no auth and a network error all surface as errors; callers must treat those as no news.
+pub async fn pr_state(app: &App, url: &str) -> Result<PrState> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "state,merged"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    let view: PrView = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
+    pr_state_from(&view.state, view.merged)
+        .with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
+}
+
 const COLONIZER_CO_AUTHOR: &str = "Co-Authored-By: Colonizer <noreply@colonizer.dev>";
 
 /// The commit's closing paragraph: what the work refers to, then Colonizer's co-author line unless
@@ -593,5 +636,20 @@ mod tests {
     fn attribution_inside_the_description_is_kept() {
         let body = "Fixtures generated with the claude-api mock.\n\n```\nCo-Authored-By: Colonizer <noreply@colonizer.dev>\n```";
         assert_eq!(strip_agent_attribution(body), body);
+    }
+
+    #[test]
+    fn a_pull_requests_state_comes_from_ghs_state_and_merged_fields() {
+        assert_eq!(pr_state_from("OPEN", false), Some(PrState::Open));
+        assert_eq!(pr_state_from("CLOSED", false), Some(PrState::Closed));
+        assert_eq!(pr_state_from("MERGED", false), Some(PrState::Merged));
+        // Case and surrounding whitespace are tolerated.
+        assert_eq!(pr_state_from(" open ", false), Some(PrState::Open));
+        // `merged` wins over `state`, whatever the state says.
+        assert_eq!(pr_state_from("OPEN", true), Some(PrState::Merged));
+        assert_eq!(pr_state_from("CLOSED", true), Some(PrState::Merged));
+        // An unrecognised state is no news, so a colony's status is left alone.
+        assert_eq!(pr_state_from("DRAFT", false), None);
+        assert_eq!(pr_state_from("", false), None);
     }
 }

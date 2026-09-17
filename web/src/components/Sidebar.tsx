@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
+import { sortSessions } from "../sessionOrder";
 import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
 import {
   IconCheck,
@@ -22,7 +23,7 @@ import {
   Switch,
   cx,
   inputClass,
-  isLive,
+  occupiesSlot,
   orgOf,
   sameOrg,
   store,
@@ -92,7 +93,10 @@ export function Sidebar({
     store("colonizer.sidebar-tab", tab);
   }, [tab]);
 
-  const visible = selectedOrg ? sessions.filter((s) => sameOrg(orgOf(s), selectedOrg)) : sessions;
+  const visible = useMemo(
+    () => sortSessions(selectedOrg ? sessions.filter((s) => sameOrg(orgOf(s), selectedOrg)) : sessions),
+    [sessions, selectedOrg],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -222,6 +226,7 @@ function SidebarTab({ active, onClick, children }: { active: boolean; onClick: (
 interface OrgEntry {
   org: string;
   live: number;
+  queued: number;
   total: number;
   pending: number;
 }
@@ -232,7 +237,7 @@ function orgEntries(orgs: OrgInfo[], sessions: Session[]): OrgEntry[] {
   const entry = (org: string) => {
     const key = org.toLowerCase();
     let found = byKey.get(key);
-    if (!found) byKey.set(key, (found = { org, live: 0, total: 0, pending: 0 }));
+    if (!found) byKey.set(key, (found = { org, live: 0, queued: 0, total: 0, pending: 0 }));
     return found;
   };
   for (const info of orgs) entry(info.org).pending = info.pending_memory ?? 0;
@@ -241,13 +246,19 @@ function orgEntries(orgs: OrgInfo[], sessions: Session[]): OrgEntry[] {
     if (!org) continue;
     const e = entry(org);
     e.total += 1;
-    if (isLive(session.status)) e.live += 1;
+    if (session.status === "queued") e.queued += 1;
+    else if (occupiesSlot(session.status)) e.live += 1;
   }
   return [...byKey.values()].sort((a, b) => a.org.localeCompare(b.org));
 }
 
 function colonyCount(n: number): string {
   return `${n} ${n === 1 ? "colony" : "colonies"}`;
+}
+
+/** "3 live · 2 queued"; either half drops out, and neither means show nothing. */
+function liveQueuedLabel(live: number, queued: number): string {
+  return [live > 0 ? `${live} live` : null, queued > 0 ? `${queued} queued` : null].filter(Boolean).join(" · ");
 }
 
 function OrgSwitcher({
@@ -282,8 +293,11 @@ function OrgSwitcher({
 
   const entries = orgEntries(orgs, sessions);
   const current = selected ? entries.find((e) => sameOrg(e.org, selected)) : null;
-  const totalLive = sessions.filter((s) => isLive(s.status)).length;
+  const totalLive = sessions.filter((s) => occupiesSlot(s.status)).length;
+  const totalQueued = sessions.filter((s) => s.status === "queued").length;
   const live = current ? current.live : totalLive;
+  const queued = current ? current.queued : totalQueued;
+  const counts = liveQueuedLabel(live, queued);
   const choose = (org: string | null) => {
     onSelect(org);
     setOpen(false);
@@ -303,7 +317,7 @@ function OrgSwitcher({
           <IconOrg size={12} />
         </span>
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{current?.org ?? selected ?? "All orgs"}</span>
-        {live > 0 && <span className="shrink-0 text-[11.5px] text-info">{live} live</span>}
+        {counts && <span className="shrink-0 text-[11.5px] text-info">{counts}</span>}
         <IconChevronDown size={14} className={cx("shrink-0 text-faint transition-transform", open && "rotate-180")} />
       </button>
       {open && (
@@ -312,7 +326,15 @@ function OrgSwitcher({
           aria-label="Organisations"
           className="scroll-thin absolute inset-x-0 top-[calc(100%+4px)] z-30 max-h-80 overflow-y-auto rounded-xl border border-border bg-panel p-1 shadow-[var(--shadow)]"
         >
-          <OrgOption label="All orgs" meta={colonyCount(sessions.length)} live={totalLive} pending={0} active={!selected} onClick={() => choose(null)} />
+          <OrgOption
+            label="All orgs"
+            meta={colonyCount(sessions.length)}
+            live={totalLive}
+            queued={totalQueued}
+            pending={0}
+            active={!selected}
+            onClick={() => choose(null)}
+          />
           {entries.length > 0 && <li role="separator" className="my-1 border-t border-border" />}
           {entries.map((e) => (
             <OrgOption
@@ -320,6 +342,7 @@ function OrgSwitcher({
               label={e.org}
               meta={colonyCount(e.total)}
               live={e.live}
+              queued={e.queued}
               pending={e.pending}
               active={sameOrg(selected, e.org)}
               onClick={() => choose(e.org)}
@@ -335,6 +358,7 @@ function OrgOption({
   label,
   meta,
   live,
+  queued,
   pending,
   active,
   onClick,
@@ -342,10 +366,12 @@ function OrgOption({
   label: string;
   meta: string;
   live: number;
+  queued: number;
   pending: number;
   active: boolean;
   onClick: () => void;
 }) {
+  const counts = liveQueuedLabel(live, queued);
   return (
     <li role="option" aria-selected={active}>
       <button
@@ -360,7 +386,7 @@ function OrgOption({
             {pending > 0 && ` · ${pending} to review`}
           </span>
         </span>
-        {live > 0 && <Badge tone="info">{live} live</Badge>}
+        {counts && <Badge tone="info">{counts}</Badge>}
         <IconCheck size={14} className={cx("shrink-0 text-accent", !active && "invisible")} />
       </button>
     </li>

@@ -72,7 +72,9 @@ export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; 
   waiting_for_answer: { label: "Needs your answer", tone: "accent", live: true },
   idle: { label: "Idle", tone: "neutral", live: true },
   publishing: { label: "Opening PR", tone: "info", live: false },
-  pr_opened: { label: "PR opened", tone: "ok", live: false },
+  pr_opened: { label: "PR opened", tone: "info", live: false },
+  merged: { label: "PR merged", tone: "ok", live: false },
+  closed: { label: "PR closed", tone: "neutral", live: false },
   no_changes: { label: "No changes", tone: "warn", live: false },
   stopped: { label: "Stopped", tone: "neutral", live: false },
   failed: { label: "Failed", tone: "err", live: false },
@@ -81,6 +83,12 @@ export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; 
 /** Sessions whose microVM is up. */
 export function isLive(status: SessionStatus): boolean {
   return SESSION_STATUS[status]?.live ?? false;
+}
+
+/** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone.
+ *  Mirrors `has_room`'s busy closure in crates/colonizer/src/sessions.rs; keep the two in step. */
+export function occupiesSlot(status: SessionStatus): boolean {
+  return isLive(status) || status === "publishing";
 }
 
 export function StatusBadge({ status }: { status: SessionStatus }) {

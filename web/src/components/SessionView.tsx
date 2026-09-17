@@ -92,7 +92,7 @@ export function SessionView({
   const deleteWarning =
     session.status === "queued"
       ? "Remove this colony from the queue and the list? It never started, so nothing else is lost."
-      : session.status === "pr_opened"
+      : ["pr_opened", "merged", "closed"].includes(session.status)
         ? "Delete this colony? Its chat, logs and local worktree are removed. The pull request and its pushed branch stay on GitHub."
         : session.cleaned_up
           ? "Delete this colony's chat and logs? Its worktree was already cleaned up. This cannot be undone."

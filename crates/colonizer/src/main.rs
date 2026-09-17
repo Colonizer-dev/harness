@@ -433,6 +433,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();
     tokio::spawn(async move { sessions::run_queue(queue).await });
+    let pr_watch = app.clone();
+    tokio::spawn(async move { sessions::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);

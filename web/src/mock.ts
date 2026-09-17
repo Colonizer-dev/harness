@@ -910,6 +910,36 @@ export function createMockApi(): Api {
   octo.session.updated_at = ago(300);
   sessions.set(octo.session.id, octo);
 
+  // The rest of the lifecycle: a launch waiting for a slot, and a PR that was merged or closed.
+  const queued = new MockSession({
+    ...baseSession("queue1357", "acme/webshop", 51, "Rate-limit the checkout API"),
+    status: "queued",
+    mesh: null,
+    created_at: ago(2),
+  });
+  queued.session.updated_at = ago(2);
+  sessions.set(queued.session.id, queued);
+  const merged = new MockSession({
+    ...baseSession("merge5678", "acme/design-system", 12, "Add focus ring tokens for dark mode"),
+    status: "merged",
+    mesh: null,
+    pr_url: "https://github.com/acme/design-system/pull/18",
+    cost_usd: 0.87,
+    created_at: ago(240),
+  });
+  merged.session.updated_at = ago(238);
+  sessions.set(merged.session.id, merged);
+  const closed = new MockSession({
+    ...baseSession("close0987", "acme/webshop", 29, "Support multiple discount codes at checkout"),
+    status: "closed",
+    mesh: null,
+    pr_url: "https://github.com/acme/webshop/pull/44",
+    cost_usd: 0.64,
+    created_at: ago(700),
+  });
+  closed.session.updated_at = ago(690);
+  sessions.set(closed.session.id, closed);
+
   const DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
   const providers: ModelProvider[] = [
     {
