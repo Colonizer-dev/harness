@@ -222,6 +222,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

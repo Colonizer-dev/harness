@@ -2,6 +2,7 @@
 import { ApiError, type Api, type SocketLike } from "./api";
 import type {
   AgentEvent,
+  HeadroomStatus,
   AgentEventBody,
   Answers,
   HarnessStatus,
@@ -613,6 +614,8 @@ const MOCK_PRESET_IMAGES: Record<string, string> = {
 };
 const mockPulled = new Set<string>(["node:24-bookworm"]);
 let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finished_at: null, error: null };
+// Headroom's bundle: a few seconds of download progress, then installed.
+let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
@@ -881,7 +884,7 @@ export function createMockApi(): Api {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
       enabled: true,
-      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", rtk: false },
+      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false },
       schema: {
         type: "object",
         properties: {
@@ -902,6 +905,12 @@ export function createMockApi(): Api {
             default: false,
           },
           caveman_level: { type: "string", enum: ["lite", "full", "ultra"], title: "Caveman level", description: "How terse, when terse replies are on.", default: "full" },
+          headroom: {
+            type: "boolean",
+            title: "Compress what the agent reads (Headroom)",
+            description: "Token savings: model requests pass through Headroom inside the colony. The first time it is switched on, the mothership downloads it (220–245 MB, depending on the architecture).",
+            default: false,
+          },
           rtk: {
             type: "boolean",
             title: "Compact command output (rtk)",
@@ -1031,6 +1040,20 @@ export function createMockApi(): Api {
       return clone(mockPull);
     },
     sandboxPullStatus: async () => clone(mockPull),
+    headroom: async () => {
+      if (mockHeadroom.state === "downloading" && mockHeadroom.started_at) {
+        const total = 231_330_241;
+        const bytes = Math.min(total, Math.round(((Date.now() - Date.parse(mockHeadroom.started_at)) / 5000) * total));
+        mockHeadroom = bytes >= total ? { ...mockHeadroom, state: "installed", bytes, total, finished_at: new Date().toISOString() } : { ...mockHeadroom, bytes, total };
+      }
+      return clone(mockHeadroom);
+    },
+    headroomDownload: async () => {
+      if (mockHeadroom.state === "idle" || mockHeadroom.state === "failed") {
+        mockHeadroom = { ...mockHeadroom, state: "downloading", bytes: 0, total: 231_330_241, started_at: new Date().toISOString(), finished_at: null, error: null };
+      }
+      return clone(mockHeadroom);
+    },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
     sessions: () =>

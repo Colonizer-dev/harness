@@ -12,6 +12,7 @@ import {
 import { errorMessage, useApi, useToast } from "../context";
 import type {
   HarnessStatus,
+  HeadroomStatus,
   LoginView,
   ModelOption,
   ModelProvider,
@@ -907,6 +908,126 @@ function useImagePull(active: boolean) {
   return { status, error, start };
 }
 
+/** The Headroom bundle download (GET/POST /api/headroom), polled while it runs. */
+function useHeadroom(active: boolean) {
+  const api = useApi();
+  const [status, setStatus] = useState<HeadroomStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    let stop = false;
+    api
+      .headroom()
+      .then((s) => !stop && setStatus(s))
+      .catch(() => {});
+    return () => {
+      stop = true;
+    };
+  }, [active, api]);
+
+  const running = status?.state === "downloading" || status?.state === "unpacking";
+  useEffect(() => {
+    if (!active || !running) return;
+    const timer = setInterval(() => {
+      api
+        .headroom()
+        .then(setStatus)
+        .catch(() => {});
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [active, api, running]);
+
+  const start = useCallback(async () => {
+    setError(null);
+    try {
+      setStatus(await api.headroomDownload());
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [api]);
+
+  return { status, error, start };
+}
+
+const megabytes = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
+
+/** Shown in the agent pane while Headroom is switched on, or while its download runs or has failed. */
+function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadroom> }) {
+  const { status, error, start } = headroom;
+  const box = "flex flex-wrap items-center gap-2 rounded-xl border border-border px-3.5 py-2.5 text-[12.5px]";
+
+  if (error) {
+    return (
+      <div className={cx(box, "text-err")}>
+        <div className="min-w-0 flex-1">Could not start the Headroom download: {error}</div>
+        <Button size="sm" onClick={() => void start()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (!status) return null;
+  switch (status.state) {
+    case "unavailable":
+      return <div className={cx(box, "text-muted")}>No Headroom bundle is published for this machine's architecture, so colonies run without it.</div>;
+    case "installed":
+      return (
+        <div className={cx(box, "text-muted")}>
+          <span className="text-ok">Headroom {status.release} is downloaded.</span> Colonies that start with it switched on use it.
+        </div>
+      );
+    case "downloading":
+    case "unpacking": {
+      const pct = status.total ? Math.min(100, Math.round((status.bytes * 100) / status.total)) : null;
+      return (
+        <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-muted">
+          <div className="mb-1.5 flex flex-wrap items-center gap-2">
+            <Spinner />
+            <span>
+              {status.state === "unpacking" ? "Unpacking" : "Downloading"} Headroom {status.release}
+              {status.state === "downloading" && status.total ? ` · ${megabytes(status.bytes)} of ${megabytes(status.total)}` : ""}
+            </span>
+            <span className="text-faint">happens once per release</span>
+          </div>
+          <div
+            className="h-1 overflow-hidden rounded-full bg-border"
+            role="progressbar"
+            aria-label="Downloading Headroom"
+            aria-valuenow={pct ?? undefined}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            {pct === null || status.state === "unpacking" ? (
+              <div className="pull-slide h-full w-1/3 rounded-full bg-accent" />
+            ) : (
+              <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
+            )}
+          </div>
+        </div>
+      );
+    }
+    case "failed":
+      return (
+        <div className={cx(box, "text-err")}>
+          <div className="min-w-0 flex-1">The Headroom download failed: {status.error}</div>
+          <Button size="sm" onClick={() => void start()}>
+            Retry
+          </Button>
+        </div>
+      );
+    default:
+      return (
+        <div className={cx(box, "text-muted")}>
+          <div className="min-w-0 flex-1">Headroom downloads when you save with it switched on (220–245 MB, once). Colonies run without it until then.</div>
+          <Button size="sm" onClick={() => void start()}>
+            Download now
+          </Button>
+        </div>
+      );
+  }
+}
+
 const seconds = (from: string | null, to?: string | null) => {
   if (!from) return 0;
   const end = to ? Date.parse(to) : Date.now();
@@ -1012,6 +1133,7 @@ function ModulePane({
   const [saving, setSaving] = useState(false);
   const providerId = useId();
   const pull = useImagePull(module.kind === "sandbox");
+  const headroom = useHeadroom(module.kind === "agent");
   const info = kindInfo(module.kind);
   const fields = Object.entries(module.schema?.properties ?? {});
   const dirty = isDirty(module, draft);
@@ -1025,6 +1147,8 @@ function ModulePane({
       toast(`${info.title} module saved`);
       // Choosing a stack is the moment to download it, not the first launch.
       if (module.kind === "sandbox") void pull.start();
+      // Switching Headroom on is the moment to download its bundle, too.
+      if (module.kind === "agent" && saved.settings?.headroom === true) void headroom.start();
     } catch (error) {
       toast(errorMessage(error), "error");
     } finally {
@@ -1085,16 +1209,31 @@ function ModulePane({
           <p className="py-2.5 text-[12.5px] text-warn">These fields belong to the current provider. Save to switch.</p>
         )}
 
-        {fields.map(([key, field]) => (
-          <SettingField
-            key={key}
-            name={key}
-            field={field}
-            value={valueOf(draft.settings, key, field)}
-            onChange={(v) => setField(key, v)}
-            models={models && MODEL_KEYS.has(key) ? models : undefined}
-          />
-        ))}
+        {fields.map(([key, field]) => {
+          const setting = (
+            <SettingField
+              key={key}
+              name={key}
+              field={field}
+              value={valueOf(draft.settings, key, field)}
+              onChange={(v) => setField(key, v)}
+              models={models && MODEL_KEYS.has(key) ? models : undefined}
+            />
+          );
+          // The download sits under the switch that asks for it, one divider group with it.
+          const showHeadroom =
+            module.kind === "agent" &&
+            key === "headroom" &&
+            (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
+          return showHeadroom ? (
+            <div key={key} className="pb-2.5">
+              {setting}
+              <HeadroomRow headroom={headroom} />
+            </div>
+          ) : (
+            setting
+          );
+        })}
 
         {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
       </div>
