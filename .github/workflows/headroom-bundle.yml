@@ -4,7 +4,7 @@
 #
 # Each architecture builds on its own runner inside Debian bookworm, the colony image's glibc, so pip picks
 # wheels a colony can load, and must pass scripts/headroom-bundle/smoke.py before anything is published.
-# The release it creates is what vendor/vendor.lock pins by sha256; publishing changes nothing for an
+# The release it creates is what crates/colonizer/headroom.lock pins by sha256; publishing changes nothing for an
 # install until a pull request pins the new archives.
 name: Headroom bundle
 
@@ -91,7 +91,7 @@ jobs:
           {
             echo "Headroom bundles for colonies that switch Headroom on: a standalone CPython with headroom-ai[proxy] and its dependencies, installed from \`vendor/headroom/requirements.txt\` at ${{ github.sha }} with hashes checked, built inside Debian bookworm and smoke-tested."
             echo
-            echo "They take effect only once \`vendor/vendor.lock\` pins them by sha256:"
+            echo "They take effect only once \`crates/colonizer/headroom.lock\` pins them by sha256:"
             echo
             echo '```'
             cat SHA256SUMS

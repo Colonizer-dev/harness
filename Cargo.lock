@@ -214,8 +214,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "colonizer"
-version = "0.1.0"
+name = "colonizer-agentd"
+version = "0.1.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
+name = "colonizer-harness"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -232,20 +246,6 @@ dependencies = [
  "toml",
  "tower-http 0.7.1",
  "uuid",
-]
-
-[[package]]
-name = "colonizer-agentd"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "futures-util",
- "libc",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.30.0",
 ]
 
 [[package]]

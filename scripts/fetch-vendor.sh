@@ -25,8 +25,6 @@ found=0
 while read -r name version plat kind sha url; do
   case "$name" in ''|'#'*) continue ;; esac
   # `any` entries are platform-independent (source, not binaries).
-  # A bundle downloads on demand, from the mothership, when its setting is switched on.
-  [ "$kind" = "bundle" ] && continue
   [ "$plat" = "$platform" ] || [ "$plat" = "any" ] || continue
   if [ -n "${VENDOR_KINDS:-}" ]; then
     case " $VENDOR_KINDS " in *" $kind "*) ;; *) continue ;; esac
