@@ -208,6 +208,27 @@ body {
   padding: 4px 8px;
 }
 
+/* What arrives in a colony's chat after it has loaded (components/motion.ts). A short fade and rise, so a new card or
+   message settles into place instead of appearing in one frame. */
+@keyframes chat-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.chat-enter {
+  animation: chat-enter 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-enter {
+    animation: none;
+  }
+}
+
 @keyframes pulse-soft {
   50% {
     opacity: 0.45;
