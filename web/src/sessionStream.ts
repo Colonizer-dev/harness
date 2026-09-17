@@ -5,6 +5,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { SOCKET_OPEN, type Api, type SocketLike } from "./api";
 import type {
   AgentEvent,
+  AgentRef,
   AgentState,
   Answers,
   ClientCommand,
@@ -49,6 +50,8 @@ export type Block = TextBlock | ThinkingBlock | ToolBlock | QuestionBlock;
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
+  /** The subagent that spoke, when it was not the orchestrator. */
+  agent?: AgentRef;
   blocks: Block[];
   ts: string | null;
   /** Optimistic user message not yet echoed by the agent. */
@@ -122,7 +125,12 @@ function textOf(message: ChatMessage): string {
 }
 
 /** Returns a copy of `messages` with the assistant message `id` (created if missing) copied for mutation. */
-function upsertAssistant(messages: ChatMessage[], id: string, ts: string | null): [ChatMessage[], ChatMessage] {
+function upsertAssistant(
+  messages: ChatMessage[],
+  id: string,
+  ts: string | null,
+  agent?: AgentRef,
+): [ChatMessage[], ChatMessage] {
   const copy = messages.slice();
   for (let i = copy.length - 1; i >= 0; i--) {
     if (copy[i].id === id && copy[i].role === "assistant") {
@@ -131,7 +139,7 @@ function upsertAssistant(messages: ChatMessage[], id: string, ts: string | null)
       return [copy, message];
     }
   }
-  const message: ChatMessage = { id, role: "assistant", blocks: [], ts, pending: false };
+  const message: ChatMessage = { id, role: "assistant", agent, blocks: [], ts, pending: false };
   copy.push(message);
   return [copy, message];
 }
@@ -192,7 +200,7 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
 
     case "assistant_text_delta":
     case "assistant_text": {
-      const [messages, message] = upsertAssistant(s.messages, ev.message_id, ts);
+      const [messages, message] = upsertAssistant(s.messages, ev.message_id, ts, ev.agent);
       const at = message.blocks.findIndex((b) => b.kind === "text" && b.index === ev.block_index);
       if (ev.type === "assistant_text_delta") {
         if (at >= 0) {
@@ -211,7 +219,7 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
     }
 
     case "thinking": {
-      const [messages, message] = upsertAssistant(s.messages, ev.message_id, ts);
+      const [messages, message] = upsertAssistant(s.messages, ev.message_id, ts, ev.agent);
       const at = message.blocks.findIndex((b) => b.kind === "thinking" && b.index === ev.block_index);
       const block: ThinkingBlock = { kind: "thinking", index: ev.block_index, text: ev.text };
       if (at >= 0) message.blocks[at] = block;
@@ -221,7 +229,7 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
 
     case "tool_call": {
       if (s.messages.some((m) => m.blocks.some((b) => b.kind === "tool" && b.id === ev.tool_call_id))) return s;
-      const [messages, message] = upsertAssistant(s.messages, ev.message_id, ts);
+      const [messages, message] = upsertAssistant(s.messages, ev.message_id, ts, ev.agent);
       message.blocks.push({
         kind: "tool",
         id: ev.tool_call_id,
@@ -449,6 +457,8 @@ export interface ToolResultPayload {
 
 export interface ThreadView {
   messages: ThreadMessageLike[];
+  /** The subagent behind a rendered message, keyed by its id; absent means the orchestrator. */
+  agents: Record<string, AgentRef>;
   /** Turn summaries keyed by the id of the (grouped) message they follow. */
   turns: Record<string, TurnSummary[]>;
   /** Memory proposals keyed the same way. */
@@ -507,7 +517,8 @@ export function buildThread(state: StreamState): ThreadView {
   const emitted = new Set<string>();
   let lastEmitted: string | null = null;
   let hasOpenQuestion = false;
-  let group: { id: string; blocks: Block[]; ts: string | null; prev: string | null } | null = null;
+  const agents: Record<string, AgentRef> = {};
+  let group: { id: string; blocks: Block[]; ts: string | null; prev: string | null; agent?: AgentRef } | null = null;
 
   const flush = () => {
     if (!group) return;
@@ -519,6 +530,7 @@ export function buildThread(state: StreamState): ThreadView {
         content: parts,
         createdAt: group.ts ? new Date(group.ts) : undefined,
       });
+      if (group.agent) agents[group.id] = group.agent;
       emitted.add(group.id);
       lastEmitted = group.id;
     } else {
@@ -541,7 +553,8 @@ export function buildThread(state: StreamState): ThreadView {
       lastEmitted = message.id;
       continue;
     }
-    if (!group) group = { id: message.id, blocks: [], ts: message.ts, prev: lastEmitted };
+    if (group && group.agent?.id !== message.agent?.id) flush();
+    if (!group) group = { id: message.id, blocks: [], ts: message.ts, prev: lastEmitted, agent: message.agent };
     group.blocks.push(...message.blocks);
     groupOf.set(message.id, group.id);
     if (message.blocks.some((b) => b.kind === "question" && !b.answer)) hasOpenQuestion = true;
@@ -567,5 +580,5 @@ export function buildThread(state: StreamState): ThreadView {
   for (const turn of state.turns) (turns[placement(turn.afterMessageId)] ??= []).push(turn);
   for (const notice of state.memoryNotices) (notices[placement(notice.afterMessageId)] ??= []).push(notice);
 
-  return { messages, turns, notices, hasOpenQuestion };
+  return { messages, agents, turns, notices, hasOpenQuestion };
 }

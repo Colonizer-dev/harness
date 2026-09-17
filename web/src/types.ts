@@ -325,9 +325,19 @@ export type AgentState = "idle" | "working" | "waiting_for_answer" | "error" | "
 
 export type LogLevel = "info" | "warn" | "error";
 
+/** The subagent that produced an event. Absent on the orchestrator's own events. */
+export interface AgentRef {
+  /** The Task tool call that started it, which is also its identity for the run. */
+  id: string;
+  /** The subagent type, or its task description when the type was not named. */
+  name: string;
+  description?: string | null;
+}
+
 interface Sequenced {
   seq?: number;
   ts?: string;
+  agent?: AgentRef;
 }
 
 export type AgentEventBody =

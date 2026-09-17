@@ -82,6 +82,18 @@ export const IconPower = make(
 export const IconSpark = make(
   <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8" />,
 );
+/** A worker ant, seen from above: the avatar for a subagent in the colony chat. */
+export const IconAnt = make(
+  <>
+    <circle cx="12" cy="5.6" r="2.1" />
+    <circle cx="12" cy="11" r="2" />
+    <ellipse cx="12" cy="17.4" rx="2.7" ry="3.4" />
+    <path d="M10.7 3.9 9.2 2.1M13.3 3.9 14.8 2.1" />
+    <path d="M10.1 9.7 6.6 7.8M13.9 9.7 17.4 7.8" />
+    <path d="M10 11.2 6.1 11.4M14 11.2 17.9 11.4" />
+    <path d="M10.1 12.6 6.6 14.9M13.9 12.6 17.4 14.9" />
+  </>,
+);
 export const IconQuestion = make(
   <>
     <circle cx="12" cy="12" r="9" />

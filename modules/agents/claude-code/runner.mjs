@@ -266,6 +266,10 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     // Not bypassPermissions: AskUserQuestion only reaches canUseTool when nothing auto-approves it.
     permissionMode: 'default',
     includePartialMessages: true,
+    // Without this the SDK forwards only a subagent's tool_use/tool_result blocks, so its work
+    // appears in the transcript as the orchestrator's own. The colony UI shows each subagent as
+    // its own speaker, which needs the text and thinking too.
+    forwardSubagentText: true,
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
@@ -356,7 +360,24 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   const toolMessage = new Map(); // tool_use id -> message_id
   const streams = new Map(); // message_id -> Map<block index, { type, id, text, final }>
   const fallbackIndex = new Map(); // message_id -> next index when nothing was streamed
+  const subagents = new Map(); // Task tool_use id -> { id, name, description }
   let streamMessageId = null;
+
+  /**
+   * Who produced a message. The SDK sets `parent_tool_use_id` to the Task call that started the
+   * subagent, and that call's input named it, so the two together identify the speaker. Returns
+   * undefined for the orchestrator's own messages, which carry no agent field at all.
+   */
+  const agentOf = (parentToolUseId) => {
+    if (!parentToolUseId) return undefined;
+    return subagents.get(parentToolUseId) ?? { id: parentToolUseId, name: 'subagent', description: null };
+  };
+
+  /** `agent` is omitted rather than null for the orchestrator, so its events keep their shape. */
+  const withAgent = (event, parentToolUseId) => {
+    const agent = agentOf(parentToolUseId);
+    return agent ? { ...event, agent } : event;
+  };
   let turnActive = false;
   let closing = false;
   let nudged = false; // one choice-card nudge per user message
@@ -405,7 +426,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
     return slot;
   };
 
-  const onStreamEvent = (event) => {
+  const onStreamEvent = (event, parent = null) => {
     switch (event?.type) {
       case 'message_start':
         streamMessageId = event.message?.id ?? null;
@@ -423,12 +444,17 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
           const slot = blockSlot(streamMessageId, event.index);
           slot.type ??= 'text';
           slot.text += event.delta.text;
-          emit({
-            type: 'assistant_text_delta',
-            message_id: streamMessageId,
-            block_index: event.index,
-            delta: event.delta.text,
-          });
+          emit(
+            withAgent(
+              {
+                type: 'assistant_text_delta',
+                message_id: streamMessageId,
+                block_index: event.index,
+                delta: event.delta.text,
+              },
+              parent,
+            ),
+          );
         }
         break;
     }
@@ -454,26 +480,44 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
 
   const onAssistant = (msg) => {
     const messageId = msg.message?.id ?? msg.uuid ?? null;
+    const parent = msg.parent_tool_use_id ?? null;
     const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
     for (const block of content) {
       const index = blockIndex(messageId, block);
       if (block.type === 'text') {
-        if (block.text) emit({ type: 'assistant_text', message_id: messageId, block_index: index, text: block.text });
+        if (block.text) {
+          emit(withAgent({ type: 'assistant_text', message_id: messageId, block_index: index, text: block.text }, parent));
+        }
       } else if (block.type === 'thinking') {
         if (block.thinking?.trim()) {
-          emit({ type: 'thinking', message_id: messageId, block_index: index, text: block.thinking });
+          emit(withAgent({ type: 'thinking', message_id: messageId, block_index: index, text: block.thinking }, parent));
         }
       } else if (block.type === 'tool_use') {
         toolMessage.set(block.id, messageId);
+        // A Task call names the subagent it is about to start; its messages arrive later carrying
+        // this call's id as their parent, which is the only thing tying the two together.
+        if (block.name === 'Task' || block.name === 'Agent') {
+          const input = block.input ?? {};
+          subagents.set(block.id, {
+            id: block.id,
+            name: String(input.subagent_type || input.description || 'subagent'),
+            description: input.description ? String(input.description) : null,
+          });
+        }
         if (block.name === ASK_TOOL) askIds.add(block.id);
         else {
-          emit({
-            type: 'tool_call',
-            message_id: messageId,
-            tool_call_id: block.id,
-            name: block.name,
-            input: block.input ?? {},
-          });
+          emit(
+            withAgent(
+              {
+                type: 'tool_call',
+                message_id: messageId,
+                tool_call_id: block.id,
+                name: block.name,
+                input: block.input ?? {},
+              },
+              parent,
+            ),
+          );
         }
       }
     }
@@ -482,14 +526,20 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   const onUser = (msg) => {
     const content = msg.message?.content;
     if (!Array.isArray(content)) return;
+    const parent = msg.parent_tool_use_id ?? null;
     for (const block of content) {
       if (block?.type !== 'tool_result' || askIds.has(block.tool_use_id)) continue;
-      emit({
-        type: 'tool_result',
-        tool_call_id: block.tool_use_id,
-        output: toolResultText(block.content),
-        is_error: Boolean(block.is_error),
-      });
+      emit(
+        withAgent(
+          {
+            type: 'tool_result',
+            tool_call_id: block.tool_use_id,
+            output: toolResultText(block.content),
+            is_error: Boolean(block.is_error),
+          },
+          parent,
+        ),
+      );
     }
   };
 
@@ -528,7 +578,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
           case 'stream_event':
             turnActive = true;
             settleStatus();
-            onStreamEvent(msg.event);
+            onStreamEvent(msg.event, msg.parent_tool_use_id ?? null);
             break;
           case 'assistant':
             turnActive = true;
