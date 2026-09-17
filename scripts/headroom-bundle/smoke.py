@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.request
 
-# Keep in step with how the claude-code runner starts Headroom in a colony (modules/agents/claude-code).
+# Keep in step with HEADROOM_ENV and headroomArgs() in modules/agents/claude-code/headroom.mjs.
 HEADROOM_ENV = {
     "HEADROOM_OFFLINE": "1",
     "HEADROOM_BEACON": "off",

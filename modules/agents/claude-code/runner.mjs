@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
+import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
 import { routeEnv, routingPlan, startRouter } from './router.mjs';
 
@@ -642,6 +643,11 @@ async function main() {
     emit({ type: 'log', level: 'info', message: `model router listening on ${router.url} (provider routes: ${served})` });
   }
 
+  // Headroom sits in front of whatever Claude Code would otherwise talk to (docs/protocol.md, "Token savings").
+  let headroom = null;
+  if (process.env.COLONIZER_HEADROOM === 'true') {
+    headroom = await startHeadroom({ env: process.env, upstream: router?.url, log: ({ level, message }) => emit({ type: 'log', level, message }) });
+  }
   let memoryServer;
   if (process.env.COLONIZER_MEMORY_DIR) {
     const { z } = await import('zod');
@@ -649,7 +655,8 @@ async function main() {
   }
 
   const { options, warnings } = buildOptions(process.env, {
-    routerUrl: router?.url,
+    // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
+    routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,
@@ -661,12 +668,14 @@ async function main() {
   const scan = await runPreflight({ env: process.env, emit });
   if (shouldBlock(scan)) {
     emit({ type: 'status', state: 'error', detail: 'pre-flight scan blocked this colony' });
+    await headroom?.close();
     await router?.close();
     process.exit(0);
   }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
   await runAgent({ query, commands, emit, options, enforceChoices });
+  await headroom?.close();
   await router?.close();
   process.exit(0);
 }
