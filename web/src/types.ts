@@ -127,7 +127,7 @@ export interface ModuleInfo {
 // ---------------------------------------------------------------------------
 
 export type ProviderAuth = "x-api-key" | "bearer" | "none";
-export type ProviderPreset = "deepseek" | "local" | "custom";
+export type ProviderPreset = "deepseek" | "zai" | "alibaba" | "local" | "custom";
 
 /** Gateway settings the Mothership applies to every request to a provider. */
 export interface ProviderLimits {

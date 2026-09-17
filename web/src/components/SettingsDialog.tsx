@@ -587,6 +587,24 @@ const PRESETS: Record<ProviderPreset, ProviderDraft> = {
     models: ["deepseek-flash", "deepseek-v4-pro"],
     ...DEFAULT_LIMITS,
   },
+  // Z.AI's coding plan speaks the Anthropic protocol; its key goes in an Authorization header.
+  zai: {
+    id: "zai",
+    name: "Z.AI",
+    base_url: "https://api.z.ai/api/anthropic",
+    auth: "bearer",
+    models: ["glm-5.3", "glm-5.3-flash"],
+    ...DEFAULT_LIMITS,
+  },
+  // Alibaba bills coding plans and token plans through different hosts; this is the token plan's.
+  alibaba: {
+    id: "alibaba",
+    name: "Alibaba (Qwen)",
+    base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+    auth: "bearer",
+    models: ["qwen3.7-plus", "qwen3.8-flash"],
+    ...DEFAULT_LIMITS,
+  },
   // Local servers are slow and usually serve one or two requests at a time.
   local: { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", models: [], ...DEFAULT_LIMITS, timeout_secs: 900, max_concurrent: 1 },
   custom: { id: "", name: "", base_url: "", auth: "x-api-key", models: [], ...DEFAULT_LIMITS },
@@ -632,7 +650,19 @@ function limitLabels(limits: Partial<ProviderLimits>): string[] {
   return labels;
 }
 
-const PRESET_LABEL: Record<ProviderPreset, string> = { deepseek: "DeepSeek preset", local: "Local preset", custom: "Custom" };
+const PRESET_LABEL: Record<ProviderPreset, string> = {
+  deepseek: "DeepSeek preset",
+  zai: "Z.AI preset",
+  alibaba: "Alibaba preset",
+  local: "Local preset",
+  custom: "Custom",
+};
+
+/// Shown while adding a provider, where the base URL is the thing people get wrong.
+const PRESET_HINT: Partial<Record<ProviderPreset, string>> = {
+  zai: "Uses your Z.AI coding plan key as a bearer token.",
+  alibaba: "This is the token plan's host. A coding plan key needs coding-intl.dashscope.aliyuncs.com instead — the two are not interchangeable.",
+};
 
 const AUTH_LABEL: Record<ProviderAuth, string> = {
   "x-api-key": "API key (x-api-key header)",
@@ -764,6 +794,12 @@ function ProvidersSection() {
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={!providers || editing !== null || has("deepseek")} onClick={() => setEditing({ mode: "new", preset: "deepseek" })}>
           <IconPlus size={13} /> DeepSeek
+        </Button>
+        <Button size="sm" disabled={!providers || editing !== null || has("zai")} onClick={() => setEditing({ mode: "new", preset: "zai" })}>
+          <IconPlus size={13} /> Z.AI
+        </Button>
+        <Button size="sm" disabled={!providers || editing !== null || has("alibaba")} onClick={() => setEditing({ mode: "new", preset: "alibaba" })}>
+          <IconPlus size={13} /> Alibaba
         </Button>
         <Button size="sm" disabled={!providers || editing !== null || has("local")} onClick={() => setEditing({ mode: "new", preset: "local" })}>
           <IconPlus size={13} /> Local
@@ -1022,6 +1058,7 @@ function ProviderForm({
         <span className="text-[13.5px] font-semibold">{isNew ? `Add ${PRESET_LABEL[preset].replace(" preset", "")} provider` : `Edit ${initial.name}`}</span>
         {!isNew && <KeyBadge provider={initial} />}
       </div>
+      {isNew && PRESET_HINT[preset] && <p className="text-[12.5px] text-muted">{PRESET_HINT[preset]}</p>}
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="block min-w-0 space-y-1">
           <span className={fieldLabel}>ID</span>
