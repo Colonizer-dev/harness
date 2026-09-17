@@ -27,7 +27,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "resume" | "stop" | "cleanup";
+type Action = "publish" | "resume" | "stop" | "cleanup" | "delete";
 
 export function SessionView({
   sessionId,
@@ -36,6 +36,7 @@ export function SessionView({
   narrow,
   showOrg,
   onSessionChanged,
+  onSessionDeleted,
   onOpenSidebar,
   onOpenMemory,
   onMemoryProposed,
@@ -47,6 +48,7 @@ export function SessionView({
   /** Show the org chip (the sidebar isn't filtered to one org). */
   showOrg: boolean;
   onSessionChanged: (session: Session) => void;
+  onSessionDeleted: (id: string) => void;
   onOpenSidebar: () => void;
   onOpenMemory: () => void;
   onMemoryProposed: () => void;
@@ -85,6 +87,29 @@ export function SessionView({
   const split = showChat && showTerminal;
   const waiting = state.agentState === "waiting_for_answer" || session.status === "waiting_for_answer";
   const attention = session.attention ?? null;
+
+  /** What deleting this colony takes with it, in the words the confirmation uses. */
+  const deleteWarning =
+    session.status === "queued"
+      ? "Remove this colony from the queue and the list? It never started, so nothing else is lost."
+      : session.status === "pr_opened"
+        ? "Delete this colony? Its chat, logs and local worktree are removed. The pull request and its pushed branch stay on GitHub."
+        : session.cleaned_up
+          ? "Delete this colony's chat and logs? Its worktree was already cleaned up. This cannot be undone."
+          : "Delete this colony? Its worktree — including any changes that were never published — its chat and its logs are removed. This cannot be undone.";
+
+  const remove = async () => {
+    if (!window.confirm(deleteWarning)) return;
+    setBusy("delete");
+    try {
+      const result = (await api.deleteSession(session.id)) as { leftover?: string | null } | null;
+      if (result?.leftover) toast(`Colony deleted, but some files could not be removed: ${result.leftover}`, "error");
+      onSessionDeleted(session.id);
+    } catch (error) {
+      toast(errorMessage(error), "error");
+      setBusy(null);
+    }
+  };
 
   const act = async (action: Action, call: (api: Api, id: string) => Promise<Session>, confirmText?: string) => {
     if (confirmText && !window.confirm(confirmText)) return;
@@ -193,6 +218,14 @@ export function SessionView({
               title={session.cleaned_up ? "Already cleaned up" : live ? "Stop the colony first" : "Remove the worktree and local branch"}
             >
               {busy === "cleanup" ? <Spinner /> : <IconTrash size={15} />} Clean up
+            </Button>
+            <Button
+              variant="danger"
+              disabled={live || session.status === "publishing" || busy !== null}
+              onClick={remove}
+              title={live || session.status === "publishing" ? "Stop the colony first" : "Remove this colony from the list, with its chat, logs and worktree"}
+            >
+              {busy === "delete" ? <Spinner /> : <IconTrash size={15} />} Delete
             </Button>
           </div>
         </div>

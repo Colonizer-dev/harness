@@ -111,6 +111,10 @@ export function App() {
     if (!status.github.connected || !status.claude.configured) setSettingsOpen(true);
   }, [status]);
 
+  const removeSession = useCallback((id: string) => {
+    setSessions((list) => list.filter((s) => s.id !== id));
+  }, []);
+
   const upsertSession = useCallback((session: Session) => {
     setSessions((list) => {
       const index = list.findIndex((s) => s.id === session.id);
@@ -206,6 +210,7 @@ export function App() {
             narrow={narrow}
             showOrg={!selectedOrg}
             onSessionChanged={upsertSession}
+            onSessionDeleted={removeSession}
             onOpenSidebar={() => setSidebarOpen(true)}
             onOpenMemory={openMemory}
             onMemoryProposed={loadPendingMemory}
