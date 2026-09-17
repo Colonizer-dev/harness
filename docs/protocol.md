@@ -300,12 +300,13 @@ can switch single skillsets on or off over that list with `agent.skillsets` (see
 
 ### Token savings
 
-Two `claude-code` module settings cut what a colony spends on tokens. Both are off by default, and each
+Three `claude-code` module settings cut what a colony spends on tokens. All are off by default, and each
 works only when the install has what it needs; otherwise the colony boots without it and its log says why.
 
 | Setting | What it does | Needs |
 | :--- | :--- | :--- |
 | `caveman` (`COLONIZER_CAVEMAN`), `caveman_level` (`lite`, `full`, `ultra`; default `full`) | The agent replies in [caveman](https://github.com/juliusbrussee/caveman)'s compressed style: output tokens | `<COLONIZER_HOME>/vendor/caveman/`, mounted at `/opt/colonizer/caveman` |
+| `headroom` (`COLONIZER_HEADROOM`) | Model requests pass through [Headroom](https://github.com/headroomlabs-ai/headroom), which compacts large tool results before the model reads them: input tokens | The Headroom bundle for the machine's architecture, downloaded to `<data>/headroom/<release>` when Headroom is switched on and mounted at `/opt/colonizer/headroom` |
 | `rtk` (`COLONIZER_RTK`) | Shell commands go through [rtk](https://github.com/rtk-ai/rtk), which shortens their output before the agent reads it: input tokens | `<COLONIZER_HOME>/bin/rtk`, mounted at `/opt/colonizer/bin/rtk` |
 
 **caveman.** caveman switches itself on with `SessionStart` and `UserPromptSubmit` hooks that inject its
@@ -314,6 +315,43 @@ ruleset — `skills/caveman/SKILL.md` without its frontmatter — into the syste
 Colonizer exception: the pull request description, AskUserQuestion questions and options, memory
 proposals and code comments stay in plain sentences. Only that file and `LICENSE` are staged, and both are
 MIT. caveman's compression engine, proxy and MCP server are BSL-1.1 and are neither staged nor used.
+
+**Headroom.** The runner starts Headroom's proxy on loopback inside the colony and points Claude Code's
+`ANTHROPIC_BASE_URL` at it. Headroom forwards to the model router when the colony has provider routes and
+to Anthropic when it doesn't, so routing, the Claude fallback and microsandbox's credential swap stay where
+they were. What it changes is the size of large tool results: in the bundle's smoke test, a Bash result of
+400 JSON log rows reaches upstream 75% smaller, with every error row still in it. How it runs is fixed in
+`modules/agents/claude-code/headroom.mjs`:
+
+- `--no-cache`. Headroom's semantic cache answers a similar-enough request without calling the model,
+  which an agent must never get.
+- `--stateless`. Nothing it would write is worth keeping in a disposable colony.
+- No network of its own. Telemetry, update checks, subscription tracking, model downloads and LiteLLM's
+  price-map fetch are switched off through its environment.
+- No ML compression. Kompress needs a 261 MB model that the bundle doesn't carry, and it is disabled.
+- No credential. From the runner's environment it gets `PATH`, `LANG` and the certificate-bundle
+  variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), and nothing else. The
+  requests it forwards carry the colony's placeholder, which microsandbox swaps for the real credential at
+  its TLS edge as before. Those variables are what make Headroom's Python trust that edge; without them,
+  requests with no router in front fail with a 502.
+
+It takes 2.5 to 7 seconds to start and 300 to 370 MB of the colony's memory (measured on arm64). If it
+exits, or isn't healthy within 90 seconds, the colony runs without it and its log says why.
+
+Headroom is Python (Apache-2.0), and colonies run whatever stack image the sandbox module chose, so it
+can't live in the image. Each architecture gets one bundle instead: a standalone CPython 3.13 from
+python-build-standalone with `headroom-ai[proxy]` and its dependencies, installed from
+`vendor/headroom/requirements.txt` with every hash checked. `.github/workflows/headroom-bundle.yml` builds
+it inside Debian bookworm, whose glibc 2.36 matches the colony image, runs `scripts/headroom-bundle/smoke.py`
+against it, and publishes a release. `vendor/vendor.lock` pins each archive by sha256 with kind `bundle`,
+which `fetch-vendor.sh` skips, so nothing is downloaded at install.
+
+Saving the agent module in Settings with Headroom switched on starts the download
+(`POST /api/headroom/download`). The mothership fetches the bundle for its own architecture (a Mac on Apple
+Silicon takes `linux-aarch64`), checks it against the sha256 pin compiled into the mothership, and unpacks
+it to `<data>/headroom/<release>`. The archives are 221 MB for aarch64 and 243 MB for x86_64. A colony that
+starts before the download has finished runs without Headroom. A new pin is a new download, and earlier
+releases stay on disk.
 
 **rtk.** The runner registers an in-process `PreToolUse` hook on `Bash` that runs `rtk rewrite <command>`.
 Exit 0 or 3 with output replaces the command (3 is a rewrite rtk's ask rules flag; the colony's own
@@ -368,6 +406,27 @@ what is actually known: the image, when it started, and how it ended.
 
 A launch still pulls a cold image itself if nothing got to it first, announcing it in the log and
 recording it as the `image-pull` phase.
+
+### `POST /api/headroom/download` and `GET /api/headroom`
+
+Downloads the Headroom bundle pinned for this machine (see Token savings). Settings calls `POST` when the
+agent module is saved with `headroom` switched on, and offers it as "Download now" while the switch is on
+and nothing is downloaded.
+
+`POST` returns at once and the download runs in the background. While the bundle is installed,
+downloading or unpacking, `POST` returns that status without starting another download, and it returns
+`409` when no bundle is pinned for this architecture. `GET` returns the status:
+
+```json
+{"release": "0.37.0-1", "state": "downloading", "bytes": 104857600, "total": 231330241, "started_at": "…", "finished_at": null, "error": null}
+```
+
+`state` is `idle` (not downloaded), `installed`, `downloading`, `unpacking`, `failed` (with `error`), or
+`unavailable` (no bundle for this architecture, and `release` is null). Unlike the image pull, this reports
+progress: `bytes` of `total`, updated about every megabyte.
+
+Nothing appears at `<data>/headroom/<release>` until the archive's sha256 has matched and it has unpacked
+completely. A mismatch or an interrupted download ends `failed` and leaves no partial files behind.
 
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 

@@ -603,6 +603,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             }
         }
     }
+    if switched_on(&runner_env, "COLONIZER_HEADROOM") {
+        match crate::headroom::installed(app) {
+            Some(source) => mounts.push(Mount { source, target: "/opt/colonizer/headroom".into(), read_only: true }),
+            None => {
+                runner_env.remove("COLONIZER_HEADROOM");
+                log.info("Headroom is switched on, but its bundle isn't downloaded yet (Settings → Agent starts the download); running without it").await;
+            }
+        }
+    }
     if switched_on(&runner_env, "COLONIZER_CAVEMAN") {
         match app.cfg.asset("vendor/caveman/SKILL.md").and_then(|_| app.cfg.asset("vendor/caveman")) {
             Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/caveman".into(), read_only: true }),

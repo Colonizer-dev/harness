@@ -191,6 +191,20 @@ export interface PullStatus {
   error: string | null;
 }
 
+/** GET /api/headroom: the Headroom bundle a colony runs Headroom from, downloaded when it is switched on. */
+export type HeadroomState = "idle" | "installed" | "downloading" | "unpacking" | "failed" | "unavailable";
+
+export interface HeadroomStatus {
+  /** The pinned bundle release; null when none is published for this machine's architecture. */
+  release: string | null;
+  state: HeadroomState;
+  bytes: number;
+  total: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 export interface ProviderHealth {
   reachable: boolean;
   /** HTTP status of the probe, when a response arrived. */
