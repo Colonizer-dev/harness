@@ -115,7 +115,7 @@ cp -r "$root/web/dist" "$dist/web"
 
 echo "==> harness"
 if ! prebuilt_bin colonizer; then
-  cargo build --release -p colonizer --manifest-path "$root/Cargo.toml"
+  cargo build --release -p colonizer-harness --manifest-path "$root/Cargo.toml"
   mkdir -p "$dist/bin"
   install -m 755 "$root/target/release/colonizer" "$dist/bin/colonizer"
 fi

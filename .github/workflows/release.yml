@@ -7,7 +7,10 @@
 #   GitHub's JavaScript actions don't run inside Alpine containers.
 # - bundle: scripts/install.sh --bundle for each platform, then a smoke test: the app starts from the
 #   unpacked archive, finds its assets there, and serves its API and web UI.
-# - release: tags only. The tag has to match the harness crate's version.
+# - release: tags only. The tag has to match the version of both crates.
+# - crates: tags only, after the release. Publishes colonizer-agentd and colonizer-harness to crates.io
+#   through Trusted Publishing (no stored token), skipping a version crates.io already has. The crates are
+#   the source, not an install: the site and docs send people to the release installer.
 #
 # A release contains no Anthropic code: the Claude Agent SDK and Claude Code are fetched where the app
 # is installed (scripts/install.sh --bundle and scripts/install-release.sh say how).
@@ -63,7 +66,7 @@ jobs:
               scripts/build-rtk.sh
               # The harness runs on the host, so only the Linux app needs a Linux build of it.
               if [ "$ARCH" = x86_64 ]; then
-                cargo build --release --locked -p colonizer
+                cargo build --release --locked -p colonizer-harness
                 install -m 755 target/release/colonizer dist/bin/colonizer
               fi
               chown -R "$OWNER" dist target
@@ -174,10 +177,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Check the tag against the crate version
+      - name: Check the tag against the crate versions
         run: |
-          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/colonizer/Cargo.toml | head -1)
-          [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match crates/colonizer version $crate" >&2; exit 1; }
+          for manifest in crates/colonizer/Cargo.toml crates/colonizer-agentd/Cargo.toml; do
+            crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
+            [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match $manifest version $crate" >&2; exit 1; }
+          done
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -207,3 +212,49 @@ jobs:
           gh release create "$TAG" colonizer-*.tar.gz install.sh SHA256SUMS \
             --repo "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "Colonizer $TAG" --notes-file notes.md
+
+  crates:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Versions crates.io doesn't have yet
+        id: pending
+        run: |
+          pending=""
+          for crate in colonizer-agentd colonizer-harness; do
+            version=$(cargo metadata --no-deps --format-version 1 |
+              jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
+            status=$(curl -s -o /dev/null -w '%{http_code}' -A "Colonizer-dev/harness release (contact@colonizer.dev)" \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            if [ "$status" = 200 ]; then
+              echo "$crate $version is already on crates.io"
+            else
+              pending="$pending $crate"
+            fi
+          done
+          echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
+
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.pending.outputs.crates != ''
+        id: auth
+
+      - name: Publish
+        if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATES: ${{ steps.pending.outputs.crates }}
+        run: |
+          # colonizer-agentd first: nothing depends on it, but the harness README links to it.
+          for crate in $CRATES; do
+            cargo publish --locked -p "$crate"
+          done

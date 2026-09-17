@@ -1,8 +1,8 @@
 //! Headroom (docs/protocol.md, "Token savings"): the bundle colonies run Headroom from, downloaded only when
-//! someone switches Headroom on — it is a standalone CPython with headroom-ai[proxy], 220–245 MB depending on the architecture, which
-//! nobody who leaves the switch off should carry. Pinned per architecture in vendor/vendor.lock (kind
-//! `bundle`) and published by .github/workflows/headroom-bundle.yml. Colonies mount the unpacked bundle
-//! read-only at /opt/colonizer/headroom, whatever stack they use.
+//! someone switches Headroom on — it is a standalone CPython with headroom-ai[proxy], 220–245 MB depending on
+//! the architecture, which nobody who leaves the switch off should carry. Pinned per architecture in
+//! headroom.lock beside this crate's Cargo.toml, and published by .github/workflows/headroom-bundle.yml.
+//! Colonies mount the unpacked bundle read-only at /opt/colonizer/headroom, whatever stack they use.
 
 use crate::{util::exec, App, Shared};
 use anyhow::{bail, Context, Result};
@@ -15,7 +15,7 @@ use std::{
 use tokio::{io::AsyncWriteExt, process::Command};
 
 /// Compiled in, so the pin always matches the harness that was built.
-const LOCK: &str = include_str!("../../../vendor/vendor.lock");
+const LOCK: &str = include_str!("../headroom.lock");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pin {
@@ -253,7 +253,7 @@ headroom     0.37.0-1  linux-aarch64 bundle  2222  https://example.com/headroom-
     #[test]
     fn the_real_lock_pins_both_architectures() {
         for arch in ["x86_64", "aarch64"] {
-            let pin = pin_for(LOCK, arch).unwrap_or_else(|| panic!("vendor/vendor.lock pins no Headroom bundle for {arch}"));
+            let pin = pin_for(LOCK, arch).unwrap_or_else(|| panic!("headroom.lock pins no Headroom bundle for {arch}"));
             assert_eq!(pin.sha256.len(), 64, "{arch}: sha256 must be 64 hex characters");
             assert!(pin.url.starts_with("https://github.com/Colonizer-dev/harness/releases/download/headroom-"), "{arch}: {}", pin.url);
         }

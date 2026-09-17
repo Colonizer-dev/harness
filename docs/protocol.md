@@ -353,8 +353,8 @@ can't live in the image. Each architecture gets one bundle instead: a standalone
 python-build-standalone with `headroom-ai[proxy]` and its dependencies, installed from
 `vendor/headroom/requirements.txt` with every hash checked. `.github/workflows/headroom-bundle.yml` builds
 it inside Debian bookworm, whose glibc 2.36 matches the colony image, runs `scripts/headroom-bundle/smoke.py`
-against it, and publishes a release. `vendor/vendor.lock` pins each archive by sha256 with kind `bundle`,
-which `fetch-vendor.sh` skips, so nothing is downloaded at install.
+against it, and publishes a release. `crates/colonizer/headroom.lock` pins each archive by sha256. The pins
+are compiled into the mothership, and nothing is downloaded at install.
 
 Saving the agent module in Settings with Headroom switched on starts the download
 (`POST /api/headroom/download`). The mothership fetches the bundle for its own architecture (a Mac on Apple
