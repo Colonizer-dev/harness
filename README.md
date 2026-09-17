@@ -28,9 +28,9 @@ agent can do anything in there. Every colony joins a **private mesh** with the m
 so its chat and a real terminal are one hop away. When the agent needs you, it asks with **choices**.
 When the work is done, your machine, the **mothership**, commits it and opens the pull request.
 
-This repository is the open-source core, MIT, and it runs on one Linux machine today.
-[colonizer.dev](https://colonizer.dev) is the name for everything around it. Nothing is live there
-yet, and nothing in this README pretends otherwise.
+This repository is the open-source core, MIT, and it runs on one machine today: Linux with KVM, or an
+Apple Silicon Mac. [colonizer.dev](https://colonizer.dev) is the name for everything around it. Nothing
+is live there yet, and nothing in this README pretends otherwise.
 
 > **Colonies only ever hold placeholders.**
 > The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
@@ -40,6 +40,23 @@ yet, and nothing in this README pretends otherwise.
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
 it's going, is in [docs/vision.md](docs/vision.md).
+
+---
+
+## Run it
+
+On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git`, `gh`, Node.js 20+ and Rust 1.88+:
+
+```sh
+git clone https://github.com/Colonizer-dev/harness
+cd harness
+scripts/install.sh      # builds everything into ./dist
+dist/bin/colonizer      # then open http://127.0.0.1:7878
+```
+
+[docs/install.md](docs/install.md) has the rest: what a Linux machine needs for Claude Code, what the
+installer does on a Mac, the install options, the first run, where things live and how to update. It is
+also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install).
 
 ---
 
@@ -183,39 +200,6 @@ watchdog. Model providers (DeepSeek, a server on your LAN or tailnet, any Anthro
 are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
 keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
 Claude when a provider is down or busy.
-
----
-
-## Run it
-
-Linux x86_64 with `/dev/kvm` readable and writable by your user, or an Apple Silicon Mac. Either way:
-`git`, `gh`, Node.js ≥ 20 and a Rust toolchain of 1.88 or newer — Homebrew's `rust` can lag a long way
-behind, so `rustup` is the safe bet. On Linux you also need a native Claude Code install;
-[microsandbox](https://docs.microsandbox.dev) ships with the app like the mesh binaries, so there is
-nothing else to install.
-
-**On a Mac**, `scripts/install.sh` additionally fetches the `linux-arm64` build of Claude Code — pinned
-to the `stable` channel and checked against Anthropic's own manifest — because a colony is a Linux
-microVM and the Mac's own binary is Mach-O. `colonizer-agentd` is built for the guest's architecture.
-A colony has been taken end to end on Apple Silicon, from install to an open pull request
-([#36](https://github.com/Colonizer-dev/harness/issues/36)); an Intel Mac cannot run this at all,
-because microsandbox's libkrun backend is aarch64-only. The one gap is the bundled private mesh:
-Tailscale publishes no macOS `tailscaled` to vendor, so colonies are reached on a loopback port
-instead ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
-
-```sh
-git clone https://github.com/Colonizer-dev/harness && cd harness
-scripts/install.sh           # builds everything into ./dist; nothing is downloaded at runtime
-dist/bin/colonizer           # open http://127.0.0.1:7878
-```
-
-In **Settings**, connect GitHub (your `gh` login is picked up automatically) and press **Log in with
-Claude subscription**. Then **Launch** a colony on an issue, or on a repository with nothing but a
-sentence of instructions. Launch as many as you like: past the parallel limit (Settings → Modules →
-sandbox) a colony is queued, and starts on its own when one ahead of it finishes.
-
-`scripts/install.sh --install` additionally copies the app to `~/.local/share/colonizer/app` and links
-`~/.local/bin/colonizer`.
 
 ---
 
