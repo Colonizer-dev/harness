@@ -6,23 +6,35 @@
 #                                   link ~/.local/bin/colonizer
 #   scripts/install.sh --pull-image also download the default colony image now, so the
 #                                   first colony boots instead of waiting on a download
+#   scripts/install.sh --bundle     build ./dist for a prebuilt release (.github/workflows/release.yml)
+#
+# A bundle is built on one machine and run on another, so --bundle skips the KVM check and the Claude Code
+# fetch (scripts/install-release.sh fetches it where the app is installed). Binaries already in
+# $COLONIZER_PREBUILT (colonizer, colonizer-agentd, rtk) are used as they are instead of being built:
+# the release workflow builds the Linux ones as static musl binaries inside rust:1-alpine.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 dist="$root/dist"
 install_app=0
 pull_image=0
+bundle=0
+prebuilt=${COLONIZER_PREBUILT:-}
 # Opt-in on purpose: the colony image is gigabytes, and an installer that
 # downloads that much without being asked is not a good guest on a laptop.
 for arg in "$@"; do
   case "$arg" in
     --install) install_app=1 ;;
     --pull-image) pull_image=1 ;;
+    --bundle) bundle=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
-for c in cargo npm node git gh curl tar; do need "$c"; done
+# The build needs these; gh is for running the app, and a bundle is not run where it is built.
+for c in npm node git curl tar; do need "$c"; done
+[ "$bundle" = 1 ] || need gh
+[ -n "$prebuilt" ] && [ -x "$prebuilt/colonizer" ] || need cargo
 # GNU calls it sha256sum, macOS ships shasum; either will do.
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
   { echo "missing required command: sha256sum or shasum" >&2; exit 1; }
@@ -30,7 +42,7 @@ command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
 # One rule per platform, and nothing pretends to work where it cannot.
 case "$(uname -s)" in
   Linux)
-    [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "/dev/kvm is not accessible; microVMs need KVM" >&2; exit 1; }
+    [ "$bundle" = 1 ] || { [ -r /dev/kvm ] && [ -w /dev/kvm ]; } || { echo "/dev/kvm is not accessible; microVMs need KVM" >&2; exit 1; }
     ;;
   Darwin)
     [ "$(uname -m)" = "arm64" ] ||
@@ -47,7 +59,7 @@ echo "==> vendored binaries (pinned, sha256-verified)"
 
 # A colony is a Linux microVM, so the agent binary mounted into it has to be a Linux one. On Linux that
 # is the host's own install; a Mac's is Mach-O and cannot run in the guest, so fetch the Linux build.
-if [ "$(uname -s)" = "Darwin" ]; then
+if [ "$(uname -s)" = "Darwin" ] && [ "$bundle" = 0 ]; then
   echo "==> Claude Code for the guest (Linux build, sha256-verified)"
   "$root/scripts/fetch-agent-binary.sh"
 fi
@@ -61,11 +73,19 @@ for plugin in $(awk '$1 !~ /^#/ && $4 == "plugin" { print $1 }' "$root/vendor/ve
   [ -d "$dist/plugins/$plugin" ] || { echo "vendored plugin $plugin is missing from $dist/plugins after vendoring" >&2; exit 1; }
 done
 
+# A prebuilt binary is used as it is; anything missing from $COLONIZER_PREBUILT is built here.
+prebuilt_bin() {
+  [ -n "$prebuilt" ] && [ -x "$prebuilt/$1" ] || return 1
+  mkdir -p "$dist/bin"
+  install -m 755 "$prebuilt/$1" "$dist/bin/$1"
+  echo "using prebuilt $1 from $prebuilt"
+}
+
 echo "==> colonizer-agentd (static musl build inside a microVM)"
-MSB="$msb" "$root/scripts/build-agentd.sh"
+prebuilt_bin colonizer-agentd || MSB="$msb" "$root/scripts/build-agentd.sh"
 
 echo "==> rtk (static musl build inside a microVM, for colonies that switch on compact command output)"
-MSB="$msb" "$root/scripts/build-rtk.sh"
+prebuilt_bin rtk || MSB="$msb" "$root/scripts/build-rtk.sh"
 
 echo "==> agent modules"
 mkdir -p "$dist/modules/agents"
@@ -75,7 +95,14 @@ for module in "$root"/modules/agents/*/; do
   rm -rf "$target"
   mkdir -p "$target"
   (cd "$module" && tar --exclude=./node_modules --exclude=./test -cf - .) | tar -xf - -C "$target"
-  if [ -f "$target/package.json" ]; then
+  if [ -f "$target/package.json" ] && [ "$bundle" = 1 ]; then
+    # A release carries no Anthropic code. The Agent SDK is "all rights reserved", and its optional
+    # platform packages are Claude Code itself. Colonies run the Claude Code binary the install provides
+    # (pathToClaudeCodeExecutable in the runner), so the platform packages are left out, and the SDK is
+    # recorded in fetch-at-install for scripts/install-release.sh to fetch from the npm registry.
+    (cd "$target" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
+    (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
+  elif [ -f "$target/package.json" ]; then
     (cd "$target" && npm ci --omit=dev --no-audit --no-fund --silent)
   fi
   echo "installed agent module $id"
@@ -87,9 +114,11 @@ rm -rf "$dist/web"
 cp -r "$root/web/dist" "$dist/web"
 
 echo "==> harness"
-cargo build --release -p colonizer --manifest-path "$root/Cargo.toml"
-mkdir -p "$dist/bin"
-install -m 755 "$root/target/release/colonizer" "$dist/bin/colonizer"
+if ! prebuilt_bin colonizer; then
+  cargo build --release -p colonizer --manifest-path "$root/Cargo.toml"
+  mkdir -p "$dist/bin"
+  install -m 755 "$root/target/release/colonizer" "$dist/bin/colonizer"
+fi
 
 if [ "$install_app" = 1 ]; then
   app="$HOME/.local/share/colonizer/app"
