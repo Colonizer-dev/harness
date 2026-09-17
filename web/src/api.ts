@@ -3,6 +3,8 @@ import type {
   HarnessStatus,
   Issue,
   LoginView,
+  Mem0Check,
+  Mem0Status,
   MemoryListing,
   MemoryNote,
   MemoryProposal,
@@ -92,6 +94,11 @@ export interface Api {
   rejectProposal(id: string): Promise<unknown>;
   createNote(body: NewNoteRequest): Promise<MemoryNote>;
   deleteNote(note: Pick<MemoryNote, "id" | "scope" | "key">): Promise<unknown>;
+  mem0Status(): Promise<Mem0Status>;
+  /** Saves the key on the Mothership; an empty string removes it. */
+  saveMem0Key(apiKey: string): Promise<Mem0Status>;
+  /** Tries the saved key against the configured endpoint. */
+  checkMem0(): Promise<Mem0Check>;
   openEvents(sessionId: string, since: number): SocketLike;
   openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
 }
@@ -178,6 +185,9 @@ export const httpApi: Api = {
   rejectProposal: (id) => post(`/api/memory/proposals/${enc(id)}/reject`),
   createNote: (body) => post("/api/memory/notes", body),
   deleteNote: ({ id, scope, key }) => del(`/api/memory/notes/${enc(id)}?scope=${enc(scope)}&key=${enc(key)}`),
+  mem0Status: () => request("/api/memory/mem0"),
+  saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
+  checkMem0: () => post("/api/memory/mem0/check"),
   openEvents: (id, since) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}`)),
   openTerminal: (id, cols, rows) =>
     new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),

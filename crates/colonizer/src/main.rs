@@ -13,6 +13,7 @@ mod findings;
 mod gateway;
 mod github;
 mod headroom;
+mod mem0;
 mod memory;
 mod mesh;
 mod modules;
@@ -390,6 +391,8 @@ async fn main() -> Result<()> {
         .route("/api/memory/proposals/{id}/reject", post(memory::reject))
         .route("/api/memory/notes", post(memory::create_note))
         .route("/api/memory/notes/{id}", delete(memory::delete_note))
+        .route("/api/memory/mem0", get(memory::mem0_status).put(memory::put_mem0_key))
+        .route("/api/memory/mem0/check", post(memory::check_mem0))
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))

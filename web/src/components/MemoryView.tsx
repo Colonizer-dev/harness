@@ -278,6 +278,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
   const [org, setOrg] = useState<string>(selectedOrg ?? "");
   const [repo, setRepo] = useState<string>("");
   const [notes, setNotes] = useState<MemoryNote[] | null>(null);
+  const [provider, setProvider] = useState("files");
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
@@ -317,6 +318,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
     try {
       const listing = await api.memory(scope, key);
       setNotes(listing.notes);
+      setProvider(listing.provider ?? "files");
       setError(null);
     } catch (e) {
       setError(errorMessage(e));
@@ -413,7 +415,10 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
           </select>
         )}
       </div>
-      <p className="text-[12.5px] text-muted">{description}</p>
+      <p className="text-[12.5px] text-muted">
+        {description}
+        {provider === "mem0" && " Stored in your mem0 project."}
+      </p>
 
       {adding && ready && (
         <NoteForm

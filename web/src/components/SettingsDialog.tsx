@@ -13,6 +13,8 @@ import { errorMessage, useApi, useToast } from "../context";
 import type {
   HarnessStatus,
   HeadroomStatus,
+  Mem0Check,
+  Mem0Status,
   LoginView,
   ModelOption,
   ModelProvider,
@@ -1364,9 +1366,105 @@ function ModulePane({
           );
         })}
 
+        {module.kind === "memory" && draft.provider === "mem0" && <Mem0KeyRow />}
+
         {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
       </div>
     </Pane>
+  );
+}
+
+/**
+ * The mem0 key has its own row and its own save because it is not a module setting: settings go
+ * to modules.json and come back from the API, and a key must do neither. Shown as soon as mem0 is
+ * picked, so the key can be in place before the switch is saved.
+ */
+function Mem0KeyRow() {
+  const api = useApi();
+  const toast = useToast();
+  const id = useId();
+  const [status, setStatus] = useState<Mem0Status | null>(null);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<"save" | "remove" | "check" | null>(null);
+  const [check, setCheck] = useState<Mem0Check | null>(null);
+
+  useEffect(() => {
+    api.mem0Status().then(setStatus, () => setStatus(null));
+  }, [api]);
+
+  const saveKey = async (value: string, kind: "save" | "remove") => {
+    setBusy(kind);
+    setCheck(null);
+    try {
+      setStatus(await api.saveMem0Key(value));
+      setKey("");
+      toast(kind === "save" ? "mem0 key saved" : "mem0 key removed");
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runCheck = async () => {
+    setBusy("check");
+    try {
+      setCheck(await api.checkMem0());
+    } catch (error) {
+      setCheck({ ok: false, error: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const state = !status
+    ? "Checking…"
+    : !status.has_key
+      ? "Not set. Until it is, colonies start without shared memory."
+      : status.source === "MEM0_API_KEY"
+        ? "Read from MEM0_API_KEY."
+        : "Saved on this machine.";
+
+  return (
+    <div className="space-y-2 py-2.5">
+      <label htmlFor={id} className="block text-[13px] font-medium">
+        mem0 API key
+      </label>
+      <p className="text-[12.5px] text-muted">{state} It stays on the Mothership: colonies never see it.</p>
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (key.trim()) void saveKey(key.trim(), "save");
+        }}
+      >
+        <input
+          id={id}
+          type="password"
+          autoComplete="off"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder={status?.has_key ? "Replace the key" : "m0-…"}
+          className={cx(inputClass, "min-w-48 flex-1")}
+        />
+        <Button type="submit" variant="primary" disabled={!key.trim() || busy !== null}>
+          {busy === "save" && <Spinner />} Save
+        </Button>
+        {status?.source === "saved" && (
+          <Button disabled={busy !== null} onClick={() => void saveKey("", "remove")}>
+            {busy === "remove" && <Spinner />} Remove
+          </Button>
+        )}
+        <Button disabled={!status?.has_key || busy !== null} onClick={() => void runCheck()}>
+          {busy === "check" && <Spinner />} Check
+        </Button>
+      </form>
+      {check && (
+        <p role="status" className={cx("text-[12.5px]", check.ok ? "text-ok" : "text-err")}>
+          {check.ok ? "mem0 accepted the key." : check.error}
+        </p>
+      )}
+    </div>
   );
 }
 

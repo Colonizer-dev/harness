@@ -569,6 +569,25 @@ The mothership records it as a pending proposal and broadcasts `{"type":"memory_
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
 mount immediately.
 
+**Where approved notes live** is the memory module's provider. `files` keeps them on the mothership and
+mounts each scope directory. `mem0` keeps them in a [mem0](https://mem0.ai) project through its Platform
+API (v3), and the runner side is identical:
+
+- Proposals queue on the mothership either way. mem0 only receives a note once it is approved (or stored
+  with review off), written with `infer: false` and `immutable: true` so mem0's extraction model never
+  rewrites or later consolidates text a human reviewed.
+- Each scope is a mem0 `user_id` — `colonizer:global`, `colonizer:org:<org>`, `colonizer:repo:<owner>/<repo>`
+  — and every memory carries `app_id: "colonizer"`. Colonizer's own fields (`colonizer_id`, `scope`, `key`,
+  `title`, `tags`, `source`, `created_at`) ride in `metadata`. Listing and deleting are filtered on both, so a
+  mem0 project shared with other tools is safe to point at.
+- At boot the mothership lists the colony's three scopes from mem0 and writes them into the colony's session
+  directory in the layout above. The colony never talks to mem0 and never sees the key, and a resume
+  rewrites the layout rather than keeping deleted notes. `MEMORY.md` is ordered by mem0's relevance to the
+  task (the issue title, the instructions, then the issue body — not the full prompt).
+- If mem0 cannot be reached at boot, the colony still starts, with an empty layout and a `warn` in its log.
+  An approval that cannot reach mem0 fails with `502` and the proposal stays in the queue; with review off, a
+  note that cannot be stored is queued for review instead of dropped.
+
 ### 6.3 Mothership API additions
 
 **Skillsets** (plugin directories a colony can load; see "Plugin directories"):
@@ -619,12 +638,15 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/memory?scope=&key=` | `{scope, key, notes: [Note], proposals: [Proposal]}` |
+| `GET /api/memory?scope=&key=` | `{scope, key, provider, notes: [Note], proposals: [Proposal]}`; `provider` is `files` or `mem0` |
 | `GET /api/memory/proposals` | Every pending proposal, newest first |
 | `POST /api/memory/proposals/{id}/approve` | Optional `{title, content}` edits; creates the note |
 | `POST /api/memory/proposals/{id}/reject` | Discard |
 | `POST /api/memory/notes` | `{scope, key, title, content}`: a note written by you |
-| `DELETE /api/memory/notes/{id}?scope=&key=` | Remove a note |
+| `DELETE /api/memory/notes/{id}?scope=&key=` | Remove a note. With mem0, only one Colonizer wrote into that scope |
+| `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
+| `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
+| `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
 
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
 (`pending`). `source` = `{session_id, repo}` or `{user: true}`.
