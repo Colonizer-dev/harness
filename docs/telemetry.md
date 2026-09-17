@@ -15,7 +15,12 @@ While it is on, the mothership sends a heartbeat to `https://telemetry.colonizer
 nothing else:
 
 ```json
-{"install_id": "0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b", "version": "0.1.3", "platform": "darwin-arm64", "colonies": 2}
+{
+  "install_id": "0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b",
+  "version": "0.1.3",
+  "platform": "darwin-arm64",
+  "colonies": 2
+}
 ```
 
 | Field | What it is |
