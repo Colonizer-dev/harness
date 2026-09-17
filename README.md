@@ -314,6 +314,8 @@ cargo test --workspace                          # mothership and agentd
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
 ```
 
+Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their owners' trademarks. See [NOTICE](NOTICE).
+
 <p align="center">
   <br>
   <a href="https://colonizer.dev"><b>colonizer.dev</b></a>

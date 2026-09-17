@@ -4,6 +4,7 @@ import {
   useId,
   useRef,
   useState,
+  type ComponentType,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
@@ -24,7 +25,20 @@ import type {
   SchemaField,
 } from "../types";
 import { useModels } from "../useModels";
-import { IconCheck, IconChevron, IconCpu, IconExternal, IconNetwork, IconPencil, IconPlus, IconX } from "./icons";
+import {
+  BrandAlibabaCloud,
+  BrandClaude,
+  BrandDeepSeek,
+  IconCheck,
+  IconChevron,
+  IconExternal,
+  IconNetwork,
+  IconPencil,
+  IconPlug,
+  IconServer,
+  IconX,
+  type IconProps,
+} from "./icons";
 import { SkillsetField } from "./Skillsets";
 import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, useMediaQuery, type Tone } from "./ui";
 
@@ -165,7 +179,13 @@ function SettingsBody({
           tone: connectionsTone,
           toneText: connectionsTone === "ok" ? "All connected" : connectionsTone === "err" ? "Needs setup" : undefined,
         },
-        { id: "providers", label: "Model providers", hint: "Other Anthropic-compatible endpoints", badge: providers ? String(providers.length) : undefined },
+        {
+          id: "providers",
+          label: "Model providers",
+          hint: "Claude, and other Anthropic-compatible endpoints",
+          // Anthropic is always in the list as a built-in row, so the count follows what is on screen.
+          badge: providers ? String(providers.length + 1) : undefined,
+        },
         { id: "runtime", label: "Runtime", hint: "Detected on this machine", tone: runtimeBroken ? "err" : null, toneText: runtimeBroken ? "Something is missing" : undefined },
       ],
     },
@@ -195,6 +215,9 @@ function SettingsBody({
         error={providersError}
         setProviders={setProviders}
         reload={loadProviders}
+        claude={claude ?? null}
+        models={models}
+        onOpenConnections={() => select("connections")}
         back={back}
       />
     );
@@ -1258,6 +1281,50 @@ const PRESET_LABEL: Record<ProviderPreset, string> = {
   custom: "Custom",
 };
 
+/**
+ * What sits in a provider's tile. Vendors with a CC0 mark in the icon set get it;
+ * `local` and `custom` are not brands and keep a plain glyph. Anything else,
+ * including OpenAI and Z.AI (no CC0 artwork exists for them) and every preset
+ * added later, falls through to a lettermark built from the provider's name.
+ */
+const PRESET_MARK: Partial<Record<ProviderPreset | "anthropic", ComponentType<IconProps>>> = {
+  anthropic: BrandClaude,
+  deepseek: BrandDeepSeek,
+  alibaba: BrandAlibabaCloud,
+  local: IconServer,
+  custom: IconPlug,
+};
+
+/** One or two initials: the capitals of the name ("OpenAI" gives OA, "Z.AI" gives ZA), else the first letters of its words. */
+function initialsOf(name: string): string {
+  const capitals = name.replace(/[^A-Z]/g, "");
+  if (capitals.length >= 2) return capitals.slice(0, 2);
+  const words = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const letters = words.map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+  return letters || capitals || "?";
+}
+
+/**
+ * The tile at the start of a provider row or add button. Decorative: the vendor's
+ * name is always beside it as text, so the tile is hidden from assistive tech.
+ */
+function ProviderMark({ preset, name, size = "row" }: { preset?: ProviderPreset | "anthropic"; name: string; size?: "row" | "button" }) {
+  const Mark = preset ? PRESET_MARK[preset] : undefined;
+  const row = size === "row";
+  return (
+    <span
+      aria-hidden="true"
+      className={cx(
+        "grid shrink-0 select-none place-items-center bg-panel-2 text-text",
+        row ? "size-8 rounded-lg" : "size-[18px] rounded-[5px]",
+        !Mark && (row ? "text-[11.5px] font-semibold tracking-tight" : "text-[8.5px] font-bold"),
+      )}
+    >
+      {Mark ? <Mark size={row ? 18 : 12} strokeWidth={row ? 1.75 : 2} /> : initialsOf(name)}
+    </span>
+  );
+}
+
 /** Shown while adding a provider, where the base URL is the thing people get wrong. */
 const PRESET_HINT: Partial<Record<ProviderPreset, string>> = {
   zai: "Uses your Z.AI coding plan key as a bearer token.",
@@ -1274,20 +1341,37 @@ const AUTH_LABEL: Record<ProviderAuth, string> = {
 
 type Editing = { mode: "new"; preset: ProviderPreset } | { mode: "edit"; id: string } | null;
 
+/** Add buttons, in the order the presets are listed. */
+const ADD_PRESETS: { preset: ProviderPreset; label: string }[] = [
+  { preset: "deepseek", label: "DeepSeek" },
+  { preset: "openai", label: "OpenAI" },
+  { preset: "zai", label: "Z.AI" },
+  { preset: "alibaba", label: "Alibaba" },
+  { preset: "local", label: "Local server" },
+  { preset: "custom", label: "Custom" },
+];
+
 function ProvidersPane({
   providers,
   error,
   setProviders,
   reload,
+  claude,
+  models,
+  onOpenConnections,
   back,
 }: {
   providers: ModelProvider[] | null;
   error: string | null;
   setProviders: (update: (list: ModelProvider[] | null) => ModelProvider[] | null) => void;
   reload: () => Promise<void>;
+  claude: HarnessStatus["claude"] | null;
+  models: ModelOption[];
+  onOpenConnections: () => void;
   back?: () => void;
 }) {
   const api = useApi();
+  const addLabelId = useId();
   const [editing, setEditing] = useState<Editing>(null);
   const [health, setHealth] = useState<Record<string, HealthView>>({});
 
@@ -1325,13 +1409,14 @@ function ProvidersPane({
   return (
     <Pane
       title="Model providers"
-      subtitle="Other Anthropic-compatible endpoints"
+      subtitle="Claude, and other Anthropic-compatible endpoints"
       back={back}
       info={
         <>
           <p>
-            Pick a provider's model as <Code>provider/model</Code>, for example <Code>deepseek/deepseek-flash</Code>, wherever you choose an
-            orchestrator, subagent or background model.
+            Claude is the default: a model picked by its plain id, such as <Code>sonnet</Code>, goes to Anthropic. Pick another provider's
+            model as <Code>provider/model</Code>, for example <Code>deepseek/deepseek-flash</Code>, wherever you choose an orchestrator,
+            subagent or background model.
           </p>
           <p className="text-muted">
             Requests go through the Mothership gateway: colonies never see provider keys, and servers on a private network (LAN, tailnet)
@@ -1341,17 +1426,20 @@ function ProvidersPane({
       }
     >
       <div className="space-y-3">
-        {error && <p className="text-[13px] text-err">{error}</p>}
-        {!providers && !error && (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading providers…
-          </p>
-        )}
+        <div className="space-y-2">
+          <ClaudeRow claude={claude} models={models} onOpenConnections={onOpenConnections} />
+          {error && <p className="text-[13px] text-err">{error}</p>}
+          {!providers && !error && (
+            <p className="flex items-center gap-2 py-1 text-[13px] text-muted">
+              <Spinner /> Loading providers…
+            </p>
+          )}
+        </div>
         {providers && (
           <div className="space-y-2">
             {providers.length === 0 && editing?.mode !== "new" && (
               <p className="rounded-xl border border-dashed border-border-strong px-3.5 py-4 text-center text-[13px] text-muted">
-                No extra providers yet. Claude models work without one.
+                No extra providers yet. Claude works without one.
               </p>
             )}
             {providers.map((provider) =>
@@ -1401,29 +1489,69 @@ function ProvidersPane({
             )}
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[12.5px] text-muted">Add</span>
-          <Button size="sm" disabled={addDisabled || has("deepseek")} onClick={() => setEditing({ mode: "new", preset: "deepseek" })}>
-            <IconPlus size={13} /> DeepSeek
-          </Button>
-          <Button size="sm" disabled={addDisabled || has("openai")} onClick={() => setEditing({ mode: "new", preset: "openai" })}>
-            <IconPlus size={13} /> OpenAI
-          </Button>
-          <Button size="sm" disabled={addDisabled || has("zai")} onClick={() => setEditing({ mode: "new", preset: "zai" })}>
-            <IconPlus size={13} /> Z.AI
-          </Button>
-          <Button size="sm" disabled={addDisabled || has("alibaba")} onClick={() => setEditing({ mode: "new", preset: "alibaba" })}>
-            <IconPlus size={13} /> Alibaba
-          </Button>
-          <Button size="sm" disabled={addDisabled || has("local")} onClick={() => setEditing({ mode: "new", preset: "local" })}>
-            <IconPlus size={13} /> Local server
-          </Button>
-          <Button size="sm" disabled={addDisabled} onClick={() => setEditing({ mode: "new", preset: "custom" })}>
-            <IconPlus size={13} /> Custom
-          </Button>
+        <div role="group" aria-labelledby={addLabelId} className="flex flex-wrap items-center gap-2">
+          <span id={addLabelId} className="text-[12.5px] text-muted">
+            Add
+          </span>
+          {ADD_PRESETS.map(({ preset, label }) => (
+            <Button
+              key={preset}
+              size="sm"
+              className="pl-1.5"
+              disabled={addDisabled || (preset !== "custom" && has(preset))}
+              onClick={() => setEditing({ mode: "new", preset })}
+            >
+              <ProviderMark preset={preset} name={PRESET_LABEL[preset]} size="button" /> {label}
+            </Button>
+          ))}
         </div>
+        <p className="text-[11.5px] leading-snug text-faint">
+          Logos and names are the property of their owners. Colonizer is not affiliated with, endorsed by or connected to any of them.
+        </p>
       </div>
     </Pane>
+  );
+}
+
+/**
+ * Claude, at the top of the list. Not a provider anyone configured here: it is the
+ * default the harness falls back to, so it is read-only, has no key field and no
+ * endpoint to probe. Its state is the Connections card's, its models the ones
+ * `/api/models` lists under `anthropic`.
+ */
+function ClaudeRow({ claude, models, onOpenConnections }: { claude: HarnessStatus["claude"] | null; models: ModelOption[]; onOpenConnections: () => void }) {
+  const own = models.filter((m) => m.provider === "anthropic");
+  return (
+    <div className="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-border px-3.5 py-3">
+      <ProviderMark preset="anthropic" name="Anthropic" />
+      <div className="min-w-0 flex-1 basis-48">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[14px] font-semibold">Anthropic</span>
+          <Badge>Built-in</Badge>
+          {claude && <Badge tone={claude.configured ? "ok" : "err"}>{claude.configured ? "Connected" : "Not connected"}</Badge>}
+        </div>
+        <div className="mt-0.5 text-[12px] text-muted">
+          {claude?.configured ? `${claude.source ?? "Connected"} · managed in Connections` : "Managed in Connections"}
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {own.length === 0 ? (
+            <span className="text-[12px] text-faint">Model list not loaded.</span>
+          ) : (
+            own.map((model) => (
+              <span key={model.id} title={model.label} className="rounded bg-panel-2 px-1.5 py-px font-mono text-[11.5px] text-muted">
+                {model.id}
+              </span>
+            ))
+          )}
+        </div>
+        <p className="mt-1.5 text-[12px] text-faint">The default. A model id with no provider prefix, and a provider's fallback, go here.</p>
+      </div>
+      <div className="flex shrink-0 gap-1.5">
+        <Button size="sm" onClick={onOpenConnections}>
+          Connections <IconChevron size={13} />
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1496,9 +1624,7 @@ function ProviderRow({
   const limits = limitLabels(provider);
   return (
     <div className="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-border px-3.5 py-3">
-      <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-panel-2 text-muted">
-        <IconCpu size={16} />
-      </div>
+      <ProviderMark preset={provider.preset} name={provider.name} />
       <div className="min-w-0 flex-1 basis-48">
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[14px] font-semibold">{provider.name}</span>
