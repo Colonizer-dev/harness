@@ -148,8 +148,15 @@ export function describeTool(toolName: string, input: Record<string, unknown>): 
       return { icon: "web", label: query ? `Searching the web for ${quote(query)}` : "Searching the web" };
     }
     case "Task":
-    case "Agent":
-      return { icon: "agent", label: "Asking a helper agent" };
+    case "Agent": {
+      // The subagent that starts here speaks for itself further down the thread, so name it.
+      const what = str(input.description);
+      const who = str(input.subagent_type);
+      if (what && who) return { icon: "agent", label: `Sending ${quote(what)} to the ${who} subagent` };
+      if (what) return { icon: "agent", label: `Starting a subagent: ${what}` };
+      if (who) return { icon: "agent", label: `Starting the ${who} subagent` };
+      return { icon: "agent", label: "Starting a subagent" };
+    }
     case "TodoWrite":
       return { icon: "list", label: "Updating its plan" };
     default:
