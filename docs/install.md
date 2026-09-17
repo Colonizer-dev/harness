@@ -27,7 +27,11 @@ Then run `colonizer` and open <http://127.0.0.1:7878>.
 
 The installer picks the app for your machine from the latest
 [release](https://github.com/Colonizer-dev/harness/releases) and checks it against the release's
-`SHA256SUMS`. It installs the app to `~/.local/share/colonizer/app` and links `~/.local/bin/colonizer`.
+`SHA256SUMS`. It installs the app to `~/.local/share/colonizer/app`, a symlink to the directory the
+installed version lives in, and links `~/.local/bin/colonizer`; an upgrade switches the symlink with
+one rename, so an upgrade cut short leaves either the whole old app or the whole new one. The
+exception is the one-time move up from a pre-symlink install: for a moment the old app is parked at
+`app.old`, and a hard kill in that window leaves colonizer down until the next install puts it back.
 The script is `scripts/install-release.sh`, published with each release as `install.sh`.
 
 A release contains no Anthropic code, which isn't ours to redistribute. So the installer fetches two
@@ -92,7 +96,7 @@ port instead ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
 
 | What | Where | Change it with |
 | :--- | :--- | :--- |
-| The app | `~/.local/share/colonizer/app` for a release; `./dist` for a build from source, or that same place after `--install` | `COLONIZER_APP` for a release |
+| The app | `~/.local/share/colonizer/app` for a release — a symlink to the directory the installed version lives in, so an upgrade is one rename; `./dist` for a build from source, or that same place after `--install` | `COLONIZER_APP` for a release |
 | Settings, org settings, providers, and the GitHub, Claude and provider credentials | `~/.config/colonizer` | `COLONIZER_CONFIG_DIR` |
 | Colonies and their worktrees, shared memory, your own plugins, the Headroom bundle | `~/.local/share/colonizer` | `COLONIZER_DATA_DIR` |
 | The web UI | `127.0.0.1:7878` | `COLONIZER_BIND` |

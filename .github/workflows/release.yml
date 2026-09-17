@@ -24,6 +24,7 @@ on:
       - .github/workflows/release.yml
       - scripts/install.sh
       - scripts/install-release.sh
+      - scripts/test/install-release.test.sh
       - scripts/record-fetch-at-install.mjs
       - scripts/build-agentd.sh
       - scripts/build-rtk.sh
@@ -163,6 +164,20 @@ jobs:
           path: out/colonizer-${{ matrix.platform }}.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The installer refuses to install where colonies cannot run, and hosted runners have /dev/kvm
+      # but keep it from the runner user. Missing device should fail loudly, not skip the test.
+      - name: Let the runner user use /dev/kvm
+        run: sudo chmod 0666 /dev/kvm
+
+      - name: Test the installer
+        run: sh scripts/test/install-release.test.sh
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
