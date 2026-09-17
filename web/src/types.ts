@@ -39,12 +39,22 @@ export interface Session {
   autopilot: boolean;
   pr_url: string | null;
   error: string | null;
+  /** Claude models only; routed models are counted in `model_usage` as tokens. */
   cost_usd: number | null;
+  /** Cumulative tokens per model, as of the last turn end. */
+  model_usage?: Record<string, ModelTokens> | null;
   cleaned_up: boolean;
   created_at: string;
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+}
+
+export interface ModelTokens {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
 }
 
 export interface Repo {
@@ -364,7 +374,14 @@ export type AgentEventBody =
   | { type: "tool_result"; tool_call_id: string; output: string; is_error: boolean }
   | { type: "question"; question_id: string; message_id?: string; questions: Question[] }
   | { type: "question_answered"; question_id: string; answers: Answers; response?: string | null }
-  | { type: "turn_end"; is_error: boolean; result: string | null; cost_usd: number | null; duration_ms: number | null }
+  | {
+      type: "turn_end";
+      is_error: boolean;
+      result: string | null;
+      cost_usd: number | null;
+      duration_ms: number | null;
+      model_usage?: Record<string, ModelTokens>;
+    }
   | { type: "log"; level: LogLevel; message: string };
 
 export type AgentEvent = Sequenced & AgentEventBody;

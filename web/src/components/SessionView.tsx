@@ -142,7 +142,7 @@ export function SessionView({
                 </span>
               )}
               <span>{session.agent}</span>
-              {session.cost_usd != null && <span>${session.cost_usd.toFixed(2)}</span>}
+              <CostSummary session={session} />
               {live && session.last_activity_at && !attention && <span>Last activity {minutesAgo(session.last_activity_at)}</span>}
             </div>
           </div>
@@ -362,5 +362,37 @@ function ActivityStrip({ logs }: { logs: LogEntry[] }) {
         </ol>
       )}
     </div>
+  );
+}
+
+function compactTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+/**
+ * The colony's cost and what it is made of. With per-model usage the dollar figure is Claude's alone, since Claude Code
+ * cannot price routed models; the tooltip lists tokens for every model. Older colonies carry only the SDK's total.
+ */
+function CostSummary({ session }: { session: Session }) {
+  const usage = session.model_usage ? Object.entries(session.model_usage) : [];
+  if (session.cost_usd == null && usage.length === 0) return null;
+  const tokens = usage.reduce(
+    (sum, [, u]) => sum + u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens,
+    0,
+  );
+  const detail = usage
+    .map(
+      ([model, u]) =>
+        `${model}: ${compactTokens(u.input_tokens)} in · ${compactTokens(u.output_tokens)} out · ` +
+        `${compactTokens(u.cache_read_tokens)} cache read · ${compactTokens(u.cache_write_tokens)} cache write`,
+    )
+    .join("\n");
+  return (
+    <span title={detail || undefined}>
+      {session.cost_usd != null && `$${session.cost_usd.toFixed(2)}${usage.length ? " on Claude" : ""}`}
+      {usage.length > 0 && `${session.cost_usd != null ? " · " : ""}${compactTokens(tokens)} tokens`}
+    </span>
   );
 }
