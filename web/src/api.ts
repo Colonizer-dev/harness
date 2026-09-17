@@ -14,6 +14,7 @@ import type {
   NewSessionRequest,
   OrgInfo,
   OrgSettings,
+  PluginListing,
   ProviderHealth,
   PullStatus,
   Repo,
@@ -67,6 +68,7 @@ export interface Api {
   claudeLoginStart(): Promise<LoginView>;
   claudeLoginCode(code: string): Promise<LoginView>;
   claudeLoginCancel(): Promise<LoginView>;
+  plugins(): Promise<PluginListing>;
   providers(): Promise<ModelProvider[]>;
   saveProvider(id: string, body: SaveProviderRequest): Promise<ModelProvider>;
   deleteProvider(id: string): Promise<unknown>;
@@ -149,6 +151,7 @@ export const httpApi: Api = {
   claudeLoginStart: () => post("/api/claude-login/start"),
   claudeLoginCode: (code) => post("/api/claude-login/code", { code }),
   claudeLoginCancel: () => post("/api/claude-login/cancel"),
+  plugins: () => request("/api/plugins"),
   providers: () => request("/api/providers"),
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),

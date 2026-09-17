@@ -239,7 +239,9 @@ operator put in `<data>/plugins/<name>`, then what shipped with the app in `<COL
 A local copy therefore overrides a vendored one of the same name. Each is a plain name, never a path,
 and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
 
-`scripts/install.sh` stages one vendored plugin today:
+`scripts/fetch-vendor.sh` stages vendored plugins at `dist/plugins/<name>`, which `install.sh` copies to
+`<COLONIZER_HOME>/plugins/<name>`, and `install.sh` fails if a `plugin` entry in `vendor/vendor.lock` didn't
+land there. It stages one vendored plugin today:
 
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
@@ -251,7 +253,11 @@ be expressed as a setting: every ECC hook is a `node -e` bootstrap that spawns f
 `ECC_HOOKS_ENABLED` second. The staging step removes the directory, and `fetch-vendor.sh` fails if it
 survives. `ECC_HOOKS_ENABLED=false` is also set in any colony that loads a plugin, as a second line.
 
-Set `plugins` to `ecc` on the `claude-code` module to load it. Empty, the default, loads nothing.
+**Skillsets are switches, all off by default.** Settings shows the `claude-code` module's `plugins`
+setting (schema `"format": "plugin-dirs"`) as one switch per plugin directory from `GET /api/plugins`,
+and writes the same comma-separated list of names. A saved name that no longer resolves is shown as
+missing, since a colony loading it fails to boot. Empty, the default, loads nothing. An org workspace
+can switch single skillsets on or off over that list with `agent.skillsets` (see Org workspaces).
 
 ### Pre-flight scan
 
@@ -398,6 +404,12 @@ mount immediately.
 
 ### 6.3 Mothership API additions
 
+**Skillsets** (plugin directories a colony can load; see "Plugin directories"):
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/plugins` | `{local_root, plugins: [{name, description, version, source: "vendored"\|"local", shadows_vendored, skills, agents, commands}]}`, one entry per name resolved the way a colony's boot resolves it. `local_root` is where an operator adds their own; the counts are what Claude Code discovers: `skills/<name>/SKILL.md`, `agents/*.md`, `commands/*.md` |
+
 **Model providers** (credentials stay on the mothership, keys stored 0600):
 
 | Method & path | Purpose |
@@ -422,9 +434,14 @@ strings; UIs offer `GET /api/models` as suggestions).
 | `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings}]` for every org seen in repositories, colonies or saved settings |
 | `PUT /api/orgs/{org}` | `{settings}`; every field optional, missing or `null` inherits the global module setting |
 
+`agent.skillsets` is a map of plugin directory name to `true` or `false`: those skillsets are switched on
+or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
+global switch. Names are plain directory names, at most 64. An empty map is stored as `null`.
+
 ```json
 {"settings": {
-  "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null},
+  "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
+            "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
   "memory": {"enabled": true},
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
