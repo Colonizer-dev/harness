@@ -24,7 +24,7 @@ import type {
   PullStatus,
   SchemaField,
 } from "../types";
-import { PROVIDER_CATALOG, type CatalogEntry } from "../providerCatalog";
+import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
 import {
   BrandAlibabaCloud,
@@ -1876,6 +1876,11 @@ function ProviderForm({
     context_tokens: limitText(start.context_tokens),
   });
   const [fallback, setFallback] = useState(start.fallback_model ?? "");
+  // A catalogue entry whose base URL has ${…} holes: ask for them, and the URL follows.
+  const template = initial ? [] : (CATALOG_BY_ID.get(preset)?.variables ?? []);
+  const [vars, setVars] = useState<Record<string, string>>(() =>
+    Object.fromEntries(template.map((v) => [v.name, v.default ?? ""])),
+  );
   // A new Local provider opens Advanced so the prefilled limits are visible.
   const [advancedOpen, setAdvancedOpen] = useState(!initial && preset === "local");
   const anthropicModels = useModels().filter((m) => m.provider === "anthropic");
@@ -1914,10 +1919,17 @@ function ProviderForm({
         : takenIds.includes(id)
           ? "Already in use"
           : null;
-  const urlError = /^https?:\/\/[^\s/]+(\/\S*)?$/.test(baseUrl.trim()) ? null : "An http(s) URL";
+  // What actually gets saved and validated: the template with its holes filled.
+  const url = template.length ? fillTemplate(baseUrl, vars) : baseUrl;
+  const unfilled = template.filter((v) => !vars[v.name]?.trim());
+  const urlError = unfilled.length
+    ? `Fill in ${unfilled.map((v) => v.label).join(" and ")}`
+    : /^https?:\/\/[^\s/]+(\/\S*)?$/.test(url.trim())
+      ? null
+      : "An http(s) URL";
   const keyError = auth !== "none" && keyMode === "replace" && initial?.has_key && !key.trim() ? "Paste the new key" : null;
   const invalid = Boolean(idError || urlError || keyError || limitsInvalid || !name.trim());
-  const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(baseUrl.trim());
+  const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url.trim());
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -1931,7 +1943,7 @@ function ProviderForm({
     try {
       const saved = await api.saveProvider(id, {
         name: name.trim(),
-        base_url: baseUrl.trim(),
+        base_url: url.trim(),
         auth,
         wire,
         models,
@@ -1967,7 +1979,7 @@ function ProviderForm({
   return (
     <form onSubmit={save} className="space-y-3 rounded-xl border border-accent/40 bg-panel p-3.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13.5px] font-semibold">{isNew ? `New ${PRESET_LABEL[preset]} provider` : `Edit ${initial.name}`}</span>
+        <span className="text-[13.5px] font-semibold">{isNew ? `New ${presetLabel(preset)} provider` : `Edit ${initial.name}`}</span>
         {!isNew && <KeyBadge provider={initial} />}
         {wire === "openai" && (
           <Badge tone="info" title="Speaks the OpenAI protocol; the Mothership gateway translates">
@@ -1998,21 +2010,45 @@ function ProviderForm({
         <FormField id={ids.name} label="Name">
           <input id={ids.name} value={name} onChange={(e) => setName(e.target.value)} placeholder="My provider" className={inputClass} />
         </FormField>
+        {template.map((variable) => (
+          <FormField
+            key={variable.name}
+            id={`${ids.url}-${variable.name}`}
+            label={variable.label}
+            info={<p>Part of this provider's address, so the URL below is only complete once it is filled in.</p>}
+          >
+            <input
+              id={`${ids.url}-${variable.name}`}
+              value={vars[variable.name] ?? ""}
+              onChange={(e) => setVars((v) => ({ ...v, [variable.name]: e.target.value }))}
+              placeholder={variable.placeholder}
+              spellCheck={false}
+              className={cx(inputClass, "font-mono text-[13px]")}
+            />
+          </FormField>
+        ))}
         <FormField
           id={ids.url}
           label="Base URL"
           className="sm:col-span-2"
-          error={urlError && baseUrl ? urlError : null}
-          hint={loopback ? "The Mothership connects to this address, so localhost is the Mothership itself." : undefined}
+          error={urlError && baseUrl && !unfilled.length ? urlError : null}
+          hint={
+            unfilled.length
+              ? urlError ?? undefined
+              : loopback
+                ? "The Mothership connects to this address, so localhost is the Mothership itself."
+                : undefined
+          }
         >
           <input
             id={ids.url}
-            value={baseUrl}
+            value={template.length ? url : baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
+            readOnly={template.length > 0}
             placeholder={wire === "openai" ? "https://api.openai.com" : "https://api.example.com/anthropic"}
             spellCheck={false}
-            aria-invalid={Boolean(urlError && baseUrl)}
-            className={cx(inputClass, "font-mono text-[13px]")}
+            aria-invalid={Boolean(urlError && baseUrl && !unfilled.length)}
+            className={cx(inputClass, "font-mono text-[13px]", template.length > 0 && "text-muted")}
           />
         </FormField>
         <FormField id={ids.auth} label="Authentication">
