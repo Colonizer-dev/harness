@@ -189,6 +189,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree) |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
+| `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
 
 Module `schema` is a JSON Schema subset (also used for `settings` in agent `module.json` manifests):
 
@@ -437,6 +438,29 @@ progress: `bytes` of `total`, updated about every megabyte.
 
 Nothing appears at `<data>/headroom/<release>` until the archive's sha256 has matched and it has unpacked
 completely. A mismatch or an interrupted download ends `failed` and leaves no partial files behind.
+
+### `GET /api/telemetry` and `PUT /api/telemetry`
+
+The live map on colonizer.dev ([telemetry.md](telemetry.md)). It is off until the user switches it on, and
+the web UI asks once while `enabled` is `null`. `GET` returns:
+
+```json
+{
+  "enabled": true, "blocked_by": null,
+  "endpoint": "https://telemetry.colonizer.dev", "map_url": "https://colonizer.dev/live",
+  "last_sent_at": "…", "last_error": null,
+  "heartbeat": {"install_id": "0b0c9a8e-…", "version": "0.1.3", "platform": "darwin-arm64", "colonies": 2}
+}
+```
+
+`heartbeat` is exactly what the next heartbeat will send; `install_id` is `null` until the map is first
+switched on. `blocked_by` names `DO_NOT_TRACK` or `COLONIZER_TELEMETRY` when the environment keeps it
+off, and `enabled` is then `false`.
+
+`PUT` with `{"enabled": true|false}` saves the answer to `<config>/telemetry.json` and returns the same
+status. Switching on creates a random `install_id` and sends a heartbeat within a second or two.
+Switching off sends `{"install_id", "online": false}` and forgets the id. `PUT` returns `409` while the
+environment keeps it off.
 
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 

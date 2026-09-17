@@ -4,10 +4,10 @@ import { IconMenu, IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView } from "./components/Sidebar";
-import { Button, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
-import type { HarnessStatus, ModuleInfo, OrgInfo, Session } from "./types";
+import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
+import type { HarnessStatus, ModuleInfo, OrgInfo, Session, TelemetryStatus } from "./types";
 
 export function App() {
   const api = useApi();
@@ -20,6 +20,8 @@ export function App() {
   const [interfaces, setInterfaces] = useState<InterfaceFlags>({ chat: true, terminal: true });
   const [autopilotDefault, setAutopilotDefault] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
+  const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string | null>(() => stored("colonizer.org") || null);
@@ -74,9 +76,18 @@ export function App() {
     setInterfaces({ chat: flag("chat"), terminal: flag("terminal") });
   }, []);
 
+  const loadTelemetry = useCallback(async () => {
+    try {
+      setTelemetry(await api.telemetry());
+    } catch {
+      /* older mothership: no live map, and nothing to ask */
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadStatus();
     void loadSessions();
+    void loadTelemetry();
     void loadOrgs();
     void loadPendingMemory();
     api.modules().then(applyModules).catch(() => {});
@@ -87,7 +98,7 @@ export function App() {
       setInterval(loadPendingMemory, 10_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, applyModules]);
+  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -163,6 +174,7 @@ export function App() {
       }}
       onOpenSettings={() => {
         setSidebarOpen(false);
+        setSettingsSection(undefined);
         setSettingsOpen(true);
       }}
       onClose={narrow ? () => setSidebarOpen(false) : undefined}
@@ -221,11 +233,27 @@ export function App() {
       </main>
       <SettingsDialog
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          setSettingsOpen(false);
+          void loadTelemetry();
+        }}
         status={status}
         onStatusChanged={loadStatus}
         onModulesChanged={applyModules}
+        telemetry={telemetry}
+        onTelemetryChanged={setTelemetry}
+        initialSection={settingsSection}
       />
+      {telemetry && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status?.github.connected && status.claude.configured && (
+        <LiveMapPrompt
+          narrow={narrow}
+          onAnswered={setTelemetry}
+          onDetails={() => {
+            setSettingsSection("live-map");
+            setSettingsOpen(true);
+          }}
+        />
+      )}
       <OrgSettingsDialog
         org={orgSettingsFor}
         info={orgs.find((o) => sameOrg(o.org, orgSettingsFor))}
@@ -241,6 +269,55 @@ export function App() {
           void loadOrgs();
         }}
       />
+    </div>
+  );
+}
+
+/** Asked once, after setup: the live map stays off until the user says otherwise (docs/telemetry.md). */
+function LiveMapPrompt({
+  narrow,
+  onAnswered,
+  onDetails,
+}: {
+  narrow: boolean;
+  onAnswered: (telemetry: TelemetryStatus) => void;
+  onDetails: () => void;
+}) {
+  const api = useApi();
+  const [busy, setBusy] = useState(false);
+  const answer = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      onAnswered(await api.setTelemetry(enabled));
+    } catch {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      role="region"
+      aria-label="Live map"
+      className={cx(
+        "fixed z-30 rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]",
+        narrow ? "inset-x-3 bottom-3" : "bottom-5 right-5 w-[380px]",
+      )}
+    >
+      <p className="text-[14px] font-semibold">Put this mothership on the live map?</p>
+      <p className="mt-1.5 text-[12.5px] text-muted">
+        colonizer.dev/live shows where colonies are running, to within about 25 km. It gets a heartbeat every 5 minutes: a random id,
+        the version, the platform and how many colonies run. Nothing about your code. Off unless you say yes.
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => void answer(true)}>
+          Show on the map
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => void answer(false)}>
+          No thanks
+        </Button>
+        <button type="button" onClick={onDetails} className="ml-auto cursor-pointer text-[12.5px] text-accent hover:underline">
+          What is sent
+        </button>
+      </div>
     </div>
   );
 }

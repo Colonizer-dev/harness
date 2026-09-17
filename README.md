@@ -276,6 +276,7 @@ The roadmap is the issue tracker. There is no private version of it.
 | Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |
+| Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
@@ -293,6 +294,8 @@ come from the environment:
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
+| `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
+| `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 
 A few things belong in neither the UI nor the environment. They live in `~/.config/colonizer/colonizer.toml`,
 which you write and Colonizer only reads — a missing file means the defaults:
@@ -309,6 +312,7 @@ co_author = true
 ```sh
 cargo test --workspace                          # mothership and agentd
 (cd modules/agents/claude-code && node --test test/)
+(cd services/telemetry && node --test)          # the live map's receiver
 (cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
 ```
