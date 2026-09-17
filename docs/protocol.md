@@ -115,6 +115,11 @@ whole question card instead.
 
 Rules:
 
+- Any event a **subagent** produced carries `"agent": {"id":"toolu_…","name":"code-reviewer","description":"…"}`,
+  where `id` is the `Task` tool call that started it. The orchestrator's own events omit the field
+  entirely rather than sending null. `assistant_text(_delta)`, `thinking`, `tool_call` and
+  `tool_result` can all carry it; `question`, `turn_end` and `status` are the colony's own and never
+  do. A UI groups consecutive events by `agent.id` to show each subagent as its own speaker.
 - A question is **never** also emitted as `tool_call`/`tool_result`; use `question` / `question_answered`.
 - Agents must ask the user only through `question` events (the Claude Code runner appends a system
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
@@ -461,6 +466,9 @@ Byte-for-byte proxy of agentd `/v1/pty` (same binary/text frame rules).
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.
+- Consecutive assistant messages group into one bubble, and a change of `agent` breaks the group, so a
+  subagent's turn is never folded into the orchestrator's. A subagent's bubble is shown as its own
+  speaker: ant avatar, the subagent's name, indented under the `Task` call that started it.
 - Choice card (`ask_user`): one section per question with its header chip; options as large selectable
   cards (radio, or checkboxes when `multi_select`) showing label + description; `preview` rendered as
   monospace text (markdown) or a sandboxed `iframe srcdoc` (HTML); an always-present "Other…" option

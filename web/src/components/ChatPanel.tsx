@@ -26,11 +26,12 @@ import {
   type ToolResultPayload,
   type TurnSummary,
 } from "../sessionStream";
-import type { MemoryScope } from "../types";
+import type { AgentRef, MemoryScope } from "../types";
 import { describeTool, isNoiseTool, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
 import {
   IconAlert,
+  IconAnt,
   IconBranch,
   IconCheck,
   IconChevron,
@@ -156,7 +157,11 @@ export function ChatPanel({
               {({ message }) => (
                 <>
                   {message.role !== "user" ? (
-                    <AssistantMessage />
+                    thread.agents[message.id] ? (
+                      <SubagentMessage agent={thread.agents[message.id]} />
+                    ) : (
+                      <AssistantMessage />
+                    )
                   ) : message.id === BRIEF_ID ? (
                     <SessionBrief text={messageText(message)} />
                   ) : isWatchdogMessageId(message.id) ? (
@@ -369,6 +374,37 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
         )}
       </div>
     </details>
+  );
+}
+
+/**
+ * A subagent's turn. The orchestrator and each subagent are different speakers in the same thread,
+ * so a subagent gets its own avatar, its name, and an indented column — the shape of a group chat
+ * rather than one long monologue.
+ */
+function SubagentMessage({ agent }: { agent: AgentRef }) {
+  return (
+    <MessagePrimitive.Root className="my-4 ml-4 flex gap-3 border-l-2 border-accent/25 pl-4">
+      <div
+        className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent"
+        title={agent.description ?? undefined}
+      >
+        <IconAnt size={16} />
+      </div>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="text-[12.5px] font-semibold text-accent">{agent.name}</span>
+          <span className="text-[11.5px] text-faint">subagent</span>
+        </div>
+        <MessagePrimitive.Parts
+          components={{
+            Text: MarkdownText,
+            Reasoning: ReasoningPart,
+            tools: { Fallback: ToolCallCard },
+          }}
+        />
+      </div>
+    </MessagePrimitive.Root>
   );
 }
 
