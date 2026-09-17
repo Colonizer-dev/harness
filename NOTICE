@@ -29,3 +29,16 @@ Vendors shown by name only, with a neutral lettermark in place of a logo:
   - Z.AI
 
 Colonizer's own code is licensed under the MIT license; see LICENSE.
+
+Provider catalogue
+------------------
+
+The searchable list of Anthropic-compatible endpoints in Settings is adapted
+from cc-switch (https://github.com/farion1231/cc-switch), which is MIT
+licensed. Only the endpoint data was taken: names, base URLs, authentication
+header and API format.
+
+Inclusion is not a recommendation. Colonizer does not vet, endorse or have any
+relationship with the services listed, several of which resell access to models
+they do not run. Some carried commercial-partner flags in the source catalogue;
+those flags were not imported, and no placement here was paid for.
