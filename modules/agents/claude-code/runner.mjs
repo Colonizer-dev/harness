@@ -17,6 +17,11 @@ export const SYSTEM_PROMPT_APPEND = [
   '- Do not run `git commit` or `git push` and do not create branches; the harness commits your changes and opens the pull request.',
 ].join('\n');
 
+export const DELEGATE_PROMPT_APPEND = [
+  '- You are the orchestrator of this colony. Plan the work, split it into tasks, and start a subagent with the Task tool for each one. Read the subagent\'s report, decide what follows, and keep a subagent going until its task is genuinely done.',
+  '- Do the thinking yourself: what to build, in what order, whether a result is good enough, and what to tell the user. Leave reading, searching, editing, running commands and tests to subagents.',
+].join('\n');
+
 export const CHOICE_NUDGE =
   'You ended your turn with a question in plain text. Ask it again with the AskUserQuestion tool, offering 2-4 concrete options, and wait for the answer.';
 
@@ -28,6 +33,30 @@ export function endsWithQuestion(text) {
 
 export const MAX_TOOL_OUTPUT = 20_000;
 const ASK_TOOL = 'AskUserQuestion';
+
+/** Tools the orchestrator keeps when delegation is enforced: planning, asking, delegating, memory. */
+const ORCHESTRATOR_TOOLS = new Set(['Task', 'Agent', ASK_TOOL, 'TodoWrite', 'ExitPlanMode']);
+
+/** The one thing the orchestrator writes itself; the harness reads it to open the pull request. */
+const OUT_DIR = '/harness/out';
+
+/**
+ * Why a tool call is refused when `delegate = enforce`, or null when it is allowed.
+ *
+ * Only the main thread is constrained: a subagent's own calls carry `agent_id` in the hook input, and
+ * subagents doing the work is the entire point. Unknown tools are refused rather than allowed, so a
+ * tool added later cannot quietly become an orchestrator shortcut.
+ */
+export function delegationDecision(toolName, toolInput = {}, hookInput = {}) {
+  if (hookInput.agent_id) return null;
+  if (ORCHESTRATOR_TOOLS.has(toolName) || toolName.startsWith('mcp__')) return null;
+  const path = typeof toolInput?.file_path === 'string' ? toolInput.file_path : '';
+  if (path.startsWith(OUT_DIR)) return null;
+  return (
+    `${toolName} belongs to your subagents in this colony. Start one with the Task tool and have it do this; ` +
+    `you plan, decide and review. ${OUT_DIR}/pr.md is yours to write.`
+  );
+}
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 // Claude Code variables that mean "you are nested inside another Claude Code session".
 const KEEP_CLAUDE_CODE_VARS = /^CLAUDE_CODE_(OAUTH_TOKEN|MAX_RETRIES|USE_BEDROCK|USE_VERTEX|USE_FOUNDRY)$/;
@@ -122,6 +151,12 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
   if (env.COLONIZER_SUBAGENT_MODEL) claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
+  // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
+  // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
+  const delegate = ['encourage', 'enforce'].includes(env.COLONIZER_DELEGATE) ? env.COLONIZER_DELEGATE : 'off';
+  const appended = [SYSTEM_PROMPT_APPEND];
+  if (memory) appended.push(MEMORY_PROMPT_APPEND);
+  if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
 
   const options = {
     cwd: process.cwd(),
@@ -132,7 +167,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
-      append: memory ? `${SYSTEM_PROMPT_APPEND}\n${MEMORY_PROMPT_APPEND}` : SYSTEM_PROMPT_APPEND,
+      append: appended.join('\n'),
     },
     settingSources: ['project'],
     env: claudeEnv,
@@ -142,6 +177,27 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     // No allowedTools entry: canUseTool already allows every tool except AskUserQuestion, and listing
     // them would make the SDK warn that canUseTool is shadowed.
     options.mcpServers = { [MEMORY_SERVER]: memoryServer };
+  }
+  if (delegate === 'enforce') {
+    // A hook rather than canUseTool: only the hook input says whether a call came from a subagent
+    // (`agent_id`), and without that the gate would refuse the subagents' work as well as the
+    // orchestrator's. Denying here reaches the model as a tool error it can act on.
+    options.hooks = {
+      PreToolUse: [
+        {
+          hooks: [
+            async (input) => {
+              const reason = delegationDecision(input.tool_name, input.tool_input, input);
+              if (!reason) return { continue: true };
+              return {
+                continue: true,
+                hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+              };
+            },
+          ],
+        },
+      ],
+    };
   }
   // Plugin directories arrive already mounted read-only in the VM; the mothership
   // rewrites COLONIZER_PLUGIN_DIRS to the in-VM paths. settingSources stays
