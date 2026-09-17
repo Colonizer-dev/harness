@@ -1308,19 +1308,15 @@ function initialsOf(name: string): string {
  * The tile at the start of a provider row or add button. Decorative: the vendor's
  * name is always beside it as text, so the tile is hidden from assistive tech.
  */
-function ProviderMark({ preset, name, size = "row" }: { preset?: ProviderPreset | "anthropic"; name: string; size?: "row" | "button" }) {
+function ProviderMark({ preset, name, size = "row" }: { preset?: ProviderPreset | "anthropic"; name: string; size?: "row" | "button" | "tile" }) {
   const Mark = preset ? PRESET_MARK[preset] : undefined;
-  const row = size === "row";
+  const box = { tile: "size-11 rounded-xl", row: "size-8 rounded-lg", button: "size-[18px] rounded-[5px]" }[size];
+  const glyph = { tile: 24, row: 18, button: 12 }[size];
+  // Initials carry the whole tile when a vendor has no mark, so they scale with it.
+  const initials = { tile: "text-[15px] font-semibold tracking-tight", row: "text-[11.5px] font-semibold tracking-tight", button: "text-[8.5px] font-bold" }[size];
   return (
-    <span
-      aria-hidden="true"
-      className={cx(
-        "grid shrink-0 select-none place-items-center bg-panel-2 text-text",
-        row ? "size-8 rounded-lg" : "size-[18px] rounded-[5px]",
-        !Mark && (row ? "text-[11.5px] font-semibold tracking-tight" : "text-[8.5px] font-bold"),
-      )}
-    >
-      {Mark ? <Mark size={row ? 18 : 12} strokeWidth={row ? 1.75 : 2} /> : initialsOf(name)}
+    <span aria-hidden="true" className={cx("grid shrink-0 select-none place-items-center bg-panel-2 text-text", box, !Mark && initials)}>
+      {Mark ? <Mark size={glyph} strokeWidth={size === "button" ? 2 : 1.75} /> : initialsOf(name)}
     </span>
   );
 }
@@ -1489,21 +1485,32 @@ function ProvidersPane({
             )}
           </div>
         )}
-        <div role="group" aria-labelledby={addLabelId} className="flex flex-wrap items-center gap-2">
-          <span id={addLabelId} className="text-[12.5px] text-muted">
-            Add
+        <div role="group" aria-labelledby={addLabelId} className="space-y-2">
+          <span id={addLabelId} className="block text-[12.5px] text-muted">
+            Add a provider
           </span>
-          {ADD_PRESETS.map(({ preset, label }) => (
-            <Button
-              key={preset}
-              size="sm"
-              className="pl-1.5"
-              disabled={addDisabled || (preset !== "custom" && has(preset))}
-              onClick={() => setEditing({ mode: "new", preset })}
-            >
-              <ProviderMark preset={preset} name={PRESET_LABEL[preset]} size="button" /> {label}
-            </Button>
-          ))}
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+            {ADD_PRESETS.map(({ preset, label }) => {
+              const configured = preset !== "custom" && has(preset);
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  disabled={addDisabled || configured}
+                  title={configured ? `${label} is already configured` : undefined}
+                  onClick={() => setEditing({ mode: "new", preset })}
+                  className={cx(
+                    "flex cursor-pointer select-none flex-col items-center gap-2 rounded-xl border border-border bg-panel px-1.5 py-3",
+                    "text-[12px] font-medium text-text transition-colors hover:bg-panel-2",
+                    "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-panel",
+                  )}
+                >
+                  <ProviderMark preset={preset} name={PRESET_LABEL[preset]} size="tile" />
+                  <span className="w-full truncate text-center">{label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
         <p className="text-[11.5px] leading-snug text-faint">
           Logos and names are the property of their owners. Colonizer is not affiliated with, endorsed by or connected to any of them.
