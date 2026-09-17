@@ -56,6 +56,10 @@ fi
 # wins, for a host that would rather run its own build.
 msb="${COLONIZER_MSB:-$dist/vendor/microsandbox/bin/msb}"
 [ -x "$msb" ] || { echo "microsandbox is missing from $msb after vendoring" >&2; exit 1; }
+# Every vendored plugin must land where the mothership resolves it (<app>/plugins/<name>).
+for plugin in $(awk '$1 !~ /^#/ && $4 == "plugin" { print $1 }' "$root/vendor/vendor.lock"); do
+  [ -d "$dist/plugins/$plugin" ] || { echo "vendored plugin $plugin is missing from $dist/plugins after vendoring" >&2; exit 1; }
+done
 
 echo "==> colonizer-agentd (static musl build inside a microVM)"
 MSB="$msb" "$root/scripts/build-agentd.sh"

@@ -570,35 +570,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     //
     // A setting names a directory, never a path: it is resolved under the
     // mothership's plugins folder, so it cannot reach an arbitrary host path.
-    let plugin_names: Vec<String> = runner_env
-        .get("COLONIZER_PLUGIN_DIRS")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .split(',')
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .collect();
+    let plugin_names = crate::plugins::parse_list(runner_env.get("COLONIZER_PLUGIN_DIRS").and_then(Value::as_str).unwrap_or_default());
     if !plugin_names.is_empty() {
-        let root = app.cfg.data_dir.join("plugins");
         let mut targets = Vec::new();
         for name in &plugin_names {
-            if !crate::util::is_plain_name(name) {
-                bail!("plugin directory {name:?} must be a plain name under {}", root.display());
-            }
-            // Two places, in this order: what the operator dropped in the data
-            // directory, then what shipped with the app. A local copy therefore
-            // overrides a vendored one of the same name, and neither can be
-            // named by a path.
-            let source = match root.join(name) {
-                local if local.is_dir() => local,
-                _ => app
-                    .cfg
-                    .asset(&format!("plugins/{name}"))
-                    .with_context(|| format!("plugin directory {name:?} is not in {}", root.display()))?,
-            };
-            if !source.is_dir() {
-                bail!("plugin {name:?} is not a directory");
-            }
+            // The operator's data directory first, then what shipped with the app; the same resolution the
+            // skillset list in Settings shows (plugins.rs).
+            let source = crate::plugins::resolve(&app.cfg, name)?;
             let target = format!("/opt/colonizer/plugins/{name}");
             mounts.push(Mount { source, target: target.clone(), read_only: true });
             targets.push(target);

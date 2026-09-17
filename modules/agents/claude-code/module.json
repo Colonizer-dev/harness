@@ -81,8 +81,9 @@
       },
       "plugins": {
         "type": "string",
-        "title": "Plugin directories",
-        "description": "Comma-separated Claude Code plugin directories to load, read-only, from the mothership's plugins folder. Names only, no paths. Empty loads none.",
+        "format": "plugin-dirs",
+        "title": "Skillsets",
+        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. All off by default. Stored as a comma-separated list of names.",
         "default": "",
         "env": "COLONIZER_PLUGIN_DIRS"
       },

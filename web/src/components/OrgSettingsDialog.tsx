@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
 import { IconOrg, IconX } from "./icons";
+import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
 import { Button, ModelInput, Spinner, Switch, cx, inputClass } from "./ui";
 
 type FieldKey =
@@ -147,6 +148,24 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
   };
 }
 
+/** Skillset overrides with sorted keys, so switching one back and forth doesn't read as a change. */
+function sortedSkillsets(map: Record<string, boolean> | null | undefined): Record<string, boolean> {
+  return Object.fromEntries(Object.entries(map ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+/** No skillset overrides is sent as null: the same as inheriting every one of them. */
+function withSkillsets(settings: OrgSettings, skillsets: Record<string, boolean>): OrgSettings {
+  const sorted = sortedSkillsets(skillsets);
+  return { ...settings, agent: { ...settings.agent, skillsets: Object.keys(sorted).length ? sorted : null } };
+}
+
+/** The skillsets switched on in Settings → Modules, which every org inherits. */
+function globalSkillsets(modules: ModuleInfo[] | null): string[] | null {
+  const agent = modules?.find((m) => m.kind === "agent");
+  if (!agent) return null;
+  return pluginNames(agent.settings?.plugins ?? agent.schema?.properties?.plugins?.default);
+}
+
 export function OrgSettingsDialog({
   org,
   info,
@@ -198,8 +217,12 @@ function OrgSettingsForm({
   const toast = useToast();
   const models = useModels();
   const [modules, setModules] = useState<ModuleInfo[] | null>(null);
+  const { listing } = usePlugins();
   const [draft, setDraft] = useState<Draft>(() => toDraft(info?.settings ?? {}, null));
-  const [initial, setInitial] = useState(() => JSON.stringify(fromDraft(toDraft(info?.settings ?? {}, null)).settings));
+  const [skillsets, setSkillsets] = useState(() => sortedSkillsets(info?.settings?.agent?.skillsets));
+  const [initial, setInitial] = useState(() =>
+    JSON.stringify(withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {})),
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -224,8 +247,27 @@ function OrgSettingsForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);
 
-  const { settings, error } = fromDraft(draft);
-  const overrides = FIELDS.filter((spec) => draft[spec.key].override).length;
+  const { settings: fields, error } = fromDraft(draft);
+  const settings = withSkillsets(fields, skillsets);
+  const overrides = FIELDS.filter((spec) => draft[spec.key].override).length + Object.keys(skillsets).length;
+  const inheritedSkillsets = globalSkillsets(modules);
+  // Every installed skillset, plus any this org still names that is no longer installed.
+  const skillsetRows = listing
+    ? [
+        ...listing.plugins.map((plugin) => ({ name: plugin.name, hint: pluginCost(plugin) })),
+        ...Object.keys(skillsets)
+          .filter((name) => !listing.plugins.some((p) => p.name === name))
+          .map((name) => ({ name, hint: "Not installed: inherit to remove it" })),
+      ]
+    : [];
+  const overrideSkillset = (name: string, override: boolean) =>
+    setSkillsets((current) => {
+      const next = { ...current };
+      // An override starts from what the org inherits, like every other field here.
+      if (override) next[name] = inheritedSkillsets?.includes(name) ?? false;
+      else delete next[name];
+      return sortedSkillsets(next);
+    });
   const dirty = JSON.stringify(settings) !== initial;
 
   const set = (key: FieldKey, patch: Partial<Draft[FieldKey]>) => setDraft((d) => ({ ...d, [key]: { ...d[key], ...patch } }));
@@ -274,61 +316,90 @@ function OrgSettingsForm({
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
         {groups.map((group) => (
-          <section key={group} className="border-b border-border py-3 last:border-b-0">
-            <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">{group}</h3>
-            <div className="divide-y divide-border">
-              {FIELDS.filter((f) => f.group === group).map((spec) => (
-                <OverrideRow
-                  key={spec.key}
-                  spec={spec}
-                  override={draft[spec.key].override}
-                  inherited={describe(spec, globalValue(modules, spec.key))}
-                  onOverride={(override) => set(spec.key, { override })}
-                >
-                  {spec.kind === "model" && (
-                    <ModelInput
-                      value={String(draft[spec.key].value)}
-                      onChange={(value) => set(spec.key, { value })}
-                      models={models}
-                      ariaLabel={`${spec.label} model for ${org}`}
-                      placeholder={spec.key === "model" ? "opus" : "deepseek/deepseek-flash"}
-                    />
-                  )}
-                  {spec.kind === "number" && (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        min={spec.min}
-                        max={spec.max}
-                        step={1}
+          <Fragment key={group}>
+            <section className="border-b border-border py-3 last:border-b-0">
+              <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">{group}</h3>
+              <div className="divide-y divide-border">
+                {FIELDS.filter((f) => f.group === group).map((spec) => (
+                  <OverrideRow
+                    key={spec.key}
+                    label={spec.label}
+                    hint={spec.hint}
+                    override={draft[spec.key].override}
+                    inherited={describe(spec, globalValue(modules, spec.key))}
+                    onOverride={(override) => set(spec.key, { override })}
+                  >
+                    {spec.kind === "model" && (
+                      <ModelInput
                         value={String(draft[spec.key].value)}
-                        onChange={(e) => set(spec.key, { value: e.target.value })}
-                        aria-label={`${spec.label} for ${org}`}
-                        aria-invalid={parseNumber(spec, String(draft[spec.key].value)) === null}
-                        className={cx(
-                          inputClass,
-                          "w-28",
-                          parseNumber(spec, String(draft[spec.key].value)) === null && "border-err focus:border-err",
-                        )}
-                      />
-                      {spec.unit && <span className="text-[13px] text-muted">{spec.unit}</span>}
-                    </div>
-                  )}
-                  {spec.kind === "boolean" && (
-                    <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
-                      <Switch
-                        checked={Boolean(draft[spec.key].value)}
                         onChange={(value) => set(spec.key, { value })}
-                        label={`${spec.label} for ${org}`}
+                        models={models}
+                        ariaLabel={`${spec.label} model for ${org}`}
+                        placeholder={spec.key === "model" ? "opus" : "deepseek/deepseek-flash"}
                       />
-                      {draft[spec.key].value ? "On" : "Off"}
-                    </label>
-                  )}
-                </OverrideRow>
-              ))}
-            </div>
-          </section>
+                    )}
+                    {spec.kind === "number" && (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={spec.min}
+                          max={spec.max}
+                          step={1}
+                          value={String(draft[spec.key].value)}
+                          onChange={(e) => set(spec.key, { value: e.target.value })}
+                          aria-label={`${spec.label} for ${org}`}
+                          aria-invalid={parseNumber(spec, String(draft[spec.key].value)) === null}
+                          className={cx(
+                            inputClass,
+                            "w-28",
+                            parseNumber(spec, String(draft[spec.key].value)) === null && "border-err focus:border-err",
+                          )}
+                        />
+                        {spec.unit && <span className="text-[13px] text-muted">{spec.unit}</span>}
+                      </div>
+                    )}
+                    {spec.kind === "boolean" && (
+                      <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                        <Switch
+                          checked={Boolean(draft[spec.key].value)}
+                          onChange={(value) => set(spec.key, { value })}
+                          label={`${spec.label} for ${org}`}
+                        />
+                        {draft[spec.key].value ? "On" : "Off"}
+                      </label>
+                    )}
+                  </OverrideRow>
+                ))}
+              </div>
+            </section>
+            {group === "Models" && skillsetRows.length > 0 && (
+              <section className="border-b border-border py-3 last:border-b-0">
+                <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Skillsets</h3>
+                <div className="divide-y divide-border">
+                  {skillsetRows.map(({ name, hint }) => (
+                    <OverrideRow
+                      key={name}
+                      label={name}
+                      hint={hint}
+                      override={name in skillsets}
+                      inherited={inheritedSkillsets ? (inheritedSkillsets.includes(name) ? "on" : "off") : "global default"}
+                      onOverride={(override) => overrideSkillset(name, override)}
+                    >
+                      <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                        <Switch
+                          checked={skillsets[name] ?? false}
+                          onChange={(on) => setSkillsets((current) => sortedSkillsets({ ...current, [name]: on }))}
+                          label={`${name} skillset for ${org}`}
+                        />
+                        {skillsets[name] ? "On" : "Off"}
+                      </label>
+                    </OverrideRow>
+                  ))}
+                </div>
+              </section>
+            )}
+          </Fragment>
         ))}
       </div>
 
@@ -339,9 +410,10 @@ function OrgSettingsForm({
         {overrides > 0 && (
           <Button
             variant="ghost"
-            onClick={() =>
-              setDraft((d) => Object.fromEntries(FIELDS.map((f) => [f.key, { ...d[f.key], override: false }])) as Draft)
-            }
+            onClick={() => {
+              setDraft((d) => Object.fromEntries(FIELDS.map((f) => [f.key, { ...d[f.key], override: false }])) as Draft);
+              setSkillsets({});
+            }}
           >
             Inherit all
           </Button>
@@ -356,13 +428,15 @@ function OrgSettingsForm({
 }
 
 function OverrideRow({
-  spec,
+  label,
+  hint,
   override,
   inherited,
   onOverride,
   children,
 }: {
-  spec: FieldSpec;
+  label: string;
+  hint: string;
   override: boolean;
   inherited: string;
   onOverride: (override: boolean) => void;
@@ -371,11 +445,11 @@ function OverrideRow({
   return (
     <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
       <div className="min-w-0 flex-1 basis-44">
-        <div className="text-[13.5px] font-medium">{spec.label}</div>
-        <div className="text-[12px] text-muted">{spec.hint}</div>
+        <div className="text-[13.5px] font-medium [overflow-wrap:anywhere]">{label}</div>
+        <div className="text-[12px] text-muted">{hint}</div>
       </div>
       <div className="flex w-full min-w-0 flex-col gap-2 sm:w-[270px]">
-        <div role="radiogroup" aria-label={`${spec.label}: inherit or override`} className="inline-flex self-start rounded-lg bg-panel-2 p-0.5">
+        <div role="radiogroup" aria-label={`${label}: inherit or override`} className="inline-flex self-start rounded-lg bg-panel-2 p-0.5">
           {[false, true].map((value) => (
             <button
               key={String(value)}

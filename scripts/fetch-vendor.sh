@@ -41,7 +41,10 @@ while read -r name version plat kind sha url; do
       rm -rf "$tmp"
       ;;
     ecc)
-      # Staged as a Claude Code plugin directory, not a binary.
+      # Staged as a Claude Code plugin directory, not a binary, at dist/plugins/<name>:
+      # the mothership resolves vendored plugins at <app>/plugins/<name>
+      # (crates/colonizer/src/plugins.rs), not under vendor/. Staging it under
+      # dist/vendor/ left every `plugins = ecc` colony failing to boot.
       #
       # The whole hooks/ directory is dropped. ECC's plugin manifest sets
       # userConfig.hooks_enabled default true and Claude Code discovers
@@ -55,7 +58,7 @@ while read -r name version plat kind sha url; do
       tmp=$(mktemp -d)
       tar -xzf "$file" -C "$tmp"
       src=$(echo "$tmp"/ECC-*)
-      dest="$out/plugins/ecc"
+      dest="$root/dist/plugins/ecc"
       rm -rf "$dest"
       mkdir -p "$dest"
       for keep in .claude-plugin skills agents commands scripts LICENSE; do
