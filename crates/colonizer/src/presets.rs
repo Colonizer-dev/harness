@@ -12,6 +12,9 @@
 
 use serde_json::{json, Value};
 
+/// Compiled in, so the pin always matches the harness that was built.
+const LOCK: &str = include_str!("../images.lock");
+
 /// A named bundle of image and machine size.
 pub struct Preset {
     pub id: &'static str,
@@ -45,6 +48,39 @@ pub fn find(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.id == id)
 }
 
+/// The digest the lock pins `image` to. Same six columns as vendor/vendor.lock:
+/// name, version, platform, kind, sha256, url — the reference is matched in the
+/// url position, and only rows of kind `image` count.
+fn digest_for<'a>(lock: &'a str, image: &str) -> Option<&'a str> {
+    lock.lines().filter(|line| !line.trim_start().starts_with('#')).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            [_name, _version, _platform, "image", sha256, url] if *url == image => Some(*sha256),
+            _ => None,
+        }
+    })
+}
+
+/// The reference a colony boots: `image` pinned by digest when the lock knows
+/// it, otherwise `image` as written. Degrading to the bare tag rather than
+/// failing is deliberate — a colony that cannot boot is worse than one booting
+/// an unpinned tag, and the_real_lock_pins_every_preset below guarantees the
+/// shipped lock pins every preset, so the degradation only ever fires for a
+/// hand-edited lock or a half-shipped build.
+pub fn pinned(image: &str) -> String {
+    match digest_for(LOCK, image) {
+        Some(digest) => format!("{image}@sha256:{digest}"),
+        None => image.to_string(),
+    }
+}
+
+/// The reference a preset's stack boots, for schema defaults that name a preset:
+/// the same value `defaults` puts in `image`. `None` for `custom` or an unknown
+/// id, which have no image of their own.
+pub fn pinned_image(id: &str) -> Option<String> {
+    find(id).map(|p| pinned(p.image))
+}
+
 /// The defaults a preset contributes, as a settings map.
 ///
 /// Returns an empty map for `custom` or an unknown id, so a configuration
@@ -53,7 +89,7 @@ pub fn find(id: &str) -> Option<&'static Preset> {
 pub fn defaults(id: &str) -> Value {
     match find(id) {
         Some(p) => json!({
-            "image": p.image,
+            "image": pinned(p.image),
             "cpus": p.cpus,
             "memory": p.memory,
             "root_disk": p.root_disk,
@@ -71,10 +107,58 @@ mod tests {
         // These four were the schema defaults before presets existed. If this
         // fails, every existing install silently changes machine on upgrade.
         let d = defaults("node");
-        assert_eq!(d["image"], "node:24-bookworm");
+        assert!(
+            d["image"].as_str().unwrap().starts_with("node:24-bookworm@sha256:"),
+            "{} is not the node:24-bookworm tag pinned by digest",
+            d["image"]
+        );
         assert_eq!(d["cpus"], 4);
         assert_eq!(d["memory"], "8G");
         assert_eq!(d["root_disk"], "16G");
+    }
+
+    const LOCK_SAMPLE: &str = "\
+# a comment naming node 24-bookworm any image 9999 node:24-bookworm is not an entry
+node      24-bookworm   any  image  1111  node:24-bookworm
+python    3.13-bookworm any  image  2222  python:3.13-bookworm
+golang    1-bookworm    any  binary 3333  golang:1-bookworm
+";
+
+    #[test]
+    fn the_digest_lookup_picks_the_image_row_and_skips_the_rest() {
+        assert_eq!(digest_for(LOCK_SAMPLE, "node:24-bookworm"), Some("1111"));
+        assert_eq!(digest_for(LOCK_SAMPLE, "python:3.13-bookworm"), Some("2222"));
+        // The reference also appears on a non-image row, which must not match.
+        assert_eq!(digest_for(LOCK_SAMPLE, "golang:1-bookworm"), None, "a non-image kind never matches");
+        assert_eq!(digest_for(LOCK_SAMPLE, "rust:1-bookworm"), None, "an unknown reference pins nothing");
+    }
+
+    #[test]
+    fn an_unpinned_image_degrades_to_the_bare_reference() {
+        // A colony that cannot boot is worse than one booting an unpinned tag;
+        // the_real_lock_pins_every_preset is what keeps this path dormant.
+        assert_eq!(pinned("ghcr.io/me/my-toolchain:1"), "ghcr.io/me/my-toolchain:1");
+    }
+
+    #[test]
+    fn the_schema_default_is_the_preset_its_own_pinned_image() {
+        // modules.rs takes its image default from here, so this is the node stack
+        // default, not a second copy of it.
+        assert_eq!(pinned_image("node").as_deref(), Some(pinned("node:24-bookworm").as_str()));
+        assert_eq!(pinned_image(CUSTOM), None, "custom has no image of its own");
+        assert_eq!(pinned_image("no-such-preset"), None);
+    }
+
+    #[test]
+    fn the_real_lock_pins_every_preset() {
+        for p in PRESETS {
+            let reference = pinned(p.image);
+            let digest = reference
+                .strip_prefix(&format!("{}@sha256:", p.image))
+                .unwrap_or_else(|| panic!("{}: {} is not pinned by images.lock", p.id, p.image));
+            assert_eq!(digest.len(), 64, "{}: sha256 must be 64 hex characters", p.id);
+            assert!(digest.chars().all(|c| c.is_ascii_hexdigit()), "{}: {digest} is not hex", p.id);
+        }
     }
 
     #[test]

@@ -7,7 +7,13 @@
 #   GitHub's JavaScript actions don't run inside Alpine containers.
 # - bundle: scripts/install.sh --bundle for each platform, then a smoke test: the app starts from the
 #   unpacked archive, finds its assets there, and serves its API and web UI.
-# - release: tags only. The tag has to match the version of both crates.
+# - release: tags only. The tag has to match the version of both crates. Every published artifact — the
+#   tarballs, install.sh and SHA256SUMS — is attested with build provenance, and the release is created
+#   as a draft, given all its assets, and only then published. The draft step is what makes the release
+#   safe for GitHub's immutable releases, which freeze the assets and the tag the moment a release is
+#   published, so nothing can be added or replaced afterwards. Immutability itself is a repository
+#   setting (Settings → Releases → "Enable release immutability"), not anything a workflow can commit:
+#   this workflow is ready for it, and flipping that toggle is the missing half.
 # - crates: tags only, after the release. Publishes colonizer-agentd and colonizer-harness to crates.io
 #   through Trusted Publishing (no stored token), skipping a version crates.io already has. The crates are
 #   the source, not an install: the site and docs send people to the release installer.
@@ -60,8 +66,10 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: |
+          # The image is pinned by digest, because the tag alone would move under us between builds.
+          # The tag stays in the reference so a human can still read it; the digest is what pins it.
           docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e OWNER="$(id -u):$(id -g)" \
-            -v "$PWD:/src" -w /src rust:1-alpine sh -euc '
+            -v "$PWD:/src" -w /src rust:1-alpine@sha256:1716b3aa042d735f4566d14dc54e8037de9d69556e2d5dd58131d93a613d173d sh -euc '
               apk add --no-cache musl-dev file >/dev/null
               scripts/build-agentd.sh
               scripts/build-rtk.sh
@@ -184,8 +192,14 @@ jobs:
     needs: bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # id-token: write mints the Sigstore signing certificate for the attestations through OIDC;
+    # attestations: write stores the attestations on the repository; artifact-metadata: write is the
+    # storage record the attestation action requires; contents: write publishes the release itself.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
@@ -205,7 +219,7 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Publish
+      - name: Checksum the artifacts and write the release notes
         run: |
           cp scripts/install-release.sh release/install.sh
           cd release
@@ -220,13 +234,40 @@ jobs:
             echo
             echo "The installer checks the archive against SHA256SUMS. It fetches the Claude Agent SDK from the npm registry, and on a Mac the Linux build of Claude Code, from Anthropic's own channels: neither is in the release. Guide: https://colonizer.dev/docs/install"
             echo
+            echo "Each artifact, SHA256SUMS included, also carries a build-provenance attestation recording the commit that built it. Verify one with:"
+            echo
+            echo '```sh'
+            echo 'gh attestation verify colonizer-<platform>.tar.gz --repo Colonizer-dev/harness'
+            echo '```'
+            echo
+            echo 'Here <platform> is linux-x86_64 or darwin-arm64.'
+            echo
             echo '```'
             cat SHA256SUMS
             echo '```'
           } > notes.md
+
+      # Attests build provenance for the tarballs, the installer and SHA256SUMS itself: an installer
+      # that has verified the checksums file can then trust every digest it lists. Artifact
+      # attestations are free for public repositories. The paths carry the release/ prefix because
+      # uses steps ignore working-directory and resolve paths against the workspace root.
+      - name: Attest the release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/colonizer-*.tar.gz, release/install.sh, release/SHA256SUMS
+
+      - name: Publish
+        run: |
+          cd release
+          # The release is created as a draft with every asset attached, and published only once
+          # everything is up. That is not gratuitous: GitHub's immutable releases freeze the assets
+          # and the tag the moment a release is published, so an asset attached afterwards would be
+          # rejected — attaching everything to the draft first is the only order that works. It is
+          # also good practice without immutability: a half-uploaded release is never visible.
           gh release create "$TAG" colonizer-*.tar.gz install.sh SHA256SUMS \
-            --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --draft --repo "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "Colonizer $TAG" --notes-file notes.md
+          gh release edit "$TAG" --draft=false --repo "${{ github.repository }}"
 
   crates:
     if: startsWith(github.ref, 'refs/tags/v')

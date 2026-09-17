@@ -34,7 +34,10 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
-    container: debian:bookworm-slim
+    # The image is pinned by digest, because the tag alone would move under us between builds — and
+    # these archives are pinned by sha256 downstream, so the build must stay reproducible. The tag
+    # stays in the reference so a human can still read it; the digest is what pins it.
+    container: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
     env:
       RELEASE: ${{ inputs.release }}
     steps:

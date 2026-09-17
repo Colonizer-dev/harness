@@ -8,7 +8,9 @@ repository.
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
   or an Apple Silicon Mac. An Intel Mac can't run Colonizer, because microsandbox's libkrun backend is
   aarch64-only.
-- **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar`. A build from source also needs
+- **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar`. The installer also uses `gh`,
+  when it is present, to verify a release's build provenance ([Install a release](#install-a-release)).
+  A build from source also needs
   Node.js 20 or newer and a Rust toolchain of 1.88 or newer. Homebrew's `rust` can lag a long way
   behind, so `rustup` is the safe bet.
 - **Claude Code**: on Linux, a native Claude Code install, which colonies use. On a Mac the installer
@@ -34,12 +36,35 @@ exception is the one-time move up from a pre-symlink install: for a moment the o
 `app.old`, and a hard kill in that window leaves colonizer down until the next install puts it back.
 The script is `scripts/install-release.sh`, published with each release as `install.sh`.
 
+The checksums catch a corrupted download, not a rewritten release: whoever can replace the archive can
+replace its checksums too. So the installer also verifies `SHA256SUMS` itself against the release's
+build-provenance attestation — the release workflow signs the checksum file with Sigstore and logs the
+signature in a public transparency log, which access to the release's assets alone cannot produce. That
+second check needs `gh`, and when it cannot reach a verdict it is skipped with a note rather than
+failing: no `gh` installed, a `gh` too old to have `gh attestation verify`, `COLONIZER_RELEASE_URL`
+pointing somewhere other than the official release, or a release published before the workflow began
+signing, which carries no attestation at all. A check that runs and fails stops the install.
+`COLONIZER_REQUIRE_ATTESTATION=1` turns the skips into failures too.
+
+To verify an artifact yourself:
+
+```sh
+gh attestation verify colonizer-linux-x86_64.tar.gz --repo Colonizer-dev/harness
+```
+
+`darwin-arm64` is the other platform. Releases are created as a draft and published only once every
+asset is attached — the only order that works under GitHub's immutable releases, which freeze the assets
+and the tag the moment a release is published. Turning immutability on is itself a repository setting
+(Settings → Releases), not something a workflow can do.
+
 A release contains no Anthropic code, which isn't ours to redistribute. So the installer fetches two
 things from Anthropic's own channels and checks each one:
 
 - the Claude Agent SDK, from the npm registry, against the checksum the release recorded from
   `package-lock.json`;
-- on a Mac, the Linux build of Claude Code that colonies run ([On a Mac](#on-a-mac)).
+- on a Mac, the Linux build of Claude Code that colonies run — the build pinned by version and checksum
+  in the release's `claude-code.lock`, not whatever Anthropic's `stable` channel points at that day
+  ([On a Mac](#on-a-mac)).
 
 Run the same command again to update. Two variations:
 
@@ -50,6 +75,12 @@ curl -fsSL https://colonizer.dev/install.sh | COLONIZER_VERSION=v0.1.0 sh
 # also download the default colony image now, so the first colony boots straight away
 curl -fsSL https://colonizer.dev/install.sh | sh -s -- --pull-image
 ```
+
+Two more variables change where the app comes from and how strictly it is checked:
+`COLONIZER_RELEASE_URL` fetches the app from `<url>/<file>` instead of the GitHub release — the build
+attestation belongs to the official release, so it is skipped on that path — and
+`COLONIZER_REQUIRE_ATTESTATION=1` makes a provenance check that comes back without a verdict a failure
+instead of a note.
 
 ## Build from source
 
@@ -69,7 +100,8 @@ first time a colony needs it, and the Headroom bundle, if you switch Headroom on
 
 Two options:
 
-- `--pull-image` downloads the default colony image, `node:24-bookworm`, at install time. The first
+- `--pull-image` downloads the default colony image, `node:24-bookworm` pinned by digest
+  (`crates/colonizer/images.lock`), at install time. The first
   colony then boots straight away instead of waiting on a download of several gigabytes.
 - `--install` copies the app to `~/.local/share/colonizer/app` and links `~/.local/bin/colonizer`, so
   `colonizer` runs from anywhere. It is implemented but hasn't been run end to end yet.
@@ -87,8 +119,11 @@ sandbox), a colony is queued and starts on its own when one ahead of it finishes
 
 ## On a Mac
 
-The installer, for a release or a build from source, also fetches the `linux-arm64` build of Claude Code. It follows the `stable`
-channel and is checked against Anthropic's own manifest. This is needed because a colony is a Linux
+The installer, for a release or a build from source, also fetches the `linux-arm64` build of Claude Code. The
+release decides which build: the version and its sha256 come from `claude-code.lock`, so every install of
+the same Colonizer release gets the same agent, checked before it is used. `scripts/update-runtime-pins.mjs`
+watches Anthropic's `stable` channel daily and proposes a newer version by pull request, and the pin only
+moves when a person merges that. This is needed because a colony is a Linux
 microVM and the Mac's own binary is Mach-O. `colonizer-agentd` is built for the guest's architecture.
 
 A colony has been taken end to end on Apple Silicon, from install to an open pull request

@@ -194,7 +194,7 @@ mothership also tells you when a newer release is out, and can install it.
 | [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
-| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, plus a DERP map snapshot | `SHIPPING` |
+| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build | `SHIPPING` |
 
 ## Modules
@@ -202,7 +202,7 @@ mothership also tells you when a newer release is out, and can install it.
 | Kind | Providers today | Next |
 | :--- | :--- | :--- |
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
-| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go | other VMMs `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go, each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
 | `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
@@ -245,9 +245,11 @@ Stated here rather than buried.
   crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
   microsandbox, the in-VM daemon, the agent module and the web UI beside it — use the installer.
   Nothing is published to npm.
-- **No test CI yet.** No workflow runs the Rust, runner or UI test suites on a push or a pull request;
-  GitHub Actions cuts the releases, publishes the crates and proposes the vendored plugin updates —
-  none of it runs the test suites.
+- **CI builds, audits and attests, but doesn't run the test suites.** Releases are built, smoke-tested
+  and attested with build provenance; dependency audits and SBOMs run with every change and on a weekly
+  schedule; runtime pins move only by reviewed pull request. The Rust, runner and UI test suites still
+  run only where a person runs them ([roadmap](#roadmap-in-public)). The crates are published to
+  crates.io through Trusted Publishing; nothing is published to npm.
 
 ---
 
@@ -270,6 +272,7 @@ Stated here rather than buried.
 | Token savings: terse replies (caveman) and compact command output (rtk), each a switch | `SHIPPING` |
 | Token savings: Headroom compacting tool results, its bundle downloaded when switched on ([#53](https://github.com/Colonizer-dev/harness/issues/53)) | `SHIPPING` |
 | Live map of motherships, off until you switch it on: the heartbeat and its receiver | `SHIPPING` |
+| Release provenance: every release artifact attested, colony images and the guest agent pinned, SBOMs and dependency audits, pins proposed by pull request ([#89](https://github.com/Colonizer-dev/harness/issues/89)) | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
@@ -290,6 +293,8 @@ The roadmap is the issue tracker. There is no private version of it.
 | Worktree | Mounted read-write at `/workspace`. |
 | Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |
 | Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
+| What a colony runs | Pinned, not floating: the image by OCI digest (`crates/colonizer/images.lock`), the guest Claude Code build by sha256 (`vendor/claude-code.lock`), the vendored tools by sha256 (`vendor/vendor.lock`). Pins move only through a reviewed pull request. |
+| Release downloads | Checked against the release's `SHA256SUMS`, which itself carries a build-provenance attestation the installer verifies whenever `gh` can reach a verdict ([docs/install.md](docs/install.md)). |
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |
 | Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
