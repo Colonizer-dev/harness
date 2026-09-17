@@ -1103,6 +1103,13 @@ export function createMockApi(): Api {
       s.log("microVM stopped and removed; the worktree was kept");
       return clone(s.session);
     },
+    deleteSession: async (id) => {
+      const s = find(id);
+      if (isLive(s.session.status) || s.session.status === "publishing") throw new ApiError("stop the colony first", 409);
+      s.halt();
+      sessions.delete(id);
+      return { deleted: id, leftover: null };
+    },
     cleanupSession: async (id) => {
       const s = find(id);
       if (isLive(s.session.status) || s.session.status === "publishing") throw new ApiError("stop the colony first", 409);

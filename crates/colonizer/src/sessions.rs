@@ -1489,6 +1489,49 @@ pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     Ok(Json(s))
 }
 
+/// Whether a colony in this state can be deleted. A live or publishing colony has a microVM or a push in flight.
+fn deletable(status: SessionStatus) -> bool {
+    !status.is_live() && status != SessionStatus::Publishing
+}
+
+/// Forgets a colony: its worktree and local branch (unless already cleaned up), its chat and harness logs, and its
+/// record. A pull request it opened, and any branch it pushed, stay on GitHub. Live and publishing colonies must be
+/// stopped first.
+pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    // Out of the list before any file is touched, so neither the queue nor Resume can start it meanwhile.
+    let (at, s) = {
+        let mut sessions = app.sessions.write().await;
+        let at = sessions.iter().position(|s| s.id == id).ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+        if !deletable(sessions[at].status) {
+            return Err(client_error(StatusCode::CONFLICT, "stop the colony first"));
+        }
+        (at, sessions.remove(at))
+    };
+    if !s.cleaned_up {
+        let removed = {
+            let lock = app.repo_lock(&s.repo).await;
+            let _guard = lock.lock().await;
+            github::remove_worktree(&app, &s).await
+        };
+        if let Err(e) = removed {
+            // Nothing is lost yet: put the record back where it was, so the colony can be cleaned up or retried.
+            let mut sessions = app.sessions.write().await;
+            let at = at.min(sessions.len());
+            sessions.insert(at, s);
+            return Err(e.context("could not remove the colony's worktree; nothing was deleted").into());
+        }
+    }
+    app.persist_sessions().await;
+    app.runtimes.lock().await.remove(&id);
+    let dir = app.session_dir(&id);
+    let leftover = match tokio::fs::remove_dir_all(&dir).await {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!("{}: {e}", dir.display())),
+    };
+    Ok(Json(json!({"deleted": id, "leftover": leftover})))
+}
+
 #[derive(Deserialize)]
 pub struct SinceQuery {
     since: Option<u64>,
@@ -1664,6 +1707,18 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_colonies_with_nothing_running_can_be_deleted() {
+        use SessionStatus::*;
+        for status in [Queued, Stopped, Failed, NoChanges, PrOpened] {
+            assert!(deletable(status), "{status:?}");
+        }
+        for status in [Starting, Running, WaitingForAnswer, Idle, Publishing] {
+            assert!(!deletable(status), "{status:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

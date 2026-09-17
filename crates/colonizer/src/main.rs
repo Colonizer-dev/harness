@@ -388,7 +388,7 @@ async fn main() -> Result<()> {
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
-        .route("/api/sessions/{id}", get(sessions::get))
+        .route("/api/sessions/{id}", get(sessions::get).delete(sessions::delete))
         .route("/api/sessions/{id}/resume", post(sessions::resume))
         .route("/api/sessions/{id}/publish", post(sessions::publish))
         .route("/api/sessions/{id}/stop", post(sessions::stop))
