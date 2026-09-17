@@ -178,7 +178,13 @@ function SettingsBody({
           tone: connectionsTone,
           toneText: connectionsTone === "ok" ? "All connected" : connectionsTone === "err" ? "Needs setup" : undefined,
         },
-        { id: "providers", label: "Model providers", hint: "Claude, and other Anthropic-compatible endpoints", badge: providers ? String(providers.length) : undefined },
+        {
+          id: "providers",
+          label: "Model providers",
+          hint: "Claude, and other Anthropic-compatible endpoints",
+          // Anthropic is always in the list as a built-in row, so the count follows what is on screen.
+          badge: providers ? String(providers.length + 1) : undefined,
+        },
         { id: "runtime", label: "Runtime", hint: "Detected on this machine", tone: runtimeBroken ? "err" : null, toneText: runtimeBroken ? "Something is missing" : undefined },
       ],
     },
