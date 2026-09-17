@@ -4,8 +4,8 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    client_error,
-    providers::{strip_oauth_betas, Provider},
+    client_error, openai,
+    providers::{strip_oauth_betas, Provider, Wire},
     util::read_trimmed,
     ApiResult, App, Shared,
 };
@@ -264,8 +264,31 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
         return api_error(StatusCode::NOT_FOUND, "not_found_error", format!("colonizer gateway: no provider \"{id}\""), None);
     };
     let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
-    let Some(url) = upstream_url(&provider.base_url, rest, uri.query()) else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "colonizer gateway: unsupported path", None);
+    // Everything that can refuse the request happens here, before it waits for a slot. The anthropic wire
+    // never parses the body; the openai wire has to rebuild it.
+    let (url, upstream_headers, body, translation) = match provider.wire {
+        Wire::Anthropic => {
+            let Some(url) = upstream_url(&provider.base_url, rest, uri.query()) else {
+                return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "colonizer gateway: unsupported path", None);
+            };
+            (url, forward_headers(&headers, credential_header(&app, &provider)), body, None)
+        }
+        Wire::Openai => {
+            // 404 is also what tells the colony router to estimate `count_tokens` itself.
+            let Some(path) = openai::upstream_path(rest) else {
+                return api_error(StatusCode::NOT_FOUND, "not_found_error", format!("colonizer gateway: provider \"{id}\" does not serve {rest}"), None);
+            };
+            let (body, info) = match openai::translate_request(&body) {
+                Ok(translated) => translated,
+                Err(message) => return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", format!("colonizer gateway: {message}"), None),
+            };
+            let mut upstream_headers = HeaderMap::new();
+            upstream_headers.insert("content-type", HeaderValue::from_static("application/json"));
+            if let Some((name, value)) = credential_header(&app, &provider) {
+                upstream_headers.insert(name, value);
+            }
+            (format!("{}{path}", provider.base_url.trim_end_matches('/')), upstream_headers, Bytes::from(body), Some(info))
+        }
     };
 
     let busy = Counted::new(&app.gateway.colony_counter(&colony));
@@ -297,7 +320,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
         .gateway
         .client
         .request(method, &url)
-        .headers(forward_headers(&headers, credential_header(&app, &provider)))
+        .headers(upstream_headers)
         .body(body);
     let upstream = match tokio::time::timeout(timeout, request.send()).await {
         Ok(Ok(response)) => response,
@@ -320,6 +343,12 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
         }
     };
 
+    // The guards live as long as the body, so slots and activity cover the whole streamed response.
+    let guards = (busy, in_flight, permit);
+    if let Some(info) = translation {
+        return openai_response(upstream, guards, timeout, &info, &id).await;
+    }
+
     let status = upstream.status();
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
@@ -331,12 +360,44 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     // keeps the connection alive with comment lines in that case, which only makes sense for SSE:
     // injecting bytes into a non-streaming JSON body would corrupt it.
     let is_sse = response_headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("text/event-stream"));
-    // The guards live as long as the body, so slots and activity cover the whole streamed response.
-    let guards = (busy, in_flight, permit);
     let body = stream_body(upstream.bytes_stream(), guards, timeout, is_sse);
     let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
+    response
+}
+
+/// An `openai`-wire provider's response in Anthropic's shape. Only `retry-after` is copied from upstream:
+/// OpenAI's other headers (`openai-*`, `x-ratelimit-*`) describe a different API. Once response headers
+/// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
+async fn openai_response(upstream: reqwest::Response, guards: Guards, timeout: Duration, info: &openai::RequestInfo, id: &str) -> Response {
+    let status = upstream.status();
+    let retry_after = upstream.headers().get("retry-after").cloned();
+    if status.is_success() && info.stream {
+        let body = stream_body(openai::translate_stream(upstream.bytes_stream(), info.model.clone()), guards, timeout, true);
+        let mut response = Response::new(Body::from_stream(body));
+        response.headers_mut().insert("content-type", HeaderValue::from_static("text/event-stream"));
+        response.headers_mut().insert("cache-control", HeaderValue::from_static("no-cache"));
+        return response;
+    }
+    let bytes = match tokio::time::timeout(timeout, upstream.bytes()).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => return api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\" response failed: {}", e.without_url()), None),
+        Err(_) => return api_error(StatusCode::GATEWAY_TIMEOUT, "api_error", format!("provider \"{id}\" did not finish its response within {} s", timeout.as_secs()), None),
+    };
+    drop(guards);
+    let mut response = if status.is_success() {
+        match openai::translate_response(&bytes, info) {
+            Ok(message) => (StatusCode::OK, Json(message)).into_response(),
+            Err(message) => api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\": {message}"), None),
+        }
+    } else {
+        let (status, kind, message) = openai::translate_error(status, &bytes, id);
+        api_error(status, kind, message, None)
+    };
+    if let Some(value) = retry_after {
+        response.headers_mut().insert("retry-after", value);
+    }
     response
 }
 
@@ -460,6 +521,54 @@ mod tests {
             tokio::time::sleep(delay).await;
             Some((Ok(chunk), it))
         })
+    }
+
+    fn openai_chunk(delta: &str, finish_reason: &str) -> Bytes {
+        Bytes::from(format!("data: {{\"id\":\"c\",\"choices\":[{{\"delta\":{delta},\"finish_reason\":{finish_reason}}}]}}\n\n"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn translated_streams_still_get_pinged_through_a_silent_prefill() {
+        let upstream = delayed_chunks(vec![
+            (Duration::ZERO, openai_chunk(r#"{"role":"assistant"}"#, "null")),
+            (Duration::from_secs(40), [openai_chunk(r#"{"content":"hi"}"#, "\"stop\""), Bytes::from_static(b"data: [DONE]\n\n")].concat().into()),
+        ]);
+        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into()), guards(), Duration::from_secs(120), true);
+        tokio::pin!(body);
+
+        let (mut pings, mut out) = (0, Vec::new());
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.unwrap();
+            if chunk.as_ref() == SSE_PING {
+                pings += 1;
+                assert!(out.is_empty() || out.ends_with(b"\n\n"), "a ping landed inside an event");
+            } else {
+                out.extend_from_slice(&chunk);
+            }
+        }
+        assert_eq!(pings, 2);
+        assert!(out.ends_with(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+    }
+
+    /// Upstream chunks that translate to nothing still reset the silence deadline. Here the provider talks
+    /// every 10 s for 40 s against a 25 s timeout; counting only translated bytes would kill it at 25 s.
+    #[tokio::test(start_paused = true)]
+    async fn untranslatable_chunks_still_count_as_activity() {
+        let empty = || (Duration::from_secs(10), openai_chunk("{}", "null"));
+        let upstream = delayed_chunks(vec![
+            (Duration::ZERO, openai_chunk(r#"{"role":"assistant"}"#, "null")),
+            empty(),
+            empty(),
+            (Duration::from_secs(10), Bytes::from_static(b": OPENROUTER PROCESSING\n\n")),
+            (Duration::from_secs(10), [openai_chunk(r#"{"content":"done"}"#, "\"stop\""), Bytes::from_static(b"data: [DONE]\n\n")].concat().into()),
+        ]);
+        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into()), guards(), Duration::from_secs(25), true);
+        tokio::pin!(body);
+        let mut out = Vec::new();
+        while let Some(chunk) = body.next().await {
+            out.extend_from_slice(&chunk.expect("the stream must not time out"));
+        }
+        assert!(std::str::from_utf8(&out).unwrap().contains("event: message_stop"));
     }
 
     #[tokio::test(start_paused = true)]

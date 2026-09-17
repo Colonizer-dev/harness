@@ -10,6 +10,7 @@ import type {
   ProviderHealth,
   ProviderLimits,
   ProviderPreset,
+  ProviderWire,
   PullStatus,
   SchemaField,
 } from "../types";
@@ -704,7 +705,7 @@ function SettingField({
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------
 
-type ProviderDraft = ProviderLimits & { id: string; name: string; base_url: string; auth: ProviderAuth; models: string[] };
+type ProviderDraft = ProviderLimits & { id: string; name: string; base_url: string; auth: ProviderAuth; wire: ProviderWire; models: string[] };
 
 const DEFAULT_TIMEOUT = 600;
 const DEFAULT_LIMITS: ProviderLimits = { timeout_secs: DEFAULT_TIMEOUT, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
@@ -715,12 +716,25 @@ const PRESETS: Record<ProviderPreset, ProviderDraft> = {
     name: "DeepSeek",
     base_url: "https://api.deepseek.com/anthropic",
     auth: "x-api-key",
+    wire: "anthropic",
     models: ["deepseek-flash", "deepseek-v4-pro"],
     ...DEFAULT_LIMITS,
   },
+  // OpenAI is not Anthropic-compatible: the gateway translates this one in both directions.
+  openai: {
+    id: "openai",
+    name: "OpenAI",
+    base_url: "https://api.openai.com",
+    auth: "bearer",
+    wire: "openai",
+    models: ["gpt-5.6", "gpt-5.5"],
+    ...DEFAULT_LIMITS,
+    // Conservative: Claude Code compacts against this, and overshooting the real limit costs a failed turn.
+    context_tokens: 272_000,
+  },
   // Local servers are slow and usually serve one or two requests at a time.
-  local: { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", models: [], ...DEFAULT_LIMITS, timeout_secs: 900, max_concurrent: 1 },
-  custom: { id: "", name: "", base_url: "", auth: "x-api-key", models: [], ...DEFAULT_LIMITS },
+  local: { id: "local", name: "Local", base_url: "http://127.0.0.1:8080", auth: "none", wire: "anthropic", models: [], ...DEFAULT_LIMITS, timeout_secs: 900, max_concurrent: 1 },
+  custom: { id: "", name: "", base_url: "", auth: "x-api-key", wire: "anthropic", models: [], ...DEFAULT_LIMITS },
 };
 
 /** Integer fields of the Advanced group, with the ranges the Mothership accepts. */
@@ -763,7 +777,7 @@ function limitLabels(limits: Partial<ProviderLimits>): string[] {
   return labels;
 }
 
-const PRESET_LABEL: Record<ProviderPreset, string> = { deepseek: "DeepSeek preset", local: "Local preset", custom: "Custom" };
+const PRESET_LABEL: Record<ProviderPreset, string> = { deepseek: "DeepSeek preset", openai: "OpenAI preset", local: "Local preset", custom: "Custom" };
 
 const AUTH_LABEL: Record<ProviderAuth, string> = {
   "x-api-key": "API key (x-api-key header)",
@@ -895,6 +909,9 @@ function ProvidersSection() {
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={!providers || editing !== null || has("deepseek")} onClick={() => setEditing({ mode: "new", preset: "deepseek" })}>
           <IconPlus size={13} /> DeepSeek
+        </Button>
+        <Button size="sm" disabled={!providers || editing !== null || has("openai")} onClick={() => setEditing({ mode: "new", preset: "openai" })}>
+          <IconPlus size={13} /> OpenAI
         </Button>
         <Button size="sm" disabled={!providers || editing !== null || has("local")} onClick={() => setEditing({ mode: "new", preset: "local" })}>
           <IconPlus size={13} /> Local
@@ -1052,6 +1069,7 @@ function ProviderForm({
   const api = useApi();
   const toast = useToast();
   const start = initial ?? PRESETS[preset];
+  const wire = initial?.wire ?? PRESETS[preset].wire;
   const [id, setId] = useState(start.id);
   const [name, setName] = useState(start.name);
   const [baseUrl, setBaseUrl] = useState(start.base_url);
@@ -1115,6 +1133,7 @@ function ProviderForm({
         name: name.trim(),
         base_url: baseUrl.trim(),
         auth,
+        wire,
         models,
         preset: initial?.preset ?? preset,
         api_key,
@@ -1178,7 +1197,7 @@ function ProviderForm({
           <input
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.example.com/anthropic"
+            placeholder={wire === "openai" ? "https://api.openai.com" : "https://api.example.com/anthropic"}
             spellCheck={false}
             aria-invalid={Boolean(urlError && baseUrl)}
             className={cx(inputClass, "font-mono text-[13px]")}

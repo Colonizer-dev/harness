@@ -39,7 +39,8 @@ variables are removed from Claude Code's own environment.
 
 Claude Code sends its full request shape to routed providers, including `thinking`, `context_management`,
 `output_config`, `metadata`, every tool definition and betas such as `context-management-*` and
-`advisor-tool-*`. Providers that reject unknown fields need to ignore them.
+`advisor-tool-*`. Providers that reject unknown fields need to ignore them; a provider on the gateway's
+`openai` wire gets a rebuilt request without them (docs/protocol.md §6.5).
 
 ## Shared memory
 

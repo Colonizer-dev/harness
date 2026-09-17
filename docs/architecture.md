@@ -62,8 +62,9 @@ editable in Settings → Modules). A module kind has one active provider:
 
 Two settings layers sit next to the modules:
 
-- **Model providers** (`providers.json`, keys in `provider-keys/`, 0600): Anthropic-compatible endpoints
-  the agent can route models to as `<provider>/<model>`. The Claude Code runner starts a router inside
+- **Model providers** (`providers.json`, keys in `provider-keys/`, 0600): Anthropic-compatible endpoints,
+  or OpenAI Chat Completions endpoints the gateway translates, that the agent can route models to as
+  `<provider>/<model>`. The Claude Code runner starts a router inside
   the colony that sends those requests to the mothership's provider gateway
   (`host.microsandbox.internal:41750`). The gateway reaches loopback, LAN and tailnet providers, adds the
   key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
