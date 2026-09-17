@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
@@ -222,7 +223,7 @@ export function childEnv(env) {
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, hiddenEnv = [], routes = [] } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, hiddenEnv = [], routes = [] } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -231,6 +232,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
   if (env.COLONIZER_SUBAGENT_MODEL) claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
+  const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
   // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
   // Enforced unless someone chose otherwise: an unset or unrecognised value delegates, and only an
@@ -246,6 +248,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     .filter(Boolean);
   const appended = [SYSTEM_PROMPT_APPEND];
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
+  if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
   // Keyed on the skill file, not the directory name, so an operator's own copy of superpowers switches on too.
   for (const dir of pluginDirs) {
@@ -282,11 +285,12 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     env: claudeEnv,
     stderr: (data) => process.stderr.write(data),
   };
-  if (memory) {
-    // No allowedTools entry: canUseTool already allows every tool except AskUserQuestion, and listing
-    // them would make the SDK warn that canUseTool is shadowed.
-    options.mcpServers = { [MEMORY_SERVER]: memoryServer };
-  }
+  // No allowedTools entry: canUseTool already allows every tool except AskUserQuestion, and listing
+  // them would make the SDK warn that canUseTool is shadowed.
+  const mcpServers = {};
+  if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
+  if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
+  if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
   const preToolUse = [];
   if (delegate === 'enforce') {
     // A hook rather than canUseTool: only the hook input says whether a call came from a subagent
@@ -296,6 +300,22 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
       hooks: [
         async (input) => {
           const reason = delegationDecision(input.tool_name, input.tool_input, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (findings) {
+    // Whatever the delegation mode, filing stays with the orchestrator: a subagent's call carries
+    // `agent_id`, and is refused with a reason that tells it to report the finding instead.
+    preToolUse.push({
+      hooks: [
+        async (input) => {
+          const reason = findingDecision(input.tool_name, input);
           if (!reason) return { continue: true };
           return {
             continue: true,
@@ -706,10 +726,17 @@ async function main() {
     memoryServer = createMemoryServer({ dir: process.env.COLONIZER_MEMORY_DIR, emit, createSdkMcpServer, tool, z });
   }
 
+  let findingsServer;
+  if (process.env.COLONIZER_FINDINGS === 'true') {
+    const { z } = await import('zod');
+    findingsServer = createFindingsServer({ emit, createSdkMcpServer, tool, z });
+  }
+
   const { options, warnings } = buildOptions(process.env, {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
+    findingsServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,
   });
