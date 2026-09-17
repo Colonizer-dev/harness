@@ -5,6 +5,8 @@
  * Anything unrecognised falls back to naming the command rather than guessing at its intent.
  */
 
+import { settlerName } from "../settlers";
+
 export type ActivityIcon = "run" | "read" | "edit" | "search" | "download" | "web" | "memory" | "test" | "git" | "clean" | "list" | "agent";
 
 export interface Activity {
@@ -151,11 +153,9 @@ export function describeTool(toolName: string, input: Record<string, unknown>): 
     case "Agent": {
       // The subagent that starts here speaks for itself further down the thread, so name it.
       const what = str(input.description);
-      const who = str(input.subagent_type);
-      if (what && who) return { icon: "agent", label: `Sending ${quote(what)} to the ${who} subagent` };
-      if (what) return { icon: "agent", label: `Starting a subagent: ${what}` };
-      if (who) return { icon: "agent", label: `Starting the ${who} subagent` };
-      return { icon: "agent", label: "Starting a subagent" };
+      const who = settlerName(str(input.subagent_type) || null);
+      const article = /^[AEIOU]/.test(who) ? "an" : "a";
+      return { icon: "agent", label: what ? `Sending ${article} ${who}: ${what}` : `Sending ${article} ${who}` };
     }
     case "TodoWrite":
       return { icon: "list", label: "Updating its plan" };
