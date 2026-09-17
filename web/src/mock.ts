@@ -908,7 +908,7 @@ export function createMockApi(): Api {
           headroom: {
             type: "boolean",
             title: "Compress what the agent reads (Headroom)",
-            description: "Token savings: model requests pass through Headroom inside the colony. The first time it is switched on, the mothership downloads it (220–245 MB, depending on the architecture).",
+            description: "Token savings: model requests pass through Headroom inside the colony. The first time it is switched on, the mothership downloads it (220–245 MB, depending on the architecture). It takes 300–370 MB of each colony’s memory.",
             default: false,
           },
           rtk: {

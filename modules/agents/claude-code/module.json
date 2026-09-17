@@ -105,7 +105,7 @@
       "headroom": {
         "type": "boolean",
         "title": "Compress what the agent reads (Headroom)",
-        "description": "Token savings: model requests pass through Headroom inside the colony, which compacts large tool output such as JSON before it reaches the model, and leaves earlier turns alone so prompt caching keeps working. The first time it is switched on, the mothership downloads Headroom (220–245 MB, depending on the architecture). Off by default.",
+        "description": "Token savings: model requests pass through Headroom inside the colony, which compacts large tool output such as JSON before it reaches the model, and leaves earlier turns alone so prompt caching keeps working. The first time it is switched on, the mothership downloads Headroom (220–245 MB, depending on the architecture). It takes 300–370 MB of each colony’s memory. Off by default.",
         "default": false,
         "env": "COLONIZER_HEADROOM"
       },
