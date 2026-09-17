@@ -79,7 +79,8 @@ const ANTHROPIC_MODELS: &[(&str, &str)] = &[
 ];
 
 const AUTH_MODES: [&str; 3] = ["x-api-key", "bearer", "none"];
-const PRESETS: [&str; 4] = ["deepseek", "openai", "local", "custom"];
+/// Vendors worth one click. `custom` is anything else; `openai` is translated by the gateway.
+const PRESETS: [&str; 6] = ["deepseek", "openai", "zai", "alibaba", "local", "custom"];
 /// The runner reads these to decide which routes a colony actually uses.
 const MODEL_VARS: [&str; 3] = ["COLONIZER_MODEL", "COLONIZER_SUBAGENT_MODEL", "COLONIZER_BACKGROUND_MODEL"];
 
@@ -293,7 +294,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     }
     let preset = req.preset.unwrap_or_else(|| "custom".into());
     if !PRESETS.contains(&preset.as_str()) {
-        return Err(bad("preset must be deepseek, openai, local or custom"));
+        return Err(bad("preset must be deepseek, openai, zai, alibaba, local or custom"));
     }
     if !in_range(req.timeout_secs, 30, 3600) {
         return Err(bad("request timeout must be 30-3600 seconds"));
