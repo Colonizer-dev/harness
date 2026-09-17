@@ -1019,7 +1019,7 @@ function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadroom> })
     default:
       return (
         <div className={cx(box, "text-muted")}>
-          <div className="min-w-0 flex-1">Headroom downloads when you save with it switched on (220–245 MB, once). Colonies run without it until then.</div>
+          <div className="min-w-0 flex-1">Headroom downloads when you save with it switched on (220–245 MB, once). Colonies run without it until then. While it runs, it takes 300–370 MB of each colony’s memory.</div>
           <Button size="sm" onClick={() => void start()}>
             Download now
           </Button>
