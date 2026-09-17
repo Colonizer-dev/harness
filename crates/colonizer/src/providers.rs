@@ -1,5 +1,6 @@
-//! Model providers: Anthropic-compatible endpoints that colonies can route models to, such as
-//! DeepSeek's API or a model served on this machine or the operator's tailnet. Colonies reach them
+//! Model providers: endpoints that colonies can route models to, such as DeepSeek's Anthropic-compatible
+//! API, OpenAI (the `openai` wire, translated by openai.rs), or a model served on this machine or the
+//! operator's tailnet. Colonies reach them
 //! through the mothership's provider gateway (gateway.rs), so keys stay here (0600) and never enter a
 //! colony.
 
@@ -18,12 +19,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
+/// The protocol an endpoint speaks. An `anthropic` endpoint is proxied byte-for-byte; an `openai` one
+/// has to be translated in both directions, so the wire is recorded per provider rather than guessed
+/// from the URL. Providers saved before this field existed deserialise as `anthropic`, unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Wire {
+    #[default]
+    Anthropic,
+    Openai,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
     pub name: String,
     pub base_url: String,
     pub auth: String,
+    #[serde(default)]
+    pub wire: Wire,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -65,7 +79,7 @@ const ANTHROPIC_MODELS: &[(&str, &str)] = &[
 ];
 
 const AUTH_MODES: [&str; 3] = ["x-api-key", "bearer", "none"];
-const PRESETS: [&str; 3] = ["deepseek", "local", "custom"];
+const PRESETS: [&str; 4] = ["deepseek", "openai", "local", "custom"];
 /// The runner reads these to decide which routes a colony actually uses.
 const MODEL_VARS: [&str; 3] = ["COLONIZER_MODEL", "COLONIZER_SUBAGENT_MODEL", "COLONIZER_BACKGROUND_MODEL"];
 
@@ -203,6 +217,7 @@ fn describe(app: &App, provider: &Provider) -> Value {
         "name": provider.name,
         "base_url": provider.base_url,
         "auth": provider.auth,
+        "wire": provider.wire,
         "has_key": app.provider_key(&provider.id).is_some(),
         "models": provider.models,
         "preset": if provider.preset.is_empty() { "custom" } else { provider.preset.as_str() },
@@ -226,6 +241,9 @@ pub struct PutProvider {
     base_url: String,
     #[serde(default = "default_auth")]
     auth: String,
+    /// Omitted means `anthropic`, so a client that predates the field cannot flip an existing provider.
+    #[serde(default)]
+    wire: Wire,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -275,7 +293,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     }
     let preset = req.preset.unwrap_or_else(|| "custom".into());
     if !PRESETS.contains(&preset.as_str()) {
-        return Err(bad("preset must be deepseek, local or custom"));
+        return Err(bad("preset must be deepseek, openai, local or custom"));
     }
     if !in_range(req.timeout_secs, 30, 3600) {
         return Err(bad("request timeout must be 30-3600 seconds"));
@@ -307,6 +325,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         name: name.to_string(),
         base_url,
         auth: req.auth,
+        wire: req.wire,
         models,
         preset,
         timeout_secs: req.timeout_secs,
@@ -363,6 +382,7 @@ mod tests {
             name: id.into(),
             base_url: "http://100.80.225.14:8000".into(),
             auth: "none".into(),
+            wire: Wire::Anthropic,
             models: vec![],
             preset: "local".into(),
             timeout_secs: None,
@@ -384,6 +404,21 @@ mod tests {
         assert!(split_url("ftp://example.com").is_none());
         assert!(split_url("https://user:pass@example.com").is_none());
         assert!(split_url("https://example.com:notaport").is_none());
+    }
+
+    /// providers.json on disk predates `wire`, and a Settings save from an older web build omits it.
+    /// Either one deserialising as anything but `anthropic` would silently reroute a working provider
+    /// into the (unimplemented) translator.
+    #[test]
+    fn a_provider_without_a_wire_is_anthropic() {
+        let saved = r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key"}"#;
+        let provider: Provider = serde_json::from_str(saved).unwrap();
+        assert_eq!(provider.wire, Wire::Anthropic);
+
+        let put: PutProvider = serde_json::from_str(r#"{"name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic"}"#).unwrap();
+        assert_eq!(put.wire, Wire::Anthropic);
+
+        assert_eq!(serde_json::to_value(Wire::Openai).unwrap(), serde_json::json!("openai"));
     }
 
     #[test]
