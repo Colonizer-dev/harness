@@ -4,6 +4,7 @@ import { createContext, useContext, useId, useMemo, useState } from "react";
 import type { AskUserArgs, AskUserResult } from "../sessionStream";
 import type { Answers, Question, QuestionOption } from "../types";
 import { IconCheck, IconChevronDown, IconQuestion } from "./icons";
+import { useEnter } from "./motion";
 import { Button, Spinner, cx } from "./ui";
 
 export interface QuestionActions {
@@ -31,9 +32,14 @@ function draftComplete(draft: Draft): boolean {
 }
 
 export function AskUserCard({ toolCallId, args, result }: ToolCallMessagePartProps<AskUserArgs, AskUserResult>) {
+  const enter = useEnter();
   const questions = args?.questions ?? [];
-  if (result) return <AnsweredCard questions={questions} result={result} />;
-  return <OpenCard questionId={toolCallId} questions={questions} />;
+  // One wrapper for both states, so answering swaps the card without fading it in again.
+  return (
+    <div className={enter}>
+      {result ? <AnsweredCard questions={questions} result={result} /> : <OpenCard questionId={toolCallId} questions={questions} />}
+    </div>
+  );
 }
 
 function OpenCard({ questionId, questions }: { questionId: string; questions: Question[] }) {

@@ -54,6 +54,7 @@ import {
   IconX,
 } from "./icons";
 import { InlineCode } from "./Markdown";
+import { EnterContext, useEnter, useFollowBottom, useSettled } from "./motion";
 import { SettlerCard, useStumble } from "./SettlerCard";
 import { Spinner, cx, formatDuration, store, stored } from "./ui";
 
@@ -95,6 +96,14 @@ export function ChatPanel({
     store("colonizer.chat-simple", next ? "1" : "0");
   };
 
+  const settled = useSettled(connected, state.lastSeq);
+  const { viewportRef, contentRef, stickToBottom } = useFollowBottom();
+  // Sending a message brings the reader back to the foot of the thread, wherever they had scrolled to.
+  const lastUserId = [...thread.messages].reverse().find((m) => m.role === "user")?.id;
+  useEffect(() => {
+    if (lastUserId) stickToBottom();
+  }, [lastUserId, stickToBottom]);
+
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: thread.messages,
     isRunning,
@@ -135,6 +144,7 @@ export function ChatPanel({
 
   return (
     <QuestionActionsContext.Provider value={questionActions}>
+      <EnterContext.Provider value={settled}>
       <SimpleViewContext.Provider value={simple}>
       <AssistantRuntimeProvider runtime={runtime}>
         <AskUserToolUI />
@@ -155,41 +165,56 @@ export function ChatPanel({
               {simple ? "Show detail" : "Simple view"}
             </button>
           </div>
-          <ThreadPrimitive.Viewport className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2">
+          {/* useFollowBottom does the following, eased, so the viewport's own instant scrolling is off. */}
+          <ThreadPrimitive.Viewport
+            ref={(el) => {
+              viewportRef.current = el;
+            }}
+            autoScroll={false}
+            scrollToBottomOnRunStart={false}
+            className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2"
+          >
             {thread.messages.length === 0 && <EmptyChat connection={state.connection} live={live} />}
-            <ThreadPrimitive.Messages>
-              {({ message }) => (
-                <>
-                  {message.role !== "user" ? (
-                    thread.subagents[message.id] ? (
-                      <SubagentMessage view={thread.subagents[message.id]} subagents={thread.subagents} live={live} />
+            <div
+              ref={(el) => {
+                contentRef.current = el;
+              }}
+            >
+              <ThreadPrimitive.Messages>
+                {({ message }) => (
+                  <>
+                    {message.role !== "user" ? (
+                      thread.subagents[message.id] ? (
+                        <SubagentMessage view={thread.subagents[message.id]} subagents={thread.subagents} live={live} />
+                      ) : (
+                        <AssistantMessage />
+                      )
+                    ) : message.id === BRIEF_ID ? (
+                      <SessionBrief text={messageText(message)} />
+                    ) : isWatchdogMessageId(message.id) ? (
+                      <WatchdogNotice text={messageText(message)} at={message.createdAt} />
                     ) : (
-                      <AssistantMessage />
-                    )
-                  ) : message.id === BRIEF_ID ? (
-                    <SessionBrief text={messageText(message)} />
-                  ) : isWatchdogMessageId(message.id) ? (
-                    <WatchdogNotice text={messageText(message)} at={message.createdAt} />
-                  ) : (
-                    <UserMessage />
-                  )}
-                  {thread.turns[message.id]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
-                  {thread.notices[message.id]?.map((notice) => (
-                    <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
-                  ))}
-                </>
-              )}
-            </ThreadPrimitive.Messages>
-            {thread.turns[END_OF_THREAD]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
-            {thread.notices[END_OF_THREAD]?.map((notice) => (
-              <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
-            ))}
-            <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
+                      <UserMessage />
+                    )}
+                    {thread.turns[message.id]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
+                    {thread.notices[message.id]?.map((notice) => (
+                      <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
+                    ))}
+                  </>
+                )}
+              </ThreadPrimitive.Messages>
+              {thread.turns[END_OF_THREAD]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
+              {thread.notices[END_OF_THREAD]?.map((notice) => (
+                <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
+              ))}
+              <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
+            </div>
           </ThreadPrimitive.Viewport>
           <Composer isRunning={isRunning} live={live} waiting={thread.hasOpenQuestion} />
         </ThreadPrimitive.Root>
       </AssistantRuntimeProvider>
       </SimpleViewContext.Provider>
+      </EnterContext.Provider>
     </QuestionActionsContext.Provider>
   );
 }
@@ -215,10 +240,11 @@ function EmptyChat({ connection, live }: { connection: StreamState["connection"]
 }
 
 function SessionBrief({ text }: { text: string }) {
+  const enter = useEnter();
   const trimmed = text.trim();
   const firstLine = trimmed.split("\n").find((line) => line.trim()) ?? "";
   return (
-    <MessagePrimitive.Root className="my-3">
+    <MessagePrimitive.Root className={cx("my-3", enter)}>
       <details className="group rounded-xl border border-border bg-panel text-[13px]">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-3 py-2 hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
           <IconChevron size={13} className="shrink-0 text-faint transition-transform group-open:rotate-90" />
@@ -235,8 +261,9 @@ function SessionBrief({ text }: { text: string }) {
 
 /** A watchdog nudge (§6.3) is an operator notice, never shown as something the user said. */
 function WatchdogNotice({ text, at }: { text: string; at?: Date }) {
+  const enter = useEnter();
   return (
-    <MessagePrimitive.Root className="my-3">
+    <MessagePrimitive.Root className={cx("my-3", enter)}>
       <details className="group rounded-lg border border-warn/25 bg-warn-soft text-[12.5px] text-warn">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-1.5 [&::-webkit-details-marker]:hidden">
           <IconAlert size={13} className="shrink-0" />
@@ -257,9 +284,10 @@ function WatchdogNotice({ text, at }: { text: string; at?: Date }) {
 const SCOPE_WORD: Record<MemoryScope, string> = { global: "global", org: "org", repo: "repository" };
 
 function MemoryNoticeRow({ notice, onOpen }: { notice: MemoryNotice; onOpen?: () => void }) {
+  const enter = useEnter();
   const { proposal } = notice;
   return (
-    <div className="my-2 ml-10 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-panel-2/60 px-3 py-1.5 text-[12.5px] text-muted">
+    <div className={cx(enter, "my-2 ml-10 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-panel-2/60 px-3 py-1.5 text-[12.5px] text-muted")}>
       <IconMemory size={13} className="shrink-0 text-accent" />
       <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
         Proposed a {SCOPE_WORD[proposal.scope] ?? proposal.scope} memory: <span className="font-medium text-text"><InlineCode text={proposal.title} /></span>
@@ -274,8 +302,9 @@ function MemoryNoticeRow({ notice, onOpen }: { notice: MemoryNotice; onOpen?: ()
 }
 
 function UserMessage() {
+  const enter = useEnter();
   return (
-    <MessagePrimitive.Root className="my-4 flex justify-end">
+    <MessagePrimitive.Root className={cx("my-4 flex justify-end", enter)}>
       <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent-soft px-3.5 py-2 text-[14px] leading-relaxed">
         <MessagePrimitive.Parts />
       </div>
@@ -283,8 +312,16 @@ function UserMessage() {
   );
 }
 
+/**
+ * Streamed text is revealed at a steady pace rather than as it arrives. Colonies' deltas come in bursts, 150–250
+ * characters at once and then up to half a second of nothing; the default reveal (250 ms to catch up) typed each burst
+ * out in a rush. Spreading the backlog over 700 ms evens that out, and 8 ms per character at most keeps the end of a
+ * message from trailing on after the stream has finished.
+ */
+const SMOOTH_TEXT = { drainMs: 700, maxCharIntervalMs: 8 };
+
 function MarkdownText() {
-  return <MarkdownTextPrimitive className="md break-words text-[14px] leading-relaxed" />;
+  return <MarkdownTextPrimitive smooth={SMOOTH_TEXT} className="md break-words text-[14px] leading-relaxed" />;
 }
 
 /** A settler's report, which its card already shows in the report box, so the transcript under it leaves it out. */
@@ -334,6 +371,7 @@ function toolSummary(input: Record<string, unknown>): string {
 
 function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartProps) {
   const simple = useContext(SimpleViewContext);
+  const enter = useEnter();
   const payload = result as ToolResultPayload | undefined;
   const done = payload !== undefined;
   const failed = Boolean(isError || payload?.is_error);
@@ -343,7 +381,7 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
   const activity = describeTool(toolName, input);
   const ActivityGlyph = ACTIVITY_ICONS[activity.icon];
   return (
-    <details className="group my-1.5 rounded-xl border border-border bg-panel-2/50 text-[13px] open:bg-panel-2">
+    <details className={cx("group my-1.5 rounded-xl border border-border bg-panel-2/50 text-[13px] open:bg-panel-2", enter)}>
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-3 py-2 [&::-webkit-details-marker]:hidden">
         <span
           className={cx(
@@ -425,6 +463,7 @@ function subagentStatus(view: SubagentView, state: SubagentState | "paused"): st
  */
 function SubagentMessage({ view, subagents, live }: { view: SubagentView; subagents: Record<string, SubagentView>; live: boolean }) {
   const simple = useContext(SimpleViewContext);
+  const enter = useEnter();
   const state = settlerState(view, live);
   const error = useStumble(view.errors);
   const crew = view.crew;
@@ -466,11 +505,11 @@ function SubagentMessage({ view, subagents, live }: { view: SubagentView; subage
       )}
     </SettlerCard>
   );
-  if (!crew) return <MessagePrimitive.Root className="my-3 ml-4">{card}</MessagePrimitive.Root>;
+  if (!crew) return <MessagePrimitive.Root className={cx("my-3 ml-4", enter)}>{card}</MessagePrimitive.Root>;
   const first = crew.index === 0;
   const last = crew.index === crew.ids.length - 1;
   return (
-    <MessagePrimitive.Root className={cx("ml-4", first && "mt-3", last && "mb-3")}>
+    <MessagePrimitive.Root className={cx("ml-4", first && "mt-3", last && "mb-3", enter)}>
       {first && <CrewStrip views={crew.ids.map((id) => subagents[id]).filter(Boolean)} live={live} />}
       <div className="ml-3.5 border-l-2 border-border pl-3.5 pt-2.5">{card}</div>
     </MessagePrimitive.Root>
@@ -515,8 +554,9 @@ function CrewAnt({ view, state, index }: { view: SubagentView; state: SubagentSt
 }
 
 function AssistantMessage() {
+  const enter = useEnter();
   return (
-    <MessagePrimitive.Root className="my-4 flex gap-3">
+    <MessagePrimitive.Root className={cx("my-4 flex gap-3", enter)}>
       <div className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-panel-3 text-accent">
         <IconSpark size={15} />
       </div>
@@ -534,13 +574,14 @@ function AssistantMessage() {
 }
 
 function TurnNotice({ turn }: { turn: TurnSummary }) {
+  const enter = useEnter();
   const meta = [turn.durationMs != null ? formatDuration(turn.durationMs) : null, turn.costUsd != null ? `$${turn.costUsd.toFixed(2)} total` : null]
     .filter(Boolean)
     .join(" · ");
   if (turn.isError) {
     const result = turn.result?.trim();
     return (
-      <div role="alert" className="my-3 ml-10 rounded-lg border border-err/30 bg-err-soft px-3 py-2 text-[13px] text-err">
+      <div role="alert" className={cx("my-3 ml-10 rounded-lg border border-err/30 bg-err-soft px-3 py-2 text-[13px] text-err", enter)}>
         <div className="flex flex-wrap items-center gap-x-2">
           <IconX size={13} strokeWidth={3} />
           <span className="font-semibold">Turn failed</span>
@@ -553,7 +594,7 @@ function TurnNotice({ turn }: { turn: TurnSummary }) {
     );
   }
   return (
-    <div className="-mt-2 mb-3 ml-10 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-faint">
+    <div className={cx("-mt-2 mb-3 ml-10 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-faint", enter)}>
       <span className="font-medium text-ok">Turn complete</span>
       {meta && <span>· {meta}</span>}
     </div>
@@ -568,6 +609,7 @@ const OPEN_QUESTION = "[data-open-question]";
  * offers the way back to it — but only when it is actually out of sight.
  */
 function WaitingForAnswer() {
+  const enter = useEnter();
   const [offscreen, setOffscreen] = useState(false);
 
   useEffect(() => {
@@ -598,7 +640,7 @@ function WaitingForAnswer() {
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent">
+    <div className={cx("flex flex-wrap items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent", enter)}>
       <IconQuestion size={15} /> Waiting for your answer
       {offscreen && (
         <button
@@ -618,13 +660,7 @@ function ActivityLine({ state, hasOpenQuestion, live }: { state: StreamState; ha
   if (hasOpenQuestion || state.agentState === "waiting_for_answer") {
     return <WaitingForAnswer />;
   }
-  if (state.agentState === "working") {
-    return (
-      <div className="flex items-center gap-2 py-2 pl-10 text-[13px] text-muted">
-        <Spinner className="text-accent" /> {state.agentDetail || "Working in the microVM…"}
-      </div>
-    );
-  }
+  if (state.agentState === "working") return <WorkingLine detail={state.agentDetail} />;
   if (state.agentState === "error" || state.agentState === "exited") {
     return (
       <div className="py-2 pl-10 text-[13px] text-err">
@@ -634,6 +670,15 @@ function ActivityLine({ state, hasOpenQuestion, live }: { state: StreamState; ha
     );
   }
   return null;
+}
+
+function WorkingLine({ detail }: { detail: string | null | undefined }) {
+  const enter = useEnter();
+  return (
+    <div className={cx("flex items-center gap-2 py-2 pl-10 text-[13px] text-muted", enter)}>
+      <Spinner className="text-accent" /> {detail || "Working in the microVM…"}
+    </div>
+  );
 }
 
 function Composer({ isRunning, live, waiting }: { isRunning: boolean; live: boolean; waiting: boolean }) {
