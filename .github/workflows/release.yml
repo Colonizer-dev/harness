@@ -1,0 +1,209 @@
+# Builds the prebuilt Colonizer apps and, for a version tag, publishes them as a GitHub release together
+# with the one-command installer (scripts/install-release.sh, published as install.sh). docs/install.md
+# tells people how to use them.
+#
+# - linux-binaries: colonizer-agentd and rtk for each colony architecture, and the harness for Linux, as
+#   static musl binaries built inside rust:1-alpine. That is `docker run` from an ordinary job, because
+#   GitHub's JavaScript actions don't run inside Alpine containers.
+# - bundle: scripts/install.sh --bundle for each platform, then a smoke test: the app starts from the
+#   unpacked archive, finds its assets there, and serves its API and web UI.
+# - release: tags only. The tag has to match the harness crate's version.
+#
+# A release contains no Anthropic code: the Claude Agent SDK and Claude Code are fetched where the app
+# is installed (scripts/install.sh --bundle and scripts/install-release.sh say how).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/install.sh
+      - scripts/install-release.sh
+      - scripts/record-fetch-at-install.mjs
+      - scripts/build-agentd.sh
+      - scripts/build-rtk.sh
+      - scripts/fetch-vendor.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux-binaries:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch rtk's pinned source
+        run: VENDOR_KINDS=source scripts/fetch-vendor.sh
+
+      - name: Build inside rust:1-alpine
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e OWNER="$(id -u):$(id -g)" \
+            -v "$PWD:/src" -w /src rust:1-alpine sh -euc '
+              apk add --no-cache musl-dev file >/dev/null
+              scripts/build-agentd.sh
+              scripts/build-rtk.sh
+              # The harness runs on the host, so only the Linux app needs a Linux build of it.
+              if [ "$ARCH" = x86_64 ]; then
+                cargo build --release --locked -p colonizer
+                install -m 755 target/release/colonizer dist/bin/colonizer
+              fi
+              chown -R "$OWNER" dist target
+            '
+          mkdir -p prebuilt
+          cp dist/bin/colonizer-agentd dist/bin/rtk prebuilt/
+          [ "$ARCH" != x86_64 ] || cp dist/bin/colonizer prebuilt/
+          file prebuilt/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-binaries-${{ matrix.arch }}
+          path: prebuilt/
+          if-no-files-found: error
+          retention-days: 7
+
+  bundle:
+    needs: linux-binaries
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            guest: x86_64
+          - platform: darwin-arm64
+            runner: macos-15
+            guest: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Rust
+        if: matrix.platform == 'darwin-arm64'
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-binaries-${{ matrix.guest }}
+          path: prebuilt
+
+      - name: Build the app
+        run: |
+          chmod 755 prebuilt/*
+          COLONIZER_PREBUILT="$PWD/prebuilt" scripts/install.sh --bundle
+
+      - name: Package
+        run: |
+          printf '%s\n' "$VERSION" > dist/VERSION
+          cp LICENSE NOTICE dist/
+          # Anthropic's code stays out: install-release.sh fetches it where the app is installed.
+          if find dist -path '*/node_modules/@anthropic-ai/claude-agent-sdk*' | grep -q .; then
+            echo "the Claude Agent SDK is in the bundle" >&2
+            exit 1
+          fi
+          mkdir -p stage out
+          cp -R dist stage/colonizer
+          tar -C stage -czf "out/colonizer-$PLATFORM.tar.gz" colonizer
+          ls -lh out
+
+      - name: Smoke test
+        run: |
+          mkdir -p smoke/home
+          tar -xzf "out/colonizer-$PLATFORM.tar.gz" -C smoke
+          HOME="$PWD/smoke/home" COLONIZER_BIND=127.0.0.1:17878 COLONIZER_GATEWAY_BIND=127.0.0.1:17879 \
+            smoke/colonizer/bin/colonizer > smoke/log 2>&1 &
+          pid=$!
+          for _ in $(seq 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:17878/api/status && break
+            sleep 1
+          done
+          cat smoke/log
+          grep -q "^assets: .*/smoke/colonizer$" smoke/log
+          curl -fsS http://127.0.0.1:17878/api/status | tee smoke/status.json
+          echo
+          # The app found its own parts: the in-VM daemon, the web UI and the Claude Code module.
+          grep -q '"agentd":true' smoke/status.json
+          grep -q '"web":true' smoke/status.json
+          grep -q '"claude-code"' smoke/status.json
+          curl -fsS http://127.0.0.1:17878/ | grep -qi '<html'
+          kill "$pid"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colonizer-${{ matrix.platform }}
+          path: out/colonizer-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the tag against the crate version
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/colonizer/Cargo.toml | head -1)
+          [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match crates/colonizer version $crate" >&2; exit 1; }
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: colonizer-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          cp scripts/install-release.sh release/install.sh
+          cd release
+          sha256sum colonizer-*.tar.gz install.sh > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "Prebuilt Colonizer for Linux x86_64 (with KVM) and Apple Silicon Macs, built from ${{ github.sha }}."
+            echo
+            echo '```sh'
+            echo 'curl -fsSL https://colonizer.dev/install.sh | sh'
+            echo '```'
+            echo
+            echo "The installer checks the archive against SHA256SUMS. It fetches the Claude Agent SDK from the npm registry, and on a Mac the Linux build of Claude Code, from Anthropic's own channels: neither is in the release. Guide: https://colonizer.dev/docs/install"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" colonizer-*.tar.gz install.sh SHA256SUMS \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "Colonizer $TAG" --notes-file notes.md
