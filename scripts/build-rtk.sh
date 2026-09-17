@@ -8,6 +8,8 @@
 #
 #   scripts/build-rtk.sh           build (skipped when dist/bin/rtk is already built from this source)
 #   scripts/build-rtk.sh --smoke   build, then run it inside a node:24-bookworm microVM
+#
+# COLONIZER_BUILD_HERE=1 builds in the current environment instead of a microVM, as build-agentd.sh does.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,15 +33,23 @@ if [ -x "$OUT" ] && [ -f "$stamp" ]; then
   echo "rtk $version ($target) already built"
 else
   SRC="$REPO/target/rtk-src"
+  # Built in place, the source has to sit outside this repository: under it, cargo would take rtk for a
+  # member of the harness workspace and refuse to build it.
+  [ "${COLONIZER_BUILD_HERE:-}" != 1 ] || SRC="${TMPDIR:-/tmp}/colonizer-rtk-src"
   rm -rf "$SRC" && mkdir -p "$SRC" "$REPO/target/rtk-build" "$REPO/target/alpine-rtk" "$REPO/target/alpine-cargo-registry" "$REPO/dist/bin"
   tar -xzf "$archive" -C "$SRC" --strip-components 1
-  echo "building rtk $version ($target) in a rust:1-alpine microVM..."
-  "$MSB" run --no-tty -q -m 4G -c 8 \
-    -v "$SRC:/src" \
-    -v "$REPO/target/alpine-rtk:/build-target" \
-    -v "$REPO/target/alpine-cargo-registry:/usr/local/cargo/registry" \
-    -w /src \
-    rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release --locked --target-dir /build-target'
+  if [ "${COLONIZER_BUILD_HERE:-}" = 1 ]; then
+    echo "building rtk $version ($target) here..."
+    (cd "$SRC" && cargo build --release --locked --target-dir "$REPO/target/alpine-rtk")
+  else
+    echo "building rtk $version ($target) in a rust:1-alpine microVM..."
+    "$MSB" run --no-tty -q -m 4G -c 8 \
+      -v "$SRC:/src" \
+      -v "$REPO/target/alpine-rtk:/build-target" \
+      -v "$REPO/target/alpine-cargo-registry:/usr/local/cargo/registry" \
+      -w /src \
+      rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release --locked --target-dir /build-target'
+  fi
   install -m 755 "$REPO/target/alpine-rtk/release/rtk" "$OUT"
   rm -f "$REPO/target/rtk-build/"*
   touch "$stamp"

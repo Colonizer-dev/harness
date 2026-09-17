@@ -5,6 +5,9 @@
 #
 #   scripts/build-agentd.sh           build
 #   scripts/build-agentd.sh --smoke   build, then run it inside a node:24-bookworm microVM
+#
+# COLONIZER_BUILD_HERE=1 builds in the current environment instead of a microVM. The release workflow
+# sets it when it is already running inside rust:1-alpine, where no microVM can start.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,13 +34,18 @@ case "$(uname -m)" in
   arm64|aarch64) target="aarch64-unknown-linux-musl" ;;
   *) target="x86_64-unknown-linux-musl" ;;
 esac
-echo "building colonizer-agentd ($target) in a rust:1-alpine microVM..."
-"$MSB" run --no-tty -q -m 4G -c 8 \
-  -v "$SRC:/src" \
-  -v "$REPO/target/alpine:/build-target" \
-  -v "$REPO/target/alpine-cargo-registry:/usr/local/cargo/registry" \
-  -w /src \
-  rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release -p colonizer-agentd --target-dir /build-target'
+if [ "${COLONIZER_BUILD_HERE:-}" = 1 ]; then
+  echo "building colonizer-agentd ($target) here..."
+  (cd "$SRC" && cargo build --release -p colonizer-agentd --target-dir "$REPO/target/alpine")
+else
+  echo "building colonizer-agentd ($target) in a rust:1-alpine microVM..."
+  "$MSB" run --no-tty -q -m 4G -c 8 \
+    -v "$SRC:/src" \
+    -v "$REPO/target/alpine:/build-target" \
+    -v "$REPO/target/alpine-cargo-registry:/usr/local/cargo/registry" \
+    -w /src \
+    rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release -p colonizer-agentd --target-dir /build-target'
+fi
 
 install -m 755 "$REPO/target/alpine/release/colonizer-agentd" "$OUT"
 file "$OUT"
