@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Proposes new pins for the vendored Claude Code plugins in vendor/vendor.lock, described in skill terms.
+// Proposes new pins for the vendored Claude Code plugins and prompt texts (caveman) in vendor/vendor.lock,
+// described in skill terms.
 //
 //   node scripts/update-vendored-plugins.mjs                     report what moved upstream (changes nothing)
 //   node scripts/update-vendored-plugins.mjs --write             also rewrite vendor/vendor.lock
@@ -130,7 +131,7 @@ function parseLock(text) {
   lines.forEach((line, index) => {
     if (!line.trim() || line.trimStart().startsWith('#')) return;
     const [name, version, platform, kind, sha, url] = line.trim().split(/\s+/);
-    if (kind === 'plugin') entries.push({ index, name, version, platform, kind, sha, url });
+    if (kind === 'plugin' || kind === 'prompt') entries.push({ index, name, version, platform, kind, sha, url });
   });
   return { lines, entries };
 }

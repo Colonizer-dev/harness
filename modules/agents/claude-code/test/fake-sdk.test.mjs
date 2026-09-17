@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -7,10 +7,13 @@ import { test } from 'node:test';
 import {
   AsyncQueue,
   buildOptions,
+  CAVEMAN_LEVELS,
+  cavemanPrompt,
   childEnv,
   CHOICE_NUDGE,
   endsWithQuestion,
   MAX_TOOL_OUTPUT,
+  rtkRewrite,
   runAgent,
   SUPERPOWERS_COLONIZER_NOTE,
   SUPERPOWERS_SKILL,
@@ -354,6 +357,91 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
     assert.equal(options.hooks, undefined);
 
     assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('caveman puts its ruleset in the system prompt at the chosen level, with what stays plain', () => {
+  const root = mkdtempSync(join(tmpdir(), 'colonizer-caveman-'));
+  try {
+    const skill = join(root, 'SKILL.md');
+    writeFileSync(skill, '---\nname: caveman\ndescription: >\n  Ultra-compressed.\n---\n\nRespond terse like smart caveman.\n\nDefault: **full**. Switch: `/caveman lite|full|ultra`.\n');
+
+    assert.equal(buildOptions({}).options.systemPrompt.append, SYSTEM_PROMPT_APPEND, 'off by default');
+    assert.equal(buildOptions({ COLONIZER_CAVEMAN: 'false', COLONIZER_CAVEMAN_SKILL: skill }).options.systemPrompt.append, SYSTEM_PROMPT_APPEND);
+
+    const { options, warnings } = buildOptions({ COLONIZER_CAVEMAN: 'true', COLONIZER_CAVEMAN_SKILL: skill, COLONIZER_CAVEMAN_LEVEL: 'ultra' });
+    const append = options.systemPrompt.append;
+    assert.deepEqual(warnings, []);
+    assert.ok(append.startsWith(SYSTEM_PROMPT_APPEND));
+    assert.ok(append.includes('at the ultra level'));
+    assert.ok(append.includes('Respond terse like smart caveman.'));
+    assert.ok(!append.includes('name: caveman'), 'the frontmatter is not part of the rules');
+    assert.ok(append.includes('pull request description, AskUserQuestion questions and options'), 'what a colony writes for other people stays plain');
+
+    for (const level of ['', 'wenyan-ultra', 'LOUD']) {
+      assert.ok(buildOptions({ COLONIZER_CAVEMAN: 'true', COLONIZER_CAVEMAN_SKILL: skill, COLONIZER_CAVEMAN_LEVEL: level }).options.systemPrompt.append.includes('at the full level'), `${level || '(unset)'} falls back to full`);
+    }
+    assert.deepEqual([...CAVEMAN_LEVELS], ['lite', 'full', 'ultra']);
+
+    const missing = buildOptions({ COLONIZER_CAVEMAN: 'true', COLONIZER_CAVEMAN_SKILL: join(root, 'nope.md') });
+    assert.equal(missing.options.systemPrompt.append, SYSTEM_PROMPT_APPEND);
+    assert.equal(missing.warnings.length, 1, 'a missing ruleset is reported, not fatal');
+    assert.equal(cavemanPrompt('no frontmatter', 'lite').split('\n')[2], 'no frontmatter');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('rtk rewrites Bash commands through `rtk rewrite` and leaves every other outcome alone', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'colonizer-rtk-'));
+  try {
+    // rtk's exit codes: 0 rewrite, 3 rewrite that its ask rules flag, 1 no equivalent, 2 deny rule.
+    const rtk = join(root, 'rtk');
+    writeFileSync(
+      rtk,
+      [
+        '#!/bin/sh',
+        '[ "$1" = rewrite ] || exit 9',
+        'case "$2" in',
+        '  "git status") echo "rtk git status"; exit 3 ;;',
+        '  "cargo test") echo "rtk cargo test"; exit 0 ;;',
+        '  "rm -rf /") echo "rtk rm -rf /"; exit 2 ;;',
+        '  "same") echo "same"; exit 0 ;;',
+        '  "slow") sleep 5; echo "rtk slow"; exit 0 ;;',
+        '  *) exit 1 ;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(rtk, 0o755);
+
+    assert.equal(await rtkRewrite('git status', rtk), 'rtk git status', 'exit 3 still rewrites');
+    assert.equal(await rtkRewrite('cargo test', rtk), 'rtk cargo test');
+    assert.equal(await rtkRewrite('echo hi', rtk), null, 'no equivalent');
+    assert.equal(await rtkRewrite('rm -rf /', rtk), null, 'a deny rule leaves the command to the colony');
+    assert.equal(await rtkRewrite('same', rtk), null, 'an identical rewrite is no rewrite');
+    assert.equal(await rtkRewrite('git status', join(root, 'missing-rtk')), null, 'rtk not installed');
+    assert.equal(await rtkRewrite('slow', rtk), null, 'a slow rtk never holds a command back');
+
+    assert.equal(buildOptions({}).options.hooks, undefined, 'off by default');
+    const { options } = buildOptions({ COLONIZER_RTK: 'true', COLONIZER_RTK_BIN: rtk, PATH: '/usr/bin' });
+    assert.equal(options.env.PATH, `${root}:/usr/bin`, 'rewritten commands call rtk, so it is on the PATH');
+    const [entry] = options.hooks.PreToolUse;
+    assert.equal(entry.matcher, 'Bash');
+    const hook = entry.hooks[0];
+    const rewritten = await hook({ tool_name: 'Bash', tool_input: { command: 'cargo test', description: 'Run tests' } });
+    assert.deepEqual(rewritten.hookSpecificOutput, {
+      hookEventName: 'PreToolUse',
+      updatedInput: { command: 'rtk cargo test', description: 'Run tests' },
+    });
+    assert.equal(rewritten.hookSpecificOutput.permissionDecision, undefined, 'never a permission decision');
+    assert.deepEqual(await hook({ tool_name: 'Bash', tool_input: { command: 'echo hi' } }), { continue: true });
+
+    // Alongside the delegation gate, both hooks are registered and the gate keeps its deny.
+    const both = buildOptions({ COLONIZER_RTK: 'true', COLONIZER_RTK_BIN: rtk, COLONIZER_DELEGATE: 'enforce' }).options;
+    assert.equal(both.hooks.PreToolUse.length, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
