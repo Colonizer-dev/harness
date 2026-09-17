@@ -49,6 +49,14 @@
         "default": "",
         "env": "COLONIZER_BACKGROUND_MODEL"
       },
+      "delegate": {
+        "type": "string",
+        "title": "Delegation",
+        "description": "Off: the orchestrator does the work itself. Encourage: it is asked to hand implementation to subagents. Enforce: it may only plan, ask and delegate — reading, editing and running commands are refused, so the work happens in subagents on the subagent model.",
+        "enum": ["off", "encourage", "enforce"],
+        "default": "off",
+        "env": "COLONIZER_DELEGATE"
+      },
       "effort": {
         "type": "string",
         "title": "Effort",
