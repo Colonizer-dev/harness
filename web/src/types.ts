@@ -127,7 +127,9 @@ export interface ModuleInfo {
 // ---------------------------------------------------------------------------
 
 export type ProviderAuth = "x-api-key" | "bearer" | "none";
-export type ProviderPreset = "deepseek" | "local" | "custom";
+export type ProviderPreset = "deepseek" | "openai" | "local" | "custom";
+/** The protocol the endpoint speaks. `anthropic` is proxied as-is; `openai` is translated by the gateway. */
+export type ProviderWire = "anthropic" | "openai";
 
 /** Gateway settings the Mothership applies to every request to a provider. */
 export interface ProviderLimits {
@@ -147,6 +149,7 @@ export interface ModelProvider extends ProviderLimits {
   name: string;
   base_url: string;
   auth: ProviderAuth;
+  wire: ProviderWire;
   has_key: boolean;
   models: string[];
   preset: ProviderPreset;
@@ -159,6 +162,8 @@ export interface SaveProviderRequest {
   name: string;
   base_url: string;
   auth: ProviderAuth;
+  /** Omitted means `anthropic`. */
+  wire?: ProviderWire;
   models: string[];
   preset?: ProviderPreset;
   /** Omitted keeps the saved key; `""` removes it. */

@@ -14,6 +14,7 @@ mod github;
 mod memory;
 mod mesh;
 mod modules;
+mod openai;
 mod orgs;
 mod presets;
 mod providers;
