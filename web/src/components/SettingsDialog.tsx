@@ -24,6 +24,7 @@ import type {
   ProviderWire,
   PullStatus,
   SchemaField,
+  TelemetryStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
@@ -58,7 +59,7 @@ import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass,
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-type SectionId = "connections" | "providers" | "runtime" | `module:${string}`;
+export type SectionId = "connections" | "providers" | "runtime" | "live-map" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -88,12 +89,19 @@ export function SettingsDialog({
   status,
   onStatusChanged,
   onModulesChanged,
+  telemetry,
+  onTelemetryChanged,
+  initialSection,
 }: {
   open: boolean;
   onClose: () => void;
   status: HarnessStatus | null;
   onStatusChanged: () => void;
   onModulesChanged: (modules: ModuleInfo[]) => void;
+  telemetry: TelemetryStatus | null;
+  onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  /** The section to open on, instead of the first. */
+  initialSection?: SectionId;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -111,7 +119,17 @@ export function SettingsDialog({
       aria-labelledby="settings-title"
       className="m-auto w-[min(900px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
     >
-      {open && <SettingsBody status={status} onStatusChanged={onStatusChanged} onModulesChanged={onModulesChanged} onClose={onClose} />}
+      {open && (
+        <SettingsBody
+          status={status}
+          onStatusChanged={onStatusChanged}
+          onModulesChanged={onModulesChanged}
+          telemetry={telemetry}
+          onTelemetryChanged={onTelemetryChanged}
+          initialSection={initialSection}
+          onClose={onClose}
+        />
+      )}
     </dialog>
   );
 }
@@ -120,19 +138,25 @@ function SettingsBody({
   status,
   onStatusChanged,
   onModulesChanged,
+  telemetry,
+  onTelemetryChanged,
+  initialSection,
   onClose,
 }: {
   status: HarnessStatus | null;
   onStatusChanged: () => void;
   onModulesChanged: (modules: ModuleInfo[]) => void;
+  telemetry: TelemetryStatus | null;
+  onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  initialSection?: SectionId;
   onClose: () => void;
 }) {
   const api = useApi();
   const narrow = useMediaQuery("(max-width: 699px)");
   // A narrow window opens on the section list; a wide one on the first section.
-  const [section, setSection] = useState<SectionId | null>(() => (narrow ? null : "connections"));
+  const [section, setSection] = useState<SectionId | null>(() => initialSection ?? (narrow ? null : "connections"));
   // Where focus returns when a narrow window goes back to the section list.
-  const lastSection = useRef<SectionId>("connections");
+  const lastSection = useRef<SectionId>(initialSection ?? "connections");
   const select = (id: SectionId) => {
     lastSection.current = id;
     setSection(id);
@@ -198,6 +222,12 @@ function SettingsBody({
           badge: providers ? String(providers.length + 1) : undefined,
         },
         { id: "runtime", label: "Runtime", hint: "Detected on this machine", tone: runtimeBroken ? "err" : null, toneText: runtimeBroken ? "Something is missing" : undefined },
+        {
+          id: "live-map",
+          label: "Live map",
+          hint: "This mothership as a dot on colonizer.dev",
+          badge: telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
+        },
       ],
     },
     {
@@ -219,6 +249,7 @@ function SettingsBody({
   let pane: ReactNode = null;
   if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
+  else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -828,6 +859,104 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
         </dl>
       ) : (
         <p className="text-[13px] text-muted">Mothership status unavailable.</p>
+      )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live map: a heartbeat to colonizer.dev, off until switched on (docs/telemetry.md)
+// ---------------------------------------------------------------------------
+
+const TELEMETRY_DOCS = "https://colonizer.dev/docs/telemetry";
+
+function LiveMapPane({
+  telemetry,
+  onChanged,
+  back,
+}: {
+  telemetry: TelemetryStatus | null;
+  onChanged: (telemetry: TelemetryStatus) => void;
+  back?: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+
+  const set = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setTelemetry(enabled));
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const info = (
+    <>
+      <p>
+        While it is on, the Mothership sends a heartbeat every 5 minutes, and within a minute when the number of running colonies changes.
+        colonizer.dev/live shows a dot for its area, about 25 km across, lit while colonies run.
+      </p>
+      <p>Switching it off takes the dot away at once and forgets the random id, so a later period on the map can’t be tied to this one.</p>
+    </>
+  );
+
+  return (
+    <Pane title="Live map" subtitle="This mothership as a dot on colonizer.dev/live" info={info} back={back}>
+      {!telemetry ? (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          <Row id="live-map-switch" label="Show this mothership on the live map" inline>
+            <Switch
+              id="live-map-switch"
+              labelledBy="live-map-switch-label"
+              label="Show this mothership on the live map"
+              checked={telemetry.enabled === true}
+              disabled={saving || telemetry.blocked_by !== null}
+              onChange={(checked) => void set(checked)}
+            />
+          </Row>
+          {telemetry.blocked_by && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              Kept off by <Code>{telemetry.blocked_by}</Code> in the Mothership’s environment.
+            </p>
+          )}
+          <div>
+            <h4 className="mb-1.5 text-[12.5px] font-semibold">What is sent</h4>
+            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-[12px] leading-5">
+              {JSON.stringify(
+                { ...telemetry.heartbeat, install_id: telemetry.heartbeat.install_id ?? "(random, created when you switch it on)" },
+                null,
+                2,
+              )}
+            </pre>
+            <p className="mt-2 text-[12.5px] text-muted">
+              Nothing else: no repositories, issues, code, names or paths. The service sees this machine’s IP address, as any website
+              would, turns it into a 25 km area and doesn’t store it. Heartbeats are kept for an hour at most.
+            </p>
+          </div>
+          {telemetry.enabled && (telemetry.last_sent_at || telemetry.last_error) && (
+            <p className={cx("text-[12.5px] [overflow-wrap:anywhere]", telemetry.last_error ? "text-err" : "text-muted")}>
+              {telemetry.last_error
+                ? `Last heartbeat failed: ${telemetry.last_error}`
+                : `Last heartbeat ${new Date(telemetry.last_sent_at!).toLocaleTimeString()}`}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12.5px]">
+            <a className="inline-flex items-center gap-1 text-accent hover:underline" href={telemetry.map_url} target="_blank" rel="noreferrer">
+              Open the live map <IconExternal size={12} />
+            </a>
+            <a className="inline-flex items-center gap-1 text-accent hover:underline" href={TELEMETRY_DOCS} target="_blank" rel="noreferrer">
+              How it works <IconExternal size={12} />
+            </a>
+          </div>
+        </div>
       )}
     </Pane>
   );
