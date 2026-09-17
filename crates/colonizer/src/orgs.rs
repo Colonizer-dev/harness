@@ -27,6 +27,10 @@ pub struct AgentOverrides {
     pub subagent_model: Option<String>,
     #[serde(default)]
     pub background_model: Option<String>,
+    /// Skillsets (plugin directories) this org switches on (`true`) or off (`false`) on top of the global
+    /// `plugins` setting. A skillset it doesn't name follows the global switch.
+    #[serde(default)]
+    pub skillsets: Option<BTreeMap<String, bool>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -87,7 +91,7 @@ impl App {
     }
 }
 
-/// The agent module choice with the org's model overrides applied.
+/// The agent module choice with the org's model and skillset overrides applied.
 pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoice {
     let mut choice = modules.agent.clone();
     if let Some(agent) = &org.agent {
@@ -95,6 +99,18 @@ pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoi
             if let Some(value) = value {
                 choice.settings.insert(key.to_string(), Value::String(value.clone()));
             }
+        }
+        if let Some(skillsets) = agent.skillsets.as_ref().filter(|s| !s.is_empty()) {
+            let global = choice.settings.get("plugins").and_then(Value::as_str).unwrap_or_default();
+            let mut names = crate::plugins::parse_list(global);
+            for (name, on) in skillsets {
+                if !*on {
+                    names.retain(|n| n != name);
+                } else if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+            choice.settings.insert("plugins".into(), Value::String(names.join(",")));
         }
     }
     choice
@@ -140,6 +156,11 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
             if model.len() > 120 || model.contains(char::is_whitespace) {
                 return Err("model names can't contain spaces or exceed 120 characters".into());
             }
+        }
+        if let Some(skillsets) = &agent.skillsets
+            && (skillsets.len() > 64 || !skillsets.keys().all(|name| crate::util::is_plain_name(name) && name.len() <= 64))
+        {
+            return Err("skillset names are plain directory names, at most 64 of them".into());
         }
     }
     if settings.max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
@@ -203,6 +224,13 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(req): 
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid GitHub org name"));
     }
     validate(&req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    let mut req = req;
+    // No skillset overrides is the same as inheriting all of them.
+    if let Some(agent) = req.settings.agent.as_mut()
+        && agent.skillsets.as_ref().is_some_and(BTreeMap::is_empty)
+    {
+        agent.skillsets = None;
+    }
     let mut all = app.all_org_settings();
     if req.settings == OrgSettings::default() {
         all.remove(&org);
@@ -247,5 +275,36 @@ mod tests {
         assert!(validate(&bad_model).is_err());
         assert!(valid_org("Colonizer-dev"));
         assert!(!valid_org("../etc"));
+
+        let skillsets = |names: &[(&str, bool)]| OrgSettings {
+            agent: Some(AgentOverrides { skillsets: Some(names.iter().map(|(n, on)| (n.to_string(), *on)).collect()), ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(validate(&skillsets(&[("google-skills", true)])).is_ok());
+        assert!(validate(&skillsets(&[("../ecc", true)])).is_err(), "a skillset is a directory name, never a path");
+        assert!(validate(&skillsets(&[("a,b", true)])).is_err(), "a comma would split into two names in the setting");
+    }
+
+    #[test]
+    fn org_skillsets_switch_single_skillsets_on_and_off_over_the_global_list() {
+        let mut modules = ModulesConfig::default();
+        modules.agent.settings.insert("plugins".into(), json!("ecc, team-skills"));
+        let org = |names: &[(&str, bool)]| OrgSettings {
+            agent: Some(AgentOverrides { skillsets: Some(names.iter().map(|(n, on)| (n.to_string(), *on)).collect()), ..Default::default() }),
+            ..Default::default()
+        };
+        let plugins = |org: &OrgSettings| effective_agent(&modules, org).settings.get("plugins").cloned();
+
+        // Unnamed skillsets follow the global switches, in the global order.
+        assert_eq!(plugins(&org(&[("ecc", false), ("google-skills", true)])), Some(json!("team-skills,google-skills")));
+        // Switching on what is already on changes nothing.
+        assert_eq!(plugins(&org(&[("ecc", true)])), Some(json!("ecc,team-skills")));
+        // No overrides leaves the global setting exactly as the operator wrote it.
+        assert_eq!(plugins(&OrgSettings::default()), Some(json!("ecc, team-skills")));
+        assert_eq!(plugins(&org(&[])), Some(json!("ecc, team-skills")));
+
+        // With nothing on globally (the default), an org can still switch one on.
+        let fresh = ModulesConfig::default();
+        assert_eq!(effective_agent(&fresh, &org(&[("superpowers", true)])).settings.get("plugins"), Some(&json!("superpowers")));
     }
 }

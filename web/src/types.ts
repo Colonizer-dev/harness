@@ -99,6 +99,8 @@ export interface ModuleProviderInfo {
 /** A small JSON-Schema subset: an object whose properties are scalar settings. */
 export interface SchemaField {
   type?: "string" | "number" | "integer" | "boolean";
+  /** A rendering hint: `plugin-dirs` shows a comma-separated list of plugin names as skillset switches. */
+  format?: string;
   title?: string;
   description?: string;
   enum?: (string | number)[];
@@ -205,12 +207,42 @@ export interface ModelOption {
 }
 
 // ---------------------------------------------------------------------------
+// Skillsets: plugin directories a colony can load (§6.3)
+// ---------------------------------------------------------------------------
+
+export interface PluginDir {
+  name: string;
+  description: string | null;
+  version: string | null;
+  /** `vendored` ships with the app; `local` is in the mothership's plugins folder. */
+  source: "vendored" | "local";
+  /** A local copy of a vendored plugin, loaded instead of it. */
+  shadows_vendored: boolean;
+  skills: number;
+  agents: number;
+  commands: number;
+}
+
+/** GET /api/plugins */
+export interface PluginListing {
+  /** Where an operator puts their own plugin directories. */
+  local_root: string;
+  plugins: PluginDir[];
+}
+
+// ---------------------------------------------------------------------------
 // Org workspaces (§6.3)
 // ---------------------------------------------------------------------------
 
 /** Every field is optional; missing or null inherits the global module setting. */
 export interface OrgSettings {
-  agent?: { model?: string | null; subagent_model?: string | null; background_model?: string | null } | null;
+  agent?: {
+    model?: string | null;
+    subagent_model?: string | null;
+    background_model?: string | null;
+    /** Skillsets this org switches on (`true`) or off (`false`); unnamed ones follow the global switches. */
+    skillsets?: Record<string, boolean> | null;
+  } | null;
   max_parallel?: number | null;
   memory?: { enabled?: boolean | null } | null;
   watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;
