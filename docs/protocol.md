@@ -298,6 +298,37 @@ and writes the same comma-separated list of names. A saved name that no longer r
 missing, since a colony loading it fails to boot. Empty, the default, loads nothing. An org workspace
 can switch single skillsets on or off over that list with `agent.skillsets` (see Org workspaces).
 
+### Token savings
+
+Two `claude-code` module settings cut what a colony spends on tokens. Both are off by default, and each
+works only when the install has what it needs; otherwise the colony boots without it and its log says why.
+
+| Setting | What it does | Needs |
+| :--- | :--- | :--- |
+| `caveman` (`COLONIZER_CAVEMAN`), `caveman_level` (`lite`, `full`, `ultra`; default `full`) | The agent replies in [caveman](https://github.com/juliusbrussee/caveman)'s compressed style: output tokens | `<COLONIZER_HOME>/vendor/caveman/`, mounted at `/opt/colonizer/caveman` |
+| `rtk` (`COLONIZER_RTK`) | Shell commands go through [rtk](https://github.com/rtk-ai/rtk), which shortens their output before the agent reads it: input tokens | `<COLONIZER_HOME>/bin/rtk`, mounted at `/opt/colonizer/bin/rtk` |
+
+**caveman.** caveman switches itself on with `SessionStart` and `UserPromptSubmit` hooks that inject its
+ruleset and track a per-session level. In a colony the level is the setting, and the runner puts the
+ruleset — `skills/caveman/SKILL.md` without its frontmatter — into the system prompt, followed by the one
+Colonizer exception: the pull request description, AskUserQuestion questions and options, memory
+proposals and code comments stay in plain sentences. Only that file and `LICENSE` are staged, and both are
+MIT. caveman's compression engine, proxy and MCP server are BSL-1.1 and are neither staged nor used.
+
+**rtk.** The runner registers an in-process `PreToolUse` hook on `Bash` that runs `rtk rewrite <command>`.
+Exit 0 or 3 with output replaces the command (3 is a rewrite rtk's ask rules flag; the colony's own
+permission handling still applies), and anything else — 1 for no rtk equivalent, 2 for a deny rule, rtk
+missing, or no answer within 2 seconds — runs the command unchanged. The hook returns only
+`updatedInput`, never a permission decision, so it can't allow what `delegate = enforce` denies. Rewritten
+commands call `rtk`, so `/opt/colonizer/bin` is put first on the agent's `PATH`. Read, Grep and Glob
+don't go through the shell and aren't rewritten.
+
+`scripts/build-rtk.sh` builds rtk from the source pinned in `vendor/vendor.lock` as a static musl binary
+inside a `rust:1-alpine` microVM, like `colonizer-agentd`, and skips the build when that source is already
+built for the machine. Upstream's aarch64 Linux release is linked against glibc 2.39, newer than the
+colony image's 2.36, so it would not start in a colony on Apple Silicon. rtk's telemetry is opt-in and
+never switched on in a colony.
+
 ### Pre-flight scan
 
 With `COLONIZER_SCAN` set to `warn` or `block` and `COLONIZER_SCAN_COMMAND` naming a scanner, the

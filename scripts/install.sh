@@ -64,6 +64,9 @@ done
 echo "==> colonizer-agentd (static musl build inside a microVM)"
 MSB="$msb" "$root/scripts/build-agentd.sh"
 
+echo "==> rtk (static musl build inside a microVM, for colonies that switch on compact command output)"
+MSB="$msb" "$root/scripts/build-rtk.sh"
+
 echo "==> agent modules"
 mkdir -p "$dist/modules/agents"
 for module in "$root"/modules/agents/*/; do

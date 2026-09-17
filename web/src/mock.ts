@@ -881,7 +881,7 @@ export function createMockApi(): Api {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
       enabled: true,
-      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc" },
+      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", rtk: false },
       schema: {
         type: "object",
         properties: {
@@ -894,6 +894,19 @@ export function createMockApi(): Api {
             title: "Skillsets",
             description: "Claude Code plugin directories colonies load, read-only. All off by default.",
             default: "",
+          },
+          caveman: {
+            type: "boolean",
+            title: "Terse replies (caveman)",
+            description: "Token savings: the agent answers in caveman's compressed style. Pull request descriptions and questions to you stay in plain sentences.",
+            default: false,
+          },
+          caveman_level: { type: "string", enum: ["lite", "full", "ultra"], title: "Caveman level", description: "How terse, when terse replies are on.", default: "full" },
+          rtk: {
+            type: "boolean",
+            title: "Compact command output (rtk)",
+            description: "Token savings: shell commands the agent runs go through rtk, which shortens their output.",
+            default: false,
           },
         },
       },

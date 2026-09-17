@@ -3,8 +3,9 @@
 // commands arrive as JSON lines on stdin, protocol events leave as JSON lines on stdout.
 // Diagnostics go to stderr only.
 
+import { execFile } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -51,6 +52,45 @@ export function superpowersBootstrap(skill) {
     '</EXTREMELY_IMPORTANT>',
     SUPERPOWERS_COLONIZER_NOTE,
   ].join('\n');
+}
+
+/** Where the mothership mounts what the token-saving settings need (crates/colonizer/src/sessions.rs). */
+export const RTK_BIN = '/opt/colonizer/bin/rtk';
+export const CAVEMAN_SKILL = '/opt/colonizer/caveman/SKILL.md';
+export const CAVEMAN_LEVELS = new Set(['lite', 'full', 'ultra']);
+
+/**
+ * caveman's ruleset for the system prompt. The plugin switches itself on with SessionStart and
+ * UserPromptSubmit hooks that inject this text and track a per-session level; in a colony the level is a
+ * setting and the text goes straight into the prompt. What a colony writes for people other than the
+ * user in the chat stays in plain sentences.
+ */
+export function cavemanPrompt(skill, level) {
+  const body = skill.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+  return [
+    `Caveman mode is on for this colony at the ${level} level. The level is set in Colonizer's settings, so ignore the /caveman switch the rules mention.`,
+    '',
+    body,
+    '',
+    '- Colonizer exceptions: write the pull request description, AskUserQuestion questions and options, memory proposals and code comments in plain, complete sentences. Caveman style is for your replies in the chat.',
+  ].join('\n');
+}
+
+/**
+ * The command `rtk rewrite` turns `command` into, or null to run it unchanged. rtk's exit codes: 0 with
+ * output, a rewrite; 3 with output, a rewrite its ask rules flag (the colony's own permission handling
+ * still applies); 1, no rtk equivalent; 2, a deny rule matched. Anything else, including rtk missing or
+ * slow, leaves the command alone: saving tokens must never break a command.
+ */
+export function rtkRewrite(command, bin = RTK_BIN) {
+  return new Promise((resolve) => {
+    execFile(bin, ['rewrite', command], { encoding: 'utf8', timeout: 2000 }, (error, stdout) => {
+      const status = error ? error.code : 0;
+      if ((status !== 0 && status !== 3) || typeof stdout !== 'string') return resolve(null);
+      const rewritten = stdout.replace(/\r?\n$/, '');
+      resolve(rewritten && rewritten !== command ? rewritten : null);
+    });
+  });
 }
 
 function readText(path) {
@@ -209,6 +249,16 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     const skill = readText(join(dir, SUPERPOWERS_SKILL));
     if (skill !== null) appended.push(superpowersBootstrap(skill.trimEnd()));
   }
+  // Token savings (docs/protocol.md): each is off unless its setting is on and the mothership mounted it.
+  if (env.COLONIZER_CAVEMAN === 'true') {
+    const skill = readText(env.COLONIZER_CAVEMAN_SKILL || CAVEMAN_SKILL);
+    const level = CAVEMAN_LEVELS.has(env.COLONIZER_CAVEMAN_LEVEL) ? env.COLONIZER_CAVEMAN_LEVEL : 'full';
+    if (skill === null) warnings.push('caveman is switched on but its ruleset is not mounted; replies stay as they are');
+    else appended.push(cavemanPrompt(skill, level));
+  }
+  const rtkBin = env.COLONIZER_RTK === 'true' ? env.COLONIZER_RTK_BIN || RTK_BIN : null;
+  // Rewritten commands call `rtk`, so it has to be on the PATH the Bash tool runs with.
+  if (rtkBin) claudeEnv.PATH = `${dirname(rtkBin)}:${claudeEnv.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`;
 
   const options = {
     cwd: process.cwd(),
@@ -230,27 +280,45 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, hidde
     // them would make the SDK warn that canUseTool is shadowed.
     options.mcpServers = { [MEMORY_SERVER]: memoryServer };
   }
+  const preToolUse = [];
   if (delegate === 'enforce') {
     // A hook rather than canUseTool: only the hook input says whether a call came from a subagent
     // (`agent_id`), and without that the gate would refuse the subagents' work as well as the
     // orchestrator's. Denying here reaches the model as a tool error it can act on.
-    options.hooks = {
-      PreToolUse: [
-        {
-          hooks: [
-            async (input) => {
-              const reason = delegationDecision(input.tool_name, input.tool_input, input);
-              if (!reason) return { continue: true };
-              return {
-                continue: true,
-                hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
-              };
-            },
-          ],
+    preToolUse.push({
+      hooks: [
+        async (input) => {
+          const reason = delegationDecision(input.tool_name, input.tool_input, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
         },
       ],
-    };
+    });
   }
+  if (rtkBin) {
+    // In process, like the delegation gate: rtk's own Claude Code hook is a shell script needing jq, and
+    // Colonizer doesn't run plugin hooks. Only the input is updated; no permission decision is returned,
+    // so this can never allow what the delegation gate denies.
+    preToolUse.push({
+      matcher: 'Bash',
+      hooks: [
+        async (input) => {
+          const command = input.tool_input?.command;
+          if (typeof command !== 'string' || !command) return { continue: true };
+          const rewritten = await rtkRewrite(command, rtkBin);
+          if (!rewritten) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { ...input.tool_input, command: rewritten } },
+          };
+        },
+      ],
+    });
+  }
+  if (preToolUse.length) options.hooks = { PreToolUse: preToolUse };
   if (pluginDirs.length) {
     options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
   }
