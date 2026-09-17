@@ -11,7 +11,7 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useId, useMemo, useState } from "react";
 import { errorMessage, useToast } from "../context";
 import {
   ASK_USER_TOOL,
@@ -23,15 +23,17 @@ import {
   type MemoryNotice,
   type SessionStream,
   type StreamState,
+  type SubagentState,
+  type SubagentView,
   type ToolResultPayload,
   type TurnSummary,
 } from "../sessionStream";
-import type { AgentRef, MemoryScope } from "../types";
+import type { MemoryScope } from "../types";
+import { AntAvatar } from "./AntAvatar";
 import { describeTool, isNoiseTool, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
 import {
   IconAlert,
-  IconAnt,
   IconBranch,
   IconCheck,
   IconChevron,
@@ -157,8 +159,8 @@ export function ChatPanel({
               {({ message }) => (
                 <>
                   {message.role !== "user" ? (
-                    thread.agents[message.id] ? (
-                      <SubagentMessage agent={thread.agents[message.id]} />
+                    thread.subagents[message.id] ? (
+                      <SubagentMessage view={thread.subagents[message.id]} live={live} />
                     ) : (
                       <AssistantMessage />
                     )
@@ -377,32 +379,72 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
   );
 }
 
+/** The line under a settler's name: what it is doing right now, in plain words. */
+function subagentStatus(view: SubagentView, state: SubagentState | "paused"): string {
+  const describe = (tool: { name: string; input: Record<string, unknown> } | null) => (tool ? describeTool(tool.name, tool.input).label : null);
+  switch (state) {
+    case "working":
+      return `${describe(view.current) ?? "Working"}…`;
+    case "thinking":
+      return view.steps === 0 ? "Getting its bearings…" : "Thinking about the next step…";
+    case "writing":
+      return "Writing its report…";
+    case "done":
+      return view.steps === 1 ? "Done · 1 step" : `Done · ${view.steps} steps`;
+    case "continued":
+      return "Carried on further down";
+    case "paused":
+      return view.last ? `Stopped while ${describe(view.last)?.toLowerCase()}` : "Stopped";
+  }
+}
+
 /**
- * A subagent's turn. The orchestrator and each subagent are different speakers in the same thread,
- * so a subagent gets its own avatar, its name, and an indented column — the shape of a group chat
- * rather than one long monologue.
+ * A settler — a subagent — as one compact card: an ant animated by what it is doing, its settler name and task, and
+ * one live status line. Its full work, every step and its report, opens on request, so a colony that delegates reads
+ * as a few busy settlers rather than pages of their output.
  */
-function SubagentMessage({ agent }: { agent: AgentRef }) {
+function SubagentMessage({ view, live }: { view: SubagentView; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  // A colony that is no longer running has no settler still at work, whatever its last event said.
+  const state: SubagentState | "paused" = !live && view.state !== "done" && view.state !== "continued" ? "paused" : view.state;
+  const status = subagentStatus(view, state);
   return (
-    <MessagePrimitive.Root className="my-4 ml-4 flex gap-3 border-l-2 border-accent/25 pl-4">
-      <div
-        className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent"
-        title={agent.description ?? undefined}
-      >
-        <IconAnt size={16} />
-      </div>
-      <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className="text-[12.5px] font-semibold text-accent">{agent.name}</span>
-          <span className="text-[11.5px] text-faint">subagent</span>
-        </div>
-        <MessagePrimitive.Parts
-          components={{
-            Text: MarkdownText,
-            Reasoning: ReasoningPart,
-            tools: { Fallback: ToolCallCard },
-          }}
-        />
+    <MessagePrimitive.Root className="my-3 ml-4">
+      <div className={cx("rounded-2xl border bg-panel transition-colors", open ? "border-accent/35" : "border-border")}>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          className="flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-2.5 text-left hover:bg-panel-2/60"
+        >
+          <AntAvatar state={state} />
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-baseline gap-x-2">
+              <span className="text-[13px] font-semibold text-accent">{view.name}</span>
+              {view.agent.description && <span className="min-w-0 truncate text-[12.5px] text-muted">{view.agent.description}</span>}
+            </span>
+            <span key={status} className="status-in block truncate text-[12.5px] text-faint">
+              {status}
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-1 text-[12px] text-faint">
+            {open ? "Hide work" : "Show work"}
+            <IconChevron size={13} className={cx("transition-transform", open && "rotate-90")} />
+          </span>
+        </button>
+        {open && (
+          <div id={bodyId} className="space-y-1.5 border-t border-border px-4 py-3">
+            <MessagePrimitive.Parts
+              components={{
+                Text: MarkdownText,
+                Reasoning: ReasoningPart,
+                tools: { Fallback: ToolCallCard },
+              }}
+            />
+          </div>
+        )}
       </div>
     </MessagePrimitive.Root>
   );

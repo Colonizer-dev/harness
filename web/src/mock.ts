@@ -1,6 +1,7 @@
 // In-browser mock of the harness API and event streams, enabled with `?mock=1`.
 import { ApiError, type Api, type SocketLike } from "./api";
 import type {
+  AgentRef,
   AgentEvent,
   HeadroomStatus,
   AgentEventBody,
@@ -143,7 +144,8 @@ class MockSession {
     for (const socket of this.sockets) socket.deliver(text);
   }
 
-  emit(body: AgentEventBody, ts = now()): void {
+  /** `agent` rides along for a subagent's events, as the runner sends it. */
+  emit(body: AgentEventBody & { agent?: AgentRef }, ts = now()): void {
     const event = { ...body, seq: ++this.seq, ts } as AgentEvent;
     this.events.push(event);
     this.session.last_activity_at = ts;
@@ -225,24 +227,36 @@ class MockSession {
     return generation === this.generation && isLive(this.session.status);
   }
 
-  private async streamText(generation: number, messageId: string, text: string): Promise<boolean> {
+  /** `agent` marks what a subagent says, as the runner does (docs/protocol.md §2). */
+  private async streamText(generation: number, messageId: string, text: string, agent?: AgentRef): Promise<boolean> {
     const words = text.match(/\S+\s*/g) ?? [text];
+    const by = agent ? { agent } : {};
     for (let i = 0; i < words.length; i += 2) {
       if (!this.alive(generation)) return false;
-      this.emit({ type: "assistant_text_delta", message_id: messageId, block_index: 0, delta: words.slice(i, i + 2).join("") });
+      this.emit({ type: "assistant_text_delta", message_id: messageId, block_index: 0, delta: words.slice(i, i + 2).join(""), ...by });
       await sleep(40);
     }
     if (!this.alive(generation)) return false;
-    this.emit({ type: "assistant_text", message_id: messageId, block_index: 0, text });
+    this.emit({ type: "assistant_text", message_id: messageId, block_index: 0, text, ...by });
     return true;
   }
 
-  private async tool(generation: number, messageId: string, id: string, name: string, input: Record<string, unknown>, output: string, delay = 800): Promise<boolean> {
+  private async tool(
+    generation: number,
+    messageId: string,
+    id: string,
+    name: string,
+    input: Record<string, unknown>,
+    output: string,
+    delay = 800,
+    agent?: AgentRef,
+  ): Promise<boolean> {
     if (!this.alive(generation)) return false;
-    this.emit({ type: "tool_call", message_id: messageId, tool_call_id: id, name, input });
+    const by = agent ? { agent } : {};
+    this.emit({ type: "tool_call", message_id: messageId, tool_call_id: id, name, input, ...by });
     await sleep(delay);
     if (!this.alive(generation)) return false;
-    this.emit({ type: "tool_result", tool_call_id: id, output, is_error: false });
+    this.emit({ type: "tool_result", tool_call_id: id, output, is_error: false, ...by });
     return true;
   }
 
@@ -362,20 +376,41 @@ class MockSession {
       text: `Resolve GitHub issue #${s.issue} in ${s.repo}: ${s.issue_title}.\n\nRead the relevant code, make a focused fix with tests, and ask before making product decisions.`,
     });
     await sleep(600);
-    if (!(await this.streamText(generation, "msg_1", "I'll start by finding where guest checkout is handled so I can reproduce the failure."))) return;
+    if (!(await this.streamText(generation, "msg_1", "I'll send a scout to find where guest checkout is handled before deciding anything."))) return;
+    // The orchestrator delegates the reading, as colonies do: a Task call, the subagent's own events, then its report.
+    const scout: AgentRef = { id: "toolu_task1", name: "Explore", description: "Find where guest checkout fails" };
+    const report =
+      "`createSession()` throws when nobody is signed in (`src/checkout/session.ts:5`), so a guest never reaches `createGuestCart()` (`src/checkout/cart.ts:12`), which `src/checkout/api.ts:71` would otherwise call.";
+    this.emit({
+      type: "tool_call",
+      message_id: "msg_1",
+      tool_call_id: scout.id,
+      name: "Task",
+      input: { subagent_type: "Explore", description: scout.description, prompt: "Find where guest checkout fails. Report conclusions with file:line references." },
+    });
+    await sleep(500);
+    if (!this.alive(generation)) return;
+    this.emit({ type: "thinking", message_id: "sub_1", block_index: 0, text: "Guest checkout failing — search for guest handling first.", agent: scout });
+    await sleep(1400);
     if (
       !(await this.tool(
         generation,
-        "msg_1",
-        "toolu_1",
+        "sub_1",
+        "toolu_s1a",
         "Bash",
         { command: 'grep -rn "guest" src/checkout --include=*.ts', description: "Find guest checkout code" },
         'src/checkout/session.ts:5:  if (!user) throw new Error("guest checkout disabled");\nsrc/checkout/cart.ts:12:export async function createGuestCart(email: string) {\nsrc/checkout/api.ts:71:  const cart = await createGuestCart(body.email);',
-        900,
+        1800,
+        scout,
       ))
     )
       return;
-    if (!(await this.tool(generation, "msg_1", "toolu_2", "Read", { file_path: "/workspace/src/checkout/session.ts" }, SESSION_TS, 600))) return;
+    if (!(await this.tool(generation, "sub_1", "toolu_s1b", "Read", { file_path: "/workspace/src/checkout/session.ts" }, SESSION_TS, 1600, scout))) return;
+    await sleep(1200);
+    if (!(await this.streamText(generation, "sub_2", report, scout))) return;
+    await sleep(300);
+    if (!this.alive(generation)) return;
+    this.emit({ type: "tool_result", tool_call_id: scout.id, output: report, is_error: false });
     await sleep(300);
     if (
       !(await this.streamText(
