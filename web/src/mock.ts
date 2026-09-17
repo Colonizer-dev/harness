@@ -881,13 +881,20 @@ export function createMockApi(): Api {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
       enabled: true,
-      settings: { model: "", subagent_model: "", background_model: "" },
+      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc" },
       schema: {
         type: "object",
         properties: {
           model: { type: "string", title: "Orchestrator model", default: "", description: "Empty uses the Claude Code default" },
           subagent_model: { type: "string", title: "Subagent model", default: "", description: "e.g. deepseek/deepseek-flash; empty uses the orchestrator model" },
           background_model: { type: "string", title: "Background model", default: "", description: "Small, fast tasks; empty uses the Claude Code default" },
+          plugins: {
+            type: "string",
+            format: "plugin-dirs",
+            title: "Skillsets",
+            description: "Claude Code plugin directories colonies load, read-only. All off by default.",
+            default: "",
+          },
         },
       },
     },
@@ -1129,6 +1136,32 @@ export function createMockApi(): Api {
     },
     openTerminal: (id) => mockTerminal(sessions.get(id)),
 
+    plugins: () =>
+      later(() => ({
+        local_root: "/home/you/.local/share/colonizer/plugins",
+        plugins: [
+          {
+            name: "ecc",
+            description: "Harness-native ECC plugin for engineering teams - 68 agents, 286 skills, 94 legacy command shims",
+            version: "2.2.1",
+            source: "vendored" as const,
+            shadows_vendored: false,
+            skills: 286,
+            agents: 68,
+            commands: 94,
+          },
+          {
+            name: "team-skills",
+            description: "House style, release checklist and the incident runbook",
+            version: "0.3.0",
+            source: "local" as const,
+            shadows_vendored: false,
+            skills: 4,
+            agents: 0,
+            commands: 1,
+          },
+        ],
+      })),
     providers: () => later(() => providers),
     saveProvider: async (id, body) => {
       await sleep(250);
