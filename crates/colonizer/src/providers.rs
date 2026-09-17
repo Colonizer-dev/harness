@@ -79,8 +79,12 @@ const ANTHROPIC_MODELS: &[(&str, &str)] = &[
 ];
 
 const AUTH_MODES: [&str; 3] = ["x-api-key", "bearer", "none"];
-/// Vendors worth one click. `custom` is anything else; `openai` is translated by the gateway.
-const PRESETS: [&str; 6] = ["deepseek", "openai", "zai", "alibaba", "local", "custom"];
+/// The preset a provider was added from: a label for the UI, not a capability. The catalogue names
+/// dozens, so this is checked for shape rather than against a list.
+fn valid_preset(preset: &str) -> bool {
+    !preset.is_empty() && preset.len() <= 48 && preset.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// The runner reads these to decide which routes a colony actually uses.
 const MODEL_VARS: [&str; 3] = ["COLONIZER_MODEL", "COLONIZER_SUBAGENT_MODEL", "COLONIZER_BACKGROUND_MODEL"];
 
@@ -293,8 +297,8 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         return Err(bad("models must be up to 50 model IDs without spaces"));
     }
     let preset = req.preset.unwrap_or_else(|| "custom".into());
-    if !PRESETS.contains(&preset.as_str()) {
-        return Err(bad("preset must be deepseek, openai, zai, alibaba, local or custom"));
+    if !valid_preset(&preset) {
+        return Err(bad("preset ids are lowercase letters, digits and dashes, up to 48 characters"));
     }
     if !in_range(req.timeout_secs, 30, 3600) {
         return Err(bad("request timeout must be 30-3600 seconds"));
@@ -420,6 +424,17 @@ mod tests {
         assert_eq!(put.wire, Wire::Anthropic);
 
         assert_eq!(serde_json::to_value(Wire::Openai).unwrap(), serde_json::json!("openai"));
+    }
+
+    #[test]
+    fn preset_ids_are_checked_for_shape_not_membership() {
+        // The catalogue names dozens of vendors, and its longest id today is 34 characters.
+        for ok in ["custom", "deepseek", "kimi-for-coding", "9527code", "tencent-token-plan-enterprise-lite"] {
+            assert!(valid_preset(ok), "{ok}");
+        }
+        for bad in ["", "Custom", "has space", "under_score", &"x".repeat(49)] {
+            assert!(!valid_preset(bad), "{bad}");
+        }
     }
 
     #[test]
