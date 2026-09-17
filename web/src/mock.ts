@@ -11,6 +11,7 @@ import type {
   Issue,
   LogLevel,
   LoginView,
+  Mem0Status,
   MemoryNote,
   MemoryProposal,
   ModelOption,
@@ -825,6 +826,8 @@ export function createMockApi(): Api {
   sessions.set(failed.session.id, failed);
   sessions.set(old.session.id, old);
 
+  const mem0: Mem0Status = { has_key: false, source: null, active: false };
+
   // Shared memory: two proposals waiting for review and a few notes per scope.
   const proposals: MemoryProposal[] = [
     {
@@ -1098,7 +1101,14 @@ export function createMockApi(): Api {
     {
       kind: "memory",
       provider: "files",
-      providers: [{ id: "files", name: "Shared memory", description: "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes" }],
+      providers: [
+        { id: "files", name: "Shared memory", description: "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes" },
+        {
+          id: "mem0",
+          name: "mem0",
+          description: "Approved notes stored in your mem0 project. Colonies read them exactly as they read files, most relevant to the task first; the key never enters a colony",
+        },
+      ],
       enabled: true,
       settings: { require_review: true },
       schema: {
@@ -1486,6 +1496,7 @@ export function createMockApi(): Api {
       later(() => ({
         scope,
         key,
+        provider: "files",
         notes: notes.filter((n) => n.scope === scope && n.key === key).sort((a, b) => b.created_at.localeCompare(a.created_at)),
         proposals: proposals.filter((p) => p.scope === scope && p.key === key),
       })),
@@ -1536,6 +1547,17 @@ export function createMockApi(): Api {
       if (index < 0) throw new ApiError("no such note", 404);
       notes.splice(index, 1);
       return { ok: true };
+    },
+    mem0Status: () => later(() => ({ ...mem0 })),
+    saveMem0Key: async (apiKey) => {
+      await sleep(250);
+      mem0.has_key = apiKey.trim() !== "";
+      mem0.source = mem0.has_key ? "saved" : null;
+      return { ...mem0 };
+    },
+    checkMem0: async () => {
+      await sleep(600);
+      return mem0.has_key ? { ok: true } : { ok: false, error: "add a mem0 API key in Settings → Modules → Memory" };
     },
   };
 }

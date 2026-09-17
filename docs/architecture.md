@@ -57,7 +57,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit on the host, push, open the pull request |
-| `memory` | `files` | Shared notes per repository, org and globally; agents propose, the user approves |
+| `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 
 Two settings layers sit next to the modules:

@@ -321,8 +321,23 @@ export interface MemoryProposal extends MemoryNote {
 export interface MemoryListing {
   scope: MemoryScope;
   key: string;
+  /** Where approved notes live: `files` on the Mothership, or `mem0`. */
+  provider?: string;
   notes: MemoryNote[];
   proposals: MemoryProposal[];
+}
+
+/** Whether a mem0 key is set and where from. The API never returns the key. */
+export interface Mem0Status {
+  has_key: boolean;
+  source: "saved" | "MEM0_API_KEY" | null;
+  /** mem0 is the memory module's saved provider. */
+  active: boolean;
+}
+
+export interface Mem0Check {
+  ok: boolean;
+  error?: string;
 }
 
 export interface NewNoteRequest {
