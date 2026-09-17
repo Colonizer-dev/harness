@@ -11,6 +11,7 @@ mod claude_login;
 mod config;
 mod gateway;
 mod github;
+mod headroom;
 mod memory;
 mod mesh;
 mod modules;
@@ -82,6 +83,8 @@ pub struct App {
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
+    /// The Headroom bundle download, started when Headroom is switched on.
+    pub headroom: Mutex<headroom::Status>,
 }
 
 pub type Shared = Arc<App>;
@@ -351,6 +354,7 @@ async fn main() -> Result<()> {
         repo_owners: RwLock::new(BTreeSet::new()),
         orgs_refreshed: Mutex::new(None),
         pull: Mutex::new(Default::default()),
+        headroom: Mutex::new(Default::default()),
         cfg,
     });
 
@@ -365,6 +369,8 @@ async fn main() -> Result<()> {
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
+        .route("/api/headroom", get(headroom::status))
+        .route("/api/headroom/download", post(headroom::download))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))

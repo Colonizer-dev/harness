@@ -13,6 +13,7 @@ import type {
   NewNoteRequest,
   NewSessionRequest,
   OrgInfo,
+  HeadroomStatus,
   OrgSettings,
   PluginListing,
   ProviderHealth,
@@ -51,6 +52,8 @@ export interface Api {
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
   sandboxPull(): Promise<PullStatus>;
   sandboxPullStatus(): Promise<PullStatus>;
+  headroom(): Promise<HeadroomStatus>;
+  headroomDownload(): Promise<HeadroomStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   sessions(): Promise<Session[]>;
@@ -131,6 +134,8 @@ export const httpApi: Api = {
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
   sandboxPull: () => post("/api/sandbox/pull"),
   sandboxPullStatus: () => request("/api/sandbox/pull"),
+  headroom: () => request("/api/headroom"),
+  headroomDownload: () => post("/api/headroom/download"),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");
