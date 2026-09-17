@@ -419,6 +419,10 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
       state: !mesh || !mesh.enabled ? "off" : mesh.error || mesh.state === "error" ? "bad" : "ok",
     },
   ];
+  // Only a mothership that reports storage health gets the dot; older ones (no `storage`) show nothing new.
+  if (status.storage) {
+    items.push({ label: "Storage", state: status.storage.ok === false ? "bad" : "ok" });
+  }
   return (
     <button
       type="button"

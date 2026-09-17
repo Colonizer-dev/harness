@@ -11,7 +11,10 @@ use crate::{
     modules::{schema_for, AgentModule},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
-    util::{random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
+    util::{
+        append_line, faults::{self, Op}, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic,
+        write_private,
+    },
     watchdog::Activity,
     ApiResult, App, Shared, CLAUDE_API_HOST,
 };
@@ -266,7 +269,13 @@ impl App {
             session.updated_at = Utc::now();
             (session.clone(), result)
         };
-        self.persist_sessions().await;
+        if let Err(e) = self.persist_sessions().await {
+            // The change in memory is real, and the broadcast below tells the truth about it —
+            // hiding it would make the UI more wrong, not less. But the saved list now lags, so
+            // the gap is recorded loudly, in the app alert and in the colony's own log.
+            self.storage_failed("save the session list", &e).await;
+            self.session_log(id, "error", format!("could not save the session list: {e:#}")).await;
+        }
         let rt = self.runtimes.lock().await.get(id).cloned();
         if let Some(rt) = rt {
             let view = with_activity(self, session.clone()).await;
@@ -275,16 +284,10 @@ impl App {
         Some((session, result))
     }
 
-    async fn persist_sessions(&self) {
+    async fn persist_sessions(&self) -> Result<()> {
         let _guard = self.session_persist.lock().await;
-        let data = serde_json::to_vec_pretty(&*self.sessions.read().await);
-        if let Ok(data) = data {
-            let path = self.sessions_file();
-            let tmp = path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, data).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, path).await;
-            }
-        }
+        let data = serde_json::to_vec_pretty(&*self.sessions.read().await).context("could not serialize the session list")?;
+        write_atomic(&self.sessions_file(), &data).await
     }
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {
@@ -295,9 +298,16 @@ impl App {
     pub async fn session_log(&self, id: &str, level: &str, message: String) {
         let entry = json!({"type": "harness_log", "level": level, "message": message, "ts": Utc::now()});
         let rt = self.runtime(id).await;
-        {
+        let persisted = {
             let _guard = rt.file_lock.lock().await;
-            append_line(&rt.logs_path, &entry.to_string()).await;
+            append_line(&rt.logs_path, &entry.to_string()).await.err()
+        };
+        if let Some(e) = persisted {
+            // Recorded here, not by calling session_log again — that would recurse — and outside
+            // the guard, as in handle_agent_event. The frame still reaches every open browser
+            // below; the console and the app alert keep the gap.
+            eprintln!("sessions: could not append to {}: {e:#}", rt.logs_path.display());
+            self.storage_failed("append to the harness log", &e).await;
         }
         let mut logs = rt.logs.lock().await;
         logs.push_back(entry.clone());
@@ -309,12 +319,6 @@ impl App {
 
     fn logger(self: &Arc<Self>, id: &str) -> SessionLogger {
         SessionLogger { app: self.clone(), id: id.to_string() }
-    }
-}
-
-async fn append_line(path: &std::path::Path, line: &str) {
-    if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open(path).await {
-        let _ = f.write_all(format!("{line}\n").as_bytes()).await;
     }
 }
 
@@ -458,7 +462,26 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     tokio::fs::create_dir_all(dir.join("vm")).await?;
     tokio::fs::create_dir_all(dir.join("out")).await?;
     app.sessions.write().await.push(session.clone());
-    app.persist_sessions().await;
+    if let Err(e) = app.persist_sessions().await {
+        // Nothing has been reported as done yet — no boot, no log line, no reply — so the record
+        // comes back out rather than leaving a colony only memory has heard of, and the caller
+        // hears that the write never happened. The directories created above go with it; the
+        // removal is best effort, and a failure there is reported, not swallowed.
+        app.sessions.write().await.retain(|s| s.id != id);
+        let e = e.context("could not save the new colony; nothing was created");
+        app.storage_failed("save the session list", &e).await;
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                eprintln!(
+                    "sessions: could not remove the unused colony directory {}: {e}",
+                    dir.display()
+                )
+            }
+        }
+        return Err(e.into());
+    }
     app.runtime(&id).await;
     if queued {
         let waiting = existing.iter().filter(|s| s.status == SessionStatus::Queued).count();
@@ -943,13 +966,27 @@ async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut commands: mps
 async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
     let Ok(event) = serde_json::from_str::<Value>(line) else { return };
     let Some(seq) = event["seq"].as_u64() else { return };
-    {
+    let persisted = {
         let _guard = rt.file_lock.lock().await;
         if seq <= rt.last_seq.load(Ordering::SeqCst) {
             return; // replayed after a reconnect
         }
-        append_line(&rt.events_path, line).await;
-        rt.last_seq.store(seq, Ordering::SeqCst);
+        match append_line(&rt.events_path, line).await {
+            Ok(()) => {
+                rt.last_seq.store(seq, Ordering::SeqCst);
+                None
+            }
+            Err(e) => Some(e),
+        }
+    };
+    if let Some(e) = persisted {
+        // The event still reaches every browser below, but the evidence on disk now has a gap, and
+        // a gap in the event log must not be silent. `last_seq` stays put, so if the reconnect's
+        // re-fetch of this seq arrives before anything else is appended, the append gets another
+        // chance — but once a later event succeeds, `last_seq` jumps past the lost one and the gap
+        // is permanent. This is a second chance, not a retry that is guaranteed to happen.
+        app.storage_failed("append to the colony's event log", &e).await;
+        app.session_log(id, "error", format!("could not append to {}: {e:#}", rt.events_path.display())).await;
     }
     rt.broadcast(Some(seq), line.to_string());
 
@@ -1155,7 +1192,13 @@ async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, event: Value) {
     };
     // Only a filed or matched finding counts toward the cap; a GitHub error should not use one up.
     if !entry.is_null() {
-        append_line(&record, &entry.to_string()).await;
+        let recorded = append_line(&record, &entry.to_string()).await;
+        if let Err(e) = recorded {
+            // The finding was still filed on GitHub (that happened above); what failed is the
+            // colony's own record of it, so say so instead of letting the gap pass silently.
+            app.storage_failed("append to the colony's findings log", &e).await;
+            app.session_log(&id, "error", format!("could not record the finding in {}: {e:#}", record.display())).await;
+        }
     }
     app.session_log(&id, level, message).await;
 }
@@ -1624,19 +1667,37 @@ fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> b
         && has_worktree
 }
 
-/// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1 again.
-fn rotate_events(dir: &std::path::Path) {
+/// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1
+/// again. A failure here must stop the resume, not degrade it: agentd keeps its event store inside
+/// the microVM, so a resumed colony numbers from 1 regardless, and with the stale log still in
+/// place `Runtime::load` picks up the previous life's maximum and drops every new event until the
+/// colony has out-produced it.
+fn rotate_events(dir: &std::path::Path) -> std::io::Result<()> {
     let events = dir.join("events.jsonl");
     if !events.exists() {
-        return;
+        return Ok(());
     }
     for n in 1..1000 {
         let target = dir.join(format!("events-{n}.jsonl"));
         if !target.exists() {
-            let _ = std::fs::rename(&events, &target);
-            return;
+            // The error goes back to the caller, which refuses the resume rather than carry on; a
+            // rotation that silently failed would drop events instead of just replaying old ones.
+            faults::check(&events, Op::Rename)?;
+            return std::fs::rename(&events, &target);
         }
     }
+    // Unreachable in practice — getting here means a colony has been resumed a thousand times
+    // without one rotation being reported — but falling out silently would be a no-op that the
+    // caller reads as success, and a stale log left in place drops the resumed colony's events.
+    // So this is an error like any other failed rotation, and names the directory that filled up.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "every archive slot in {} is taken (events-1.jsonl through events-999.jsonl), so {} has nowhere to go",
+            dir.display(),
+            events.display()
+        ),
+    ))
 }
 
 pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
@@ -1644,6 +1705,7 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
+    let previous_status = s.status;
     // Re-checked inside the write, exactly as the publish claim below it is: `failed` is both
     // resumable and publishable now, so a resume landing just after a publish claimed the colony
     // must be refused, not overwrite `publishing` with `starting` and boot an agent onto the
@@ -1669,10 +1731,39 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     }
     // The colony is ours: only now is the old agent link dropped and the event log rotated, so a
     // refused resume leaves both as it found them.
-    if let Some(rt) = app.runtimes.lock().await.remove(&id) {
+    let runtime = app.runtimes.lock().await.remove(&id);
+    if let Some(rt) = &runtime {
         rt.stop.send_replace(true);
     }
-    rotate_events(&app.session_dir(&id));
+    // Rotation must not fail silently (see `rotate_events`): with the stale log still in place the
+    // resumed colony's events are dropped as already seen. A colony reads as Stopped before
+    // `teardown_vm`'s shutdown POST has finished, so its link task can still be draining agentd's
+    // last events and appending under the runtime's `file_lock`; hold that lock across the rename so
+    // an in-flight append cannot straddle it and resurrect an `events.jsonl` holding the old life's
+    // seq. Nothing under the guard may itself take `file_lock` (`session_log` does), so the failure
+    // reporting stays outside it.
+    let dir = app.session_dir(&id);
+    let rotated = {
+        let _file_lock = match runtime.as_ref() {
+            Some(rt) => Some(rt.file_lock.lock().await),
+            None => None,
+        };
+        rotate_events(&dir)
+    };
+    if let Err(e) = rotated {
+        // The claim already moved this colony to `starting`, so unlike the pre-claim ordering there
+        // is something to roll back: put the status back, or the colony is left mid-resume and
+        // `can_resume` refuses the retry this error asks for.
+        app.update_session(&id, |x| x.status = previous_status).await;
+        let e = anyhow::Error::from(e);
+        let message = format!(
+            "could not move the old event log aside ({e}); the colony was not resumed — move {} aside yourself and try again",
+            dir.join("events.jsonl").display()
+        );
+        app.storage_failed("rotate the old event log", &e).await;
+        app.session_log(&id, "error", message.clone()).await;
+        return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
+    }
     app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
     tokio::spawn(boot(app.clone(), id, true));
     Ok(Json(s))
@@ -1753,7 +1844,24 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             return Err(e.context("could not remove the colony's worktree; nothing was deleted").into());
         }
     }
-    app.persist_sessions().await;
+    if let Err(e) = app.persist_sessions().await {
+        // The worktree may already be gone — it is removed before the list is saved — but the colony
+        // goes back in the list either way: nothing reports a colony forgotten while the save that
+        // forgets it did not happen, and the deletion can be retried once storage works again.
+        let cleaned = s.cleaned_up;
+        {
+            let mut sessions = app.sessions.write().await;
+            let at = at.min(sessions.len());
+            sessions.insert(at, s);
+        }
+        let e = e.context(if cleaned {
+            "could not save the session list; the colony is kept"
+        } else {
+            "could not save the session list; the colony is kept, but its worktree was already removed"
+        });
+        app.storage_failed("save the session list", &e).await;
+        return Err(e.into());
+    }
     app.runtimes.lock().await.remove(&id);
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
@@ -2106,5 +2214,178 @@ mod tests {
             assert!(!can_publish(status, true, true), "cleaned up: {status:?}");
             assert!(!can_publish(status, false, false), "no worktree: {status:?}");
         }
+    }
+
+    // -- storage failures -----------------------------------------------------------------------
+
+    use crate::tests::test_app;
+
+    /// A throwaway App with one colony in it, over a temp directory (as in memory.rs).
+    async fn app_with_colony(id: &str, status: SessionStatus) -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = test_app(&root);
+        let mut s = colony("acme", status);
+        s.id = id.to_string();
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        (app, root)
+    }
+
+    #[test]
+    fn a_failed_event_log_rotation_is_reported_not_swallowed() {
+        let dir = std::env::temp_dir().join(format!("colonizer-rotate-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
+        let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
+        assert!(rotate_events(&dir).is_err());
+        drop(_guard);
+        assert_eq!(std::fs::read_to_string(dir.join("events.jsonl")).unwrap(), "{\"seq\":1}\n", "the log is untouched");
+        rotate_events(&dir).unwrap();
+        assert!(!dir.join("events.jsonl").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("events-1.jsonl")).unwrap(), "{\"seq\":1}\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_log_rotation_refuses_the_resume_and_leaves_the_colony_stopped() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into())).await.unwrap();
+        std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
+        let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
+        let err = resume(State(app.clone()), Path("abc".to_string())).await.unwrap_err();
+        let body = err.1.to_string();
+        assert!(body.contains("the colony was not resumed"), "{body}");
+        assert!(body.contains("aside yourself and try again"), "{body}");
+        assert!(app.storage_alert.read().await.is_some(), "the failure is recorded, not swallowed");
+        assert_eq!(
+            app.session("abc").await.unwrap().status,
+            SessionStatus::Stopped,
+            "nothing about the colony changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap(),
+            "{\"seq\":7}\n",
+            "the old log is left where it was"
+        );
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(log.contains("could not move the old event log aside"), "{log}");
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_rotation_with_every_archive_slot_taken_is_an_error_and_leaves_the_log_in_place() {
+        let dir = std::env::temp_dir().join(format!("colonizer-rotate-full-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
+        for n in 1..1000 {
+            std::fs::write(dir.join(format!("events-{n}.jsonl")), "").unwrap();
+        }
+        let message = rotate_events(&dir).unwrap_err().to_string();
+        assert!(message.contains("every archive slot"), "{message}");
+        assert!(message.contains(&dir.display().to_string()), "the error names the directory that filled up: {message}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
+            "{\"seq\":1}\n",
+            "the log is left in place, so the resume stays refused instead of dropping events"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_resume_does_not_rotate_while_another_task_holds_the_runtime_s_file_lock() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into())).await.unwrap();
+        std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
+        // A runtime in the map, as a just-stopped colony still has while its link task drains.
+        let rt = app.runtime("abc").await;
+        // Stand in for an in-flight append: the lock another task would hold.
+        let append = rt.file_lock.lock().await;
+        let resumed = tokio::spawn(resume(State(app.clone()), Path("abc".to_string())));
+        // Purely cooperative, so there is no timing bet: each yield lets the resume advance to the
+        // lock it cannot take. With the lock held it can neither have finished nor have renamed.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert!(!resumed.is_finished(), "the resume waits for the runtime's file_lock");
+            assert!(
+                app.session_dir("abc").join("events.jsonl").exists(),
+                "no rotation while an append holds the lock"
+            );
+        }
+        drop(append);
+        if let Err(e) = resumed.await.unwrap() {
+            panic!("the resume failed once the lock freed up: {:#}", e.1);
+        }
+        assert!(
+            !app.session_dir("abc").join("events.jsonl").exists(),
+            "the rotation went ahead once the lock freed up"
+        );
+        assert_eq!(std::fs::read_to_string(app.session_dir("abc").join("events-1.jsonl")).unwrap(), "{\"seq\":7}\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_is_alerted_and_the_colony_log_shows_the_gap() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let _guard = faults::inject("sessions.json", Op::Write, || std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let (s, ()) = app.update_session("abc", |s| s.status = SessionStatus::Idle).await.unwrap();
+        assert_eq!(s.status, SessionStatus::Idle, "the in-memory change is kept and still broadcast");
+        let alert = app.storage_alert.read().await.clone().unwrap();
+        assert!(alert.message.contains("save the session list"), "{}", alert.message);
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(log.contains("could not save the session list"), "{log}");
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_harness_log_append_still_reaches_the_browser_and_alerts() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let rt = app.runtime("abc").await;
+        let _guard = faults::inject("harness.jsonl", Op::Append, || std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        app.session_log("abc", "error", "a message".into()).await;
+        assert!(app.storage_alert.read().await.is_some(), "the failure is recorded, not swallowed");
+        {
+            let logs = rt.logs.lock().await;
+            let last = logs.back().unwrap();
+            assert_eq!(last["type"], "harness_log");
+            assert_eq!(last["message"], "a message", "the frame still goes out to open browsers");
+        }
+        drop(_guard);
+        app.session_log("abc", "info", "recovered".into()).await;
+        assert!(app.session_dir("abc").join("harness.jsonl").exists(), "appends work again once the fault clears");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_append_does_not_advance_last_seq_and_the_lost_line_stays_lost() {
+        // (Injecting a fault only on the first append would promise a retry; in reality the next
+        // event succeeds and seq 1 is gone for good, which is what this pins.)
+        let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;
+        let rt = app.runtime("abc").await;
+        let _guard = faults::inject("events.jsonl", Op::Append, || std::io::Error::from_raw_os_error(5));
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":1,"type":"status","state":"working"}"#).await;
+        assert!(app.storage_alert.read().await.is_some(), "the gap in the event log is not silent");
+        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 0, "last_seq does not advance past a failed append");
+        assert!(!app.session_dir("abc").join("events.jsonl").exists(), "the line never landed");
+        assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::Running, "the in-memory state still advances");
+        drop(_guard);
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":2,"type":"status","state":"idle"}"#).await;
+        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 2, "the next event succeeds and jumps past the lost one");
+        let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        assert_eq!(events, "{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n", "seq 1 stays lost");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_keeps_the_colony_listed_and_the_delete_reports_failure() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
+        let _guard = faults::inject("sessions.json", Op::Write, || std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let result = delete(State(app.clone()), Path("abc".to_string())).await;
+        assert!(result.unwrap_err().1.to_string().contains("the colony is kept"));
+        assert!(app.session("abc").await.is_some(), "the colony goes back in the list");
+        assert!(app.storage_alert.read().await.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
