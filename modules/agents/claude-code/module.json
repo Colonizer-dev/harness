@@ -87,6 +87,28 @@
         "default": "",
         "env": "COLONIZER_PLUGIN_DIRS"
       },
+      "caveman": {
+        "type": "boolean",
+        "title": "Terse replies (caveman)",
+        "description": "Token savings: the agent answers in caveman's compressed style, keeping code, commands and exact errors intact. Pull request descriptions and questions to you stay in plain sentences. Off by default.",
+        "default": false,
+        "env": "COLONIZER_CAVEMAN"
+      },
+      "caveman_level": {
+        "type": "string",
+        "enum": ["lite", "full", "ultra"],
+        "title": "Caveman level",
+        "description": "How terse, when terse replies are on: lite drops filler but keeps full sentences, full drops articles too, ultra is the shortest.",
+        "default": "full",
+        "env": "COLONIZER_CAVEMAN_LEVEL"
+      },
+      "rtk": {
+        "type": "boolean",
+        "title": "Compact command output (rtk)",
+        "description": "Token savings: shell commands the agent runs, such as git status or a test run, go through rtk, which shortens their output before the agent reads it. Commands rtk has no rule for run unchanged. Off by default.",
+        "default": false,
+        "env": "COLONIZER_RTK"
+      },
       "scan": {
         "type": "string",
         "title": "Pre-flight scan",

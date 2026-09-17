@@ -590,6 +590,29 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
     }
 
+    // Token savings (docs/protocol.md): what a switched-on setting needs inside the colony. When the
+    // install lacks it, the setting is off for this colony and the log says why: saving tokens is never
+    // the reason a colony doesn't start.
+    let switched_on = |env: &Map<String, Value>, key: &str| env.get(key).and_then(Value::as_str) == Some("true");
+    if switched_on(&runner_env, "COLONIZER_RTK") {
+        match app.cfg.asset("bin/rtk") {
+            Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/bin/rtk".into(), read_only: true }),
+            Err(_) => {
+                runner_env.remove("COLONIZER_RTK");
+                log.info("compact command output is switched on, but rtk isn't installed (scripts/install.sh builds it); running without it").await;
+            }
+        }
+    }
+    if switched_on(&runner_env, "COLONIZER_CAVEMAN") {
+        match app.cfg.asset("vendor/caveman/SKILL.md").and_then(|_| app.cfg.asset("vendor/caveman")) {
+            Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/caveman".into(), read_only: true }),
+            Err(_) => {
+                runner_env.remove("COLONIZER_CAVEMAN");
+                log.info("terse replies are switched on, but caveman's ruleset isn't installed (scripts/install.sh stages it); running without it").await;
+            }
+        }
+    }
+
     if memory_on {
         for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
             // Mount points must exist inside the read-only /colonizer mount.
