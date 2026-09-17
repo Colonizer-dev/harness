@@ -16,3 +16,9 @@ microsandbox 0.6.18    darwin-arm64  msb     1e8c40859142cd38fb99b301bdb1fb4095a
 # If GitHub ever regenerates this archive the checksum fails loudly and the
 # pin has to be refreshed by hand, which is the correct failure.
 ecc          2.2.1     any           plugin  578c1ead4d8e6a50e3dd943f5a8069eeb04880ae09e186ee5d949c5190d7ab4c  https://codeload.github.com/affaan-m/ECC/tar.gz/refs/tags/v2.2.1
+
+# superpowers is github.com/obra/superpowers at tag v6.3.0. MIT (LICENSE is staged with it).
+# Staging drops hooks/ — its one hook, a SessionStart bootstrap, becomes system-prompt text in the
+# claude-code runner instead — and the using-git-worktrees and finishing-a-development-branch skills,
+# which would work around the worktree, branch and publish step Colonizer already owns.
+superpowers  6.3.0     any           plugin  2933703111f44dd1ae0234372cd2a924afb372a682fe3d9acdb6497231213fcb  https://codeload.github.com/obra/superpowers/tar.gz/refs/tags/v6.3.0
