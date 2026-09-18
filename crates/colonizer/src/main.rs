@@ -9,10 +9,12 @@
 
 mod claude_login;
 mod config;
+mod events;
 mod findings;
 mod gateway;
 mod github;
 mod headroom;
+mod lifecycle;
 mod mem0;
 mod memory;
 mod mesh;
@@ -21,14 +23,17 @@ mod openai;
 mod orgs;
 mod plugins;
 mod presets;
+mod protocol;
 mod providers;
+mod publish;
+mod queue;
 mod sandbox;
 mod sessions;
 mod telemetry;
 mod timing;
+mod update;
 mod usage;
 mod util;
-mod update;
 mod version;
 mod watchdog;
 
@@ -584,11 +589,11 @@ async fn serve() -> Result<()> {
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
-        .route("/api/sessions/{id}", get(sessions::get).delete(sessions::delete))
-        .route("/api/sessions/{id}/resume", post(sessions::resume))
-        .route("/api/sessions/{id}/publish", post(sessions::publish))
-        .route("/api/sessions/{id}/stop", post(sessions::stop))
-        .route("/api/sessions/{id}/cleanup", post(sessions::cleanup))
+        .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
+        .route("/api/sessions/{id}/resume", post(lifecycle::resume))
+        .route("/api/sessions/{id}/publish", post(publish::publish))
+        .route("/api/sessions/{id}/stop", post(lifecycle::stop))
+        .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws));
     let router = api
@@ -622,7 +627,7 @@ async fn serve() -> Result<()> {
 
     let recovery = app.clone();
     tokio::spawn(async move {
-        sessions::recover(&recovery).await;
+        lifecycle::recover(&recovery).await;
         // Once recovery has settled, an app directory kept by an earlier update
         // can go, unless a colony that survived it still mounts from there.
         let live: Vec<std::path::PathBuf> = recovery
@@ -638,13 +643,13 @@ async fn serve() -> Result<()> {
         }
     });
     let sandbox_watch = app.clone();
-    tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
+    tokio::spawn(async move { lifecycle::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();
-    tokio::spawn(async move { sessions::run_queue(queue).await });
+    tokio::spawn(async move { queue::run_queue(queue).await });
     let disk_watch = app.clone();
-    tokio::spawn(async move { sessions::watch_host_disks(disk_watch).await });
+    tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
     let pr_watch = app.clone();
-    tokio::spawn(async move { sessions::watch_pull_requests(pr_watch).await });
+    tokio::spawn(async move { publish::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
     tokio::spawn(version::run(app.clone()));

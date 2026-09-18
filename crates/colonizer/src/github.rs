@@ -2,7 +2,8 @@
 
 use crate::{
     client_error,
-    sessions::{record_publish_stage, PublishStage, Session, SessionLogger},
+    publish::record_publish_stage,
+    sessions::{PublishStage, Session, SessionLogger},
     util::{env_nonempty, exec, exec_status, read_trimmed, truncate, valid_repo, write_secret},
     ApiResult, App, Shared,
 };

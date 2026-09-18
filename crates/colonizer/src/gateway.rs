@@ -4,7 +4,7 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    client_error, openai, sessions,
+    client_error, openai,
     providers::{strip_oauth_betas, Provider, Usage, Wire},
     util::read_trimmed,
     ApiResult, App, Shared,
@@ -565,7 +565,7 @@ fn counted_body(
 fn usage_recorder(app: &Shared, colony: &str, provider: &Provider) -> Recorder {
     let (app, colony, provider) = (app.clone(), colony.to_string(), provider.clone());
     Box::new(move |usage| {
-        tokio::spawn(async move { sessions::record_routed_usage(&app, &colony, &provider, usage).await });
+        tokio::spawn(async move { crate::lifecycle::record_routed_usage(&app, &colony, &provider, usage).await });
     })
 }
 
@@ -626,7 +626,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     };
     // Refused before it waits for a slot, and the colony is stopped like the max-duration path stops one.
     // The 403 follows the empty-balance precedent in openai.rs: Claude Code does not retry it in a loop.
-    if sessions::enforce_budget(&app, &colony).await {
+    if crate::lifecycle::enforce_budget(&app, &colony).await {
         return api_error(
             StatusCode::FORBIDDEN,
             "permission_error",
