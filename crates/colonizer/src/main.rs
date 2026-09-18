@@ -208,10 +208,10 @@ async fn find_claude_bin(cfg: &Settings, elf_only: bool) -> Result<PathBuf> {
         if elf_only && !is_elf(&real) {
             continue;
         }
-        if let Ok(version) = exec(Command::new(&real).arg("--version")).await {
-            if version.contains("Claude Code") {
-                return Ok(real);
-            }
+        if let Ok(version) = exec(Command::new(&real).arg("--version")).await
+            && version.contains("Claude Code")
+        {
+            return Ok(real);
         }
     }
     bail!("no Claude Code binary found")
@@ -343,16 +343,15 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
     let bind_host = app.cfg.bind.rsplit_once(':').map_or(app.cfg.bind.as_str(), |(h, _)| h);
     let allowed = matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]")
         || hostname == bind_host
-        || app.cfg.allowed_hosts.iter().any(|h| *h == hostname);
+        || app.cfg.allowed_hosts.contains(&hostname);
     if !allowed {
         return (StatusCode::FORBIDDEN, "Host not allowed (set COLONIZER_ALLOWED_HOSTS)").into_response();
     }
-    if req.method() != Method::GET || req.headers().contains_key(header::UPGRADE) {
-        if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-            if origin.split("://").nth(1) != Some(host.as_str()) {
-                return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
-            }
-        }
+    if (req.method() != Method::GET || req.headers().contains_key(header::UPGRADE))
+        && let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok())
+        && origin.split("://").nth(1) != Some(host.as_str())
+    {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
     next.run(req).await
 }

@@ -33,37 +33,92 @@ export function useSettled(connected: boolean, lastSeq: number, quietMs = 400, m
   return settled;
 }
 
+/** How the thread follows new content: a speed, not a jump. Tuned so a line of text nudges the pace, not the view. */
+const LEAD_S = 0.3; // aim to be level with the bottom this many seconds from now
+const SMOOTH_S = 0.25; // how long the distance behind is averaged over
+const MAX_SPEED = 1400; // px per second
+const MAX_ACCEL = 2200; // px per second², the cap on how fast the pace may change
+const STOP_PX = 0.5;
+const COAST_MS = 600; // keep the loop alive this long after catching up
+
 const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /**
- * Keeps a scrolling thread at its bottom while content grows, easing each change in over a few frames rather than
- * jumping by the height of a new line or card. Scrolling up stops following; scrolling back to the bottom resumes it.
- * Attach `viewport` to the scroll container and `content` to the element holding everything inside it.
+ * Keeps a scrolling thread at its bottom while content grows, at a steady pace rather than a burst per line.
+ *
+ * The view moves at a speed in pixels per second, not by a fraction of the distance left: a new line nudges that
+ * speed instead of starting a fresh burst that fades. How far behind the bottom is is smoothed over a quarter of a
+ * second, and the speed itself may only change so fast, so a colony writing line after line reads as one movement.
+ * The position is kept as a float and written once per frame, so slow movement doesn't alternate between 1 and 2 px.
+ *
+ * Scrolling up stops the following; scrolling back to the bottom resumes it. Attach `viewport` to the scroll
+ * container and `content` to the element holding everything inside it.
  */
 export function useFollowBottom() {
   const viewportRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
   const follow = useRef(true);
   const frame = useRef(0);
+  // The glide: where it thinks it is, how fast it is going, and when it last had something to do.
+  const position = useRef<number | null>(null);
+  const velocity = useRef(0);
+  const gap = useRef(0);
+  const lastFrame = useRef(0);
+  const idleSince = useRef(0);
 
-  const step = useCallback(() => {
-    frame.current = 0;
+  const step = useCallback((now: number) => {
     const el = viewportRef.current;
-    if (!el || !follow.current) return;
-    const target = el.scrollHeight - el.clientHeight;
-    const distance = target - el.scrollTop;
-    if (distance <= 0.5) return;
-    // More than a screen away (a colony just opened, or a long block arrived while the tab was hidden): go there.
-    if (distance > el.clientHeight || reducedMotion()) {
-      el.scrollTop = target;
+    if (!el || !follow.current) {
+      frame.current = 0;
       return;
     }
-    el.scrollTop += Math.min(distance, Math.max(1.5, distance * 0.2));
+    // A frame is capped at 50 ms so a stall (a background tab, a long parse) cannot turn into a jump.
+    const dt = Math.min(0.05, lastFrame.current ? (now - lastFrame.current) / 1000 : 1 / 60);
+    lastFrame.current = now;
+
+    const target = el.scrollHeight - el.clientHeight;
+    // Anything else that moved the view — the reader, the browser's scroll anchoring — wins.
+    if (position.current === null || Math.abs(el.scrollTop - position.current) > 2) position.current = el.scrollTop;
+    const distance = target - position.current;
+
+    // More than a screen behind (a colony just opened, or a long block arrived while the tab was hidden): go there.
+    if (distance > el.clientHeight || reducedMotion()) {
+      position.current = target;
+      velocity.current = 0;
+      gap.current = 0;
+      el.scrollTop = target;
+      frame.current = requestAnimationFrame(step);
+      return;
+    }
+
+    // The distance a line adds arrives in one frame; smoothing it is what keeps the pace even.
+    gap.current += (Math.max(0, distance) - gap.current) * Math.min(1, dt / SMOOTH_S);
+    const wanted = Math.min(MAX_SPEED, gap.current / LEAD_S);
+    const change = Math.max(-MAX_ACCEL * dt, Math.min(MAX_ACCEL * dt, wanted - velocity.current));
+    velocity.current = Math.max(0, velocity.current + change);
+
+    if (distance > STOP_PX) {
+      position.current = Math.min(target, position.current + velocity.current * dt);
+      el.scrollTop = position.current;
+      idleSince.current = 0;
+    } else {
+      position.current = target;
+      velocity.current = Math.min(velocity.current, wanted);
+      // Keep gliding for a moment after catching up, so the next line carries on rather than starting again.
+      idleSince.current ||= now;
+      if (now - idleSince.current > COAST_MS) {
+        frame.current = 0;
+        return;
+      }
+    }
     frame.current = requestAnimationFrame(step);
   }, []);
 
   const kick = useCallback(() => {
-    if (follow.current && !frame.current) frame.current = requestAnimationFrame(step);
+    if (!follow.current || frame.current) return;
+    lastFrame.current = 0;
+    idleSince.current = 0;
+    frame.current = requestAnimationFrame(step);
   }, [step]);
 
   /** Follow again from wherever the reader is, e.g. after they send a message. */
@@ -81,6 +136,9 @@ export function useFollowBottom() {
       follow.current = false;
       if (frame.current) cancelAnimationFrame(frame.current);
       frame.current = 0;
+      velocity.current = 0;
+      gap.current = 0;
+      position.current = null;
     };
     // Only a reader moves the thread up. Programmatic scrolls never turn following off, so there is no race with
     // the easing above.
