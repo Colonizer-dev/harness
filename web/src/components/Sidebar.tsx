@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
+import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { sortSessions } from "../sessionOrder";
 import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
 import {
@@ -40,6 +41,7 @@ export function Sidebar({
   sessionsLoaded,
   selectedId,
   onSelect,
+  onOpenColony,
   onCreated,
   onOpenSettings,
   onClose,
@@ -51,6 +53,7 @@ export function Sidebar({
   onOpenMemory,
   pendingMemory,
   autopilotDefault,
+  attentionStrip,
 }: {
   status: HarnessStatus | null;
   statusError: boolean;
@@ -58,6 +61,8 @@ export function Sidebar({
   sessionsLoaded: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Opening from the strip may also have to drop the org filter: the strip lists every waiting colony whatever the filter shows. App decides; the strip stays presentational. */
+  onOpenColony: (session: Session) => void;
   onCreated: (session: Session) => void;
   onOpenSettings: () => void;
   onClose?: () => void;
@@ -70,6 +75,8 @@ export function Sidebar({
   onOpenMemory: () => void;
   pendingMemory: number;
   autopilotDefault: boolean;
+  /** The notification layer's in-tab switch: when off, no strip — today's sidebar exactly. */
+  attentionStrip: boolean;
 }) {
   const api = useApi();
   const [tab, setTab] = useState<"sessions" | "new">(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
@@ -129,6 +136,8 @@ export function Sidebar({
       </div>
 
       <StatusRow status={status} error={statusError} onOpenSettings={onOpenSettings} />
+
+      {attentionStrip && <AttentionStrip sessions={sessions} onOpenColony={onOpenColony} />}
 
       <div role="tablist" aria-label="Sidebar" className="mx-3 mt-2 grid grid-cols-2 gap-1 rounded-lg bg-panel-2 p-1">
         <SidebarTab active={tab === "sessions"} onClick={() => setTab("sessions")}>
@@ -422,6 +431,39 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
         </span>
       ))}
     </button>
+  );
+}
+
+/**
+ * The in-tab call to action for colonies waiting on a person: sits above the colony list so it is
+ * the first thing seen when the tab comes to the front, and each entry opens that colony's chat.
+ * Deliberately plain — repository and issue number only, never the issue title or any error text,
+ * for the same reason notifications stay dull. The list itself remains the full record; this is a
+ * pointer to it, so a missed entry here hides nothing. It counts across every org, so the entry
+ * hands over the whole colony and App's `onOpenColony` makes sure the jump lands where the list
+ * can follow.
+ */
+function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpenColony: (session: Session) => void }) {
+  const needing = useMemo(() => sortSessions(sessions.filter(needsYou)), [sessions]);
+  if (needing.length === 0) return null;
+  return (
+    <div role="region" aria-label={needsYouLabel(needing.length)} className="mx-3 mt-2 rounded-xl border border-warn/40 bg-warn-soft px-2 py-2">
+      <p className="px-1.5 text-[11.5px] font-semibold text-warn">{needsYouLabel(needing.length)}</p>
+      <ul className="mt-0.5">
+        {needing.map((session) => (
+          <li key={session.id}>
+            <button
+              type="button"
+              onClick={() => onOpenColony(session)}
+              className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left hover:bg-panel-2"
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted">{colonyLabel(session.repo, session.issue)}</span>
+              <StatusBadge status={session.status} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

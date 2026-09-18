@@ -65,6 +65,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
+| `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
 
 Two settings layers sit next to the modules:
 
@@ -77,7 +78,7 @@ Two settings layers sit next to the modules:
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
-  per-colony budget and host-disk quota, memory and the watchdog. A colony belongs to its repository
+  per-colony budget and host-disk quota, memory, the watchdog and notifications. A colony belongs to its repository
   owner's org.
 
 ## Session lifecycle

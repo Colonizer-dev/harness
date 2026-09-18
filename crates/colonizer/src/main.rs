@@ -20,6 +20,7 @@ mod mem0;
 mod memory;
 mod mesh;
 mod modules;
+mod notify;
 mod openai;
 mod orgs;
 mod plugins;
@@ -355,6 +356,13 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
             "mesh": if modules.mesh.enabled { modules.mesh.provider.as_str() } else { "none" },
             "agent": modules.agent.provider,
             "publish": modules.publish.provider,
+            // Off, or never configured, reads as "none" like the mesh's loopback provider does.
+            "notify": modules
+                .notify
+                .as_ref()
+                .filter(|c| c.enabled)
+                .map(|c| c.provider.as_str())
+                .unwrap_or("none"),
         },
         "assets": {
             "path": app.cfg.assets.as_ref().map(|p| p.display().to_string()),
@@ -668,6 +676,7 @@ async fn serve() -> Result<()> {
         .route("/api/memory/notes/{id}", delete(memory::delete_note))
         .route("/api/memory/mem0", get(memory::mem0_status).put(memory::put_mem0_key))
         .route("/api/memory/mem0/check", post(memory::check_mem0))
+        .route("/api/notify/secret", get(notify::secret_status).put(notify::put_secret))
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
@@ -737,6 +746,7 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { publish::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(autonomy::run(app.clone()));
+    tokio::spawn(notify::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
     tokio::spawn(version::run(app.clone()));
     tokio::spawn(gateway::flush_loop(app.clone()));

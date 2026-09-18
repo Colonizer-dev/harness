@@ -136,6 +136,10 @@ pub struct ModulesConfig {
     /// Absent in a modules.json written before autonomous mode existed, which reads as off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<ModuleChoice>,
+    /// Absent until it is configured, like `autonomy`: telling the world outside this machine about
+    /// your colonies is something to switch on, not a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<ModuleChoice>,
 }
 
 fn default_memory() -> ModuleChoice {
@@ -159,6 +163,8 @@ impl Default for ModulesConfig {
             watchdog: default_watchdog(),
             // Off until it is switched on: a judge answering for you is a decision, not a default.
             autonomy: None,
+            // Off until it is configured: a webhook is a write to somewhere outside this machine.
+            notify: None,
         }
     }
 }
@@ -192,6 +198,7 @@ impl ModulesConfig {
             "memory" => Some(&self.memory),
             "watchdog" => Some(&self.watchdog),
             "autonomy" => self.autonomy.as_ref(),
+            "notify" => self.notify.as_ref(),
             _ => None,
         }
     }
@@ -209,6 +216,7 @@ impl ModulesConfig {
             // Absent until it is configured, so the entry is created on first save rather than
             // written into every modules.json that never asked for it.
             "autonomy" => Some(self.autonomy.get_or_insert_with(|| ModuleChoice::new("off"))),
+            "notify" => Some(self.notify.get_or_insert_with(|| ModuleChoice::new("default"))),
             _ => None,
         }
     }
@@ -371,5 +379,21 @@ mod tests {
         let schema = json!({"properties": {"memory": {"default": "8G"}}});
         assert_eq!(setting_str(&choice(json!({"memory": "16G"})), &schema, "memory"), "16G");
         assert_eq!(setting_str(&choice(json!({})), &schema, "memory"), "8G");
+    }
+
+    #[test]
+    fn notify_is_absent_until_configured_like_autonomy() {
+        let mut modules = ModulesConfig::default();
+        assert!(modules.get("notify").is_none(), "off until it is configured");
+        assert!(
+            !serde_json::to_string(&modules).unwrap().contains("notify"),
+            "not written into the modules.json of anyone who never asked for it"
+        );
+        modules.get_mut("notify").unwrap();
+        assert!(modules.get("notify").is_some());
+        assert!(
+            serde_json::to_string(&modules).unwrap().contains("notify"),
+            "created on first save"
+        );
     }
 }

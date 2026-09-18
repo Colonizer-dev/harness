@@ -805,6 +805,43 @@ autopilot colony whose turn ends with an error (not an interrupt) is not publish
 `autopilot_held`. Any new agent event clears `attention`; a disabled watchdog clears only the reasons
 it sets itself.
 
+**Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
+`on_attention` = true, `on_failed` = true, `on_pull_request` = true, `desktop` = false,
+`webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
+announces colonies to the outside world, so it is off until asked for. Every thirty seconds the
+mothership diffs the session list against what it last saw, seeding new colonies without firing so a
+restart does not replay a backlog, and announces the edges once each: `status` became
+`waiting_for_answer` (question), `failed`, or `pr_opened` (pull request), or `attention.reason`
+became the watchdog's `stalled` or `nudges_exhausted` — `waiting_for_answer` belongs to the question
+event and `autopilot_held` is not the watchdog's, so neither announces here. The text is one short
+line naming the repository and issue (`acme/webshop #42 needs an answer`, `… has stalled`, `… is out
+of nudges`, `… failed`, `… opened a pull request`); colonies with no issue are just the repository.
+
+The desktop channel runs `osascript -e 'display notification …'` on macOS or `notify-send` on Linux
+under a graphical session, with the text passed as an argument and escaped for AppleScript. Over SSH
+or headless it does nothing, logging the reason once rather than a line a tick. A non-empty
+`webhook_url` POSTs one JSON note per event:
+
+```json
+{"event": "question|attention|failed|pull_request", "at": "2026-09-18T00:00:00+00:00",
+ "text": "acme/webshop #42 needs an answer",
+ "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
+ "pr_url": null}
+```
+
+The note carries no repository content — no issue title, no question text, no branch, no error — and
+`pr_url` is the colony's pull request address only on the `pull_request` event, `null` otherwise.
+Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
+(`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
+`X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
+and without one it is sent unsigned. Transport errors and non-2xx answers are logged, never
+retried.
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/notify/secret` | `{has_secret, source}`: whether a webhook signing secret is set (`file` or `env` for `COLONIZER_NOTIFY_SECRET`). Never the secret |
+| `PUT /api/notify/secret` | `{secret}`: save it on the mothership; `{secret: null}` removes it |
+
 **Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
 error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn
 ended. An unchanged `pr.md` from an earlier turn doesn't publish a colony the maintainer is still
