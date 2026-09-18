@@ -6,7 +6,7 @@ use crate::{
     util::{env_nonempty, exec, exec_status, read_trimmed, truncate, valid_repo, write_secret},
     ApiResult, App, Shared,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -102,6 +102,54 @@ pub async fn fetch_issue(app: &App, repo: &str, number: u64) -> Result<Value> {
     ]))
     .await?;
     Ok(serde_json::from_str(&out)?)
+}
+
+/// Why a GitHub read failed, as far as it can be told apart from `gh`'s output.
+#[derive(Debug, PartialEq)]
+pub enum Denial {
+    /// Deleted, renamed, or private to an account this one is not. `gh` answers 404 to all three.
+    NotVisible,
+    /// The credential itself was refused.
+    BadCredential,
+}
+
+/// Classifies a failed `gh` invocation. Kept separate from the message so it can be tested without
+/// GitHub, and so the wording lives in one place.
+pub fn classify(error: &str) -> Option<Denial> {
+    let text = error.to_ascii_lowercase();
+    if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
+        Some(Denial::NotVisible)
+    } else if text.contains("http 401") || text.contains("http 403") || text.contains("bad credentials") {
+        Some(Denial::BadCredential)
+    } else {
+        None
+    }
+}
+
+/// Turns a failed repository read into something a person can act on.
+///
+/// The raw failure is a shell line — ``gh api repos/o/r --jq .default_branch` failed (exit status: 1):
+/// gh: Not Found (HTTP 404)`` — which says what ran, not what to do about it. It matters most on a
+/// second machine: `gh` cannot tell a deleted repository from one the signed-in account simply cannot
+/// see, so the message names the account and both possibilities rather than picking one.
+pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow::Error {
+    let raw = format!("{error:#}");
+    let Some(denial) = classify(&raw) else { return error };
+    let who = match viewer(app).await {
+        Ok(user) => user["login"].as_str().map(|login| format!("@{login}")).unwrap_or_else(|| "this machine".into()),
+        Err(_) => "this machine".into(),
+    };
+    match denial {
+        Denial::NotVisible => anyhow!(
+            "GitHub cannot see {repo} as {who}. It may have been deleted or renamed, or {who} may not have access \
+             to it — GitHub answers the same way to all three. The colony's worktree is kept, so it can be resumed \
+             once access is back; otherwise delete the colony. (GitHub said: {raw})"
+        ),
+        Denial::BadCredential => anyhow!(
+            "GitHub refused the credentials for {repo}. Reconnect GitHub in Settings → Connections, then resume. \
+             (GitHub said: {raw})"
+        ),
+    }
 }
 
 pub async fn default_branch(app: &App, repo: &str) -> Result<String> {
@@ -581,6 +629,19 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gh_failures_are_classified_by_what_the_user_can_do() {
+        use super::{classify, Denial};
+        // What a deleted repository, a renamed one and one this account cannot see all look like.
+        let raw = "`gh api repos/o/r --jq .default_branch` failed (exit status: 1): gh: Not Found (HTTP 404)";
+        assert_eq!(classify(raw), Some(Denial::NotVisible));
+        assert_eq!(classify("GraphQL: Could not resolve to a Repository with the name 'o/r'."), Some(Denial::NotVisible));
+        assert_eq!(classify("gh: Bad credentials (HTTP 401)"), Some(Denial::BadCredential));
+        assert_eq!(classify("gh: Resource not accessible (HTTP 403)"), Some(Denial::BadCredential));
+        // Anything else keeps its own message rather than being dressed up as an access problem.
+        assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);
+    }
+
     use super::*;
     use crate::util::short_id;
 
