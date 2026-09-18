@@ -157,12 +157,12 @@ impl Telemetry {
             choice.save(&self.path)?;
             forgotten
         };
-        if let Some(id) = forgotten {
-            if let Err(e) = self.send_off(&id).await {
-                // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
-                // and pruned once the row is over an hour old, by the prune that rides the next request.
-                self.report.lock().await.last_error = Some(format!("{e:#}"));
-            }
+        if let Some(id) = forgotten
+            && let Err(e) = self.send_off(&id).await
+        {
+            // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
+            // and pruned once the row is over an hour old, by the prune that rides the next request.
+            self.report.lock().await.last_error = Some(format!("{e:#}"));
         }
         self.wake.notify_one();
         Ok(())
