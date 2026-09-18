@@ -29,8 +29,9 @@ so its chat and a real terminal are one hop away. When the agent needs you, it a
 When the work is done, your machine, the **mothership**, commits it and opens the pull request.
 
 This repository is the open-source core, MIT, and it runs on one machine today: Linux with KVM, or an
-Apple Silicon Mac. [colonizer.dev](https://colonizer.dev) is the name for everything around it. Nothing
-is live there yet, and nothing in this README pretends otherwise.
+Apple Silicon Mac. [colonizer.dev](https://colonizer.dev) is the name for everything around it. The
+domain serves a page about the project, the docs, the installer and the live map. The hosted Colonizer
+is not built yet, and nothing in this README pretends otherwise.
 
 > **Colonies only ever hold placeholders.**
 > The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
@@ -256,6 +257,7 @@ Stated here rather than buried.
 | Daily proposals for vendored plugin updates, described in skills added, removed and changed ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
 | Token savings: terse replies (caveman) and compact command output (rtk), each a switch | `SHIPPING` |
 | Token savings: Headroom compacting tool results, its bundle downloaded when switched on ([#53](https://github.com/Colonizer-dev/harness/issues/53)) | `SHIPPING` |
+| Live map of motherships, off until you switch it on: the heartbeat and its receiver | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
