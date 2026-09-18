@@ -27,6 +27,7 @@ mod sessions;
 mod telemetry;
 mod timing;
 mod util;
+mod version;
 mod watchdog;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -90,6 +91,7 @@ pub struct App {
     pub headroom: Mutex<headroom::Status>,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
+    pub updates: version::Updates,
 }
 
 pub type Shared = Arc<App>;
@@ -361,6 +363,7 @@ async fn main() -> Result<()> {
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
+        updates: version::Updates::new(&cfg.config_dir)?,
         cfg,
     });
 
@@ -378,6 +381,8 @@ async fn main() -> Result<()> {
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
+        .route("/api/version", get(version::version))
+        .route("/api/update", get(version::status).put(version::put))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -438,6 +443,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { sessions::run_queue(queue).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
+    tokio::spawn(version::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
         // Retrying would never help: no mesh binary is published for this platform, so there is

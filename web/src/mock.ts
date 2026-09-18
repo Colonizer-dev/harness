@@ -1,13 +1,12 @@
 // In-browser mock of the harness API and event streams, enabled with `?mock=1`.
 import { ApiError, type Api, type SocketLike } from "./api";
 import type {
-  AgentRef,
   AgentEvent,
-  HeadroomStatus,
-  TelemetryStatus,
   AgentEventBody,
+  AgentRef,
   Answers,
   HarnessStatus,
+  HeadroomStatus,
   Issue,
   LogLevel,
   LoginView,
@@ -24,6 +23,8 @@ import type {
   Repo,
   Session,
   SessionStatus,
+  TelemetryStatus,
+  UpdateStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -783,6 +784,24 @@ let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finishe
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
 // The live map: not asked yet, so the prompt shows.
+const MOCK_LATEST = {
+  version: "v0.1.4",
+  url: "https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4",
+  notes: "- Colonies keep their worktree when the Mothership restarts\n- Settings shows which Claude account is connected",
+  published_at: "2026-09-17T17:21:32Z",
+};
+
+// An install one release behind, so the update banner can be seen in the mock.
+let mockUpdate: UpdateStatus = {
+  enabled: true,
+  blocked_by: null,
+  installed: { version: "v0.1.3", commit: "abc1234def5678", dirty: false, built_at: "2026-09-17T09:20:00Z", release: "v0.1.3" },
+  latest: MOCK_LATEST,
+  available: true,
+  last_checked: "2026-09-17T18:00:00Z",
+  error: null,
+};
+
 let mockTelemetry: TelemetryStatus = {
   enabled: null,
   blocked_by: null,
@@ -1238,6 +1257,16 @@ export function createMockApi(): Api {
         mockHeadroom = { ...mockHeadroom, state: "downloading", bytes: 0, total: 231_330_241, started_at: new Date().toISOString(), finished_at: null, error: null };
       }
       return clone(mockHeadroom);
+    },
+    update: async () => clone(mockUpdate),
+    setUpdateCheck: async (enabled) => {
+      await sleep(200);
+      // Matches the backend: switching off forgets the last answer, so no banner
+      // lingers for a check that is no longer running.
+      mockUpdate = enabled
+        ? { ...mockUpdate, enabled, latest: MOCK_LATEST, available: true, last_checked: new Date().toISOString() }
+        : { ...mockUpdate, enabled, latest: null, available: false, last_checked: null, error: null };
+      return clone(mockUpdate);
     },
     telemetry: async () => clone(mockTelemetry),
     setTelemetry: async (enabled) => {

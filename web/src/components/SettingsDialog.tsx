@@ -13,9 +13,9 @@ import { errorMessage, useApi, useToast } from "../context";
 import type {
   HarnessStatus,
   HeadroomStatus,
+  LoginView,
   Mem0Check,
   Mem0Status,
-  LoginView,
   ModelOption,
   ModelProvider,
   ModuleInfo,
@@ -27,6 +27,7 @@ import type {
   PullStatus,
   SchemaField,
   TelemetryStatus,
+  UpdateStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
@@ -61,7 +62,7 @@ import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass,
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "connections" | "providers" | "runtime" | "live-map" | `module:${string}`;
+export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -168,7 +169,20 @@ function SettingsBody({
   const [drafts, setDrafts] = useState<Record<string, ModuleDraft>>({});
   const [providers, setProviders] = useState<ModelProvider[] | null>(null);
   const [providersError, setProvidersError] = useState<string | null>(null);
+  // Fetched here rather than threaded through App: nothing outside Settings needs it.
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const models = useModels();
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .update()
+      .then((u) => !cancelled && setUpdate(u))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,6 +244,14 @@ function SettingsBody({
           hint: "This mothership as a dot on colonizer.dev",
           badge: telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
         },
+        {
+          id: "updates",
+          label: "Updates",
+          hint: "Which Colonizer this is, and whether a newer one is out",
+          tone: update?.available ? "ok" : null,
+          toneText: update?.available ? `${update.latest?.version} available` : undefined,
+          badge: update && !update.available ? update.installed.version : undefined,
+        },
       ],
     },
     {
@@ -252,6 +274,7 @@ function SettingsBody({
   if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
+  else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -861,6 +884,111 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
         </dl>
       ) : (
         <p className="text-[13px] text-muted">Mothership status unavailable.</p>
+      )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Updates: which Colonizer this is, and whether a newer release is out (#45)
+// ---------------------------------------------------------------------------
+
+function UpdatesPane({
+  update,
+  onChanged,
+  back,
+}: {
+  update: UpdateStatus | null;
+  onChanged: (update: UpdateStatus) => void;
+  back?: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+
+  const set = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setUpdateCheck(enabled));
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const info = (
+    <p>
+      While it is on, the Mothership asks GitHub every few hours whether a newer release of
+      Colonizer-dev/harness is out. The request says nothing about this install; the live map is separate
+      and off until you switch it on.
+    </p>
+  );
+
+  return (
+    <Pane title="Updates" subtitle="Which Colonizer this is, and whether a newer one is out" info={info} back={back}>
+      {!update ? (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px]">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className="font-semibold text-[13px]">{update.installed.version}</span>
+              {update.installed.dirty && <Badge tone="warn">built from a modified tree</Badge>}
+            </div>
+            <p className="mt-1 text-muted">
+              {update.installed.commit ? (
+                <>
+                  commit <Code>{update.installed.commit.slice(0, 7)}</Code>,{" "}
+                </>
+              ) : null}
+              built {new Date(update.installed.built_at).toLocaleString()}
+            </p>
+          </div>
+
+          {update.available && update.latest && (
+            <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-[12.5px]">
+              <p className="font-semibold text-[13px]">Colonizer {update.latest.version} is available</p>
+              {update.latest.notes && (
+                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-[12.5px] text-muted">
+                  {update.latest.notes}
+                </pre>
+              )}
+              <a className="mt-1.5 inline-flex items-center gap-1 text-accent hover:underline" href={update.latest.url} target="_blank" rel="noreferrer">
+                Release notes <IconExternal size={12} />
+              </a>
+              <p className="mt-1.5 text-muted">
+                To update, re-run the installer. Updating in place, without losing running colonies, is not built yet.
+              </p>
+            </div>
+          )}
+
+          <Row id="update-check-switch" label="Check for new releases" inline>
+            <Switch
+              id="update-check-switch"
+              labelledBy="update-check-switch-label"
+              label="Check for new releases"
+              checked={update.enabled}
+              disabled={saving || update.blocked_by !== null}
+              onChange={(checked) => void set(checked)}
+            />
+          </Row>
+
+          {update.blocked_by && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              Kept off by <Code>{update.blocked_by}</Code> in the Mothership’s environment.
+            </p>
+          )}
+          {!update.enabled && !update.blocked_by && (
+            <p className="text-[12.5px] text-muted">Off: the Mothership makes no request to GitHub about releases.</p>
+          )}
+          {update.error && <p className="text-[12.5px] text-err">Last check failed: {update.error}</p>}
+          {update.enabled && update.last_checked && !update.error && (
+            <p className="text-[12.5px] text-faint">Last checked {new Date(update.last_checked).toLocaleString()}.</p>
+          )}
+        </div>
       )}
     </Pane>
   );
