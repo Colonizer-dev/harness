@@ -11,7 +11,7 @@
 //! pass-through happens before this dispatch (`events.rs`).
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The `state` of a `status` event (docs/protocol.md §2). A state a newer runner knows still
 /// deserialises, as [`AgentState::Unknown`], so a status change can never be a contract error —
@@ -132,15 +132,39 @@ mod tests {
             .collect();
 
         // The events the harness acts on, with the fields the dispatch reads.
-        assert_eq!(events[0], AgentEvent::Status { state: AgentState::Idle, detail: None });
-        assert_eq!(events[1], AgentEvent::UserMessage { id: "initial".into(), text: "Fix the issue".into() });
-        assert!(matches!(&events[2], AgentEvent::Status { state: AgentState::Working, detail: None }));
+        assert_eq!(
+            events[0],
+            AgentEvent::Status {
+                state: AgentState::Idle,
+                detail: None
+            }
+        );
+        assert_eq!(
+            events[1],
+            AgentEvent::UserMessage {
+                id: "initial".into(),
+                text: "Fix the issue".into()
+            }
+        );
+        assert!(matches!(
+            &events[2],
+            AgentEvent::Status {
+                state: AgentState::Working,
+                detail: None
+            }
+        ));
         assert!(matches!(
             &events[7],
             AgentEvent::Question { question_id, questions, message_id: Some(message_id), .. }
                 if question_id == "toolu_ask" && message_id == "msg_1" && questions.len() == 1
         ));
-        assert!(matches!(&events[8], AgentEvent::Status { state: AgentState::WaitingForAnswer, detail: None }));
+        assert!(matches!(
+            &events[8],
+            AgentEvent::Status {
+                state: AgentState::WaitingForAnswer,
+                detail: None
+            }
+        ));
         assert!(matches!(
             &events[9],
             AgentEvent::QuestionAnswered { question_id, response: None, .. } if question_id == "toolu_ask"
@@ -154,10 +178,27 @@ mod tests {
             &events[15],
             AgentEvent::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
         ));
-        assert!(matches!(&events[17], AgentEvent::Status { state: AgentState::Idle, detail: None }));
-        assert!(matches!(&events[18], AgentEvent::Status { state: AgentState::Exited, detail: None }));
+        assert!(matches!(
+            &events[17],
+            AgentEvent::Status {
+                state: AgentState::Idle,
+                detail: None
+            }
+        ));
+        assert!(matches!(
+            &events[18],
+            AgentEvent::Status {
+                state: AgentState::Exited,
+                detail: None
+            }
+        ));
         match &events[16] {
-            AgentEvent::TurnEnd { is_error, cost_usd, model_usage: Some(usage), .. } => {
+            AgentEvent::TurnEnd {
+                is_error,
+                cost_usd,
+                model_usage: Some(usage),
+                ..
+            } => {
                 assert!(!is_error);
                 assert!(cost_usd.is_some_and(|cost| cost > 0.0));
                 assert!(usage.is_object());
@@ -180,8 +221,14 @@ mod tests {
     /// types must be ignored).
     #[test]
     fn an_event_outside_the_contract_lands_on_the_catch_all_rather_than_erroring() {
-        assert_eq!(serde_json::from_str::<AgentEvent>(r#"{"type":"brand_new","payload":{}}"#).unwrap(), AgentEvent::Other);
-        assert_eq!(serde_json::from_str::<AgentEvent>(r#"{"type":"status"}"#).unwrap_or(AgentEvent::Other), AgentEvent::Other);
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(r#"{"type":"brand_new","payload":{}}"#).unwrap(),
+            AgentEvent::Other
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(r#"{"type":"status"}"#).unwrap_or(AgentEvent::Other),
+            AgentEvent::Other
+        );
     }
 
     /// The acted-on set is read off the enum, so the forwarded-only types and anything a newer
@@ -189,10 +236,26 @@ mod tests {
     /// variant added later is acted on without a second tag list being edited.
     #[test]
     fn the_acted_on_set_is_read_off_the_enum_not_a_second_tag_list() {
-        for tag in ["status", "user_message", "question", "question_answered", "turn_end", "memory_proposal", "finding"] {
+        for tag in [
+            "status",
+            "user_message",
+            "question",
+            "question_answered",
+            "turn_end",
+            "memory_proposal",
+            "finding",
+        ] {
             assert!(AgentEvent::is_acted_on(tag), "{tag} is a variant of this enum");
         }
-        for tag in ["log", "assistant_text", "assistant_text_delta", "thinking", "tool_call", "tool_result", "brand_new"] {
+        for tag in [
+            "log",
+            "assistant_text",
+            "assistant_text_delta",
+            "thinking",
+            "tool_call",
+            "tool_result",
+            "brand_new",
+        ] {
             assert!(!AgentEvent::is_acted_on(tag), "{tag} is forwarded only, or not known at all");
         }
     }
@@ -202,7 +265,13 @@ mod tests {
     #[test]
     fn a_status_with_an_unknown_state_is_still_a_status() {
         let event = serde_json::from_str::<AgentEvent>(r#"{"type":"status","state":"teleporting"}"#).unwrap();
-        assert_eq!(event, AgentEvent::Status { state: AgentState::Unknown, detail: None });
+        assert_eq!(
+            event,
+            AgentEvent::Status {
+                state: AgentState::Unknown,
+                detail: None
+            }
+        );
     }
 
     /// agentd stamps `seq`/`ts` onto every event (crates/colonizer-agentd/src/store.rs) and
@@ -214,7 +283,11 @@ mod tests {
             "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}},
             "agent":{"id":"toolu_1","name":"Explore","description":null},"seq":41,"ts":"2026-09-18T10:00:00.000Z"}"#;
         match serde_json::from_str::<AgentEvent>(stored).unwrap() {
-            AgentEvent::TurnEnd { cost_usd, model_usage: Some(usage), .. } => {
+            AgentEvent::TurnEnd {
+                cost_usd,
+                model_usage: Some(usage),
+                ..
+            } => {
                 assert_eq!(cost_usd, Some(0.42));
                 assert!(usage.is_object());
             }
@@ -229,11 +302,23 @@ mod tests {
         let bare = serde_json::from_str::<AgentEvent>(r#"{"type":"memory_proposal","title":"t","content":"c"}"#).unwrap();
         assert_eq!(
             bare,
-            AgentEvent::MemoryProposal { scope: None, title: "t".into(), content: "c".into(), tags: vec![] }
+            AgentEvent::MemoryProposal {
+                scope: None,
+                title: "t".into(),
+                content: "c".into(),
+                tags: vec![]
+            }
         );
-        let nulled = serde_json::from_str::<AgentEvent>(r#"{"type":"memory_proposal","scope":null,"title":"t","content":"c"}"#).unwrap();
+        let nulled =
+            serde_json::from_str::<AgentEvent>(r#"{"type":"memory_proposal","scope":null,"title":"t","content":"c"}"#).unwrap();
         assert!(matches!(nulled, AgentEvent::MemoryProposal { scope: None, tags, .. } if tags.is_empty()));
         let status = serde_json::from_str::<AgentEvent>(r#"{"type":"status","state":"error","detail":null}"#).unwrap();
-        assert_eq!(status, AgentEvent::Status { state: AgentState::Error, detail: None });
+        assert_eq!(
+            status,
+            AgentEvent::Status {
+                state: AgentState::Error,
+                detail: None
+            }
+        );
     }
 }

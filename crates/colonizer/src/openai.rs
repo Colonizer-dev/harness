@@ -12,7 +12,7 @@
 use crate::providers::Usage;
 use axum::{body::Bytes, http::StatusCode};
 use futures_util::{Stream, StreamExt};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
 /// Longest SSE line the stream translation buffers before giving up on the provider.
@@ -34,7 +34,11 @@ pub struct RequestInfo {
 
 pub fn translate_request(body: &[u8]) -> Result<(Vec<u8>, RequestInfo), String> {
     let request: Value = serde_json::from_slice(body).map_err(|e| format!("request body is not JSON: {e}"))?;
-    let model = request["model"].as_str().filter(|m| !m.is_empty()).ok_or("request has no model")?.to_string();
+    let model = request["model"]
+        .as_str()
+        .filter(|m| !m.is_empty())
+        .ok_or("request has no model")?
+        .to_string();
     let stream = request["stream"].as_bool().unwrap_or(false);
 
     let mut messages = Vec::new();
@@ -85,7 +89,9 @@ pub fn translate_request(body: &[u8]) -> Result<(Vec<u8>, RequestInfo), String> 
             Some("auto") => Some(json!("auto")),
             Some("any") => Some(json!("required")),
             Some("none") => Some(json!("none")),
-            Some("tool") => choice["name"].as_str().map(|name| json!({"type": "function", "function": {"name": name}})),
+            Some("tool") => choice["name"]
+                .as_str()
+                .map(|name| json!({"type": "function", "function": {"name": name}})),
             _ => None,
         };
         if let Some(mapped) = mapped {
@@ -144,7 +150,11 @@ fn user_messages(content: &Value, out: &mut Vec<Value>) {
             _ => String::new(),
         };
         if !images.is_empty() {
-            text = if text.is_empty() { IMAGE_NOTE.to_string() } else { format!("{text}\n{IMAGE_NOTE}") };
+            text = if text.is_empty() {
+                IMAGE_NOTE.to_string()
+            } else {
+                format!("{text}\n{IMAGE_NOTE}")
+            };
         }
         out.push(json!({"role": "tool", "tool_call_id": block["tool_use_id"].as_str().unwrap_or_default(), "content": text}));
         parts.extend(images);
@@ -157,7 +167,10 @@ fn user_messages(content: &Value, out: &mut Vec<Value>) {
 fn user_part(block: &Value) -> Option<Value> {
     let source = &block["source"];
     match block["type"].as_str()? {
-        "text" => block["text"].as_str().filter(|t| !t.is_empty()).map(|text| json!({"type": "text", "text": text})),
+        "text" => block["text"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(|text| json!({"type": "text", "text": text})),
         "image" => {
             let url = match source["type"].as_str()? {
                 "base64" => format!("data:{};base64,{}", source["media_type"].as_str()?, source["data"].as_str()?),
@@ -186,7 +199,11 @@ fn assistant_message(content: &Value, out: &mut Vec<Value>) {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => {
             for block in blocks.iter().filter(|b| b["type"] == "tool_use") {
-                let input = if block["input"].is_null() { json!({}) } else { block["input"].clone() };
+                let input = if block["input"].is_null() {
+                    json!({})
+                } else {
+                    block["input"].clone()
+                };
                 calls.push(json!({
                     "id": block["id"],
                     "type": "function",
@@ -220,7 +237,10 @@ fn stop_reason(finish_reason: &str) -> &'static str {
 /// OpenAI counts cached prompt tokens inside `prompt_tokens`; Anthropic reports them separately.
 fn usage_of(usage: &Value) -> Usage {
     let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
-    let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(prompt);
+    let cached = usage["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .min(prompt);
     Usage {
         input_tokens: prompt - cached,
         output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
@@ -282,12 +302,27 @@ pub fn translate_response(body: &[u8], info: &RequestInfo) -> Result<(Value, Usa
 pub fn translate_error(status: StatusCode, body: &[u8], provider: &str) -> (StatusCode, &'static str, String) {
     let parsed: Value = serde_json::from_slice(body).unwrap_or_default();
     let error = &parsed["error"];
-    let detail = error["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    let detail = error["message"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
     match error["code"].as_str().unwrap_or_default() {
         // Anthropic's wording: Claude Code compacts the conversation when it sees it.
-        "context_length_exceeded" => return (StatusCode::BAD_REQUEST, "invalid_request_error", format!("prompt is too long: {detail}")),
+        "context_length_exceeded" => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("prompt is too long: {detail}"),
+            );
+        }
         // A 429 would be retried; an empty balance does not fill up with retries.
-        "insufficient_quota" => return (StatusCode::FORBIDDEN, "permission_error", format!("provider \"{provider}\": {detail}")),
+        "insufficient_quota" => {
+            return (
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                format!("provider \"{provider}\": {detail}"),
+            );
+        }
         _ => {}
     }
     let kind = match status.as_u16() {
@@ -479,7 +514,11 @@ impl StreamTranslator {
     fn open_block(&mut self, block: Value, out: &mut Vec<u8>) -> usize {
         let index = self.next_index;
         self.next_index += 1;
-        event(out, "content_block_start", json!({"type": "content_block_start", "index": index, "content_block": block}));
+        event(
+            out,
+            "content_block_start",
+            json!({"type": "content_block_start", "index": index, "content_block": block}),
+        );
         index
     }
 
@@ -493,7 +532,11 @@ impl StreamTranslator {
                 index
             }
         };
-        event(out, "content_block_delta", json!({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}}));
+        event(
+            out,
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}}),
+        );
     }
 
     fn tool_delta(&mut self, call: &Value, out: &mut Vec<u8>) -> bool {
@@ -501,13 +544,19 @@ impl StreamTranslator {
         let index = match self.tool {
             Some((open, index)) if open == position => index,
             _ if self.seen_tools.contains(&position) => {
-                self.fail_into(out, "provider interleaved the arguments of parallel tool calls, which the openai wire does not support");
+                self.fail_into(
+                    out,
+                    "provider interleaved the arguments of parallel tool calls, which the openai wire does not support",
+                );
                 return false;
             }
             _ => {
                 self.close_blocks(out);
                 self.seen_tools.insert(position);
-                let id = call["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("call_{position}"));
+                let id = call["id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call_{position}"));
                 let block = json!({"type": "tool_use", "id": id, "name": call["function"]["name"].as_str().unwrap_or_default(), "input": {}});
                 let index = self.open_block(block, out);
                 self.tool = Some((position, index));
@@ -515,14 +564,25 @@ impl StreamTranslator {
             }
         };
         if let Some(partial) = call["function"]["arguments"].as_str().filter(|a| !a.is_empty()) {
-            event(out, "content_block_delta", json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": partial}}));
+            event(
+                out,
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": partial}}),
+            );
         }
         true
     }
 
     fn close_blocks(&mut self, out: &mut Vec<u8>) {
-        for index in [self.text.take(), self.tool.take().map(|(_, index)| index)].into_iter().flatten() {
-            event(out, "content_block_stop", json!({"type": "content_block_stop", "index": index}));
+        for index in [self.text.take(), self.tool.take().map(|(_, index)| index)]
+            .into_iter()
+            .flatten()
+        {
+            event(
+                out,
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": index}),
+            );
         }
     }
 
@@ -546,7 +606,11 @@ impl StreamTranslator {
             return;
         }
         self.finished = true;
-        event(out, "error", json!({"type": "error", "error": {"type": "api_error", "message": message}}));
+        event(
+            out,
+            "error",
+            json!({"type": "error", "error": {"type": "api_error", "message": message}}),
+        );
     }
 }
 
@@ -574,9 +638,7 @@ pub fn translate_stream(
             None => (translator.finish(), true),
         };
         // The usage is complete exactly when the translation is, so this is where it leaves the stream.
-        if finished
-            && let Some(on_usage) = on_usage.take()
-        {
+        if finished && let Some(on_usage) = on_usage.take() {
             on_usage(translator.usage());
         }
         Some((Ok(Bytes::from(out)), (upstream, translator, finished, on_usage)))
@@ -595,7 +657,10 @@ mod tests {
     /// `(event name, data)` for every event in an SSE body.
     fn events(bytes: &[u8]) -> Vec<(String, Value)> {
         let text = std::str::from_utf8(bytes).unwrap();
-        assert!(text.is_empty() || text.ends_with("\n\n"), "output must end on an event boundary: {text:?}");
+        assert!(
+            text.is_empty() || text.ends_with("\n\n"),
+            "output must end on an event boundary: {text:?}"
+        );
         text.split("\n\n")
             .filter(|e| !e.is_empty())
             .map(|e| {
@@ -659,7 +724,8 @@ mod tests {
                 "stream_options": {"include_usage": true},
             })
         );
-        let unstreamed = translate(json!({"model": "gpt-5.5", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}));
+        let unstreamed =
+            translate(json!({"model": "gpt-5.5", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}));
         assert!(unstreamed.get("stream").is_none() && unstreamed.get("stream_options").is_none());
         assert_eq!(unstreamed["messages"], json!([{"role": "user", "content": "hi"}]));
     }
@@ -720,9 +786,17 @@ mod tests {
                 {"role": "system", "content": [{"type": "text", "text": "<system-reminder>budget</system-reminder>", "cache_control": {"type": "ephemeral"}}]},
             ],
         }));
-        let roles: Vec<&str> = out["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();
+        let roles: Vec<&str> = out["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
         assert_eq!(roles, ["user", "system", "assistant", "tool", "system"]);
-        assert_eq!(out["messages"][4], json!({"role": "system", "content": "<system-reminder>budget</system-reminder>"}));
+        assert_eq!(
+            out["messages"][4],
+            json!({"role": "system", "content": "<system-reminder>budget</system-reminder>"})
+        );
     }
 
     #[test]
@@ -735,12 +809,19 @@ mod tests {
             "model": "gpt-5.5", "messages": [{"role": "user", "content": "hi"}],
             "tools": tools, "tool_choice": {"type": "any", "disable_parallel_tool_use": true},
         }));
-        assert_eq!(out["tools"], json!([{"type": "function", "function": {"name": "Bash", "description": "Run a command", "parameters": {"type": "object", "properties": {}}}}]));
+        assert_eq!(
+            out["tools"],
+            json!([{"type": "function", "function": {"name": "Bash", "description": "Run a command", "parameters": {"type": "object", "properties": {}}}}])
+        );
         assert_eq!(out["tool_choice"], json!("required"));
         assert_eq!(out["parallel_tool_calls"], json!(false));
 
-        let named = translate(json!({"model": "m", "messages": [], "tools": tools, "tool_choice": {"type": "tool", "name": "Bash"}}));
-        assert_eq!(named["tool_choice"], json!({"type": "function", "function": {"name": "Bash"}}));
+        let named =
+            translate(json!({"model": "m", "messages": [], "tools": tools, "tool_choice": {"type": "tool", "name": "Bash"}}));
+        assert_eq!(
+            named["tool_choice"],
+            json!({"type": "function", "function": {"name": "Bash"}})
+        );
 
         // No usable tools means no tool_choice either: OpenAI rejects one without the other.
         let server_only = translate(json!({"model": "m", "messages": [], "tools": [tools[1]], "tool_choice": {"type": "auto"}}));
@@ -760,13 +841,24 @@ mod tests {
         let out = events(&whole);
         assert_eq!(
             names(&out),
-            ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+            [
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
         );
         assert_eq!(out[0].1["message"]["id"], "chatcmpl-1");
         assert_eq!(out[1].1["content_block"], json!({"type": "text", "text": ""}));
         assert_eq!(out[2].1["delta"], json!({"type": "text_delta", "text": "Hé"}));
         assert_eq!(out[5].1["delta"]["stop_reason"], "end_turn");
-        assert_eq!(out[5].1["usage"], json!({"input_tokens": 20, "output_tokens": 7, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}));
+        assert_eq!(
+            out[5].1["usage"],
+            json!({"input_tokens": 20, "output_tokens": 7, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0})
+        );
 
         // One byte at a time — splitting `data:` lines, the `\n\n` boundary and the two bytes of "é" —
         // produces the same events, and every push ends on an event boundary (checked by `events`).
@@ -803,10 +895,18 @@ mod tests {
         while let Some(item) = stream.next().await {
             out.extend_from_slice(&item.expect("the stream translates"));
         }
-        assert!(std::str::from_utf8(&out).unwrap().contains("event: message_stop"), "the stream translated");
+        assert!(
+            std::str::from_utf8(&out).unwrap().contains("event: message_stop"),
+            "the stream translated"
+        );
         assert_eq!(
             *seen.lock().unwrap(),
-            Some(Usage { input_tokens: 18, output_tokens: 4, cache_read_tokens: 12, cache_write_tokens: 0 })
+            Some(Usage {
+                input_tokens: 18,
+                output_tokens: 4,
+                cache_read_tokens: 12,
+                cache_write_tokens: 0
+            })
         );
     }
 
@@ -841,14 +941,29 @@ mod tests {
         assert_eq!(
             summary,
             [
-                "message_start", "start 0 \"text\"", "delta 0", "stop 0",
-                "start 1 \"tool_use\"", "delta 1", "delta 1", "stop 1",
-                "start 2 \"tool_use\"", "delta 2", "stop 2",
-                "message_delta", "message_stop",
+                "message_start",
+                "start 0 \"text\"",
+                "delta 0",
+                "stop 0",
+                "start 1 \"tool_use\"",
+                "delta 1",
+                "delta 1",
+                "stop 1",
+                "start 2 \"tool_use\"",
+                "delta 2",
+                "stop 2",
+                "message_delta",
+                "message_stop",
             ]
         );
-        assert_eq!(out[4].1["content_block"], json!({"type": "tool_use", "id": "call_a", "name": "Bash", "input": {}}));
-        assert_eq!(out[5].1["delta"], json!({"type": "input_json_delta", "partial_json": "{\"command\":"}));
+        assert_eq!(
+            out[4].1["content_block"],
+            json!({"type": "tool_use", "id": "call_a", "name": "Bash", "input": {}})
+        );
+        assert_eq!(
+            out[5].1["delta"],
+            json!({"type": "input_json_delta", "partial_json": "{\"command\":"})
+        );
         assert_eq!(out[8].1["content_block"]["id"], "call_b");
         assert_eq!(out[11].1["delta"]["stop_reason"], "tool_use");
     }
@@ -862,8 +977,14 @@ mod tests {
 
         let mut translator = StreamTranslator::new("gpt-5.5");
         let out = events(&translator.push(&body));
-        assert_eq!(names(&out), ["message_start", "content_block_start", "content_block_delta", "error"]);
-        assert_eq!(out[3].1["error"]["message"], "provider stream failed: The server had an error");
+        assert_eq!(
+            names(&out),
+            ["message_start", "content_block_start", "content_block_delta", "error"]
+        );
+        assert_eq!(
+            out[3].1["error"]["message"],
+            "provider stream failed: The server had an error"
+        );
         assert!(translator.is_finished());
         assert!(translator.finish().is_empty(), "nothing may follow the error event");
     }
@@ -886,7 +1007,12 @@ mod tests {
 
     #[test]
     fn interleaved_tool_arguments_fail_loudly() {
-        let call = |index: u64, arguments: &str| chunk(json!({"tool_calls": [{"index": index, "id": format!("call_{index}"), "function": {"name": "T", "arguments": arguments}}]}), Value::Null);
+        let call = |index: u64, arguments: &str| {
+            chunk(
+                json!({"tool_calls": [{"index": index, "id": format!("call_{index}"), "function": {"name": "T", "arguments": arguments}}]}),
+                Value::Null,
+            )
+        };
         let out = events(&StreamTranslator::new("m").push(&sse(&[call(0, "{"), call(1, "{"), call(0, "}")])));
         assert_eq!(out.last().unwrap().0, "error");
         assert!(out.iter().all(|(name, _)| name != "message_stop"));
@@ -894,7 +1020,10 @@ mod tests {
 
     #[test]
     fn non_streaming_responses_translate_and_reject_bad_arguments() {
-        let info = RequestInfo { model: "gpt-5.5".into(), stream: false };
+        let info = RequestInfo {
+            model: "gpt-5.5".into(),
+            stream: false,
+        };
         let response = |arguments: &str| {
             json!({
                 "id": "chatcmpl-2", "model": "gpt-5.5",
@@ -920,7 +1049,15 @@ mod tests {
                 "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
             })
         );
-        assert_eq!(usage, Usage { input_tokens: 10, output_tokens: 5, ..Default::default() }, "the usage is teed out for pricing");
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            "the usage is teed out for pricing"
+        );
         assert!(translate_response(response("{\"command\":").as_bytes(), &info).is_err());
         assert!(translate_response(response("[1]").as_bytes(), &info).is_err());
         assert!(translate_response(b"<html>", &info).is_err());
@@ -928,21 +1065,51 @@ mod tests {
 
     #[test]
     fn errors_keep_their_meaning_for_claude_code() {
-        let body = |code: &str, message: &str| json!({"error": {"message": message, "type": "invalid_request_error", "code": code}}).to_string();
+        let body = |code: &str, message: &str| {
+            json!({"error": {"message": message, "type": "invalid_request_error", "code": code}}).to_string()
+        };
 
-        let (status, kind, message) = translate_error(StatusCode::BAD_REQUEST, body("context_length_exceeded", "maximum context length is 272000").as_bytes(), "openai");
+        let (status, kind, message) = translate_error(
+            StatusCode::BAD_REQUEST,
+            body("context_length_exceeded", "maximum context length is 272000").as_bytes(),
+            "openai",
+        );
         assert_eq!((status, kind), (StatusCode::BAD_REQUEST, "invalid_request_error"));
         assert!(message.starts_with("prompt is too long"), "{message}");
 
-        let (status, kind, _) = translate_error(StatusCode::TOO_MANY_REQUESTS, body("insufficient_quota", "out of credit").as_bytes(), "openai");
+        let (status, kind, _) = translate_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            body("insufficient_quota", "out of credit").as_bytes(),
+            "openai",
+        );
         assert_eq!((status, kind), (StatusCode::FORBIDDEN, "permission_error"));
 
-        let (status, kind, message) = translate_error(StatusCode::TOO_MANY_REQUESTS, body("rate_limit_exceeded", "slow down").as_bytes(), "openai");
-        assert_eq!((status, kind, message.as_str()), (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", "provider \"openai\": slow down"));
+        let (status, kind, message) = translate_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            body("rate_limit_exceeded", "slow down").as_bytes(),
+            "openai",
+        );
+        assert_eq!(
+            (status, kind, message.as_str()),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "provider \"openai\": slow down"
+            )
+        );
 
-        assert_eq!(translate_error(StatusCode::UNAUTHORIZED, b"{}", "openai").1, "authentication_error");
+        assert_eq!(
+            translate_error(StatusCode::UNAUTHORIZED, b"{}", "openai").1,
+            "authentication_error"
+        );
         let (status, kind, message) = translate_error(StatusCode::SERVICE_UNAVAILABLE, b"upstream connect error", "openai");
-        assert_eq!((status, kind, message.as_str()), (StatusCode::SERVICE_UNAVAILABLE, "overloaded_error", "provider \"openai\": HTTP 503"));
+        assert_eq!(
+            (status, kind, message.as_str()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                "provider \"openai\": HTTP 503"
+            )
+        );
     }
 }
-

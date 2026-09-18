@@ -18,13 +18,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{util, Shared};
+use crate::{Shared, util};
 
 /// Where the check looks. Overridable so a fork, or a test, does not ask about this repository.
 const RELEASES_URL: &str = "https://api.github.com/repos/Colonizer-dev/harness/releases/latest";
@@ -168,7 +168,10 @@ struct Choice {
 
 impl Choice {
     fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     fn save(&self, path: &Path) -> Result<()> {
@@ -208,8 +211,11 @@ pub struct Updates {
 
 impl Updates {
     pub fn new(config_dir: &Path) -> Result<Self> {
-        let blocked = matches!(std::env::var("COLONIZER_UPDATE_CHECK").as_deref(), Ok("0") | Ok("false") | Ok("off"))
-            .then_some("COLONIZER_UPDATE_CHECK");
+        let blocked = matches!(
+            std::env::var("COLONIZER_UPDATE_CHECK").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        )
+        .then_some("COLONIZER_UPDATE_CHECK");
         let url = crate::util::env_nonempty("COLONIZER_RELEASES_URL").unwrap_or_else(|| RELEASES_URL.to_string());
         Ok(Self {
             path: config_dir.join("updates.json"),
@@ -243,7 +249,12 @@ impl Updates {
 
     /// Asks GitHub for the latest release. Only ever called behind [`Updates::enabled`].
     async fn fetch(&self) -> Result<Latest> {
-        let response = self.client.get(&self.url).header("Accept", "application/vnd.github+json").send().await?;
+        let response = self
+            .client
+            .get(&self.url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
         let status = response.status();
         let body = response.text().await?;
         if !status.is_success() {
@@ -259,7 +270,10 @@ impl Updates {
             version,
             url: release["html_url"].as_str().unwrap_or_default().to_string(),
             notes: util::truncate(release["body"].as_str().unwrap_or_default(), 4000),
-            published_at: release["published_at"].as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(Into::into),
+            published_at: release["published_at"]
+                .as_str()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(Into::into),
         })
     }
 
@@ -282,13 +296,20 @@ impl Updates {
     pub async fn latest_release(&self) -> Option<String> {
         let state = self.state.lock().await;
         let build = build();
-        state.latest.as_ref().filter(|l| is_newer(build.release.as_deref(), &l.version)).map(|l| l.version.clone())
+        state
+            .latest
+            .as_ref()
+            .filter(|l| is_newer(build.release.as_deref(), &l.version))
+            .map(|l| l.version.clone())
     }
 
     async fn view(&self) -> Value {
         let state = self.state.lock().await;
         let build = build();
-        let available = state.latest.as_ref().is_some_and(|l| is_newer(build.release.as_deref(), &l.version));
+        let available = state
+            .latest
+            .as_ref()
+            .is_some_and(|l| is_newer(build.release.as_deref(), &l.version));
         json!({
             "enabled": self.enabled().await,
             "blocked_by": self.blocked,
@@ -334,9 +355,10 @@ pub async fn put(State(app): State<Shared>, Json(body): Json<SetRequest>) -> cra
             &format!("the update check is kept off by {blocked} in the mothership's environment"),
         ));
     }
-    app.updates.set(body.enabled).await.map_err(|e| {
-        crate::client_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"))
-    })?;
+    app.updates
+        .set(body.enabled)
+        .await
+        .map_err(|e| crate::client_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
     if body.enabled {
         app.updates.check().await;
     }
@@ -363,9 +385,23 @@ mod tests {
 
     #[test]
     fn a_tag_reads_as_its_release() {
-        assert_eq!(Semver::parse("v0.1.4"), Some(Semver { major: 0, minor: 1, patch: 4 }));
+        assert_eq!(
+            Semver::parse("v0.1.4"),
+            Some(Semver {
+                major: 0,
+                minor: 1,
+                patch: 4
+            })
+        );
         assert_eq!(Semver::parse("0.1.4"), Semver::parse("v0.1.4"));
-        assert_eq!(Semver::parse(" v1.20.300 "), Some(Semver { major: 1, minor: 20, patch: 300 }));
+        assert_eq!(
+            Semver::parse(" v1.20.300 "),
+            Some(Semver {
+                major: 1,
+                minor: 20,
+                patch: 300
+            })
+        );
     }
 
     #[test]
@@ -397,7 +433,10 @@ mod tests {
 
     #[test]
     fn a_dev_build_hears_about_the_release_after_its_tag() {
-        assert!(is_newer(Some("v0.1.4"), "v0.1.5"), "a build after v0.1.4 wants to know about v0.1.5");
+        assert!(
+            is_newer(Some("v0.1.4"), "v0.1.5"),
+            "a build after v0.1.4 wants to know about v0.1.5"
+        );
         assert!(!is_newer(Some("v0.1.4"), "v0.1.4"), "its own tag is not news");
     }
 
@@ -434,7 +473,11 @@ mod tests {
     #[test]
     fn the_stamped_build_describes_itself() {
         let b = build();
-        assert!(b.version.starts_with('v'), "version should be tag-shaped, got {:?}", b.version);
+        assert!(
+            b.version.starts_with('v'),
+            "version should be tag-shaped, got {:?}",
+            b.version
+        );
         // Either a real release was parsed out of it, or there was no git and
         // the crate version stood in; both are a release to compare against.
         assert!(b.release.is_some(), "a build should know which release it descends from");

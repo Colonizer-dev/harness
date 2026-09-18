@@ -4,29 +4,28 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    client_error, openai,
-    providers::{strip_oauth_betas, Provider, Usage, Wire},
+    ApiResult, App, Shared, client_error, openai,
+    providers::{Provider, Usage, Wire, strip_oauth_betas},
     util::read_trimmed,
-    ApiResult, App, Shared,
 };
 use axum::{
+    Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::any,
-    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -39,7 +38,14 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 const MAX_BODY: usize = 64 * 1024 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const FORWARD_HEADERS: [&str; 3] = ["content-type", "accept", "anthropic-version"];
-const DROP_RESPONSE_HEADERS: [&str; 6] = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "content-length"];
+const DROP_RESPONSE_HEADERS: [&str; 6] = [
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "transfer-encoding",
+    "upgrade",
+    "content-length",
+];
 /// How long an SSE response may go silent before the gateway sends a comment line to keep the
 /// connection (and any byte-level idle watchdog downstream) alive during a long prefill.
 const SSE_PING_INTERVAL: Duration = Duration::from_secs(15);
@@ -108,13 +114,18 @@ struct Timed {
 
 impl Timed {
     fn new(counters: Arc<UsageCounters>) -> Self {
-        Self { counters, start: Instant::now() }
+        Self {
+            counters,
+            start: Instant::now(),
+        }
     }
 }
 
 impl Drop for Timed {
     fn drop(&mut self) {
-        self.counters.duration_ms.fetch_add(self.start.elapsed().as_millis() as u64, Ordering::SeqCst);
+        self.counters
+            .duration_ms
+            .fetch_add(self.start.elapsed().as_millis() as u64, Ordering::SeqCst);
         self.counters.dirty.store(true, Ordering::SeqCst);
     }
 }
@@ -210,11 +221,22 @@ impl Gateway {
             .build()?;
         let usage_file = data_dir.join("provider-usage.json");
         // A missing or corrupt file means the counters start over, never that the gateway fails.
-        let saved: BTreeMap<String, ProviderUsage> =
-            std::fs::read(&usage_file).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default();
-        let usage: HashMap<String, Arc<UsageCounters>> =
-            saved.into_iter().map(|(id, usage)| (id, Arc::new(UsageCounters::seeded(usage)))).collect();
-        Ok(Self { client, stats: Default::default(), limits: Default::default(), colonies: Default::default(), usage: Mutex::new(usage), usage_file })
+        let saved: BTreeMap<String, ProviderUsage> = std::fs::read(&usage_file)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        let usage: HashMap<String, Arc<UsageCounters>> = saved
+            .into_iter()
+            .map(|(id, usage)| (id, Arc::new(UsageCounters::seeded(usage))))
+            .collect();
+        Ok(Self {
+            client,
+            stats: Default::default(),
+            limits: Default::default(),
+            colonies: Default::default(),
+            usage: Mutex::new(usage),
+            usage_file,
+        })
     }
 
     fn stats(&self, provider: &str) -> Arc<ProviderStats> {
@@ -243,8 +265,13 @@ impl Gateway {
     /// provider's tally. Renames can still land out of order, but each one is a complete snapshot, so the
     /// worst a lost race does is persist a slightly stale tally until the next flush.
     fn write_usage(&self) {
-        let snapshot: BTreeMap<String, ProviderUsage> =
-            self.usage.lock().unwrap().iter().map(|(id, counters)| (id.clone(), counters.snapshot())).collect();
+        let snapshot: BTreeMap<String, ProviderUsage> = self
+            .usage
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, counters)| (id.clone(), counters.snapshot()))
+            .collect();
         if let Ok(data) = serde_json::to_vec_pretty(&snapshot) {
             let tmp = self.usage_file.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
             if std::fs::write(&tmp, data).is_ok() {
@@ -295,7 +322,11 @@ impl Gateway {
 
     /// True while the colony is waiting on a model through the gateway; the watchdog counts that as progress.
     pub fn colony_busy(&self, colony: &str) -> bool {
-        self.colonies.lock().unwrap().get(colony).is_some_and(|c| c.load(Ordering::SeqCst) > 0)
+        self.colonies
+            .lock()
+            .unwrap()
+            .get(colony)
+            .is_some_and(|c| c.load(Ordering::SeqCst) > 0)
     }
 
     /// The provider's request slots, or `None` when it has no concurrency limit. A changed limit gets a
@@ -306,11 +337,15 @@ impl Gateway {
             limits.remove(provider);
             return None;
         };
-        let limit = limits
-            .entry(provider.to_string())
-            .or_insert_with(|| Limit { max, slots: Arc::new(Semaphore::new(max as usize)) });
+        let limit = limits.entry(provider.to_string()).or_insert_with(|| Limit {
+            max,
+            slots: Arc::new(Semaphore::new(max as usize)),
+        });
         if limit.max != max {
-            *limit = Limit { max, slots: Arc::new(Semaphore::new(max as usize)) };
+            *limit = Limit {
+                max,
+                slots: Arc::new(Semaphore::new(max as usize)),
+            };
         }
         Some(limit.slots.clone())
     }
@@ -330,7 +365,9 @@ impl App {
         sessions
             .iter()
             .filter(|s| s.status.is_live())
-            .find(|s| read_trimmed(&self.gateway_token_file(&s.id)).is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes())))
+            .find(|s| {
+                read_trimmed(&self.gateway_token_file(&s.id)).is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
+            })
             .map(|s| s.id.clone())
     }
 }
@@ -356,9 +393,15 @@ pub async fn flush_loop(app: Shared) {
 
 /// An error in Anthropic's shape, so Claude Code reports it like any API error.
 fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallback: Option<&'static str>) -> Response {
-    let mut response = (status, Json(json!({"type": "error", "error": {"type": kind, "message": message.into()}}))).into_response();
+    let mut response = (
+        status,
+        Json(json!({"type": "error", "error": {"type": kind, "message": message.into()}})),
+    )
+        .into_response();
     if let Some(reason) = fallback {
-        response.headers_mut().insert(FALLBACK_HEADER, HeaderValue::from_static(reason));
+        response
+            .headers_mut()
+            .insert(FALLBACK_HEADER, HeaderValue::from_static(reason));
     }
     response
 }
@@ -386,19 +429,38 @@ fn stream_body(
         guards.as_ref()?;
         let remaining = timeout.saturating_sub(silent_since.elapsed());
         if remaining.is_zero() {
-            return Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since, at_boundary)));
+            return Some((
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")),
+                (chunks, None, silent_since, at_boundary),
+            ));
         }
         let can_ping = is_sse && at_boundary;
-        let wait = if can_ping { remaining.min(SSE_PING_INTERVAL) } else { remaining };
+        let wait = if can_ping {
+            remaining.min(SSE_PING_INTERVAL)
+        } else {
+            remaining
+        };
         match tokio::time::timeout(wait, chunks.next()).await {
             Ok(Some(Ok(chunk))) => {
-                let boundary = if chunk.is_empty() { at_boundary } else { ends_sse_event(&chunk) };
+                let boundary = if chunk.is_empty() {
+                    at_boundary
+                } else {
+                    ends_sse_event(&chunk)
+                };
                 Some((Ok(chunk), (chunks, guards, tokio::time::Instant::now(), boundary)))
             }
-            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), (chunks, None, silent_since, at_boundary))),
+            Ok(Some(Err(e))) => Some((
+                Err(std::io::Error::other(e.without_url())),
+                (chunks, None, silent_since, at_boundary),
+            )),
             Ok(None) => None,
-            Err(_) if can_ping && wait < remaining => Some((Ok(Bytes::from_static(SSE_PING)), (chunks, guards, silent_since, true))),
-            Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")), (chunks, None, silent_since, at_boundary))),
+            Err(_) if can_ping && wait < remaining => {
+                Some((Ok(Bytes::from_static(SSE_PING)), (chunks, guards, silent_since, true)))
+            }
+            Err(_) => Some((
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "provider went silent")),
+                (chunks, None, silent_since, at_boundary),
+            )),
         }
     })
 }
@@ -430,7 +492,11 @@ enum UsageTap {
 
 impl UsageTap {
     fn anthropic(is_sse: bool) -> Self {
-        if is_sse { Self::Sse(SseTap::default()) } else { Self::Json(Vec::new()) }
+        if is_sse {
+            Self::Sse(SseTap::default())
+        } else {
+            Self::Json(Vec::new())
+        }
     }
 
     fn push(&mut self, chunk: &[u8]) {
@@ -449,7 +515,9 @@ impl UsageTap {
     fn finish(self) -> Usage {
         match self {
             // Malformed or truncated JSON parses to nothing, which is the deal: count only what is certain.
-            Self::Json(buffer) => serde_json::from_slice::<Value>(&buffer).map(|body| anthropic_usage(&body["usage"])).unwrap_or_default(),
+            Self::Json(buffer) => serde_json::from_slice::<Value>(&buffer)
+                .map(|body| anthropic_usage(&body["usage"]))
+                .unwrap_or_default(),
             Self::Sse(tap) => tap.usage,
             Self::Skip => Usage::default(),
         }
@@ -511,7 +579,9 @@ impl SseTap {
 
     fn dispatch(&mut self) {
         let data = std::mem::take(&mut self.data);
-        let Ok(event) = serde_json::from_str::<Value>(&data) else { return };
+        let Ok(event) = serde_json::from_str::<Value>(&data) else {
+            return;
+        };
         match event["type"].as_str() {
             Some("message_start") => {
                 let message = anthropic_usage(&event["message"]["usage"]);
@@ -616,13 +686,30 @@ fn forward_headers(incoming: &HeaderMap, credential: Option<(HeaderName, HeaderV
     out
 }
 
-async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+async fn proxy(
+    State(app): State<Shared>,
+    Path((id, _)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let token = headers.get(COLONY_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
     let Some(colony) = app.colony_for_token(token).await else {
-        return api_error(StatusCode::UNAUTHORIZED, "authentication_error", "colonizer gateway: unknown colony", None);
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "colonizer gateway: unknown colony",
+            None,
+        );
     };
     let Some(provider) = app.providers().into_iter().find(|p| p.id == id) else {
-        return api_error(StatusCode::NOT_FOUND, "not_found_error", format!("colonizer gateway: no provider \"{id}\""), None);
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            format!("colonizer gateway: no provider \"{id}\""),
+            None,
+        );
     };
     // Refused before it waits for a slot, and the colony is stopped like the max-duration path stops one.
     // The 403 follows the empty-balance precedent in openai.rs: Claude Code does not retry it in a loop.
@@ -640,25 +727,47 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     let (url, upstream_headers, body, translation) = match provider.wire {
         Wire::Anthropic => {
             let Some(url) = upstream_url(&provider.base_url, rest, uri.query()) else {
-                return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "colonizer gateway: unsupported path", None);
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "colonizer gateway: unsupported path",
+                    None,
+                );
             };
             (url, forward_headers(&headers, credential_header(&app, &provider)), body, None)
         }
         Wire::Openai => {
             // 404 is also what tells the colony router to estimate `count_tokens` itself.
             let Some(path) = openai::upstream_path(rest) else {
-                return api_error(StatusCode::NOT_FOUND, "not_found_error", format!("colonizer gateway: provider \"{id}\" does not serve {rest}"), None);
+                return api_error(
+                    StatusCode::NOT_FOUND,
+                    "not_found_error",
+                    format!("colonizer gateway: provider \"{id}\" does not serve {rest}"),
+                    None,
+                );
             };
             let (body, info) = match openai::translate_request(&body) {
                 Ok(translated) => translated,
-                Err(message) => return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", format!("colonizer gateway: {message}"), None),
+                Err(message) => {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        format!("colonizer gateway: {message}"),
+                        None,
+                    );
+                }
             };
             let mut upstream_headers = HeaderMap::new();
             upstream_headers.insert("content-type", HeaderValue::from_static("application/json"));
             if let Some((name, value)) = credential_header(&app, &provider) {
                 upstream_headers.insert(name, value);
             }
-            (format!("{}{path}", provider.base_url.trim_end_matches('/')), upstream_headers, Bytes::from(body), Some(info))
+            (
+                format!("{}{path}", provider.base_url.trim_end_matches('/')),
+                upstream_headers,
+                Bytes::from(body),
+                Some(info),
+            )
         }
     };
 
@@ -686,7 +795,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
                         "overloaded_error",
                         format!("provider \"{id}\" is busy: no free request slot within {queue_timeout} s"),
                         Some("queue_timeout"),
-                    )
+                    );
                 }
             }
         }
@@ -696,16 +805,15 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     // not add its queue time to `duration_ms`, which measures dispatched time only.
     let timed = Timed::new(usage.clone());
 
-    let request = app
-        .gateway
-        .client
-        .request(method, &url)
-        .headers(upstream_headers)
-        .body(body);
+    let request = app.gateway.client.request(method, &url).headers(upstream_headers).body(body);
     let upstream = match tokio::time::timeout(timeout, request.send()).await {
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
-            let reason = if e.is_connect() { "connection failed" } else { "request failed" };
+            let reason = if e.is_connect() {
+                "connection failed"
+            } else {
+                "request failed"
+            };
             usage.add_failure_with_fallback(&provider);
             return api_error(
                 StatusCode::BAD_GATEWAY,
@@ -745,7 +853,10 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     // A GGUF server can sit silent for minutes during prefill before its first SSE event; stream_body
     // keeps the connection alive with comment lines in that case, which only makes sense for SSE:
     // injecting bytes into a non-streaming JSON body would corrupt it.
-    let is_sse = response_headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("text/event-stream"));
+    let is_sse = response_headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| c.contains("text/event-stream"));
     // The body forwards exactly as upstream sent it; the tap only watches a private copy for usage.
     let body = counted_body(
         stream_body(upstream.bytes_stream(), guards, timeout, is_sse),
@@ -763,25 +874,52 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`. The usage
 /// the translation already extracted is teed out to `record_routed_usage` on both paths.
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
-async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc<UsageCounters>, record: Recorder, timeout: Duration, info: &openai::RequestInfo, id: &str) -> Response {
+async fn openai_response(
+    upstream: reqwest::Response,
+    guards: Guards,
+    usage: Arc<UsageCounters>,
+    record: Recorder,
+    timeout: Duration,
+    info: &openai::RequestInfo,
+    id: &str,
+) -> Response {
     let status = upstream.status();
     let retry_after = upstream.headers().get("retry-after").cloned();
     if status.is_success() && info.stream {
-        let body = stream_body(openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record), guards, timeout, true);
+        let body = stream_body(
+            openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record),
+            guards,
+            timeout,
+            true,
+        );
         let mut response = Response::new(Body::from_stream(body));
-        response.headers_mut().insert("content-type", HeaderValue::from_static("text/event-stream"));
-        response.headers_mut().insert("cache-control", HeaderValue::from_static("no-cache"));
+        response
+            .headers_mut()
+            .insert("content-type", HeaderValue::from_static("text/event-stream"));
+        response
+            .headers_mut()
+            .insert("cache-control", HeaderValue::from_static("no-cache"));
         return response;
     }
     let bytes = match tokio::time::timeout(timeout, upstream.bytes()).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {
             usage.add_failure();
-            return api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\" response failed: {}", e.without_url()), None);
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                format!("provider \"{id}\" response failed: {}", e.without_url()),
+                None,
+            );
         }
         Err(_) => {
             usage.add_failure();
-            return api_error(StatusCode::GATEWAY_TIMEOUT, "api_error", format!("provider \"{id}\" did not finish its response within {} s", timeout.as_secs()), None);
+            return api_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "api_error",
+                format!("provider \"{id}\" did not finish its response within {} s", timeout.as_secs()),
+                None,
+            );
         }
     };
     drop(guards);
@@ -791,7 +929,12 @@ async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc
                 record(priced);
                 (StatusCode::OK, Json(message)).into_response()
             }
-            Err(message) => api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\": {message}"), None),
+            Err(message) => api_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                format!("provider \"{id}\": {message}"),
+                None,
+            ),
         }
     } else {
         if status.as_u16() >= 400 {
@@ -809,7 +952,11 @@ async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc
 /// Probes `GET {base_url}/v1/models` with the provider's credential.
 pub async fn probe(app: &App, provider: &Provider) -> Value {
     let started = Instant::now();
-    let mut request = app.gateway.client.get(format!("{}/v1/models", provider.base_url.trim_end_matches('/'))).timeout(HEALTH_TIMEOUT);
+    let mut request = app
+        .gateway
+        .client
+        .get(format!("{}/v1/models", provider.base_url.trim_end_matches('/')))
+        .timeout(HEALTH_TIMEOUT);
     if let Some((name, value)) = credential_header(app, provider) {
         request = request.header(name, value);
     }
@@ -863,7 +1010,10 @@ mod tests {
             upstream_url("https://api.deepseek.com/anthropic/", "/v1/messages", Some("beta=true")).as_deref(),
             Some("https://api.deepseek.com/anthropic/v1/messages?beta=true")
         );
-        assert_eq!(upstream_url("http://100.80.225.14:8000", "/v1/models", None).as_deref(), Some("http://100.80.225.14:8000/v1/models"));
+        assert_eq!(
+            upstream_url("http://100.80.225.14:8000", "/v1/models", None).as_deref(),
+            Some("http://100.80.225.14:8000/v1/models")
+        );
         assert!(upstream_url("http://h", "/v1/../admin", None).is_none());
         assert!(upstream_url("http://h", "/v1/%2e%2e/admin", None).is_none());
         assert!(upstream_url("http://h", "v1/messages", None).is_none());
@@ -877,8 +1027,14 @@ mod tests {
         incoming.insert(COLONY_HEADER, HeaderValue::from_static("token"));
         incoming.insert("content-type", HeaderValue::from_static("application/json"));
         incoming.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        incoming.insert("anthropic-beta", HeaderValue::from_static("oauth-2025-04-20, interleaved-thinking-2025-05-14"));
-        let out = forward_headers(&incoming, Some((HeaderName::from_static("x-api-key"), HeaderValue::from_static("real"))));
+        incoming.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("oauth-2025-04-20, interleaved-thinking-2025-05-14"),
+        );
+        let out = forward_headers(
+            &incoming,
+            Some((HeaderName::from_static("x-api-key"), HeaderValue::from_static("real"))),
+        );
         assert_eq!(out.get("x-api-key").unwrap(), "real");
         assert!(out.get("authorization").is_none());
         assert!(out.get(COLONY_HEADER).is_none());
@@ -924,7 +1080,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         drop(timed);
         let after_success = usage.snapshot();
-        assert_eq!((after_success.requests, after_success.failures, after_success.fallbacks), (1, 0, 0));
+        assert_eq!(
+            (after_success.requests, after_success.failures, after_success.fallbacks),
+            (1, 0, 0)
+        );
         assert!(after_success.last_request_at.is_some());
 
         // Each of the three gateway-level fallback errors, with a fallback model configured.
@@ -934,14 +1093,23 @@ mod tests {
             usage.add_failure_with_fallback(&fallback);
         }
         let after_errors = usage.snapshot();
-        assert_eq!((after_errors.requests, after_errors.failures, after_errors.fallbacks), (4, 3, 3));
+        assert_eq!(
+            (after_errors.requests, after_errors.failures, after_errors.fallbacks),
+            (4, 3, 3)
+        );
 
         // An upstream status >= 400 is a failure without a fallback answer.
         usage.add_request();
         usage.add_failure();
         let after_status = usage.snapshot();
-        assert_eq!((after_status.requests, after_status.failures, after_status.fallbacks), (5, 4, 3));
-        assert!(after_status.duration_ms > 0, "the dropped timer recorded the request's wall-clock time");
+        assert_eq!(
+            (after_status.requests, after_status.failures, after_status.fallbacks),
+            (5, 4, 3)
+        );
+        assert!(
+            after_status.duration_ms > 0,
+            "the dropped timer recorded the request's wall-clock time"
+        );
 
         // Without a fallback model the failure is counted, the predicted fallback is not.
         usage.add_failure_with_fallback(&provider("strix", None));
@@ -959,18 +1127,28 @@ mod tests {
         // The provider's only slot is held by a request already in flight, and the one below is given no
         // queue time to speak of, so its wait gives up immediately.
         let held = gateway.slots("strix", Some(1)).unwrap().acquire_owned().await.unwrap();
-        let queued_out = Provider { queue_timeout_secs: Some(0), ..provider("strix", Some("sonnet")) };
+        let queued_out = Provider {
+            queue_timeout_secs: Some(0),
+            ..provider("strix", Some("sonnet"))
+        };
 
         // The queue-timeout path in `proxy`, in its order: the attempt counts before it waits, the wait
         // times out, and the failure carries the fallback prediction — with no timer covering any of it.
         usage.add_request();
-        let acquired = tokio::time::timeout(Duration::from_secs(queued_out.queue_timeout_secs()), gateway.slots("strix", Some(1)).unwrap().acquire_owned()).await;
+        let acquired = tokio::time::timeout(
+            Duration::from_secs(queued_out.queue_timeout_secs()),
+            gateway.slots("strix", Some(1)).unwrap().acquire_owned(),
+        )
+        .await;
         assert!(acquired.is_err(), "the wait gives up while the first request holds the slot");
         usage.add_failure_with_fallback(&queued_out);
 
         let snapshot = usage.snapshot();
         assert_eq!((snapshot.requests, snapshot.failures, snapshot.fallbacks), (1, 1, 1));
-        assert_eq!(snapshot.duration_ms, 0, "queued time is not dispatched time: nothing reached the provider");
+        assert_eq!(
+            snapshot.duration_ms, 0,
+            "queued time is not dispatched time: nothing reached the provider"
+        );
         drop(held);
     }
 
@@ -980,20 +1158,52 @@ mod tests {
     #[tokio::test]
     async fn an_openai_body_that_fails_after_the_headers_still_counts_as_a_failure() {
         let usage = Arc::new(UsageCounters::default());
-        let info = openai::RequestInfo { model: "gpt-5.5".into(), stream: false };
+        let info = openai::RequestInfo {
+            model: "gpt-5.5".into(),
+            stream: false,
+        };
         let broken_body = |status: u16| {
             let reset: futures_util::stream::Once<futures_util::future::Ready<Result<Bytes, std::io::Error>>> =
-                futures_util::stream::once(futures_util::future::ready(Err(std::io::Error::other("connection reset mid-body"))));
-            reqwest::Response::from(axum::http::Response::builder().status(status).body(reqwest::Body::wrap_stream(reset)).unwrap())
+                futures_util::stream::once(futures_util::future::ready(Err(std::io::Error::other(
+                    "connection reset mid-body",
+                ))));
+            reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(status)
+                    .body(reqwest::Body::wrap_stream(reset))
+                    .unwrap(),
+            )
         };
-        let response = openai_response(broken_body(200), guards(), usage.clone(), Box::new(|_| {}), Duration::from_secs(30), &info, "strix").await;
+        let response = openai_response(
+            broken_body(200),
+            guards(),
+            usage.clone(),
+            Box::new(|_| {}),
+            Duration::from_secs(30),
+            &info,
+            "strix",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(usage.snapshot().failures, 1, "the body-phase failure is counted");
 
         // A >= 400 status whose body then fails must not count twice: the body-phase count is the only one.
-        let response = openai_response(broken_body(500), guards(), usage.clone(), Box::new(|_| {}), Duration::from_secs(30), &info, "strix").await;
+        let response = openai_response(
+            broken_body(500),
+            guards(),
+            usage.clone(),
+            Box::new(|_| {}),
+            Duration::from_secs(30),
+            &info,
+            "strix",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(usage.snapshot().failures, 2, "one per request, never a header-phase count on top of the body-phase one");
+        assert_eq!(
+            usage.snapshot().failures,
+            2,
+            "one per request, never a header-phase count on top of the body-phase one"
+        );
     }
 
     #[test]
@@ -1007,7 +1217,10 @@ mod tests {
 
         let reopened = usage_gateway(&dir);
         let reopened_usage = reopened.usage("strix");
-        assert_eq!((reopened_usage.requests, reopened_usage.failures, reopened_usage.fallbacks), (1, 0, 0));
+        assert_eq!(
+            (reopened_usage.requests, reopened_usage.failures, reopened_usage.fallbacks),
+            (1, 0, 0)
+        );
         assert_eq!(reopened_usage.last_request_at, usage.snapshot().last_request_at);
 
         // Two providers dirty at once flush together, and the flush clears every flag: after it, removing
@@ -1017,10 +1230,17 @@ mod tests {
         gateway.flush_usage();
         std::fs::remove_file(dir.join("provider-usage.json")).unwrap();
         gateway.flush_usage();
-        assert!(!dir.join("provider-usage.json").exists(), "a flush with nothing left dirty does not write the file");
+        assert!(
+            !dir.join("provider-usage.json").exists(),
+            "a flush with nothing left dirty does not write the file"
+        );
 
         std::fs::write(dir.join("provider-usage.json"), "{not json").unwrap();
-        assert_eq!(usage_gateway(&dir).usage("strix"), ProviderUsage::default(), "a corrupt file means empty counters");
+        assert_eq!(
+            usage_gateway(&dir).usage("strix"),
+            ProviderUsage::default(),
+            "a corrupt file means empty counters"
+        );
         assert_eq!(
             usage_gateway(&std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()))).usage("strix"),
             ProviderUsage::default(),
@@ -1036,7 +1256,11 @@ mod tests {
         gateway.usage_counters("strix").add_request();
         gateway.flush_usage();
         gateway.forget_usage("strix");
-        assert_eq!(usage_gateway(&dir).usage("strix"), ProviderUsage::default(), "the removal is written at once");
+        assert_eq!(
+            usage_gateway(&dir).usage("strix"),
+            ProviderUsage::default(),
+            "the removal is written at once"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1074,9 +1298,10 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let saved: BTreeMap<String, ProviderUsage> =
-            serde_json::from_slice(&std::fs::read(dir.join("provider-usage.json")).expect("the last write left the file in place"))
-                .expect("the file always parses, whatever the interleaving");
+        let saved: BTreeMap<String, ProviderUsage> = serde_json::from_slice(
+            &std::fs::read(dir.join("provider-usage.json")).expect("the last write left the file in place"),
+        )
+        .expect("the file always parses, whatever the interleaving");
         assert!(!saved.is_empty(), "the surviving providers are on disk");
         for (id, usage) in &saved {
             let kept = id.starts_with("w0-") || id.starts_with("w1-") || id.starts_with("w2-");
@@ -1084,7 +1309,9 @@ mod tests {
             assert_eq!(usage.requests, 1, "provider {id} kept its tally");
         }
         assert!(
-            std::fs::read_dir(&dir).unwrap().all(|entry| entry.unwrap().file_name() == "provider-usage.json"),
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() == "provider-usage.json"),
             "no tmp file is left behind"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1116,7 +1343,12 @@ mod tests {
     }
 
     fn guards() -> Guards {
-        (Counted::new(&Default::default()), Counted::new(&Default::default()), None, Timed::new(Default::default()))
+        (
+            Counted::new(&Default::default()),
+            Counted::new(&Default::default()),
+            None,
+            Timed::new(Default::default()),
+        )
     }
 
     /// A mock provider stream that yields `items` spaced out by their delays.
@@ -1129,16 +1361,31 @@ mod tests {
     }
 
     fn openai_chunk(delta: &str, finish_reason: &str) -> Bytes {
-        Bytes::from(format!("data: {{\"id\":\"c\",\"choices\":[{{\"delta\":{delta},\"finish_reason\":{finish_reason}}}]}}\n\n"))
+        Bytes::from(format!(
+            "data: {{\"id\":\"c\",\"choices\":[{{\"delta\":{delta},\"finish_reason\":{finish_reason}}}]}}\n\n"
+        ))
     }
 
     #[tokio::test(start_paused = true)]
     async fn translated_streams_still_get_pinged_through_a_silent_prefill() {
         let upstream = delayed_chunks(vec![
             (Duration::ZERO, openai_chunk(r#"{"role":"assistant"}"#, "null")),
-            (Duration::from_secs(40), [openai_chunk(r#"{"content":"hi"}"#, "\"stop\""), Bytes::from_static(b"data: [DONE]\n\n")].concat().into()),
+            (
+                Duration::from_secs(40),
+                [
+                    openai_chunk(r#"{"content":"hi"}"#, "\"stop\""),
+                    Bytes::from_static(b"data: [DONE]\n\n"),
+                ]
+                .concat()
+                .into(),
+            ),
         ]);
-        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into(), |_| {}), guards(), Duration::from_secs(120), true);
+        let body = stream_body(
+            openai::translate_stream(upstream, "gpt-5.5".into(), |_| {}),
+            guards(),
+            Duration::from_secs(120),
+            true,
+        );
         tokio::pin!(body);
 
         let (mut pings, mut out) = (0, Vec::new());
@@ -1165,9 +1412,22 @@ mod tests {
             empty(),
             empty(),
             (Duration::from_secs(10), Bytes::from_static(b": OPENROUTER PROCESSING\n\n")),
-            (Duration::from_secs(10), [openai_chunk(r#"{"content":"done"}"#, "\"stop\""), Bytes::from_static(b"data: [DONE]\n\n")].concat().into()),
+            (
+                Duration::from_secs(10),
+                [
+                    openai_chunk(r#"{"content":"done"}"#, "\"stop\""),
+                    Bytes::from_static(b"data: [DONE]\n\n"),
+                ]
+                .concat()
+                .into(),
+            ),
         ]);
-        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into(), |_| {}), guards(), Duration::from_secs(25), true);
+        let body = stream_body(
+            openai::translate_stream(upstream, "gpt-5.5".into(), |_| {}),
+            guards(),
+            Duration::from_secs(25),
+            true,
+        );
         tokio::pin!(body);
         let mut out = Vec::new();
         while let Some(chunk) = body.next().await {
@@ -1196,7 +1456,10 @@ mod tests {
             }
         }
         assert_eq!(reals, 2, "both real chunks should still arrive");
-        assert_eq!(pings, 2, "one ping per 15s tick of the 40s silent gap, not reset by pings themselves");
+        assert_eq!(
+            pings, 2,
+            "one ping per 15s tick of the 40s silent gap, not reset by pings themselves"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1236,7 +1499,9 @@ mod tests {
     }
 
     fn message_delta(output: u64) -> String {
-        format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{output}}}}}\n\n")
+        format!(
+            "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{output}}}}}\n\n"
+        )
     }
 
     #[tokio::test]
@@ -1245,20 +1510,40 @@ mod tests {
             + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
             + &message_delta(15);
         let (forwarded, counted) = counted(vec![Ok(Bytes::from(body.clone()))], true).await;
-        assert_eq!(String::from_utf8_lossy(&forwarded), body, "the colony receives exactly the bytes upstream sent");
-        assert_eq!(counted, Some(Usage { input_tokens: 25, output_tokens: 15, cache_read_tokens: 40, cache_write_tokens: 5 }));
+        assert_eq!(
+            String::from_utf8_lossy(&forwarded),
+            body,
+            "the colony receives exactly the bytes upstream sent"
+        );
+        assert_eq!(
+            counted,
+            Some(Usage {
+                input_tokens: 25,
+                output_tokens: 15,
+                cache_read_tokens: 40,
+                cache_write_tokens: 5
+            })
+        );
     }
 
     #[tokio::test]
     async fn counting_survives_chunks_split_mid_event() {
         let body = message_start(25, 40, 5) + &message_delta(15);
-        let pieces: Vec<std::io::Result<Bytes>> =
-            body.as_bytes().chunks(7).map(|piece| Ok(Bytes::copy_from_slice(piece))).collect();
+        let pieces: Vec<std::io::Result<Bytes>> = body
+            .as_bytes()
+            .chunks(7)
+            .map(|piece| Ok(Bytes::copy_from_slice(piece)))
+            .collect();
         let (forwarded, counted) = counted(pieces, true).await;
         assert_eq!(String::from_utf8_lossy(&forwarded), body);
         assert_eq!(
             counted,
-            Some(Usage { input_tokens: 25, output_tokens: 15, cache_read_tokens: 40, cache_write_tokens: 5 }),
+            Some(Usage {
+                input_tokens: 25,
+                output_tokens: 15,
+                cache_read_tokens: 40,
+                cache_write_tokens: 5
+            }),
             "a data line split across chunks is waited for, not half-read"
         );
     }
@@ -1267,15 +1552,30 @@ mod tests {
     async fn an_anthropic_json_body_is_counted_and_passes_through_unchanged() {
         let body = br#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"cache_read_input_tokens":80,"cache_creation_input_tokens":2,"output_tokens":9}}"#;
         let (forwarded, counted) = counted(vec![Ok(Bytes::from_static(body))], false).await;
-        assert_eq!(forwarded, body.to_vec(), "the colony receives exactly the bytes upstream sent");
-        assert_eq!(counted, Some(Usage { input_tokens: 12, output_tokens: 9, cache_read_tokens: 80, cache_write_tokens: 2 }));
+        assert_eq!(
+            forwarded,
+            body.to_vec(),
+            "the colony receives exactly the bytes upstream sent"
+        );
+        assert_eq!(
+            counted,
+            Some(Usage {
+                input_tokens: 12,
+                output_tokens: 9,
+                cache_read_tokens: 80,
+                cache_write_tokens: 2
+            })
+        );
     }
 
     #[tokio::test]
     async fn a_malformed_or_truncated_body_counts_nothing_and_still_forwards() {
         // A data line that never becomes valid JSON, and a stream cut off mid-event, both account zero.
         for (body, is_sse) in [
-            (b"event: message_start\ndata: not json\n\nevent: message_delta\ndata: {}\n\n".as_slice(), true),
+            (
+                b"event: message_start\ndata: not json\n\nevent: message_delta\ndata: {}\n\n".as_slice(),
+                true,
+            ),
             (b"event: message_start\ndata: {\"type\":\"message_star".as_slice(), true),
             (b"<html>gateway error</html>".as_slice(), false),
             (b" &".as_slice(), false),
@@ -1292,7 +1592,14 @@ mod tests {
         let body = message_start(10, 0, 0) + ": keep-alive\n\n" + &message_delta(4);
         let (forwarded, counted) = counted(vec![Ok(Bytes::from(body.clone()))], true).await;
         assert_eq!(String::from_utf8_lossy(&forwarded), body);
-        assert_eq!(counted, Some(Usage { input_tokens: 10, output_tokens: 4, ..Default::default() }));
+        assert_eq!(
+            counted,
+            Some(Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                ..Default::default()
+            })
+        );
     }
 
     #[tokio::test]
@@ -1305,7 +1612,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn pings_never_land_inside_a_partly_forwarded_event() {
         let chunks = delayed_chunks(vec![
-            (Duration::ZERO, Bytes::from_static(b"event: content_block_delta\ndata: {\"delta\":")),
+            (
+                Duration::ZERO,
+                Bytes::from_static(b"event: content_block_delta\ndata: {\"delta\":"),
+            ),
             (Duration::from_secs(40), Bytes::from_static(b"\"hi\"}\n\n")),
             (Duration::from_secs(40), Bytes::from_static(b"event: message_stop\n\n")),
         ]);
@@ -1315,7 +1625,8 @@ mod tests {
         while let Some(chunk) = body.next().await {
             forwarded.extend_from_slice(&chunk.unwrap());
         }
-        let expected = b"event: content_block_delta\ndata: {\"delta\":\"hi\"}\n\n: keep-alive\n\n: keep-alive\n\nevent: message_stop\n\n";
+        let expected =
+            b"event: content_block_delta\ndata: {\"delta\":\"hi\"}\n\n: keep-alive\n\n: keep-alive\n\nevent: message_stop\n\n";
         assert_eq!(String::from_utf8_lossy(&forwarded), String::from_utf8_lossy(expected));
     }
 

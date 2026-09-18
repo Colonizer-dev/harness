@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// One named span of a colony launch, in the order it happened.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,7 +36,11 @@ pub struct Phases {
 impl Phases {
     pub fn new() -> Self {
         let now = Instant::now();
-        Self { started: now, open: now, phases: Vec::new() }
+        Self {
+            started: now,
+            open: now,
+            phases: Vec::new(),
+        }
     }
 
     /// Closes the open phase under `name` and starts the next one.
@@ -45,7 +49,10 @@ impl Phases {
     /// finding, and a missing row would look like the phase never ran.
     pub fn mark(&mut self, name: &str) {
         let now = Instant::now();
-        self.phases.push(Phase { name: name.to_string(), ms: now.duration_since(self.open).as_millis() as u64 });
+        self.phases.push(Phase {
+            name: name.to_string(),
+            ms: now.duration_since(self.open).as_millis() as u64,
+        });
         self.open = now;
     }
 

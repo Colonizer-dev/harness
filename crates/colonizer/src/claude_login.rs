@@ -3,15 +3,14 @@
 //! resulting long-lived OAuth token is saved on the host and never sent to the browser.
 
 use crate::{
-    client_error, resolve_host_claude_bin,
+    ApiResult, App, ClaudeCred, Shared, client_error, resolve_host_claude_bin,
     util::{shell_quote, truncate, write_secret},
-    ApiResult, App, ClaudeCred, Shared,
 };
 use anyhow::Context;
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
@@ -20,7 +19,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
 };
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -42,7 +41,11 @@ pub struct LoginView {
 
 impl LoginView {
     fn new(state: &'static str) -> Self {
-        Self { state, url: None, message: None }
+        Self {
+            state,
+            url: None,
+            message: None,
+        }
     }
 }
 
@@ -68,7 +71,10 @@ pub async fn status(State(app): State<Shared>) -> Json<LoginView> {
 pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
     let bin = resolve_host_claude_bin(&app.cfg).await?;
     // A very wide terminal keeps the sign-in URL and the token on single lines.
-    let script = format!("stty cols 4000 rows 60; exec {} setup-token", shell_quote(&bin.display().to_string()));
+    let script = format!(
+        "stty cols 4000 rows 60; exec {} setup-token",
+        shell_quote(&bin.display().to_string())
+    );
     // util-linux and BSD `script` disagree on everything but the name: the command is `-c CMD FILE`
     // there and `FILE CMD...` here, and unbuffered output is `-f` there and `-F` here.
     let mut cmd = Command::new("script");
@@ -91,14 +97,21 @@ pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
             cmd.env_remove(key);
         }
     }
-    let mut child = cmd.spawn().context("failed to start `script` (util-linux) for claude setup-token")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to start `script` (util-linux) for claude setup-token")?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().context("no output from claude setup-token")?;
 
     let id = app.login.seq.fetch_add(1, Ordering::SeqCst);
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let view = LoginView::new("starting");
-    *app.login.session.lock().await = Some(Session { id, view: view.clone(), stdin, _cancel: cancel_tx });
+    *app.login.session.lock().await = Some(Session {
+        id,
+        view: view.clone(),
+        stdin,
+        _cancel: cancel_tx,
+    });
     tokio::spawn(drive(app.clone(), id, child, stdout, cancel_rx));
     Ok(Json(view))
 }
@@ -178,7 +191,9 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
     kill_tree(&mut child).await;
 
     let mut guard = app.login.session.lock().await;
-    let Some(session) = guard.as_mut().filter(|s| s.id == id) else { return };
+    let Some(session) = guard.as_mut().filter(|s| s.id == id) else {
+        return;
+    };
     session.stdin = None;
     session.view = match outcome {
         Ok(token) => match write_secret(&app.claude_token_file(), &token) {
@@ -187,9 +202,17 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
                 url: None,
                 message: Some("Connected your Claude subscription".into()),
             },
-            Err(e) => LoginView { state: "error", url: None, message: Some(format!("could not save the token: {e:#}")) },
+            Err(e) => LoginView {
+                state: "error",
+                url: None,
+                message: Some(format!("could not save the token: {e:#}")),
+            },
         },
-        Err(message) => LoginView { state: "error", url: None, message: Some(redact(&message)) },
+        Err(message) => LoginView {
+            state: "error",
+            url: None,
+            message: Some(redact(&message)),
+        },
     };
 }
 
@@ -213,7 +236,9 @@ async fn kill_tree(child: &mut Child) {
 
 /// Every descendant of `pid`. `/proc` is Linux-only; `ps` tells the same story on macOS too.
 fn collect_descendants(pid: u32, out: &mut Vec<u32>) {
-    let Ok(output) = std::process::Command::new("ps").args(["-Ao", "pid=,ppid="]).output() else { return };
+    let Ok(output) = std::process::Command::new("ps").args(["-Ao", "pid=,ppid="]).output() else {
+        return;
+    };
     let text = String::from_utf8_lossy(&output.stdout);
     let pairs: Vec<(u32, u32)> = text
         .lines()
@@ -408,14 +433,24 @@ async fn account_status(app: &App, cred: &ClaudeCred) -> AccountStatus {
     let fresh = match fetch_profile(&cred.value).await {
         Ok(profile) => {
             let account = account_label(&profile);
-            let note = account.is_none().then(|| "Anthropic answered, but the profile did not name an account".into());
-            AccountStatus { fingerprint, looked_up_at: Instant::now(), account, account_note: note, profile_expires_at: profile_expires_at(&profile) }
+            let note = account
+                .is_none()
+                .then(|| "Anthropic answered, but the profile did not name an account".into());
+            AccountStatus {
+                fingerprint,
+                looked_up_at: Instant::now(),
+                account,
+                account_note: note,
+                profile_expires_at: profile_expires_at(&profile),
+            }
         }
         Err(ProfileError::Forbidden) => AccountStatus {
             fingerprint,
             looked_up_at: Instant::now(),
             account: None,
-            account_note: Some("this token is only allowed to make model requests, so Anthropic will not say which account it belongs to".into()),
+            account_note: Some(
+                "this token is only allowed to make model requests, so Anthropic will not say which account it belongs to".into(),
+            ),
             profile_expires_at: None,
         },
         Err(ProfileError::Unauthorized) => AccountStatus {
@@ -429,7 +464,10 @@ async fn account_status(app: &App, cred: &ClaudeCred) -> AccountStatus {
             fingerprint,
             looked_up_at: Instant::now(),
             account: None,
-            account_note: Some(format!("could not reach Anthropic to check ({})", redact(&truncate(&reason, 200)))),
+            account_note: Some(format!(
+                "could not reach Anthropic to check ({})",
+                redact(&truncate(&reason, 200))
+            )),
             profile_expires_at: None,
         },
     };
@@ -454,7 +492,10 @@ async fn fetch_profile(token: &str) -> Result<Value, ProfileError> {
         .await
         .map_err(|e| ProfileError::Other(format!("{e}")))?;
     match response.status().as_u16() {
-        200 => response.json().await.map_err(|e| ProfileError::Other(format!("unreadable profile: {e}"))),
+        200 => response
+            .json()
+            .await
+            .map_err(|e| ProfileError::Other(format!("unreadable profile: {e}"))),
         403 => Err(ProfileError::Forbidden),
         401 => Err(ProfileError::Unauthorized),
         code => Err(ProfileError::Other(format!("Anthropic answered {code}"))),
@@ -537,7 +578,10 @@ mod tests {
     #[test]
     fn token_is_only_accepted_once_fully_printed() {
         let token = format!("sk-ant-oat01-{}", "A1_b-".repeat(20));
-        assert_eq!(find_token(&strip_ansi(&format!("Your OAuth token:\n\u{1b}[1m{token}\u{1b}[22m\n"))), Some(token.clone()));
+        assert_eq!(
+            find_token(&strip_ansi(&format!("Your OAuth token:\n\u{1b}[1m{token}\u{1b}[22m\n"))),
+            Some(token.clone())
+        );
         assert_eq!(find_token(&format!("Your OAuth token:\n{}", &token[..50])), None);
     }
 

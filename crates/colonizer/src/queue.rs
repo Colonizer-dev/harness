@@ -4,14 +4,10 @@
 //! Whether a colony fits is a pure function (`has_room`), so the admission rule can be tested
 //! apart from the loop that applies it.
 
-use crate::{
-    orgs, Shared,
-};
+use crate::{Shared, orgs};
 use chrono::Utc;
 use std::time::Duration;
-use tokio::{
-    sync::RwLock,
-};
+use tokio::sync::RwLock;
 
 #[allow(unused_imports)]
 use crate::{events::*, lifecycle::*, publish::*, sessions::*};
@@ -102,7 +98,14 @@ pub(crate) async fn start_queued(app: &Shared) {
         waiting.sort_by_key(|s| s.created_at);
         let Some(next) = waiting
             .into_iter()
-            .find(|s| has_room(&sessions, &s.org, max_parallel, orgs::org_max_parallel(&app.org_settings(&s.org))))
+            .find(|s| {
+                has_room(
+                    &sessions,
+                    &s.org,
+                    max_parallel,
+                    orgs::org_max_parallel(&app.org_settings(&s.org)),
+                )
+            })
             .cloned()
         else {
             return;
@@ -119,7 +122,12 @@ pub(crate) async fn start_queued(app: &Shared) {
             None => return,
             Some(Claim::Retire(retired)) => {
                 app.persist_and_broadcast(&retired).await;
-                app.session_log(&retired.id, "warn", "was cleaned up while it waited in the queue, so it can never start".into()).await;
+                app.session_log(
+                    &retired.id,
+                    "warn",
+                    "was cleaned up while it waited in the queue, so it can never start".into(),
+                )
+                .await;
                 continue;
             }
             Some(Claim::Start(starting)) => {
@@ -143,8 +151,8 @@ pub(crate) async fn start_queued(app: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::sessions::tests::{admit_create, admit_resume, colony, stopped_colony_with_worktree};
+    use std::sync::Arc;
 
     #[test]
     fn the_queue_waits_for_a_slot_and_queued_colonies_hold_none() {
@@ -167,7 +175,10 @@ mod tests {
         assert!(has_room(&waiting, "acme", 1, None), "a queue of five holds no slots");
 
         // An org limit applies on top of the global one, and only to that org.
-        let mixed = vec![colony("acme", SessionStatus::Running), colony("other", SessionStatus::Running)];
+        let mixed = vec![
+            colony("acme", SessionStatus::Running),
+            colony("other", SessionStatus::Running),
+        ];
         assert!(!has_room(&mixed, "acme", 5, Some(1)), "acme is at its own limit");
         assert!(has_room(&mixed, "third", 5, Some(1)), "another org still has room");
     }
@@ -178,14 +189,27 @@ mod tests {
         s.status = SessionStatus::Queued;
         s.cleaned_up = true;
         let claim = claim_queued(&mut s, true);
-        assert!(matches!(claim, Some(Claim::Retire(_))), "a cleaned-up colony is retired, not started");
-        assert_eq!(s.status, SessionStatus::Failed, "out of the queue, so no later tick can pick it up");
-        assert!(!can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()), "there is no worktree to resume onto");
+        assert!(
+            matches!(claim, Some(Claim::Retire(_))),
+            "a cleaned-up colony is retired, not started"
+        );
+        assert_eq!(
+            s.status,
+            SessionStatus::Failed,
+            "out of the queue, so no later tick can pick it up"
+        );
+        assert!(
+            !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()),
+            "there is no worktree to resume onto"
+        );
         assert!(s.error.is_some(), "the operator is told why it will never start");
 
         // An ordinary queued colony is still claimed for starting.
         let mut waiting = colony("acme", SessionStatus::Queued);
-        assert!(matches!(claim_queued(&mut waiting, true), Some(Claim::Start(_))), "a queued colony with everything intact starts");
+        assert!(
+            matches!(claim_queued(&mut waiting, true), Some(Claim::Start(_))),
+            "a queued colony with everything intact starts"
+        );
         assert_eq!(waiting.status, SessionStatus::Starting);
     }
 
@@ -264,7 +288,11 @@ mod tests {
             task.await.expect("admission task joined");
         }
         let done = sessions.read().await;
-        let starting = |org: &str| done.iter().filter(|s| s.org == org && s.status == SessionStatus::Starting).count();
+        let starting = |org: &str| {
+            done.iter()
+                .filter(|s| s.org == org && s.status == SessionStatus::Starting)
+                .count()
+        };
         assert_eq!(starting("acme"), acme_limit, "acme never passes its own limit");
         assert_eq!(starting("other"), other_creates, "acme's limit holds back only acme");
         assert!(

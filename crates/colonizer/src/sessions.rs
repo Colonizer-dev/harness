@@ -5,50 +5,47 @@
 //! browser; browser commands are forwarded to the agent.
 
 use crate::{
-    client_error,
-    config::{setting, setting_str, setting_u64, ModulesConfig}, github, memory,
-    modules::{schema_for, AgentModule},
+    ApiResult, App, CLAUDE_API_HOST, Shared, client_error,
+    config::{ModulesConfig, setting, setting_str, setting_u64},
+    github, memory,
+    modules::{AgentModule, schema_for},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
-    util::{
-        append_line, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic,
-        write_private,
-    },
+    util::{append_line, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic, write_private},
     watchdog::Activity,
-    ApiResult, App, Shared, CLAUDE_API_HOST,
 };
 #[allow(unused_imports)]
 use crate::{events::*, lifecycle::*, publish::*, queue::*};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
+    Json,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::Response,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{broadcast, mpsc, watch, Mutex},
+    sync::{Mutex, broadcast, mpsc, watch},
 };
 use tokio_tungstenite::{
-    tungstenite::{self, client::IntoClientRequest},
     WebSocketStream,
+    tungstenite::{self, client::IntoClientRequest},
 };
 
 const AGENTD_PORT: u16 = 7070;
@@ -217,7 +214,12 @@ impl Runtime {
         let logs_path = dir.join("harness.jsonl");
         let last_seq = std::fs::read_to_string(&events_path)
             .ok()
-            .and_then(|content| content.lines().rev().find_map(|l| serde_json::from_str::<Value>(l).ok()?["seq"].as_u64()))
+            .and_then(|content| {
+                content
+                    .lines()
+                    .rev()
+                    .find_map(|l| serde_json::from_str::<Value>(l).ok()?["seq"].as_u64())
+            })
             .unwrap_or(0);
         let logs: VecDeque<Value> = std::fs::read_to_string(&logs_path)
             .map(|content| {
@@ -314,7 +316,8 @@ impl App {
             // hiding it would make the UI more wrong, not less. But the saved list now lags, so
             // the gap is recorded loudly, in the app alert and in the colony's own log.
             self.storage_failed("save the session list", &e).await;
-            self.session_log(&session.id, "error", format!("could not save the session list: {e:#}")).await;
+            self.session_log(&session.id, "error", format!("could not save the session list: {e:#}"))
+                .await;
         }
         let rt = self.runtimes.lock().await.get(&session.id).cloned();
         if let Some(rt) = rt {
@@ -331,7 +334,10 @@ impl App {
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {
         let mut runtimes = self.runtimes.lock().await;
-        runtimes.entry(id.to_string()).or_insert_with(|| Arc::new(Runtime::load(&self.session_dir(id)))).clone()
+        runtimes
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Runtime::load(&self.session_dir(id))))
+            .clone()
     }
 
     pub async fn session_log(&self, id: &str, level: &str, message: String) {
@@ -357,7 +363,10 @@ impl App {
     }
 
     pub(crate) fn logger(self: &Arc<Self>, id: &str) -> SessionLogger {
-        SessionLogger { app: self.clone(), id: id.to_string() }
+        SessionLogger {
+            app: self.clone(),
+            id: id.to_string(),
+        }
     }
 }
 
@@ -382,7 +391,9 @@ pub struct NewSession {
 /// Whether colonies may file validated findings as issues. On unless switched off in Settings.
 pub(crate) fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, &app.agents);
-    setting(&modules.publish, &schema, "file_findings").and_then(Value::as_bool).unwrap_or(true)
+    setting(&modules.publish, &schema, "file_findings")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// The container image a colony boots: the stack preset's, unless modules.json names one. Takes the
@@ -399,7 +410,9 @@ pub(crate) fn colony_image(agents: &[AgentModule], modules: &ModulesConfig) -> S
 /// agent list rather than the app, so usage.rs can report the same default.
 pub(crate) fn autopilot_default(agents: &[AgentModule], modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, agents);
-    setting(&modules.publish, &schema, "autopilot").and_then(Value::as_bool).unwrap_or(false)
+    setting(&modules.publish, &schema, "autopilot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
@@ -445,7 +458,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         status: SessionStatus::Starting, // decided by admission, just before the push
         branch: format!("colonizer/{slug}"),
         base: None,
-        worktree: app.cfg.data_dir.join("worktrees").join(owner).join(name).join(&slug).display().to_string(),
+        worktree: app
+            .cfg
+            .data_dir
+            .join("worktrees")
+            .join(owner)
+            .join(name)
+            .join(&slug)
+            .display()
+            .to_string(),
         git_admin_dir: None,
         sandbox: format!("colonizer-{id}"),
         mesh: None,
@@ -474,7 +495,11 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // cannot both take it. Counted before the push, so this colony is never waiting behind itself.
     let (session, queued, waiting) = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
         let mut session = session;
-        session.status = if room { SessionStatus::Starting } else { SessionStatus::Queued };
+        session.status = if room {
+            SessionStatus::Starting
+        } else {
+            SessionStatus::Queued
+        };
         let waiting = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
         sessions.push(session.clone());
         (session, !room, waiting)
@@ -502,8 +527,13 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     }
     app.runtime(&id).await;
     if queued {
-        let ahead = if waiting == 0 { String::new() } else { format!(", behind {waiting} already waiting") };
-        app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}")).await;
+        let ahead = if waiting == 0 {
+            String::new()
+        } else {
+            format!(", behind {waiting} already waiting")
+        };
+        app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}"))
+            .await;
     } else {
         tokio::spawn(boot(app.clone(), id, false));
     }
@@ -517,7 +547,8 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
         if s.status != SessionStatus::Starting {
             return; // stopped by the user while starting; the stop handler cleaned up
         }
-        app.session_log(&id, "error", format!("session failed to start: {message}")).await;
+        app.session_log(&id, "error", format!("session failed to start: {message}"))
+            .await;
         teardown_vm(&app, &s).await;
         app.update_session(&id, |s| {
             s.status = SessionStatus::Failed;
@@ -540,7 +571,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
     let modules = app.modules.read().await.clone();
-    let agent = app.agents.iter().find(|a| a.id == s.agent).cloned().context("agent module is not installed")?;
+    let agent = app
+        .agents
+        .iter()
+        .find(|a| a.id == s.agent)
+        .cloned()
+        .context("agent module is not installed")?;
 
     let issue = match s.issue {
         Some(number) => {
@@ -582,10 +618,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
         github::sync_repo(app, &s.repo, &bare, &log).await?;
-        log.info(format!("creating worktree on branch {} from origin/{base}", s.branch)).await;
+        log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
+            .await;
         github::create_worktree(app, &bare, &wt, &s.branch, &base).await?
     };
-    app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string())).await;
+    app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string()))
+        .await;
     let s = ensure_starting(app, id).await?;
 
     timing.mark("git");
@@ -601,7 +639,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
     let routing = providers::colony_routes(app, &gateway_token);
     if !routing.routes.is_empty() {
-        runner_env.insert("COLONIZER_MODEL_ROUTES".into(), Value::String(serde_json::to_string(&routing.routes)?));
+        runner_env.insert(
+            "COLONIZER_MODEL_ROUTES".into(),
+            Value::String(serde_json::to_string(&routing.routes)?),
+        );
     }
     let used = routing.used(&runner_env);
     let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe(app, p))).await;
@@ -612,7 +653,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 None => "its requests will fail until it is back (set a fallback model to use Claude instead)".into(),
             };
             let error = health["error"].as_str().unwrap_or("unknown error");
-            app.session_log(id, "warn", format!("model provider {} is unreachable ({error}); {then}", provider.id)).await;
+            app.session_log(
+                id,
+                "warn",
+                format!("model provider {} is unreachable ({error}); {then}", provider.id),
+            )
+            .await;
         }
     }
     timing.mark("providers");
@@ -629,10 +675,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     // The private mesh needs the three vendored binaries. Without them a colony is reached on a
     // loopback port rather than failing to boot.
-    let mesh_on = modules.mesh_enabled()
-        && app.cfg.assets.as_deref().is_some_and(crate::mesh::binaries_present);
+    let mesh_on = modules.mesh_enabled() && app.cfg.assets.as_deref().is_some_and(crate::mesh::binaries_present);
     if modules.mesh_enabled() && !mesh_on {
-        app.session_log(id, "warn", "the private mesh is unavailable on this platform; using a loopback port".into()).await;
+        app.session_log(
+            id,
+            "warn",
+            "the private mesh is unavailable on this platform; using a loopback port".into(),
+        )
+        .await;
     }
     let mut env: Vec<(String, String)> = vec![
         ("IS_SANDBOX".into(), "1".into()),
@@ -645,12 +695,36 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ("GIT_CONFIG_VALUE_0".into(), "*".into()),
     ];
     let mut mounts = vec![
-        Mount { source: wt.clone(), target: "/workspace".into(), read_only: false },
-        Mount { source: bare.clone(), target: bare.display().to_string(), read_only: true },
-        Mount { source: vm_dir.clone(), target: "/colonizer".into(), read_only: true },
-        Mount { source: out_dir, target: "/harness/out".into(), read_only: false },
-        Mount { source: app.cfg.asset("bin/colonizer-agentd")?, target: "/opt/colonizer/bin/colonizer-agentd".into(), read_only: true },
-        Mount { source: agent.dir.clone(), target: "/opt/colonizer/agent".into(), read_only: true },
+        Mount {
+            source: wt.clone(),
+            target: "/workspace".into(),
+            read_only: false,
+        },
+        Mount {
+            source: bare.clone(),
+            target: bare.display().to_string(),
+            read_only: true,
+        },
+        Mount {
+            source: vm_dir.clone(),
+            target: "/colonizer".into(),
+            read_only: true,
+        },
+        Mount {
+            source: out_dir,
+            target: "/harness/out".into(),
+            read_only: false,
+        },
+        Mount {
+            source: app.cfg.asset("bin/colonizer-agentd")?,
+            target: "/opt/colonizer/bin/colonizer-agentd".into(),
+            read_only: true,
+        },
+        Mount {
+            source: agent.dir.clone(),
+            target: "/opt/colonizer/agent".into(),
+            read_only: true,
+        },
     ];
     // Claude Code plugin directories, mounted read-only from the mothership.
     //
@@ -661,7 +735,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     //
     // A setting names a directory, never a path: it is resolved under the
     // mothership's plugins folder, so it cannot reach an arbitrary host path.
-    let plugin_names = crate::plugins::parse_list(runner_env.get("COLONIZER_PLUGIN_DIRS").and_then(Value::as_str).unwrap_or_default());
+    let plugin_names = crate::plugins::parse_list(
+        runner_env
+            .get("COLONIZER_PLUGIN_DIRS")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         for name in &plugin_names {
@@ -669,7 +748,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
             let target = format!("/opt/colonizer/plugins/{name}");
-            mounts.push(Mount { source, target: target.clone(), read_only: true });
+            mounts.push(Mount {
+                source,
+                target: target.clone(),
+                read_only: true,
+            });
             targets.push(target);
         }
         // The runner only ever sees in-VM paths, never the mothership's.
@@ -678,7 +761,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // own flag is checked only after a hook process has already spawned, so
         // this is the second line of defence, not the first.
         env.push(("ECC_HOOKS_ENABLED".into(), "false".into()));
-        log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
+        log.info(format!(
+            "loading {} plugin director{}",
+            targets.len(),
+            if targets.len() == 1 { "y" } else { "ies" }
+        ))
+        .await;
     }
     if let Some(assets) = app.cfg.assets.as_ref() {
         // Remembered whether or not plugins are on: an update must not remove
@@ -693,7 +781,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let switched_on = |env: &Map<String, Value>, key: &str| env.get(key).and_then(Value::as_str) == Some("true");
     if switched_on(&runner_env, "COLONIZER_RTK") {
         match app.cfg.asset("bin/rtk") {
-            Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/bin/rtk".into(), read_only: true }),
+            Ok(source) => mounts.push(Mount {
+                source,
+                target: "/opt/colonizer/bin/rtk".into(),
+                read_only: true,
+            }),
             Err(_) => {
                 runner_env.remove("COLONIZER_RTK");
                 log.info("compact command output is switched on, but rtk isn't installed (scripts/install.sh builds it); running without it").await;
@@ -702,7 +794,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     if switched_on(&runner_env, "COLONIZER_HEADROOM") {
         match crate::headroom::installed(app) {
-            Some(source) => mounts.push(Mount { source, target: "/opt/colonizer/headroom".into(), read_only: true }),
+            Some(source) => mounts.push(Mount {
+                source,
+                target: "/opt/colonizer/headroom".into(),
+                read_only: true,
+            }),
             None => {
                 runner_env.remove("COLONIZER_HEADROOM");
                 log.info("Headroom is switched on, but its bundle isn't downloaded yet (Settings → Agent starts the download); running without it").await;
@@ -710,8 +806,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
     }
     if switched_on(&runner_env, "COLONIZER_CAVEMAN") {
-        match app.cfg.asset("vendor/caveman/SKILL.md").and_then(|_| app.cfg.asset("vendor/caveman")) {
-            Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/caveman".into(), read_only: true }),
+        match app
+            .cfg
+            .asset("vendor/caveman/SKILL.md")
+            .and_then(|_| app.cfg.asset("vendor/caveman"))
+        {
+            Ok(source) => mounts.push(Mount {
+                source,
+                target: "/opt/colonizer/caveman".into(),
+                read_only: true,
+            }),
             Err(_) => {
                 runner_env.remove("COLONIZER_CAVEMAN");
                 log.info("terse replies are switched on, but caveman's ruleset isn't installed (scripts/install.sh stages it); running without it").await;
@@ -740,10 +844,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         match memory::materialize_mem0(app, &root, &s.org, &s.repo, &task).await {
             Ok(m) => {
                 let order = if m.ranked { ", most relevant to this task first" } else { "" };
-                app.session_log(id, "info", format!("shared memory: {} notes from mem0{order}", m.notes)).await;
+                app.session_log(id, "info", format!("shared memory: {} notes from mem0{order}", m.notes))
+                    .await;
             }
             Err(e) => {
-                app.session_log(id, "warn", format!("shared memory from mem0 is unavailable ({e:#}); this colony starts without it")).await;
+                app.session_log(
+                    id,
+                    "warn",
+                    format!("shared memory from mem0 is unavailable ({e:#}); this colony starts without it"),
+                )
+                .await;
                 memory::write_empty_scopes(&root, &s.org, &s.repo)?;
             }
         }
@@ -752,14 +862,26 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             // Mount points must exist inside the read-only /colonizer mount.
             std::fs::create_dir_all(vm_dir.join("memory").join(scope))?;
             let source = app.memory.ensure_scope(scope, &key)?;
-            mounts.push(Mount { source, target: format!("/colonizer/memory/{scope}"), read_only: true });
+            mounts.push(Mount {
+                source,
+                target: format!("/colonizer/memory/{scope}"),
+                read_only: true,
+            });
         }
     }
     let mut secrets = Vec::new();
     if agent.needs_claude {
         let cred = app.claude_cred().context("log in with Claude in Settings first")?;
-        mounts.push(Mount { source: resolve_guest_claude_bin(&app.cfg).await?, target: "/opt/claude/bin/claude".into(), read_only: true });
-        secrets.push(Secret { env: cred.env.into(), value: cred.value, hosts: vec![CLAUDE_API_HOST.into()] });
+        mounts.push(Mount {
+            source: resolve_guest_claude_bin(&app.cfg).await?,
+            target: "/opt/claude/bin/claude".into(),
+            read_only: true,
+        });
+        secrets.push(Secret {
+            env: cred.env.into(),
+            value: cred.value,
+            hosts: vec![CLAUDE_API_HOST.into()],
+        });
     }
     let mut net_profiles = vec!["public".to_string()];
     let mut net_rules = Vec::new();
@@ -770,12 +892,22 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         mesh.ensure_started().await?;
         mesh.delete_nodes_named(&s.sandbox).await?;
         write_private(&vm_dir.join("mesh-authkey"), mesh.mint_vm_key().await?.as_bytes())?;
-        mounts.push(Mount { source: app.cfg.asset("vendor/tailscale")?, target: "/opt/colonizer/tailscale".into(), read_only: true });
+        mounts.push(Mount {
+            source: app.cfg.asset("vendor/tailscale")?,
+            target: "/opt/colonizer/tailscale".into(),
+            read_only: true,
+        });
         env.push(("COLONIZER_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
         env.push(("COLONIZER_MESH_HOSTNAME".into(), s.sandbox.clone()));
         net_profiles.push("host".into());
         net_rules = mesh.direct_path_rules().await;
-        app.update_session(id, |x| x.mesh = Some(MeshInfo { name: s.sandbox.clone(), ip: None })).await;
+        app.update_session(id, |x| {
+            x.mesh = Some(MeshInfo {
+                name: s.sandbox.clone(),
+                ip: None,
+            })
+        })
+        .await;
     } else {
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         publish = Some((port, AGENTD_PORT));
@@ -820,15 +952,27 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // timing, which #15 could not separate without an extra call on every
     // launch. The cache check is that call, and it is already paid for here.
     if !sandbox::is_cached(&app.cfg.msb, &spec.image).await {
-        log.info(format!("pulling {} — this happens once per image, and can take a while", spec.image)).await;
+        log.info(format!(
+            "pulling {} — this happens once per image, and can take a while",
+            spec.image
+        ))
+        .await;
         if let Err(e) = sandbox::pull(&app.cfg.msb, &spec.image).await {
             // Not fatal: `msb run` will try the pull again and report properly.
-            log.info(format!("pre-pull of {} did not finish ({e:#}); the boot will pull it", spec.image)).await;
+            log.info(format!(
+                "pre-pull of {} did not finish ({e:#}); the boot will pull it",
+                spec.image
+            ))
+            .await;
         }
     }
     timing.mark("image-pull");
 
-    log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
+    log.info(format!(
+        "booting microVM {} ({}, {} vCPU, {})",
+        spec.name, spec.image, spec.cpus, spec.memory
+    ))
+    .await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
     // The pull is its own phase above, so this is the VM itself — unless the
     // pre-pull failed, in which case `msb run` pulls and this absorbs it.
@@ -840,7 +984,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         let node = app.mesh().await?.wait_online(&s.sandbox, Duration::from_secs(120)).await?;
         let _ = std::fs::remove_file(vm_dir.join("mesh-authkey"));
         log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
-        app.update_session(id, |x| x.mesh = Some(MeshInfo { name: x.sandbox.clone(), ip: Some(node.ip.clone()) })).await;
+        app.update_session(id, |x| {
+            x.mesh = Some(MeshInfo {
+                name: x.sandbox.clone(),
+                ip: Some(node.ip.clone()),
+            })
+        })
+        .await;
     }
 
     timing.mark("mesh-join");
@@ -871,7 +1021,9 @@ pub(crate) fn agent_env(agent: &AgentModule, choice: &crate::config::ModuleChoic
     let mut env = Map::new();
     if let Some(properties) = agent.schema["properties"].as_object() {
         for (key, spec) in properties {
-            let (Some(var), Some(value)) = (spec["env"].as_str(), setting(choice, &agent.schema, key)) else { continue };
+            let (Some(var), Some(value)) = (spec["env"].as_str(), setting(choice, &agent.schema, key)) else {
+                continue;
+            };
             let value = match value {
                 Value::String(s) => s.clone(),
                 Value::Null => continue,
@@ -951,7 +1103,11 @@ pub(crate) async fn agentd_http(app: &App, s: &Session, method: &str, path: &str
             }
         };
         let text = String::from_utf8_lossy(&response[..head_end]).into_owned();
-        let status = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).context("malformed agentd response")?;
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .context("malformed agentd response")?;
         let length = content_length(&text);
         let mut body = response.split_off(head_end);
         match length {
@@ -972,7 +1128,9 @@ pub(crate) async fn agentd_http(app: &App, s: &Session, method: &str, path: &str
         }
         anyhow::Ok((status, String::from_utf8_lossy(&body).into_owned()))
     };
-    tokio::time::timeout(Duration::from_secs(10), request).await.context("agentd request timed out")?
+    tokio::time::timeout(Duration::from_secs(10), request)
+        .await
+        .context("agentd request timed out")?
 }
 
 /// The offset just past the blank line that ends the response headers.
@@ -983,7 +1141,10 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 /// `Content-Length` from a response head, if it declares one.
 fn content_length(head: &str) -> Option<usize> {
     head.lines()
-        .find_map(|line| line.split_once(':').filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length")))
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        })
         .and_then(|(_, value)| value.trim().parse().ok())
 }
 
@@ -991,7 +1152,9 @@ pub(crate) async fn agentd_ws(app: &App, s: &Session, path: &str) -> Result<WebS
     let token = agentd_token(app, &s.id)?;
     let stream = dial_agentd(app, s).await?;
     let mut request = format!("ws://agentd{path}").into_client_request()?;
-    request.headers_mut().insert("Authorization", format!("Bearer {token}").parse()?);
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse()?);
     let (ws, _) = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::client_async(request, stream))
         .await
         .context("agentd websocket handshake timed out")??;
@@ -1012,7 +1175,10 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Session>> {
 }
 
 pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let session = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let session = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     Ok(Json(with_activity(&app, session).await))
 }
 
@@ -1027,7 +1193,9 @@ pub async fn events_ws(
     Query(query): Query<SinceQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
-    app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    app.session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let rt = app.runtime(&id).await;
     Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), socket)))
 }
@@ -1039,7 +1207,11 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
 
     let Some(session) = app.session(&id).await else { return };
     let session = with_activity(&app, session).await;
-    if tx.send(text(json!({"type": "session", "session": session}).to_string())).await.is_err() {
+    if tx
+        .send(text(json!({"type": "session", "session": session}).to_string()))
+        .await
+        .is_err()
+    {
         return;
     }
     let logs: Vec<Value> = rt.logs.lock().await.iter().cloned().collect();
@@ -1052,7 +1224,9 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
     if let Ok(file) = tokio::fs::File::open(&rt.events_path).await {
         let mut lines = BufReader::new(file).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let Some(seq) = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["seq"].as_u64()) else { continue };
+            let Some(seq) = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["seq"].as_u64()) else {
+                continue;
+            };
             if seq > since {
                 if tx.send(text(line)).await.is_err() {
                     return;
@@ -1098,7 +1272,9 @@ fn accepts_commands(status: SessionStatus) -> bool {
 }
 
 async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
-    let Ok(command) = serde_json::from_str::<Value>(body) else { return };
+    let Ok(command) = serde_json::from_str::<Value>(body) else {
+        return;
+    };
     let Some(s) = app.session(id).await else { return };
     if !accepts_commands(s.status) {
         // Dropping it silently left the browser showing an answer on its way to an
@@ -1117,7 +1293,9 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
             json!({"type": "user_message", "id": format!("u-{}", short_id()), "text": text})
         }
         Some("answer") => {
-            let (Some(question_id), true) = (command["question_id"].as_str(), command["answers"].is_object()) else { return };
+            let (Some(question_id), true) = (command["question_id"].as_str(), command["answers"].is_object()) else {
+                return;
+            };
             json!({
                 "type": "answer",
                 "question_id": question_id,
@@ -1146,7 +1324,10 @@ pub async fn terminal_ws(
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let cols = query.cols.unwrap_or(80).clamp(10, 500);
     let rows = query.rows.unwrap_or(24).clamp(5, 300);
     Ok(ws.on_upgrade(move |socket| terminal_socket(app, s, cols, rows, socket)))
@@ -1159,7 +1340,9 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
         _ => None,
     };
     if let Some(message) = not_ready {
-        let _ = socket.send(Message::Text(json!({"type": "error", "message": message}).to_string().into())).await;
+        let _ = socket
+            .send(Message::Text(json!({"type": "error", "message": message}).to_string().into()))
+            .await;
         let _ = socket.send(Message::Close(None)).await;
         return;
     }
@@ -1203,7 +1386,8 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
 }
 
 #[cfg(test)]
-pub(crate) mod tests {    use crate::util::faults::{self, Op};
+pub(crate) mod tests {
+    use crate::util::faults::{self, Op};
     use tokio::sync::RwLock;
 
     #[test]
@@ -1237,7 +1421,10 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
         let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"running","branch":"b","base":null,"worktree":"","git_admin_dir":null,"sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":1.5,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
         let s: Session = serde_json::from_str(saved).unwrap();
         assert_eq!(s.routed_cost_usd, None);
-        assert!((s.total_cost_usd() - 1.5).abs() < 1e-9, "the old cost still counts on its own");
+        assert!(
+            (s.total_cost_usd() - 1.5).abs() < 1e-9,
+            "the old cost still counts on its own"
+        );
     }
 
     /// So must one saved before the host-disk check existed, which measured nothing yet.
@@ -1293,7 +1480,14 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
         id: String,
     ) {
         with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
-            let mut s = colony(org, if room { SessionStatus::Starting } else { SessionStatus::Queued });
+            let mut s = colony(
+                org,
+                if room {
+                    SessionStatus::Starting
+                } else {
+                    SessionStatus::Queued
+                },
+            );
             s.id = id;
             sessions.push(s);
         })
@@ -1301,13 +1495,23 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
     }
 
     /// The shape of `resume`'s admission: re-check resumability and flip the colony under one lock.
-    pub(crate) async fn admit_resume(sessions: &RwLock<Vec<Session>>, org: &str, max_parallel: usize, org_limit: Option<u64>, id: &str) {
+    pub(crate) async fn admit_resume(
+        sessions: &RwLock<Vec<Session>>,
+        org: &str,
+        max_parallel: usize,
+        org_limit: Option<u64>,
+        id: &str,
+    ) {
         with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
             let Some(s) = sessions.iter_mut().find(|s| s.id == id) else {
                 return;
             };
             if can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
-                s.status = if room { SessionStatus::Starting } else { SessionStatus::Queued };
+                s.status = if room {
+                    SessionStatus::Starting
+                } else {
+                    SessionStatus::Queued
+                };
             }
         })
         .await
@@ -1338,9 +1542,15 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
     #[tokio::test]
     async fn a_failed_save_is_alerted_and_the_colony_log_shows_the_gap() {
         let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
-        let _guard = faults::inject("sessions.json", Op::Write, || std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let _guard = faults::inject("sessions.json", Op::Write, || {
+            std::io::Error::from(std::io::ErrorKind::StorageFull)
+        });
         let (s, ()) = app.update_session("abc", |s| s.status = SessionStatus::Idle).await.unwrap();
-        assert_eq!(s.status, SessionStatus::Idle, "the in-memory change is kept and still broadcast");
+        assert_eq!(
+            s.status,
+            SessionStatus::Idle,
+            "the in-memory change is kept and still broadcast"
+        );
         let alert = app.storage_alert.read().await.clone().unwrap();
         assert!(alert.message.contains("save the session list"), "{}", alert.message);
         let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
@@ -1353,9 +1563,14 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
     async fn a_failed_harness_log_append_still_reaches_the_browser_and_alerts() {
         let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
         let rt = app.runtime("abc").await;
-        let _guard = faults::inject("harness.jsonl", Op::Append, || std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let _guard = faults::inject("harness.jsonl", Op::Append, || {
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        });
         app.session_log("abc", "error", "a message".into()).await;
-        assert!(app.storage_alert.read().await.is_some(), "the failure is recorded, not swallowed");
+        assert!(
+            app.storage_alert.read().await.is_some(),
+            "the failure is recorded, not swallowed"
+        );
         {
             let logs = rt.logs.lock().await;
             let last = logs.back().unwrap();
@@ -1364,7 +1579,10 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
         }
         drop(_guard);
         app.session_log("abc", "info", "recovered".into()).await;
-        assert!(app.session_dir("abc").join("harness.jsonl").exists(), "appends work again once the fault clears");
+        assert!(
+            app.session_dir("abc").join("harness.jsonl").exists(),
+            "appends work again once the fault clears"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1376,16 +1594,33 @@ pub(crate) mod tests {    use crate::util::faults::{self, Op};
         let rt = app.runtime("abc").await;
         let _guard = faults::inject("events.jsonl", Op::Append, || std::io::Error::from_raw_os_error(5));
         handle_agent_event(&app, "abc", &rt, r#"{"seq":1,"type":"status","state":"working"}"#).await;
-        assert!(app.storage_alert.read().await.is_some(), "the gap in the event log is not silent");
-        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 0, "last_seq does not advance past a failed append");
+        assert!(
+            app.storage_alert.read().await.is_some(),
+            "the gap in the event log is not silent"
+        );
+        assert_eq!(
+            rt.last_seq.load(Ordering::SeqCst),
+            0,
+            "last_seq does not advance past a failed append"
+        );
         assert!(!app.session_dir("abc").join("events.jsonl").exists(), "the line never landed");
-        assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::Running, "the in-memory state still advances");
+        assert_eq!(
+            app.session("abc").await.unwrap().status,
+            SessionStatus::Running,
+            "the in-memory state still advances"
+        );
         drop(_guard);
         handle_agent_event(&app, "abc", &rt, r#"{"seq":2,"type":"status","state":"idle"}"#).await;
-        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 2, "the next event succeeds and jumps past the lost one");
+        assert_eq!(
+            rt.last_seq.load(Ordering::SeqCst),
+            2,
+            "the next event succeeds and jumps past the lost one"
+        );
         let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
-        assert_eq!(events, "{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n", "seq 1 stays lost");
+        assert_eq!(
+            events, "{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n",
+            "seq 1 stays lost"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
-
 }
