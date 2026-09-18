@@ -195,7 +195,7 @@ fn valid_model(model: &str) -> bool {
 }
 
 /// Claude Code resolves aliases itself, but a fallback request goes to the API as is, so it needs a model ID.
-fn api_model(model: &str) -> &str {
+pub(crate) fn api_model(model: &str) -> &str {
     match model {
         "opus" => "claude-opus-5",
         "sonnet" => "claude-sonnet-5",

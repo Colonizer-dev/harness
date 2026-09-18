@@ -217,8 +217,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 .await;
             }
         }
-        AgentEvent::Question { question_id, .. } => {
-            *rt.open_question.lock().await = Some(question_id);
+        AgentEvent::Question {
+            question_id, questions, ..
+        } => {
+            // The questions travel with the id: autonomous mode answers among the options the
+            // agent offered, and nothing else (docs/protocol.md §6.2b).
+            *rt.open_question.lock().await = Some((question_id, questions));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
         AgentEvent::QuestionAnswered { .. } => {

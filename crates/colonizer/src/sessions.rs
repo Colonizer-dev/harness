@@ -190,7 +190,9 @@ pub struct Runtime {
     pub(crate) commands_rx: Mutex<Option<mpsc::UnboundedReceiver<Value>>>,
     pub(crate) last_seq: AtomicU64,
     pub(crate) logs: Mutex<VecDeque<Value>>,
-    pub(crate) open_question: Mutex<Option<String>>,
+    /// The open question: its id, and the questions themselves, which autonomous mode needs to
+    /// answer among the options the agent offered.
+    pub(crate) open_question: Mutex<Option<(String, Vec<Value>)>>,
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
@@ -209,6 +211,11 @@ pub(crate) struct Broadcast {
 }
 
 impl Runtime {
+    /// The question a colony is waiting on, if it is waiting on one.
+    pub async fn open_question(&self) -> Option<(String, Vec<Value>)> {
+        self.open_question.lock().await.clone()
+    }
+
     fn load(dir: &std::path::Path) -> Self {
         let events_path = dir.join("events.jsonl");
         let logs_path = dir.join("harness.jsonl");

@@ -215,6 +215,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
+| `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
 
 Every GitHub org is a workspace with its own overrides for models, the parallel limit, the per-colony
 budget and host-disk quota, memory and the watchdog. Model providers (DeepSeek, a server on your LAN or
