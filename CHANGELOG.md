@@ -16,6 +16,19 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **One colony per issue.** Starting a colony on an issue another colony is
+  already queued on, working on, publishing or has an open pull request for is
+  refused, naming the colony that holds it. A colony that stopped, failed, found
+  nothing to change, or whose pull request is merged or closed leaves the issue
+  free, so a retry still works; `allow_duplicate` starts a second one on purpose.
+  One FindsYou issue drew four colonies, two of them ten seconds apart, and three
+  complete implementations of the same feature were thrown away. ([#172])
+- **A colony is told who else is in the repository.** The prompt lists the other
+  colonies working the same repository from the same base, and asks for the
+  smallest version of any shared scaffolding rather than the complete one. Four
+  colonies once wrote four different versions of the same new crate because none
+  of them knew the others existed. ([#172])
+
 - Colonizer now knows which version it is. A build records the tag it came from,
   its commit and when it was built, and Settings shows them. ([#110])
 - It checks whether a newer release is out, every few hours, **on by default**,
@@ -180,6 +193,7 @@ Macs. ([#74])
 [#120]: https://github.com/Colonizer-dev/harness/issues/120
 [#127]: https://github.com/Colonizer-dev/harness/issues/127
 [#131]: https://github.com/Colonizer-dev/harness/pull/131
+[#172]: https://github.com/Colonizer-dev/harness/pull/172
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2
