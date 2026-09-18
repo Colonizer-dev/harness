@@ -256,6 +256,22 @@ pub fn random_token() -> String {
     format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
 }
 
+/// A single path segment with no separators, no traversal and no leading dot.
+///
+/// Used where a setting names something the harness will resolve under a
+/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
+/// reach the rest of the host's filesystem.
+pub fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains(':')
+        && !name.contains(',')
+        && !name.contains('\0')
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -409,20 +425,4 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"seq\":1}\n{\"seq\":2}\n", "the line did not land");
         let _ = std::fs::remove_dir_all(dir);
     }
-}
-
-/// A single path segment with no separators, no traversal and no leading dot.
-///
-/// Used where a setting names something the harness will resolve under a
-/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
-/// reach the rest of the host's filesystem.
-pub fn is_plain_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains("..")
-        && !name.contains(':')
-        && !name.contains(',')
-        && !name.contains('\0')
 }
