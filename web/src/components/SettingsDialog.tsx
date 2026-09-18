@@ -28,6 +28,7 @@ import type {
   SchemaField,
   TelemetryStatus,
   UpdateStatus,
+  UsageStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
@@ -62,7 +63,7 @@ import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass,
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | `module:${string}`;
+export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -94,6 +95,8 @@ export function SettingsDialog({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  usage,
+  onUsageChanged,
   initialSection,
 }: {
   open: boolean;
@@ -103,6 +106,8 @@ export function SettingsDialog({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  usage: UsageStatus | null;
+  onUsageChanged: (usage: UsageStatus) => void;
   /** The section to open on, instead of the first. */
   initialSection?: SectionId;
 }) {
@@ -129,6 +134,8 @@ export function SettingsDialog({
           onModulesChanged={onModulesChanged}
           telemetry={telemetry}
           onTelemetryChanged={onTelemetryChanged}
+          usage={usage}
+          onUsageChanged={onUsageChanged}
           initialSection={initialSection}
           onClose={onClose}
         />
@@ -143,6 +150,8 @@ function SettingsBody({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  usage,
+  onUsageChanged,
   initialSection,
   onClose,
 }: {
@@ -151,6 +160,8 @@ function SettingsBody({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  usage: UsageStatus | null;
+  onUsageChanged: (usage: UsageStatus) => void;
   initialSection?: SectionId;
   onClose: () => void;
 }) {
@@ -252,6 +263,12 @@ function SettingsBody({
           toneText: update?.available ? `${update.latest?.version} available` : undefined,
           badge: update && !update.available ? update.installed.version : undefined,
         },
+        {
+          id: "usage",
+          label: "Usage data",
+          hint: "An anonymous batch, built here and shown — nothing is sent yet",
+          badge: usage ? (usage.enabled ? "On" : "Off") : undefined,
+        },
       ],
     },
     {
@@ -275,6 +292,7 @@ function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
+  else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -1251,6 +1269,89 @@ function LiveMapPane({
             <a className="inline-flex items-center gap-1 text-accent hover:underline" href={TELEMETRY_DOCS} target="_blank" rel="noreferrer">
               How it works <IconExternal size={12} />
             </a>
+          </div>
+        </div>
+      )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Usage data: the anonymous batch a sender would one day transmit — on by default, shown in full
+// ---------------------------------------------------------------------------
+
+function UsagePane({
+  usage,
+  onChanged,
+  back,
+}: {
+  usage: UsageStatus | null;
+  onChanged: (usage: UsageStatus) => void;
+  back?: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+
+  const set = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setUsage(enabled));
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const info = (
+    <>
+      <p>
+        The batch is built on this machine and shown here, and that is all this release does: it has no sender — no endpoint, no
+        background loop, no network call. A later one may carry the batch, composed from Cratefield’s module-telemetry.
+      </p>
+      <p>The batch carries a fresh random id while it is on — which is the default — and switching it off forgets that id, so a later period could never be tied to this one.</p>
+    </>
+  );
+
+  return (
+    <Pane title="Usage data" subtitle="An anonymous batch, collected and shown here only — nothing is sent" info={info} back={back}>
+      {!usage ? (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          <Row id="usage-switch" label="Allow an anonymous usage batch" inline>
+            <Switch
+              id="usage-switch"
+              labelledBy="usage-switch-label"
+              label="Allow an anonymous usage batch"
+              checked={usage.enabled}
+              disabled={saving || usage.blocked_by !== null}
+              onChange={(checked) => void set(checked)}
+            />
+          </Row>
+          {usage.blocked_by && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              Kept off by <Code>{usage.blocked_by}</Code> in the Mothership’s environment.
+            </p>
+          )}
+          <p className="text-[12.5px] text-muted">
+            On by default, and nothing is sent yet: this build only collects the batch and shows it here. Switch it off here or with{" "}
+            <Code>colonizer telemetry off</Code>; the Mothership’s environment can also hold it off whatever this switch says —{" "}
+            <Code>COLONIZER_TELEMETRY=0</Code>, <Code>DO_NOT_TRACK=1</Code> or <Code>CI=true</Code>.
+          </p>
+          <div>
+            <h4 className="mb-1.5 text-[12.5px] font-semibold">The whole batch</h4>
+            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-[12px] leading-5">
+              {JSON.stringify(usage.batch, null, 2)}
+            </pre>
+            <p className="mt-2 text-[12.5px] text-muted">
+              Every byte a sender would transmit, verbatim — <Code>usage_id</Code> is <Code>null</Code> while the switch is off. Nothing
+              else is in it: no repository, branch or issue names, no paths, no prompts or agent output, no tokens or URLs, and no setting
+              values — setting names only.
+            </p>
           </div>
         </div>
       )}

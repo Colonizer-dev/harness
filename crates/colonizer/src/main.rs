@@ -26,6 +26,7 @@ mod sandbox;
 mod sessions;
 mod telemetry;
 mod timing;
+mod usage;
 mod util;
 mod update;
 mod version;
@@ -49,6 +50,7 @@ use sessions::Session;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path as FsPath, PathBuf},
+    process::ExitCode,
     sync::Arc,
     time::Duration,
 };
@@ -108,6 +110,8 @@ pub struct App {
     pub telemetry: telemetry::Telemetry,
     pub updates: version::Updates,
     pub updater: update::Updater,
+    /// Anonymous usage reporting, local half only: the batch that would be sent and the switch for it.
+    pub usage: usage::Usage,
 }
 
 pub type Shared = Arc<App>;
@@ -405,42 +409,109 @@ fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
     Ok(saved)
 }
 
-/// What `colonizer` does before it decides to be a server.
+const USAGE: &str = "colonizer — turn a task into a pull request; see https://colonizer.dev/docs
+
+usage: colonizer
+       colonizer version | update
+       colonizer telemetry show|on|off
+
+  (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
+  version         print what this build is, and whether it is a release (also --version, -V)
+  update          install the newest release against a running mothership and restart into it
+  telemetry show  print the exact anonymous usage batch that would be sent
+  telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
+  telemetry off   record no to anonymous usage reporting
+  --help, -h      print this help
+
+Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
+COLONIZER_HOME and the rest are in docs/install.md.";
+
+/// What the binary was asked to do. Starting the mothership is the default; every other command
+/// runs without one, except `update`, which is a client of a mothership that is already running.
 ///
-/// Hand-rolled rather than a parser dependency: there are three words, settings
-/// come from the environment, and anything unrecognised still serves — so an
-/// argument nobody planned for cannot stop a mothership starting.
-async fn cli(arg: &str) -> Option<Result<()>> {
-    match arg {
-        "version" | "--version" | "-V" => {
-            println!("{}", version::build().line());
-            Some(Ok(()))
+/// An argument nobody planned for is an error with the usage text, not a silently started server:
+/// a typo like `colonizer updat` should say so rather than take over the port for an afternoon.
+enum Args {
+    Serve,
+    Version,
+    Update,
+    TelemetryShow,
+    TelemetrySet(bool),
+}
+
+impl Args {
+    /// `Ok(None)` means the command was fully handled (`--help`).
+    fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
+        let mut iter = argv.into_iter();
+        let Some(arg) = iter.next() else { return Ok(Some(Self::Serve)) };
+        let command = match arg.as_str() {
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(None);
+            }
+            "version" | "--version" | "-V" => Self::Version,
+            "update" => Self::Update,
+            "telemetry" => {
+                let sub = iter.next().ok_or_else(|| "telemetry needs a command: show, on or off".to_string())?;
+                match sub.as_str() {
+                    "show" => Self::TelemetryShow,
+                    "on" => Self::TelemetrySet(true),
+                    "off" => Self::TelemetrySet(false),
+                    other => return Err(format!("unknown telemetry command: {other}")),
+                }
+            }
+            _ => return Err(format!("unknown argument: {arg}")),
+        };
+        if let Some(extra) = iter.next() {
+            return Err(format!("unknown argument: {extra}"));
         }
-        "update" => Some(update::command().await),
-        "--help" | "-h" => {
-            println!("colonizer — turn a task into a pull request; see https://colonizer.dev/docs");
-            println!();
-            println!("usage: colonizer [--help] [--version] [update]");
-            println!();
-            println!("  (no argument)  serve the harness and its web UI");
-            println!("  update         update a running mothership to its newest release");
-            println!("  version        print what this build is (also --version, -V)");
-            println!();
-            println!("Settings come from the environment, not flags: COLONIZER_BIND,");
-            println!("COLONIZER_DATA_DIR, COLONIZER_HOME and the rest are in docs/install.md.");
-            Some(Ok(()))
+        Ok(Some(command))
+    }
+
+    async fn run(self) -> Result<()> {
+        match self {
+            Self::Serve => serve().await,
+            // The stamped build, not CARGO_PKG_VERSION: the crate version says nothing about
+            // which commit an install came from.
+            Self::Version => {
+                println!("{}", version::build().line());
+                Ok(())
+            }
+            Self::Update => update::command().await,
+            Self::TelemetryShow => {
+                let cfg = Settings::from_env()?;
+                usage::cli_show(&cfg.config_dir)
+            }
+            Self::TelemetrySet(enabled) => {
+                let cfg = Settings::from_env()?;
+                usage::cli_set(&cfg.config_dir, enabled)
+            }
         }
-        _ => None,
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    if let Some(arg) = std::env::args().nth(1)
-        && let Some(done) = cli(&arg).await
-    {
-        return done;
+async fn main() -> ExitCode {
+    let args = match Args::parse(std::env::args().skip(1).collect()) {
+        Ok(Some(args)) => args,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match args.run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer: {e:#}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+/// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
+/// background loops.
+async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
@@ -474,6 +545,7 @@ async fn main() -> Result<()> {
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
         updates: version::Updates::new(&cfg.config_dir)?,
         updater: update::Updater::new(),
+        usage: usage::Usage::new(&cfg.config_dir),
         cfg,
     });
 
@@ -494,6 +566,7 @@ async fn main() -> Result<()> {
         .route("/api/version", get(version::version))
         .route("/api/update", get(version::status).put(version::put))
         .route("/api/update/apply", post(update::apply))
+        .route("/api/telemetry/usage", get(usage::status).put(usage::put))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -533,6 +606,8 @@ async fn main() -> Result<()> {
         Some(assets) => println!("assets: {}", assets.display()),
         None => println!("assets: not found (run scripts/install.sh)"),
     }
+    // The first-run notice: once, while nobody has answered yet, show the exact usage batch on stderr.
+    usage::first_run_notice(&app).await;
     match tokio::net::TcpListener::bind(&app.cfg.gateway_bind).await {
         Ok(listener) => {
             println!("provider gateway on http://{}", app.cfg.gateway_bind);
@@ -647,6 +722,7 @@ pub(crate) mod tests {
             memory: memory::MemoryStore::new(root.join("memory")),
             // Added on main while this branch was open; kept in step with the real constructor.
             claude_account: Mutex::new(None),
+            usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),
             updater: update::Updater::new(),
             gateway: gateway::Gateway::new().unwrap(),
