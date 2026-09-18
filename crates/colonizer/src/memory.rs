@@ -179,7 +179,7 @@ impl MemoryStore {
     pub async fn proposals(&self) -> Vec<Proposal> {
         let _guard = self.lock.lock().await;
         let mut proposals = self.read_proposals();
-        proposals.sort_by(|a, b| b.note.created_at.cmp(&a.note.created_at));
+        proposals.sort_by_key(|a| std::cmp::Reverse(a.note.created_at));
         proposals
     }
 
