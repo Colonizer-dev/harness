@@ -18,6 +18,7 @@ import type {
   Mem0Status,
   ModelOption,
   ModelProvider,
+  ModelSetting,
   ModuleInfo,
   ProviderAuth,
   ProviderHealth,
@@ -56,7 +57,7 @@ import {
   type IconProps,
 } from "./icons";
 import { SkillsetField } from "./Skillsets";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, meshBroken, timeAgo, type Tone, useMediaQuery } from "./ui";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
@@ -2433,6 +2434,82 @@ function HealthStatus({ health }: { health: HealthView }) {
   );
 }
 
+/** Model settings by the names the model form labels them, for the usage line. */
+const MODEL_SETTING_LABEL: Record<ModelSetting, string> = {
+  model: "Orchestrator model",
+  subagent_model: "Subagent model",
+  background_model: "Background model",
+};
+
+/**
+ * Why a provider wired only to subagent or background work can look idle, as one clause: the
+ * orchestrator does nearly all of a colony's work, subagent traffic only appears when a colony
+ * delegates (rare) and background calls are small auxiliary jobs. Null when the provider is on
+ * the main path, or when no setting points at it — that case gets its own, sharper wording.
+ */
+function idleWiringNote(usedBy: ModelSetting[]): string | null {
+  if (usedBy.length === 0 || usedBy.includes("model")) return null;
+  const [first, second] = usedBy.map((setting) => MODEL_SETTING_LABEL[setting]);
+  const settings = second ? `the ${first} and ${second} settings` : `the ${first} setting`;
+  return `only wired to ${settings} — the Orchestrator model does nearly all of a colony's work, so it can look idle`;
+}
+
+/**
+ * The cumulative usage line on a provider card. Its most important job is telling "never used"
+ * from "used and working" at a glance: `Reachable` alone once read as "in use" when it only meant
+ * the endpoint answered. An absent `usage` means the Mothership didn't report one — not the same
+ * thing as never used. Wiring notes explain, they don't advise — an idle provider is not broken.
+ */
+function UsageLine({ provider }: { provider: ModelProvider }) {
+  const usage = provider.usage;
+  const requests = usage?.requests ?? 0;
+  const failures = usage?.failures ?? 0;
+  const fallbacks = usage?.fallbacks ?? 0;
+  const lastUsed = timeAgo(usage?.last_request_at);
+  const total = formatDuration(usage?.duration_ms ?? 0);
+  const usedBy = provider.used_by;
+  const wiring = idleWiringNote(usedBy ?? []);
+
+  const segments: { text: string; title?: string; tone?: "warn" | "lift" }[] = [];
+  if (!usage) {
+    segments.push({ text: "No usage recorded — this Mothership doesn't report usage", tone: "lift" });
+  } else if (requests === 0) {
+    segments.push({ text: "Never used", tone: "lift" });
+  } else {
+    segments.push({ text: `${requests.toLocaleString()} ${requests === 1 ? "request" : "requests"}` });
+    if (lastUsed) segments.push({ text: `last used ${lastUsed}` });
+    if (failures > 0)
+      segments.push({
+        text: `${failures.toLocaleString()} failed${fallbacks > 0 ? `, ${fallbacks.toLocaleString()} of them got a Claude fallback` : ""}`,
+        title:
+          "Failed means no usable response came back — a queue timeout, an unreachable provider, a request timeout, an upstream status of 400 or more, or an OpenAI-wire body that failed or never finished. A failure part-way through a streamed body is not counted. The fallbacks are a prediction, not an observation: the Mothership answered those with a fallback response, which the colony's router retries on Claude.",
+        tone: "warn",
+      });
+    if (total !== "0s") segments.push({ text: `${total} total` });
+  }
+  if (usedBy && usedBy.length === 0) {
+    segments.push({ text: "no model setting points at it as configured", tone: requests === 0 ? "lift" : undefined });
+  } else if (wiring) {
+    segments.push({ text: wiring });
+  }
+
+  return (
+    <div className="mt-1 text-[12px] text-faint" title="Counted at the Mothership gateway since it first kept tally; the counts survive a restart.">
+      {segments.map((segment, index) => (
+        <span key={index}>
+          {index > 0 && " · "}
+          <span
+            title={segment.title}
+            className={cx(segment.tone === "warn" && "text-warn", segment.tone === "lift" && "font-medium text-muted")}
+          >
+            {segment.text}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function ProviderRow({
   provider,
   health,
@@ -2481,6 +2558,7 @@ function ProviderRow({
           )}
         </div>
         {limits.length > 0 && <div className="mt-1 text-[12px] text-faint">{limits.join(" · ")}</div>}
+        <UsageLine provider={provider} />
         {health && (
           <div className="mt-2">
             <HealthStatus health={health} />

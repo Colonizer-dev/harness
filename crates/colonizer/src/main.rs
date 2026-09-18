@@ -535,7 +535,7 @@ async fn serve() -> Result<()> {
         mesh: Mutex::new(None),
         login: Default::default(),
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
-        gateway: gateway::Gateway::new()?,
+        gateway: gateway::Gateway::new(&cfg.data_dir)?,
         repo_owners: RwLock::new(BTreeSet::new()),
         orgs_refreshed: Mutex::new(None),
         claude_account: Mutex::new(None),
@@ -646,6 +646,7 @@ async fn serve() -> Result<()> {
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
     tokio::spawn(version::run(app.clone()));
+    tokio::spawn(gateway::flush_loop(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
         // Restarting would never help: the binaries are missing from this install, and the app does
@@ -684,6 +685,8 @@ async fn serve() -> Result<()> {
             if let Some(mesh) = mesh {
                 mesh.shutdown().await;
             }
+            // The usage counters flush every few seconds; one last flush loses nothing.
+            app.gateway.flush_usage();
         }
     }
     Ok(())
@@ -724,7 +727,7 @@ pub(crate) mod tests {
             usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),
             updater: update::Updater::new(),
-            gateway: gateway::Gateway::new().unwrap(),
+            gateway: gateway::Gateway::new(&root.join("data")).unwrap(),
             repo_owners: RwLock::new(BTreeSet::new()),
             orgs_refreshed: Mutex::new(None),
             pull: Mutex::new(Default::default()),

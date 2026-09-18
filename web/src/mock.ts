@@ -16,6 +16,7 @@ import type {
   MemoryProposal,
   ModelOption,
   ModelProvider,
+  ModelTokens,
   ModuleInfo,
   OrgInfo,
   OrgSettings,
@@ -153,6 +154,8 @@ class MockSession {
   private started = false;
   private generation = 0;
   private cost = 0;
+  /** Colony-cumulative per-model usage, as the runner reports it in every `turn_end` (docs/protocol.md §4). */
+  private modelUsage: Record<string, ModelTokens> = {};
   private pendingQuestion: string | null = null;
   private userMessages = 0;
 
@@ -187,6 +190,21 @@ class MockSession {
       if (status && status !== this.session.status) this.patch({ status });
     }
     if (body.type === "turn_end" && body.cost_usd != null) this.patch({ cost_usd: body.cost_usd });
+  }
+
+  /**
+   * Adds one turn's per-model usage to the colony's running total and returns it, as the runner's cumulative
+   * `model_usage` does; the snapshot is cloned so replayed earlier turns keep the totals they had then.
+   */
+  private turnUsage(perTurn: Record<string, ModelTokens>): Record<string, ModelTokens> {
+    for (const [model, tokens] of Object.entries(perTurn)) {
+      const total = (this.modelUsage[model] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 });
+      total.input_tokens += tokens.input_tokens;
+      total.output_tokens += tokens.output_tokens;
+      total.cache_read_tokens += tokens.cache_read_tokens;
+      total.cache_write_tokens += tokens.cache_write_tokens;
+    }
+    return clone(this.modelUsage);
   }
 
   log(message: string, level: LogLevel = "info"): void {
@@ -387,7 +405,14 @@ class MockSession {
       this.emit({ type: "status", state: "working" });
       await sleep(500);
       if (!(await this.streamText(generation, "msg_open", `I'm ready in \`/workspace\` on branch \`${s.branch}\`. What should I work on?`))) return;
-      this.emit({ type: "turn_end", is_error: false, result: null, cost_usd: 0.01, duration_ms: 2_100 });
+      this.emit({
+        type: "turn_end",
+        is_error: false,
+        result: null,
+        cost_usd: 0.01,
+        duration_ms: 2_100,
+        model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 1_850, output_tokens: 240, cache_read_tokens: 19_400, cache_write_tokens: 1_200 } }),
+      });
       this.emit({ type: "status", state: "idle" });
       return;
     }
@@ -600,7 +625,20 @@ class MockSession {
       .join("\n");
     if (!(await this.streamText(generation, "msg_4", summary))) return;
     this.cost += 0.42;
-    this.emit({ type: "turn_end", is_error: false, result: "Guest checkout fixed.", cost_usd: Math.round(this.cost * 100) / 100, duration_ms: 81_234 });
+    // First result of the run: it covers the delegation turn, the settlers' routed-model work and this turn, so
+    // the colony-cumulative total is all new and both models belong to this footer. A later turn that only the
+    // orchestrator served (see onUserMessage) must then diff down to Claude alone.
+    this.emit({
+      type: "turn_end",
+      is_error: false,
+      result: "Guest checkout fixed.",
+      cost_usd: Math.round(this.cost * 100) / 100,
+      duration_ms: 81_234,
+      model_usage: this.turnUsage({
+        "claude-opus-5": { input_tokens: 46_200, output_tokens: 9_100, cache_read_tokens: 402_000, cache_write_tokens: 16_800 },
+        "deepseek/deepseek-flash": { input_tokens: 28_400, output_tokens: 6_200, cache_read_tokens: 0, cache_write_tokens: 0 },
+      }),
+    });
     this.emit({ type: "status", state: "idle" });
   }
 
@@ -629,7 +667,16 @@ class MockSession {
     ].join("\n");
     if (!(await this.streamText(generation, `msg_u${n}`, reply))) return;
     this.cost += 0.06;
-    this.emit({ type: "turn_end", is_error: false, result: reply, cost_usd: Math.round(this.cost * 100) / 100, duration_ms: 4_210 });
+    // Only the orchestrator ran this turn; the settlers' routed tokens stay in the cumulative total but must
+    // not be attributed here.
+    this.emit({
+      type: "turn_end",
+      is_error: false,
+      result: reply,
+      cost_usd: Math.round(this.cost * 100) / 100,
+      duration_ms: 4_210,
+      model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 5_800, output_tokens: 940, cache_read_tokens: 48_000, cache_write_tokens: 3_600 } }),
+    });
     this.emit({ type: "status", state: this.pendingQuestion ? "waiting_for_answer" : "idle" });
   }
 
@@ -1056,6 +1103,7 @@ export function createMockApi(): Api {
   sessions.set(closed.session.id, closed);
 
   const DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
+  const zeroUsage = () => ({ requests: 0, failures: 0, fallbacks: 0, duration_ms: 0, last_request_at: null });
   const providers: ModelProvider[] = [
     {
       id: "deepseek",
@@ -1069,6 +1117,9 @@ export function createMockApi(): Api {
       ...DEFAULT_LIMITS,
       in_flight: 0,
       queued: 0,
+      // Wired only to the subagent model, and no colony has ever delegated: the issue #39 state.
+      usage: zeroUsage(),
+      used_by: ["subagent_model"],
     },
     {
       id: "strix",
@@ -1086,6 +1137,9 @@ export function createMockApi(): Api {
       fallback_model: "sonnet",
       in_flight: 1,
       queued: 2,
+      // The orchestrator model for acme, so it sees a steady stream of requests.
+      usage: { requests: 412, failures: 3, fallbacks: 1, duration_ms: 2_538_000, last_request_at: ago(2) },
+      used_by: ["model"],
     },
     {
       id: "lab",
@@ -1100,6 +1154,9 @@ export function createMockApi(): Api {
       max_concurrent: 4,
       in_flight: 0,
       queued: 0,
+      // Reachable, but no model setting points at it, so nothing ever will.
+      usage: zeroUsage(),
+      used_by: [],
     },
   ];
   const LIMIT_RANGES: [keyof typeof DEFAULT_LIMITS, number, number][] = [
@@ -1119,7 +1176,7 @@ export function createMockApi(): Api {
   ];
   const orgSettings: Record<string, OrgSettings> = {
     acme: {
-      agent: { model: "opus", subagent_model: "deepseek/deepseek-flash", background_model: null },
+      agent: { model: "strix/ds4-flash", subagent_model: "deepseek/deepseek-flash", background_model: null },
       max_parallel: 2,
       memory: { enabled: true },
       watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
@@ -1183,7 +1240,7 @@ export function createMockApi(): Api {
         type: "object",
         properties: {
           model: { type: "string", title: "Orchestrator model", default: "", description: "Empty uses the Claude Code default" },
-          subagent_model: { type: "string", title: "Subagent model", default: "", description: "e.g. deepseek/deepseek-flash; empty uses the orchestrator model" },
+          subagent_model: { type: "string", title: "Subagent model", default: "", description: "Model id, alias, or <provider>/<model>; empty uses the orchestrator model" },
           background_model: { type: "string", title: "Background model", default: "", description: "Small, fast tasks; empty uses the Claude Code default" },
           plugins: {
             type: "string",
@@ -1646,6 +1703,8 @@ export function createMockApi(): Api {
         fallback_model: fallback,
         in_flight: existing?.in_flight ?? 0,
         queued: existing?.queued ?? 0,
+        usage: existing?.usage ?? zeroUsage(),
+        used_by: existing?.used_by ?? [],
       };
       if (existing) Object.assign(existing, provider);
       else providers.push(provider);

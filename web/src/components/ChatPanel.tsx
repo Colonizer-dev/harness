@@ -576,6 +576,10 @@ function AssistantMessage() {
 
 function TurnNotice({ turn }: { turn: TurnSummary }) {
   const enter = useEnter();
+  // The model that did the substantive work leads; "+N" says others were involved, and the tooltip names them.
+  const [primary] = turn.models;
+  const model = primary == null ? null : turn.models.length > 1 ? `${primary} +${turn.models.length - 1}` : primary;
+  const modelTitle = turn.models.length > 1 ? turn.models.join(" · ") : undefined;
   const meta = [turn.durationMs != null ? formatDuration(turn.durationMs) : null, turn.costUsd != null ? `$${turn.costUsd.toFixed(2)} total` : null]
     .filter(Boolean)
     .join(" · ");
@@ -586,7 +590,12 @@ function TurnNotice({ turn }: { turn: TurnSummary }) {
         <div className="flex flex-wrap items-center gap-x-2">
           <IconX size={13} strokeWidth={3} />
           <span className="font-semibold">Turn failed</span>
-          {meta && <span className="text-[12px] opacity-75">{meta}</span>}
+          {model && (
+            <span className="min-w-0 max-w-full truncate font-mono text-[12px] opacity-75" title={modelTitle}>
+              · {model}
+            </span>
+          )}
+          {meta && <span className="text-[12px] opacity-75">{model && "· "}{meta}</span>}
         </div>
         {result && (
           <div className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{result.length > 600 ? `${result.slice(0, 600)}…` : result}</div>
@@ -597,6 +606,11 @@ function TurnNotice({ turn }: { turn: TurnSummary }) {
   return (
     <div className={cx("-mt-2 mb-3 ml-10 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-faint", enter)}>
       <span className="font-medium text-ok">Turn complete</span>
+      {model && (
+        <span className="min-w-0 max-w-full truncate font-mono" title={modelTitle}>
+          · {model}
+        </span>
+      )}
       {meta && <span>· {meta}</span>}
     </div>
   );
