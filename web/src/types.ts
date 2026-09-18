@@ -104,6 +104,19 @@ export interface HarnessStatus {
     nodes?: number;
     error?: string | null;
   } | null;
+  /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */
+  storage?: StorageHealth;
+}
+
+/** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
+export interface StorageHealth {
+  ok: boolean;
+  /** The underlying write error, for showing verbatim. */
+  message?: string | null;
+  /** When the failure was recorded; same representation as a harness_log `ts`. */
+  ts?: string | null;
+  /** Failed writes since the mothership started. */
+  failures?: number | null;
 }
 
 export interface ModuleProviderInfo {
