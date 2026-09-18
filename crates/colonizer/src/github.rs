@@ -2,11 +2,11 @@
 
 use crate::{
     client_error,
-    sessions::{Session, SessionLogger},
+    sessions::{record_publish_stage, PublishStage, Session, SessionLogger},
     util::{env_nonempty, exec, exec_status, read_trimmed, truncate, valid_repo, write_secret},
     ApiResult, App, Shared,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -81,7 +81,7 @@ pub async fn viewer(app: &App) -> Result<Value> {
         .await
         .context("GitHub API timed out")??;
     let v: Value = serde_json::from_str(&out)?;
-    Ok(json!({"login": v["login"], "id": v["id"], "name": v["name"]}))
+    Ok(json!({"login": v["login"], "id": v["id"], "name": v["name"], "avatar_url": v["avatar_url"]}))
 }
 
 pub fn token_source(app: &App) -> &'static str {
@@ -102,6 +102,54 @@ pub async fn fetch_issue(app: &App, repo: &str, number: u64) -> Result<Value> {
     ]))
     .await?;
     Ok(serde_json::from_str(&out)?)
+}
+
+/// Why a GitHub read failed, as far as it can be told apart from `gh`'s output.
+#[derive(Debug, PartialEq)]
+pub enum Denial {
+    /// Deleted, renamed, or private to an account this one is not. `gh` answers 404 to all three.
+    NotVisible,
+    /// The credential itself was refused.
+    BadCredential,
+}
+
+/// Classifies a failed `gh` invocation. Kept separate from the message so it can be tested without
+/// GitHub, and so the wording lives in one place.
+pub fn classify(error: &str) -> Option<Denial> {
+    let text = error.to_ascii_lowercase();
+    if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
+        Some(Denial::NotVisible)
+    } else if text.contains("http 401") || text.contains("http 403") || text.contains("bad credentials") {
+        Some(Denial::BadCredential)
+    } else {
+        None
+    }
+}
+
+/// Turns a failed repository read into something a person can act on.
+///
+/// The raw failure is a shell line — ``gh api repos/o/r --jq .default_branch` failed (exit status: 1):
+/// gh: Not Found (HTTP 404)`` — which says what ran, not what to do about it. It matters most on a
+/// second machine: `gh` cannot tell a deleted repository from one the signed-in account simply cannot
+/// see, so the message names the account and both possibilities rather than picking one.
+pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow::Error {
+    let raw = format!("{error:#}");
+    let Some(denial) = classify(&raw) else { return error };
+    let who = match viewer(app).await {
+        Ok(user) => user["login"].as_str().map(|login| format!("@{login}")).unwrap_or_else(|| "this machine".into()),
+        Err(_) => "this machine".into(),
+    };
+    match denial {
+        Denial::NotVisible => anyhow!(
+            "GitHub cannot see {repo} as {who}. It may have been deleted or renamed, or {who} may not have access \
+             to it — GitHub answers the same way to all three. The colony's worktree is kept, so it can be resumed \
+             once access is back; otherwise delete the colony. (GitHub said: {raw})"
+        ),
+        Denial::BadCredential => anyhow!(
+            "GitHub refused the credentials for {repo}. Reconnect GitHub in Settings → Connections, then resume. \
+             (GitHub said: {raw})"
+        ),
+    }
 }
 
 pub async fn default_branch(app: &App, repo: &str) -> Result<String> {
@@ -264,6 +312,49 @@ pub enum Published {
     PullRequest(String),
 }
 
+/// A pull request's live state on GitHub, as a colony's badge should show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// Maps what `gh pr view --json state,merged` reported to a `PrState`. `merged` wins over `state`,
+/// case is tolerated, and an unrecognised state is `None` so callers leave the colony's status alone.
+pub fn pr_state_from(state: &str, merged: bool) -> Option<PrState> {
+    if merged {
+        return Some(PrState::Merged);
+    }
+    match state.trim().to_ascii_uppercase().as_str() {
+        "OPEN" => Some(PrState::Open),
+        "MERGED" => Some(PrState::Merged),
+        "CLOSED" => Some(PrState::Closed),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct PrView {
+    state: String,
+    #[serde(default)]
+    merged: bool,
+}
+
+/// Asks GitHub for one pull request's state through the user's `gh` login. A deleted PR, no `gh`
+/// binary, no auth and a network error all surface as errors; callers must treat those as no news.
+pub async fn pr_state(app: &App, url: &str) -> Result<PrState> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "state,merged"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    let view: PrView = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
+    pr_state_from(&view.state, view.merged)
+        .with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
+}
+
 const COLONIZER_CO_AUTHOR: &str = "Co-Authored-By: Colonizer <noreply@colonizer.dev>";
 
 /// The commit's closing paragraph: what the work refers to, then Colonizer's co-author line unless
@@ -296,70 +387,241 @@ pub fn pr_description_mark(out: &FsPath) -> Option<(std::time::SystemTime, u64)>
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// Commits the worktree on the host, pushes the branch and opens the pull request.
-/// The microVM must already be gone: everything it left behind is treated as untrusted data.
+/// The publish operations, named so tests can stand in for git and GitHub and inject a failure at any
+/// step. Module-private on purpose: the runner below only ever sees the concrete impls in this file, so
+/// each async fn's future is known concretely and auto traits (Send) leak through it — no `async-trait`
+/// dependency needed to publish from inside `tokio::spawn`.
+trait PublishOps {
+    /// The commit title and pull request body, read from `pr.md` once up front so a retry that skips
+    /// the commit still has them.
+    fn description(&self) -> (String, String);
+    /// The commit's trailer paragraph: the issue reference plus Colonizer's co-author line.
+    fn trailer(&self) -> String;
+    /// Stages everything in the worktree; true when anything is staged.
+    async fn stage_all(&self) -> Result<bool>;
+    /// Commits what is staged, with the title and trailer.
+    async fn commit(&self, title: &str, trailer: &str) -> Result<()>;
+    /// Whether the branch carries commits `origin/<base>` does not have.
+    async fn commits_ahead(&self) -> Result<bool>;
+    /// The branch head's full sha, locally.
+    async fn local_head(&self) -> Result<String>;
+    /// The branch head's sha on origin, or `None` when the branch was never pushed.
+    async fn remote_head(&self) -> Result<Option<String>>;
+    /// Pushes the branch to origin.
+    async fn push(&self) -> Result<()>;
+    /// The URL of a pull request that is already open for this branch, if there is one.
+    async fn existing_pr(&self) -> Result<Option<String>>;
+    /// Opens the pull request and returns its URL.
+    async fn create_pr(&self, title: &str, body: &str) -> Result<String>;
+    /// Records progress durably, so a retry (and the UI) can see how far this attempt got.
+    async fn checkpoint(&self, stage: PublishStage);
+    /// A progress note that comes from the runner's own reconciliation rather than from one operation.
+    async fn note(&self, message: String);
+}
+
+/// The publish state machine: ask git and the remote what already happened, then do only what is left.
+/// Nothing here trusts the last attempt's bookkeeping, so a run that died at any point can simply be run
+/// again — the commit, the push and the pull request each happen at most once. "Nothing staged" alone is
+/// never a no-op: it is exactly what a retry after a failed push looks like.
+async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
+    let (title, body) = ops.description();
+    let trailer = ops.trailer();
+
+    let staged = ops.stage_all().await?;
+    if staged {
+        ops.commit(&title, &trailer).await?;
+        ops.checkpoint(PublishStage::Committed).await;
+    }
+    // A genuine no-op needs both an empty index and a branch even with origin/<base>; a commit that was
+    // never pushed leaves the branch ahead with nothing staged.
+    if !staged && !ops.commits_ahead().await? {
+        ops.note("the agent left no changes in the worktree; nothing to publish".to_string()).await;
+        return Ok(Published::NoChanges);
+    }
+
+    let local = ops.local_head().await?;
+    if ops.remote_head().await?.as_deref() == Some(local.as_str()) {
+        ops.note("the branch is already on origin; skipping the push".to_string()).await;
+    } else {
+        ops.push().await?;
+    }
+    ops.checkpoint(PublishStage::Pushed).await;
+
+    if let Some(url) = ops.existing_pr().await? {
+        ops.note(format!("a pull request is already open for this branch: {url}")).await;
+        return Ok(Published::PullRequest(url));
+    }
+    let url = ops.create_pr(&title, &body).await?;
+    ops.checkpoint(PublishStage::PrOpened).await;
+    ops.note(format!("opened pull request {url}")).await;
+    Ok(Published::PullRequest(url))
+}
+
+/// The real publish operations: host-side git on the worktree and the `gh` CLI through the hardened
+/// builders, with every checkpoint persisted on the session.
+struct GitPublishOps<'a> {
+    app: &'a App,
+    s: &'a Session,
+    log: &'a SessionLogger,
+    /// The worktree's git admin dir, and the worktree: commands run with both pinned, since the VM could
+    /// have replaced the `.git` file that would normally point at it.
+    admin: PathBuf,
+    wt: PathBuf,
+    /// The bare repo whose `origin` the push and the remote queries go through.
+    bare: PathBuf,
+    base: String,
+    session_dir: PathBuf,
+}
+
+impl GitPublishOps<'_> {
+    fn wt_git(&self) -> Command {
+        let mut c = self.app.git(&self.admin);
+        c.arg("--work-tree").arg(&self.wt);
+        c
+    }
+}
+
+impl PublishOps for GitPublishOps<'_> {
+    fn description(&self) -> (String, String) {
+        read_pr_description(&self.session_dir.join("out"), self.s)
+    }
+
+    fn trailer(&self) -> String {
+        let co_author = crate::config::FileConfig::load(&self.app.cfg.config_dir).publish.co_author;
+        commit_trailer(self.s.issue, &self.s.id, co_author)
+    }
+
+    async fn stage_all(&self) -> Result<bool> {
+        exec(self.wt_git().args(["add", "-A"])).await?;
+        Ok(!exec_status(self.wt_git().args(["diff", "--cached", "--quiet"])).await?)
+    }
+
+    async fn commit(&self, title: &str, trailer: &str) -> Result<()> {
+        let v = viewer(self.app).await?;
+        let login = v["login"].as_str().unwrap_or("colonizer");
+        let name = v["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
+        let email = format!("{}+{login}@users.noreply.github.com", v["id"]);
+        exec(
+            self.wt_git()
+                .arg("-c").arg(format!("user.name={name}"))
+                .arg("-c").arg(format!("user.email={email}"))
+                .args(["commit", "--quiet", "--no-verify", "-m"])
+                .arg(title)
+                .arg("-m")
+                .arg(trailer),
+        )
+        .await?;
+        let sha = exec(self.wt_git().args(["rev-parse", "--short", "HEAD"])).await?;
+        self.log.info(format!("committed {} as {name} <{email}>", sha.trim())).await;
+        Ok(())
+    }
+
+    async fn commits_ahead(&self) -> Result<bool> {
+        let range = format!("origin/{}..HEAD", self.base);
+        let count = exec(self.wt_git().args(["rev-list", "--count", &range]))
+            .await
+            .with_context(|| {
+                let base = &self.base;
+                format!(
+                    "could not count the branch's commits against origin/{base}: that ref is missing from the local \
+                     clone, so the base branch was probably deleted (or renamed) on GitHub and a pruned fetch dropped \
+                     it — there is no base left to open a pull request against"
+                )
+            })?;
+        Ok(count.trim() != "0")
+    }
+
+    async fn local_head(&self) -> Result<String> {
+        Ok(exec(self.wt_git().args(["rev-parse", "HEAD"])).await?.trim().to_string())
+    }
+
+    async fn remote_head(&self) -> Result<Option<String>> {
+        // Asked at origin directly, so a retry sees the branch exactly as the last attempt left it.
+        // The fully-qualified ref is the pattern, because a bare branch name tail-matches and would
+        // list sibling refs like `archive/<branch>` too.
+        let pattern = format!("refs/heads/{}", self.s.branch);
+        let out = exec(self.app.git(&self.bare).args(["ls-remote", "--heads", "origin", &pattern])).await?;
+        Ok(parse_ls_remote(&out, self.s.branch.as_str()))
+    }
+
+    async fn push(&self) -> Result<()> {
+        self.log.info(format!("pushing {} to github.com/{}", self.s.branch, self.s.repo)).await;
+        let refspec = format!("refs/heads/{0}:refs/heads/{0}", self.s.branch);
+        exec(self.app.git(&self.bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
+        Ok(())
+    }
+
+    async fn existing_pr(&self) -> Result<Option<String>> {
+        let out = exec(&mut self.app.gh([
+            "pr", "list", "-R", self.s.repo.as_str(), "--head", self.s.branch.as_str(),
+            "--state", "open", "--json", "url", "--limit", "1",
+        ]))
+        .await?;
+        let prs: Value = serde_json::from_str(&out).context("gh pr list did not return JSON")?;
+        Ok(prs.as_array().and_then(|prs| prs.first()).and_then(|pr| pr["url"].as_str()).map(String::from))
+    }
+
+    async fn create_pr(&self, title: &str, body: &str) -> Result<String> {
+        let body_path = self.session_dir.join("pr-body.md");
+        tokio::fs::write(&body_path, compose_pr_body(body, self.s.issue)).await?;
+        let draft = self.app.modules.read().await.publish.settings.get("draft").and_then(Value::as_bool).unwrap_or(false);
+        let mut create = self.app.gh([
+            "pr", "create", "-R", self.s.repo.as_str(), "--base", self.base.as_str(), "--head",
+            self.s.branch.as_str(), "--title", title, "--body-file",
+        ]);
+        create.arg(&body_path);
+        if draft {
+            create.arg("--draft");
+        }
+        let pr = exec(&mut create).await?;
+        Ok(pr.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(pr.trim()).to_string())
+    }
+
+    async fn checkpoint(&self, stage: PublishStage) {
+        record_publish_stage(self.app, &self.s.id, stage).await;
+    }
+
+    async fn note(&self, message: String) {
+        self.log.info(message).await;
+    }
+}
+
+/// The head sha of `refs/heads/<branch>` in `git ls-remote --heads` output, matched on the exact ref
+/// name: the command's pattern argument tail-matches, so querying a bare branch name can list a
+/// sibling like `archive/<branch>` too — and sorted, list it first.
+fn parse_ls_remote(out: &str, branch: &str) -> Option<String> {
+    let want = format!("refs/heads/{branch}");
+    out.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(_, r)| r.trim() == want)
+        .map(|(sha, _)| sha.trim().to_string())
+        .filter(|sha| !sha.is_empty())
+}
+
+/// Commits the worktree on the host, pushes the branch and opens the pull request. Resumably: whatever a
+/// previous attempt already got done (commit, push, pull request) is detected against git and the remote
+/// and skipped, so retrying after a failure never duplicates work. The microVM must already be gone:
+/// everything it left behind is treated as untrusted data.
 pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Published> {
     let admin = PathBuf::from(s.git_admin_dir.as_deref().context("session has no worktree yet")?);
     let base = s.base.clone().context("session has no base branch")?;
     check_publish_branch(&s.branch, &base)?;
     let wt = PathBuf::from(&s.worktree);
-    let bare = app.bare_repo(&s.repo);
-    let session_dir = app.session_dir(&s.id);
-
     restore_gitfile(&wt, &admin)?;
     for removed in strip_nested_git(&wt)? {
         log.info(format!("removed nested git metadata {}", removed.display())).await;
     }
-    let wt_git = || {
-        let mut c = app.git(&admin);
-        c.arg("--work-tree").arg(&wt);
-        c
+    let ops = GitPublishOps {
+        app,
+        s,
+        log,
+        admin,
+        wt,
+        bare: app.bare_repo(&s.repo),
+        base,
+        session_dir: app.session_dir(&s.id),
     };
-    exec(wt_git().args(["add", "-A"])).await?;
-    if exec_status(wt_git().args(["diff", "--cached", "--quiet"])).await? {
-        log.info("the agent left no changes in the worktree; nothing to publish").await;
-        return Ok(Published::NoChanges);
-    }
-
-    let (title, body) = read_pr_description(&session_dir.join("out"), s);
-    let viewer = viewer(app).await?;
-    let login = viewer["login"].as_str().unwrap_or("colonizer");
-    let name = viewer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
-    let email = format!("{}+{login}@users.noreply.github.com", viewer["id"]);
-    let co_author = crate::config::FileConfig::load(&app.cfg.config_dir).publish.co_author;
-    let trailer = commit_trailer(s.issue, &s.id, co_author);
-    exec(
-        wt_git()
-            .arg("-c").arg(format!("user.name={name}"))
-            .arg("-c").arg(format!("user.email={email}"))
-            .args(["commit", "--quiet", "--no-verify", "-m"])
-            .arg(&title)
-            .arg("-m")
-            .arg(&trailer),
-    )
-    .await?;
-    let sha = exec(wt_git().args(["rev-parse", "--short", "HEAD"])).await?;
-    log.info(format!("committed {} as {name} <{email}>", sha.trim())).await;
-
-    log.info(format!("pushing {} to github.com/{}", s.branch, s.repo)).await;
-    let refspec = format!("refs/heads/{0}:refs/heads/{0}", s.branch);
-    exec(app.git(&bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
-
-    let body_path = session_dir.join("pr-body.md");
-    tokio::fs::write(&body_path, compose_pr_body(&body, s.issue)).await?;
-    let draft = app.modules.read().await.publish.settings.get("draft").and_then(Value::as_bool).unwrap_or(false);
-    let mut create = app.gh([
-        "pr", "create", "-R", s.repo.as_str(), "--base", base.as_str(),
-        "--head", s.branch.as_str(), "--title", title.as_str(), "--body-file",
-    ]);
-    create.arg(&body_path);
-    if draft {
-        create.arg("--draft");
-    }
-    let pr = exec(&mut create).await?;
-    let url = pr.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(pr.trim()).to_string();
-    log.info(format!("opened pull request {url}")).await;
-    Ok(Published::PullRequest(url))
+    run_publish(&ops).await
 }
 
 fn read_gitdir(wt: &FsPath) -> Result<PathBuf> {
@@ -538,6 +800,19 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gh_failures_are_classified_by_what_the_user_can_do() {
+        use super::{classify, Denial};
+        // What a deleted repository, a renamed one and one this account cannot see all look like.
+        let raw = "`gh api repos/o/r --jq .default_branch` failed (exit status: 1): gh: Not Found (HTTP 404)";
+        assert_eq!(classify(raw), Some(Denial::NotVisible));
+        assert_eq!(classify("GraphQL: Could not resolve to a Repository with the name 'o/r'."), Some(Denial::NotVisible));
+        assert_eq!(classify("gh: Bad credentials (HTTP 401)"), Some(Denial::BadCredential));
+        assert_eq!(classify("gh: Resource not accessible (HTTP 403)"), Some(Denial::BadCredential));
+        // Anything else keeps its own message rather than being dressed up as an access problem.
+        assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);
+    }
+
     use super::*;
     use crate::util::short_id;
 
@@ -593,5 +868,314 @@ mod tests {
     fn attribution_inside_the_description_is_kept() {
         let body = "Fixtures generated with the claude-api mock.\n\n```\nCo-Authored-By: Colonizer <noreply@colonizer.dev>\n```";
         assert_eq!(strip_agent_attribution(body), body);
+    }
+
+    #[test]
+    fn a_pull_requests_state_comes_from_ghs_state_and_merged_fields() {
+        assert_eq!(pr_state_from("OPEN", false), Some(PrState::Open));
+        assert_eq!(pr_state_from("CLOSED", false), Some(PrState::Closed));
+        assert_eq!(pr_state_from("MERGED", false), Some(PrState::Merged));
+        // Case and surrounding whitespace are tolerated.
+        assert_eq!(pr_state_from(" open ", false), Some(PrState::Open));
+        // `merged` wins over `state`, whatever the state says.
+        assert_eq!(pr_state_from("OPEN", true), Some(PrState::Merged));
+        assert_eq!(pr_state_from("CLOSED", true), Some(PrState::Merged));
+        // An unrecognised state is no news, so a colony's status is left alone.
+        assert_eq!(pr_state_from("DRAFT", false), None);
+        assert_eq!(pr_state_from("", false), None);
+    }
+
+    // ----- run_publish against a fake repository -----
+
+    use std::cell::RefCell;
+
+    /// The branch head the fake repo reports, both locally and once pushed.
+    const LOCAL: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+    /// The commit `LOCAL` descends from: a remote head here is one a push fast-forwards.
+    const PARENT: &str = "0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a";
+    /// A remote head that shares no history with `LOCAL`: pushing over it is a non-fast-forward.
+    const DIVERGED: &str = "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0";
+    const PR_URL: &str = "https://github.com/acme/repo/pull/7";
+
+    #[derive(Default)]
+    struct State {
+        dirty: bool,
+        ahead: bool,
+        remote: Option<String>,
+        pr: Option<String>,
+        calls: Vec<&'static str>,
+        checkpoints: Vec<PublishStage>,
+        notes: Vec<String>,
+    }
+
+    /// A fake repository: the worktree and remote state a publish would see, every call recorded, and a
+    /// failure injectable at any step — including the read that decides "nothing to do".
+    struct FakeRepo {
+        state: RefCell<State>,
+        /// The step to fail: "commits_ahead", "commit", "push" or "create_pr".
+        fail_at: Option<&'static str>,
+    }
+
+    impl FakeRepo {
+        /// `dirty`: the agent left work; `ahead`: the branch carries commits; `remote`/`pr`: what a previous attempt pushed or opened.
+        fn new(dirty: bool, ahead: bool, remote: Option<&str>, pr: Option<&str>) -> Self {
+            Self {
+                state: RefCell::new(State {
+                    dirty,
+                    ahead,
+                    remote: remote.map(String::from),
+                    pr: pr.map(String::from),
+                    ..Default::default()
+                }),
+                fail_at: None,
+            }
+        }
+
+        fn failing_at(mut self, step: &'static str) -> Self {
+            self.fail_at = Some(step);
+            self
+        }
+
+        /// Clears the injected failure, as if the outage passed.
+        fn heal(&mut self) {
+            self.fail_at = None;
+        }
+
+        fn count(&self, call: &'static str) -> usize {
+            self.state.borrow().calls.iter().filter(|c| **c == call).count()
+        }
+
+        fn checkpoints(&self) -> Vec<PublishStage> {
+            self.state.borrow().checkpoints.clone()
+        }
+
+        fn noted(&self, fragment: &str) -> bool {
+            self.state.borrow().notes.iter().any(|n| n.contains(fragment))
+        }
+    }
+
+    impl PublishOps for FakeRepo {
+        fn description(&self) -> (String, String) {
+            ("Title".into(), "Body".into())
+        }
+
+        fn trailer(&self) -> String {
+            "Refs #85".into()
+        }
+
+        async fn stage_all(&self) -> Result<bool> {
+            self.state.borrow_mut().calls.push("stage_all");
+            Ok(self.state.borrow().dirty)
+        }
+
+        async fn commit(&self, _title: &str, _trailer: &str) -> Result<()> {
+            self.state.borrow_mut().calls.push("commit");
+            if self.fail_at == Some("commit") {
+                bail!("commit failed");
+            }
+            let mut state = self.state.borrow_mut();
+            state.dirty = false;
+            state.ahead = true;
+            Ok(())
+        }
+
+        async fn commits_ahead(&self) -> Result<bool> {
+            self.state.borrow_mut().calls.push("commits_ahead");
+            if self.fail_at == Some("commits_ahead") {
+                bail!("could not count the branch's commits against origin/main: fatal: ambiguous argument 'origin/main..HEAD'");
+            }
+            Ok(self.state.borrow().ahead)
+        }
+
+        async fn local_head(&self) -> Result<String> {
+            Ok(LOCAL.into())
+        }
+
+        async fn remote_head(&self) -> Result<Option<String>> {
+            Ok(self.state.borrow().remote.clone())
+        }
+
+        async fn push(&self) -> Result<()> {
+            self.state.borrow_mut().calls.push("push");
+            if self.fail_at == Some("push") {
+                bail!("push failed");
+            }
+            // Real git refuses to move a remote branch that the pushed head does not descend from, and
+            // the real push carries no `--force`: the modelled remote accepts only its own absence, the
+            // local head, or the commit the local head descends from.
+            if let Some(remote) = self.state.borrow().remote.as_deref()
+                && remote != LOCAL
+                && remote != PARENT
+            {
+                bail!("! [rejected]        colonizer/x -> colonizer/x (non-fast-forward)");
+            }
+            self.state.borrow_mut().remote = Some(LOCAL.into());
+            Ok(())
+        }
+
+        async fn existing_pr(&self) -> Result<Option<String>> {
+            self.state.borrow_mut().calls.push("existing_pr");
+            Ok(self.state.borrow().pr.clone())
+        }
+
+        async fn create_pr(&self, _title: &str, _body: &str) -> Result<String> {
+            self.state.borrow_mut().calls.push("create_pr");
+            if self.fail_at == Some("create_pr") {
+                bail!("gh pr create failed");
+            }
+            self.state.borrow_mut().pr = Some(PR_URL.into());
+            Ok(PR_URL.into())
+        }
+
+        async fn checkpoint(&self, stage: PublishStage) {
+            self.state.borrow_mut().checkpoints.push(stage);
+        }
+
+        async fn note(&self, message: String) {
+            self.state.borrow_mut().notes.push(message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_publish_commits_pushes_and_opens_the_pull_request_in_order() {
+        let repo = FakeRepo::new(true, false, None, None);
+        let Published::PullRequest(url) = run_publish(&repo).await.unwrap() else {
+            panic!("expected a pull request");
+        };
+        assert_eq!(url, PR_URL);
+        assert_eq!(repo.count("commit"), 1);
+        assert_eq!(repo.count("push"), 1);
+        assert_eq!(repo.count("create_pr"), 1);
+        assert_eq!(repo.checkpoints(), vec![PublishStage::Committed, PublishStage::Pushed, PublishStage::PrOpened]);
+        assert!(repo.noted("opened pull request"));
+    }
+
+    /// The regression from issue #85: an earlier attempt committed but failed to push, so a retry finds
+    /// nothing staged — the branch is still ahead of the base and must be pushed and published anyway.
+    #[tokio::test]
+    async fn a_committed_but_unpushed_branch_publishes_even_with_nothing_staged() {
+        let repo = FakeRepo::new(false, true, None, None);
+        let out = run_publish(&repo).await.unwrap();
+        assert!(matches!(out, Published::PullRequest(_)), "ahead of base is never a no-op");
+        assert_eq!(repo.count("commit"), 0, "the commit already exists");
+        assert_eq!(repo.count("push"), 1);
+        assert_eq!(repo.count("create_pr"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_is_retried_without_a_second_commit_or_pr() {
+        let mut repo = FakeRepo::new(true, false, None, None).failing_at("push");
+        assert!(run_publish(&repo).await.is_err());
+        assert_eq!(repo.checkpoints(), vec![PublishStage::Committed], "the reached checkpoint survives the failure");
+        repo.heal();
+        let Published::PullRequest(url) = run_publish(&repo).await.unwrap() else {
+            panic!("expected the retry to open the pull request");
+        };
+        assert_eq!(url, PR_URL);
+        assert_eq!(repo.count("commit"), 1, "the commit must not be made twice");
+        assert_eq!(repo.count("push"), 2, "the push is the step being retried");
+        assert_eq!(repo.count("create_pr"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_pr_creation_is_retried_without_recommitting_or_repushing() {
+        let mut repo = FakeRepo::new(true, false, None, None).failing_at("create_pr");
+        assert!(run_publish(&repo).await.is_err());
+        assert_eq!(repo.checkpoints(), vec![PublishStage::Committed, PublishStage::Pushed]);
+        repo.heal();
+        let Published::PullRequest(url) = run_publish(&repo).await.unwrap() else {
+            panic!("expected the retry to open the pull request");
+        };
+        assert_eq!(url, PR_URL);
+        assert_eq!(repo.count("commit"), 1);
+        assert_eq!(repo.count("push"), 1, "the remote already matches, so no second push");
+        // The failed attempt and its retry are both `create_pr` calls, but only the retry lands: the
+        // repo ends with exactly one PR, whose URL is what the second run returned.
+        assert_eq!(repo.count("create_pr"), 2);
+        assert!(repo.noted("opened pull request"), "only the retry's PR is announced");
+    }
+
+    #[tokio::test]
+    async fn an_open_pull_request_is_returned_instead_of_creating_a_second_one() {
+        let repo = FakeRepo::new(false, true, Some(LOCAL), Some(PR_URL));
+        let Published::PullRequest(url) = run_publish(&repo).await.unwrap() else {
+            panic!("expected the existing pull request's URL");
+        };
+        assert_eq!(url, PR_URL);
+        assert!(!repo.noted("opened pull request"));
+        assert_eq!(repo.count("commit"), 0);
+        assert_eq!(repo.count("push"), 0);
+        assert_eq!(repo.count("create_pr"), 0);
+        assert!(repo.noted("already open"), "the UI should say why no new PR appeared");
+    }
+
+    #[tokio::test]
+    async fn a_clean_worktree_even_with_its_base_is_a_genuine_no_op() {
+        let repo = FakeRepo::new(false, false, Some(LOCAL), None);
+        assert!(matches!(run_publish(&repo).await.unwrap(), Published::NoChanges));
+        assert_eq!(repo.count("commit"), 0);
+        assert_eq!(repo.count("push"), 0);
+        assert_eq!(repo.count("create_pr"), 0);
+        assert!(repo.noted("nothing to publish"));
+    }
+
+    /// Whatever happens, a second run must end at the same URL with one commit, one push and one PR.
+    #[tokio::test]
+    async fn publishing_twice_in_a_row_is_idempotent() {
+        let repo = FakeRepo::new(true, false, None, None);
+        let Published::PullRequest(first) = run_publish(&repo).await.unwrap() else {
+            panic!("expected a pull request");
+        };
+        let Published::PullRequest(second) = run_publish(&repo).await.unwrap() else {
+            panic!("expected the second run to find the same pull request");
+        };
+        assert_eq!(first, second);
+        assert_eq!(repo.count("commit"), 1);
+        assert_eq!(repo.count("push"), 1);
+        assert_eq!(repo.count("create_pr"), 1);
+        assert!(repo.noted("already on origin"), "the second run skipped the push");
+        assert!(repo.noted("already open"), "the second run found the open PR");
+    }
+
+    /// Real git rejects a push that does not fast-forward the remote branch — and so does the
+    /// modelled one, so a future `--force` on the real push cannot slip past this suite.
+    #[tokio::test]
+    async fn a_diverged_remote_rejects_the_push_instead_of_being_force_pushed() {
+        let repo = FakeRepo::new(true, false, Some(DIVERGED), None);
+        assert!(run_publish(&repo).await.is_err(), "a diverged remote must fail the publish loudly");
+        assert_eq!(repo.checkpoints(), vec![PublishStage::Committed]);
+        assert_eq!(repo.count("create_pr"), 0, "a rejected push must not end in a pull request");
+    }
+
+    /// An unreadable base is not evidence of nothing to do: a `commits_ahead` failure must fail the
+    /// whole publish rather than be swallowed into a `NoChanges` that quietly skips the push.
+    #[tokio::test]
+    async fn a_commits_ahead_error_fails_the_publish_rather_than_becoming_no_changes() {
+        let repo = FakeRepo::new(false, false, None, None).failing_at("commits_ahead");
+        assert!(run_publish(&repo).await.is_err());
+        assert_eq!(repo.count("commit"), 0);
+        assert_eq!(repo.count("push"), 0);
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    // ----- ls-remote parsing -----
+
+    #[test]
+    fn ls_remote_parsing_takes_the_head_of_the_named_branch() {
+        let out = format!("{LOCAL}\trefs/heads/colonizer/issue-7-ab12cd34\n");
+        assert_eq!(parse_ls_remote(&out, "colonizer/issue-7-ab12cd34").as_deref(), Some(LOCAL));
+    }
+
+    /// `git ls-remote`'s pattern tail-matches, so a remote ref ending in the branch's name can be
+    /// listed alongside it and sort first; only the exact ref name may answer.
+    #[test]
+    fn ls_remote_parsing_ignores_refs_that_merely_end_with_the_branch() {
+        let out = format!("{DIVERGED}\trefs/heads/archive/colonizer/issue-7-ab12cd34\n{LOCAL}\trefs/heads/colonizer/issue-7-ab12cd34\n");
+        assert_eq!(parse_ls_remote(&out, "colonizer/issue-7-ab12cd34").as_deref(), Some(LOCAL));
+    }
+
+    #[test]
+    fn ls_remote_parsing_of_an_absent_branch_is_none() {
+        assert_eq!(parse_ls_remote("", "colonizer/issue-7-ab12cd34"), None);
     }
 }

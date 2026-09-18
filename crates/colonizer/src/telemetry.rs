@@ -75,13 +75,20 @@ fn platform_for(os: &str, arch: &str) -> &'static str {
     }
 }
 
+/// Whether a `COLONIZER_TELEMETRY` value switches the optional senders off: `0`, `off`, `false` or
+/// `no`, case-insensitively. One helper for the live map and usage reporting, so the one environment
+/// variable means the same thing to each.
+pub(crate) fn colonizer_telemetry_off(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no"))
+}
+
 /// `DO_NOT_TRACK` (https://consoledonottrack.com) or `COLONIZER_TELEMETRY=off` keep the live map off whatever
 /// Settings says, for machines where nobody should have to remember to answer.
 fn blocked_by(do_not_track: Option<&str>, colonizer_telemetry: Option<&str>) -> Option<&'static str> {
     if do_not_track.is_some_and(|v| !matches!(v.trim(), "" | "0" | "false")) {
         return Some("DO_NOT_TRACK");
     }
-    if colonizer_telemetry.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no")) {
+    if colonizer_telemetry_off(colonizer_telemetry) {
         return Some("COLONIZER_TELEMETRY");
     }
     None
@@ -157,12 +164,12 @@ impl Telemetry {
             choice.save(&self.path)?;
             forgotten
         };
-        if let Some(id) = forgotten {
-            if let Err(e) = self.send_off(&id).await {
-                // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
-                // deleted within the hour.
-                self.report.lock().await.last_error = Some(format!("{e:#}"));
-            }
+        if let Some(id) = forgotten
+            && let Err(e) = self.send_off(&id).await
+        {
+            // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
+            // and pruned once the row is over an hour old, by the prune that rides the next request.
+            self.report.lock().await.last_error = Some(format!("{e:#}"));
         }
         self.wake.notify_one();
         Ok(())
@@ -308,6 +315,9 @@ mod tests {
         assert_eq!(blocked_by(Some(""), None), None);
         assert_eq!(blocked_by(None, Some("off")), Some("COLONIZER_TELEMETRY"));
         assert_eq!(blocked_by(None, Some("OFF")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(blocked_by(None, Some("0")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(blocked_by(None, Some("false")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(blocked_by(None, Some("No")), Some("COLONIZER_TELEMETRY"));
         assert_eq!(blocked_by(None, Some("on")), None);
     }
 
@@ -374,6 +384,22 @@ mod tests {
         assert_eq!(bodies[0], json!({"install_id": id, "version": "0.1.3", "platform": "darwin-arm64", "colonies": 1}));
         assert_eq!(bodies[1], json!({"install_id": id, "online": false}));
 
+        telemetry.set(true).await.unwrap();
+        assert_ne!(telemetry.active_id().await.unwrap(), id, "a new period on the map gets a new id");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn switching_off_forgets_the_id_even_when_the_service_is_unreachable() {
+        let dir = std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("telemetry.json");
+        let telemetry = Telemetry::with(path.clone(), "http://127.0.0.1:9".into(), None).unwrap();
+        telemetry.set(true).await.unwrap();
+        let id = telemetry.active_id().await.expect("an id once switched on");
+
+        telemetry.set(false).await.unwrap();
+        assert_eq!(telemetry.active_id().await, None);
+        assert_eq!(Choice::load(&path), Choice { enabled: Some(false), install_id: None }, "forgotten on disk although the goodbye never arrived");
         telemetry.set(true).await.unwrap();
         assert_ne!(telemetry.active_id().await.unwrap(), id, "a new period on the map gets a new id");
         std::fs::remove_dir_all(&dir).unwrap();

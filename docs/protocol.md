@@ -179,13 +179,13 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}` — sticky, set by the first failed write and cleared only by a restart |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
-| `POST /api/sessions/{id}/publish` | Stop the agent, commit (co-authored by Colonizer), push the colony's own `colonizer/…` branch (never the base or default branch), open PR |
+| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one — so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` — worktree kept — and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
@@ -198,13 +198,16 @@ Module `schema` is a JSON Schema subset (also used for `settings` in agent `modu
 {
   "type": "object",
   "properties": {
-    "image":  { "type": "string",  "title": "Image", "description": "glibc-based OCI image", "default": "node:24-bookworm" },
+    "image":  { "type": "string",  "title": "Image", "description": "glibc-based OCI image, pinned by digest", "default": "node:24-bookworm@sha256:6dac556d…" },
     "cpus":   { "type": "integer", "title": "vCPUs", "minimum": 1, "maximum": 64, "default": 4 },
     "model":  { "type": "string",  "title": "Model", "enum": ["", "opus", "sonnet", "haiku"], "default": "" },
     "draft":  { "type": "boolean", "title": "Open PRs as drafts", "default": false }
   }
 }
 ```
+
+Digests in these examples are cut short on purpose: the exact hex a release boots lives in
+`crates/colonizer/images.lock`, and quoting a full one here would only rot the next time a pin bumps.
 
 Supported property keys: `type` (`string` | `integer` | `number` | `boolean`), `title`, `description`,
 `default`, `enum` (renders a select), `minimum`, `maximum`. `settings` holds the current values;
@@ -215,16 +218,22 @@ missing values mean the `default`.
 ```json
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
-  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|no_changes|stopped|failed",
+  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|merged|closed|no_changes|stopped|failed",
   "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
-  "pr_url": null, "error": null, "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null,
-  "cleaned_up": false,
+  "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
+  "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
 }
 ```
+
+`publish_stage` records how far the last publish got — committed, pushed or pr_opened — so a retry
+finishes from where it stopped and browsers can show the progress. It is left out until a publish
+commits something, kept in place when a publish fails part-way, and cleared when a publish finds no
+changes; the publish re-derives the truth from git and origin, so the field is the record, not the
+authority.
 
 `boot_timing` is where the last launch's time went, filled in when the colony finishes booting and
 replaced on resume. The phases are consecutive spans in boot order and partition the launch, so they
@@ -313,6 +322,17 @@ runs it daily, stages the result with `VENDOR_KINDS=plugin scripts/fetch-vendor.
 stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request — or, while the repository
 doesn't let GitHub Actions open pull requests, keeps an issue open with the same description and a link to
 open it. It never merges.
+
+**Keeping the runtime pins current.** The same model covers the two runtime locks:
+`crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest —
+one pin serves both linux/amd64 and linux/arm64 colonies, and the lock is compiled into the mothership —
+and `vendor/claude-code.lock`, which pins the Linux Claude Code build colonies run by version and sha256.
+`scripts/update-runtime-pins.mjs` checks both upstreams, the registry's manifest API for the images and
+Anthropic's `stable` channel for Claude Code, and stages the newly pinned Claude Code build through
+`scripts/fetch-agent-binary.sh`, so an update that fails the checksum check a real install does never
+becomes a proposal. `.github/workflows/runtime-pin-updates.yml` runs it daily, pushes `runtime/pin-updates`,
+and opens a pull request — or keeps an issue open with a link, the way the vendored plugins do. It never
+merges: a pin bump changes what every release runs.
 
 **Skillsets are switches, all off by default.** Settings shows the `claude-code` module's `plugins`
 setting (schema `"format": "plugin-dirs"`) as one switch per plugin directory from `GET /api/plugins`,
@@ -405,18 +425,74 @@ It runs inside the colony and never on the mothership: repository content is att
 the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
 reported and treated as no findings — a broken scanner must not be able to halt every colony.
 
+### `GET /api/version`
+
+What this mothership was built from, stamped in at build time by `crates/colonizer/build.rs`:
+
+```json
+{"version":"v0.1.4","commit":"1367191…","dirty":false,"built_at":"2026-09-17T17:21:32Z","release":"v0.1.4"}
+```
+
+`version` is `git describe --tags --always --dirty`, so a build after a tag reads `v0.1.4-12-gabc1234`.
+`release` is the last release tag the build contains, which is what an update is compared against. A
+build from a source package with no git history reports the crate version and no commit. `built_at`
+honours `SOURCE_DATE_EPOCH`, so a release can still be built reproducibly.
+
+### `GET /api/update` and `PUT /api/update`
+
+Whether a newer release exists. **On by default**; `PUT {"enabled": false}` turns it off, and
+`COLONIZER_UPDATE_CHECK=0` keeps it off from the environment (reported as `blocked_by`).
+
+The check asks GitHub for the latest release of `Colonizer-dev/harness` a minute after start and every
+six hours after that, and only while it is on: switched off, the mothership makes no request for it,
+and forgets the last answer so no banner lingers. Drafts and prereleases are ignored. The request
+carries a user agent and nothing about the install — the live map is separate, and off until switched
+on (`telemetry.md`). `COLONIZER_RELEASES_URL` points the check elsewhere, for a fork or a test.
+
+```json
+{"enabled":true,"blocked_by":null,"installed":{…},"latest":{"version":"v0.1.5","url":"…","notes":"…","published_at":"…"},
+ "available":true,"last_checked":"…","error":null}
+```
+
+`available` is true only when `latest` parses as a release newer than `installed.release`. A build
+whose version cannot be placed is never told it is behind.
+
+`apply` reports an update being installed: `phase` is `idle`, `installing`, `restarting` or `failed`,
+with the installer's output and a line per live colony. `can_apply` says whether this install can update
+itself at all — a source checkout cannot, and says so.
+
+### `POST /api/update/apply`
+
+Installs the latest release and restarts into it. Answers as soon as the work starts.
+
+It runs `scripts/install-release.sh` from inside the app — the same installer a person would run — so the
+download, its checksum and the symlink swap are not reimplemented. A failure leaves the running version
+untouched, because the installer unpacks beside it and moves the symlink last.
+
+Refused with `409` when a colony is `publishing`: its microVM is already gone and the host is committing
+and pushing, and interrupting that leaves the colony failed with its pull request unopened. A colony that
+is merely working does not hold an update — it is detached, and `sessions::recover` reconnects it.
+
+The installer is run with `COLONIZER_KEEP_PREVIOUS=1`, because colonies mount vendored plugins out of the
+app directory this mothership started from (`resolve_assets` canonicalises the symlink away), and taking
+it out from under them would take their plugins too. Each session records that directory as `app_slot`;
+at the next start, once recovery has settled, a kept directory is removed if no live colony still names
+it.
+
 ### `POST /api/sandbox/pull` and `GET /api/sandbox/pull`
 
 Downloads the configured colony image (after the stack preset) into microsandbox's cache, so a launch
 boots instead of waiting on a registry. Settings calls `POST` when the sandbox module is saved, which
-is the moment a stack is chosen.
+is the moment a stack is chosen. The image is the preset's reference pinned by digest —
+`crates/colonizer/images.lock`, compiled into the mothership — so the cache ends up with the exact
+bytes the release was tested with. An image set by hand with no lock row boots as written.
 
 `POST` returns at once — a cold pull of `node:24-bookworm` measured 108 s, too long to hold a request
 open — and the download runs in the background. Calling it again while the same image is pulling
 returns the running pull rather than starting a second. `GET` returns the most recent status:
 
 ```json
-{"image": "python:3.13-bookworm", "state": "pulling", "started_at": "…", "finished_at": null, "error": null}
+{"image": "python:3.13-bookworm@sha256:933b46a0…", "state": "pulling", "started_at": "…", "finished_at": null, "error": null}
 ```
 
 `state` is `idle`, `cached` (already local, nothing done), `pulling`, `done` or `failed`.

@@ -280,4 +280,14 @@ mod tests {
     fn an_empty_cache_matches_nothing() {
         assert!(!matches_cache("node:24-bookworm", &cache(&[])));
     }
+
+    #[test]
+    fn a_digest_reference_matches_only_its_exact_cache_entry() {
+        let pinned = "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0";
+        assert!(matches_cache(pinned, &cache(&[pinned])));
+        // A digest reference contains ':', so it never falls back to :latest —
+        // or to the plain tag the digest was pinned from.
+        assert!(!matches_cache(pinned, &cache(&["node:latest"])));
+        assert!(!matches_cache(pinned, &cache(&["node:24-bookworm"])));
+    }
 }

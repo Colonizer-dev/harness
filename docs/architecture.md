@@ -4,6 +4,11 @@ Colonizer turns a task (a GitHub issue today) into a pull request by running a c
 inside a disposable microVM, with a web UI to watch, answer the agent's questions, and open a
 terminal in the VM.
 
+Colonizer runs on Linux x86_64 with `/dev/kvm` readable and writable, or an Apple Silicon Mac. An
+Intel Mac can't run it, because microsandbox's libkrun backend is aarch64-only. On Linux the host
+also needs glibc 2.28 or newer, which the pinned microsandbox binary requires.
+[docs/install.md](install.md) has the rest.
+
 ```mermaid
 flowchart TB
   browser["browser"]
@@ -52,11 +57,11 @@ editable in Settings → Modules). A module kind has one active provider:
 | Kind | Providers (v1) | Responsibility |
 | --- | --- | --- |
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
-| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image and machine size; explicit settings override it |
+| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
-| `publish` | `github-pr` | Commit on the host, push, open the pull request |
+| `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 
@@ -92,7 +97,7 @@ stateDiagram-v2
   Interact --> Stopped: microVM gone, or a limit passed
   Stopped --> Queued: Resume past the limit
   Stopped --> Boot: Resume, same worktree
-  Publish --> [*]: VM removed, then host commits and pushes
+  Publish --> [*]: VM removed, then the host publishes the branch
 ```
 
 0. **Queued** – a colony launched past the parallel limit (global, or the org's own) is created
@@ -113,9 +118,13 @@ stateDiagram-v2
    sends follow-ups, and opens terminals (`/v1/pty`) — all over the mesh.
 5. **Publish** – "Create PR", or autopilot (the `publish` module's `autopilot` setting, on by default)
    when a turn ends without an error or open question and the agent wrote or updated `pr.md` during
-   it: agentd shuts the runner down, the VM is removed, and the host commits (co-authored by Colonizer),
-   pushes the colony's own `colonizer/…` branch and opens the PR with the hardened publish step. It
-   refuses to push anything else, checked before the VM is removed. A turn that ends with an error
+   it: agentd shuts the runner down, the VM is removed, and the host publishes with the hardened
+   publish step — committing (co-authored by Colonizer) only what is uncommitted, pushing the colony's
+   own `colonizer/…` branch only when origin is behind it, and reusing a pull request that is already
+   open for the branch instead of opening a second one. It refuses to push anything else, checked
+   before the VM is removed. A publish that fails part-way leaves the colony `failed`, and it can be
+   published again from there — the kept worktree and the remote are enough, no new microVM — with the
+   remaining steps picked up where the attempt stopped. A turn that ends with an error
    (not an interrupt) holds autopilot and flags the colony (`autopilot_held`). The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
@@ -149,7 +158,9 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
   (microsandbox `host` network profile).
 - The harness node is a separate userspace `tailscaled` (own state dir, socket under
   `/run/user/<uid>/colonizer/`, fixed UDP port, `--no-logs-no-support`). It never touches the
-  system tailscaled or the user's tailnet.
+  system tailscaled or the user's tailnet. Tailscale publishes no macOS `tailscaled`, so on a Mac the
+  bundled one is built from the source pinned in `vendor/vendor.lock` (`scripts/build-tailscaled.sh`);
+  on Linux it comes from upstream's tgz.
 - VMs get one narrow extra rule, `allow@<host-lan-ip>:udp:<harness-udp-port>`, so WireGuard
   connects directly (≈1 ms) instead of through a public DERP relay. LAN access stays blocked.
 - Users: `harness` and `vms`. Policy: `harness@` may reach `vms@:*`; VMs cannot reach each other.
@@ -167,6 +178,9 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 - agentd requires a per-session bearer token even inside the private mesh.
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
 
+The external audit of v0.1.3 checked these boundaries against the code; its findings and the
+release checkpoints are in [audit.md](audit.md).
+
 ## Packaging
 
 `scripts/install.sh` produces a self-contained app directory (`COLONIZER_HOME`, default
@@ -175,11 +189,16 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 ```
 bin/colonizer            host server
 bin/colonizer-agentd             static musl build (built in a rust:alpine microVM)
+bin/claude-guest                 Mac only: linux-arm64 Claude Code, fetched at install time (the host's own binary is Mach-O)
 vendor/headscale              pinned + sha256-verified (vendor/vendor.lock)
-vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified
+vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified (built from source on a Mac)
 vendor/derpmap.yaml           DERP relay map snapshot (committed)
 modules/agents/claude-code/   runner + production node_modules
 web/                          built UI
+claude-code.lock              guest Claude Code pin: version + sha256 per platform, read at install
+images.lock                   each preset's colony image pinned by OCI digest (also compiled in)
 ```
 
-Nothing is downloaded at runtime.
+Two things arrive lazily rather than with the install: the colony image, pulled by digest the first
+time it is needed (`--pull-image` does it at install time), and the Headroom bundle when Headroom is
+switched on. Each is checked against a pin before use.

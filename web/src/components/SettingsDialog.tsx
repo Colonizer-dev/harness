@@ -13,9 +13,9 @@ import { errorMessage, useApi, useToast } from "../context";
 import type {
   HarnessStatus,
   HeadroomStatus,
+  LoginView,
   Mem0Check,
   Mem0Status,
-  LoginView,
   ModelOption,
   ModelProvider,
   ModuleInfo,
@@ -28,6 +28,8 @@ import type {
   PullStatus,
   SchemaField,
   TelemetryStatus,
+  UpdateStatus,
+  UsageStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
@@ -55,14 +57,14 @@ import {
   type IconProps,
 } from "./icons";
 import { SkillsetField } from "./Skillsets";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, useMediaQuery, type Tone } from "./ui";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, meshBroken, timeAgo, type Tone, useMediaQuery } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "connections" | "providers" | "runtime" | "live-map" | `module:${string}`;
+export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -94,6 +96,8 @@ export function SettingsDialog({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  usage,
+  onUsageChanged,
   initialSection,
 }: {
   open: boolean;
@@ -103,6 +107,8 @@ export function SettingsDialog({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  usage: UsageStatus | null;
+  onUsageChanged: (usage: UsageStatus) => void;
   /** The section to open on, instead of the first. */
   initialSection?: SectionId;
 }) {
@@ -129,6 +135,8 @@ export function SettingsDialog({
           onModulesChanged={onModulesChanged}
           telemetry={telemetry}
           onTelemetryChanged={onTelemetryChanged}
+          usage={usage}
+          onUsageChanged={onUsageChanged}
           initialSection={initialSection}
           onClose={onClose}
         />
@@ -143,6 +151,8 @@ function SettingsBody({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  usage,
+  onUsageChanged,
   initialSection,
   onClose,
 }: {
@@ -151,6 +161,8 @@ function SettingsBody({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  usage: UsageStatus | null;
+  onUsageChanged: (usage: UsageStatus) => void;
   initialSection?: SectionId;
   onClose: () => void;
 }) {
@@ -169,7 +181,20 @@ function SettingsBody({
   const [drafts, setDrafts] = useState<Record<string, ModuleDraft>>({});
   const [providers, setProviders] = useState<ModelProvider[] | null>(null);
   const [providersError, setProvidersError] = useState<string | null>(null);
+  // Fetched here rather than threaded through App: nothing outside Settings needs it.
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const models = useModels();
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .update()
+      .then((u) => !cancelled && setUpdate(u))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,7 +229,7 @@ function SettingsBody({
   const github = status?.github;
   const claude = status?.claude;
   const connectionsTone: Tone | null = !status ? null : github?.connected && claude?.configured ? "ok" : "err";
-  const runtimeBroken = Boolean(status && (!status.sandbox.msb_version || status.sandbox.claude_bin_error || status.mesh?.error));
+  const runtimeBroken = Boolean(status && (!status.sandbox.msb_version || status.sandbox.claude_bin_error || meshBroken(status.mesh)));
 
   const groups: NavGroup[] = [
     {
@@ -231,6 +256,20 @@ function SettingsBody({
           hint: "This mothership as a dot on colonizer.dev",
           badge: telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
         },
+        {
+          id: "updates",
+          label: "Updates",
+          hint: "Which Colonizer this is, and whether a newer one is out",
+          tone: update?.available ? "ok" : null,
+          toneText: update?.available ? `${update.latest?.version} available` : undefined,
+          badge: update && !update.available ? update.installed.version : undefined,
+        },
+        {
+          id: "usage",
+          label: "Usage data",
+          hint: "An anonymous batch, built here and shown — nothing is sent yet",
+          badge: usage ? (usage.enabled ? "On" : "Off") : undefined,
+        },
       ],
     },
     {
@@ -253,6 +292,8 @@ function SettingsBody({
   if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
+  else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
+  else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -554,8 +595,77 @@ function Code({ children }: { children: ReactNode }) {
 
 const IDLE_LOGIN: LoginView = { state: "idle", url: null, message: null };
 
+/**
+ * A remote account avatar, next to the login row. Same tile as a provider mark; the
+ * panel background keeps it a quiet square if the image is missing or fails to load.
+ * Decorative: `alt=""`, the login is already shown as text.
+ */
+function Avatar({ src }: { src: string }) {
+  return (
+    <img
+      src={src}
+      alt=""
+      width={32}
+      height={32}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      className="size-8 shrink-0 select-none rounded-lg bg-panel-2 object-cover"
+    />
+  );
+}
+
+/**
+ * The saved Claude credential's provenance, under the login buttons: why the account
+ * may not be identified, and when the token dies. Anthropic does not report an expiry,
+ * so an estimated one says "about"; past, or within 30 days, it turns into a warning.
+ */
+function ClaudeCredential({ claude }: { claude: HarnessStatus["claude"] }) {
+  const asDate = (ts: string | null | undefined) => {
+    if (!ts) return null;
+    const date = new Date(ts);
+    return isNaN(date.getTime()) ? null : date;
+  };
+  const savedAt = asDate(claude.saved_at);
+  const expiresAt = asDate(claude.expires_at);
+  const msLeft = expiresAt ? expiresAt.getTime() - Date.now() : null;
+  const expired = msLeft != null && msLeft <= 0;
+  const daysLeft = msLeft != null && msLeft > 0 ? msLeft / 86_400_000 : null;
+  const expiringSoon = daysLeft != null && daysLeft <= 30;
+  return (
+    <div className="space-y-1 text-[12.5px] [overflow-wrap:anywhere]">
+      {claude.account_note && <p className="text-muted">{claude.account_note}</p>}
+      {(savedAt || expiresAt) && (
+        <p className="text-muted">
+          {savedAt && <span>Saved {savedAt.toLocaleDateString()}</span>}
+          {savedAt && expiresAt && " · "}
+          {expiresAt &&
+            (expired ? (
+              <span className="text-err">
+                {claude.expires_estimated ? "estimated expiry passed " : "expired "}
+                {timeAgo(claude.expires_at)}
+              </span>
+            ) : (
+              <span className={cx(expiringSoon && "text-warn")}>
+                expires {claude.expires_estimated ? "about " : ""}
+                {expiresAt.toLocaleDateString()}
+              </span>
+            ))}
+        </p>
+      )}
+      {expiringSoon && daysLeft != null && (
+        <div>
+          <Badge tone="warn">
+            Expires in {Math.ceil(daysLeft)} day{Math.ceil(daysLeft) === 1 ? "" : "s"}
+          </Badge>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConnectionCard({
   name,
+  mark,
   connected,
   detail,
   detailTone,
@@ -563,6 +673,8 @@ function ConnectionCard({
   children,
 }: {
   name: string;
+  /** Optional tile at the front of the header row, e.g. an account avatar. */
+  mark?: ReactNode;
   connected: boolean | null;
   detail?: string;
   detailTone?: "err";
@@ -572,6 +684,7 @@ function ConnectionCard({
   return (
     <div className="rounded-xl border border-border">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3">
+        {mark}
         <span className="flex items-center gap-1 text-[14px] font-semibold">
           {name}
           <InfoButton label={name}>{info}</InfoButton>
@@ -683,6 +796,7 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"
+          mark={github?.connected && github.avatar_url ? <Avatar src={github.avatar_url} /> : undefined}
           connected={github ? github.connected : null}
           detail={github?.connected ? `@${github.login} · ${github.source}` : github?.error?.split("\n")[0]}
           detailTone={github && !github.connected ? "err" : undefined}
@@ -708,13 +822,16 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
         <ConnectionCard
           name="Claude"
           connected={claude ? claude.configured : null}
-          detail={claude?.configured ? claude.source ?? undefined : undefined}
+          detail={claude?.configured ? [claude.account ?? "account not identified", claude.source].filter(Boolean).join(" · ") : undefined}
           info={
             <>
               <p>
                 Log in runs <Code>claude setup-token</Code> on the Mothership (this machine) and saves a 1-year token here.
               </p>
               <p className="text-muted">microVMs only ever see a placeholder; the real token is swapped in for requests to api.anthropic.com.</p>
+              <p className="text-muted">
+                Anthropic does not report an expiry, so the harness shows the documented 1-year lifetime as an estimate.
+              </p>
             </>
           }
         >
@@ -726,6 +843,8 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
               Remove saved token
             </Button>
           </div>
+
+          {claude && claude.configured && <ClaudeCredential claude={claude} />}
 
           {login.state !== "idle" && (
             <div role="status" className="space-y-3 rounded-lg border border-dashed border-border-strong p-3.5">
@@ -836,10 +955,12 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
           label: "Mesh",
           value: status.mesh
             ? status.mesh.enabled
-              ? [status.mesh.provider, status.mesh.state, status.mesh.harness_ip, status.mesh.error].filter(Boolean).join(" · ")
+              ? [status.mesh.provider, status.mesh.state, status.mesh.harness_ip, status.mesh.detail, status.mesh.error]
+                  .filter(Boolean)
+                  .join(" · ")
               : "disabled"
             : "—",
-          bad: Boolean(status.mesh?.error),
+          bad: meshBroken(status.mesh),
         },
       ]
     : [];
@@ -862,6 +983,193 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
         </dl>
       ) : (
         <p className="text-[13px] text-muted">Mothership status unavailable.</p>
+      )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Updates: which Colonizer this is, and whether a newer release is out (#45)
+// ---------------------------------------------------------------------------
+
+/// How far behind the running build is: the gap between when it was built and
+/// when the newer release came out. Null when the release carries no date.
+function daysBehind(builtAt: string, publishedAt: string | null): number | null {
+  if (!publishedAt) return null;
+  const gap = Date.parse(publishedAt) - Date.parse(builtAt);
+  if (!Number.isFinite(gap) || gap <= 0) return null;
+  return Math.floor(gap / 86_400_000);
+}
+
+/// One sentence about the gap, with the release date in it once.
+function behindLabel(builtAt: string, publishedAt: string | null): string | null {
+  const days = daysBehind(builtAt, publishedAt);
+  if (days === null || !publishedAt) return null;
+  const on = new Date(publishedAt).toLocaleDateString();
+  if (days < 1) return `Released ${on}, the same day as the build you are running.`;
+  return `Released ${on}, ${days} day${days === 1 ? "" : "s"} after the build you are running.`;
+}
+
+function UpdatesPane({
+  update,
+  onChanged,
+  back,
+}: {
+  update: UpdateStatus | null;
+  onChanged: (update: UpdateStatus) => void;
+  back?: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const [applying, setApplying] = useState(false);
+
+  // While an update is being applied the process is about to be replaced, so the
+  // pane follows it until the answer stops coming.
+  useEffect(() => {
+    const phase = update?.apply.phase;
+    if (phase !== "installing" && phase !== "restarting") return;
+    const timer = setInterval(() => {
+      api
+        .update()
+        .then(onChanged)
+        .catch(() => {});
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [api, onChanged, update?.apply.phase]);
+
+  const install = async () => {
+    setApplying(true);
+    try {
+      await api.applyUpdate();
+      onChanged(await api.update());
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const set = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setUpdateCheck(enabled));
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const info = (
+    <p>
+      While it is on, the Mothership asks GitHub every few hours whether a newer release of
+      Colonizer-dev/harness is out. The request says nothing about this install; the live map is separate
+      and off until you switch it on.
+    </p>
+  );
+
+  return (
+    <Pane title="Updates" subtitle="Which Colonizer this is, and whether a newer one is out" info={info} back={back}>
+      {!update ? (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px]">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className="font-semibold text-[13px]">{update.installed.version}</span>
+              {update.installed.dirty && <Badge tone="warn">built from a modified tree</Badge>}
+            </div>
+            <p className="mt-1 text-muted">
+              {update.installed.commit ? (
+                <>
+                  commit <Code>{update.installed.commit.slice(0, 7)}</Code>,{" "}
+                </>
+              ) : null}
+              built {new Date(update.installed.built_at).toLocaleString()}
+              {update.installed.release && update.installed.release !== update.installed.version
+                ? ` (after ${update.installed.release})`
+                : ""}
+            </p>
+          </div>
+
+          {update.available && update.latest && (
+            <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-[12.5px]">
+              <p className="font-semibold text-[13px]">Colonizer {update.latest.version} is available</p>
+              {behindLabel(update.installed.built_at, update.latest.published_at) && (
+                <p className="text-muted">{behindLabel(update.installed.built_at, update.latest.published_at)}</p>
+              )}
+              {update.latest.notes && (
+                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-[12.5px] text-muted">
+                  {update.latest.notes}
+                </pre>
+              )}
+              <a className="mt-1.5 inline-flex items-center gap-1 text-accent hover:underline" href={update.latest.url} target="_blank" rel="noreferrer">
+                Release notes <IconExternal size={12} />
+              </a>
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  disabled={applying || !update.can_apply.ok || update.apply.phase === "installing" || update.apply.phase === "restarting"}
+                  onClick={() => void install()}
+                >
+                  {update.apply.phase === "installing" || update.apply.phase === "restarting" ? <Spinner /> : null}
+                  {update.apply.phase === "installing"
+                    ? "Installing…"
+                    : update.apply.phase === "restarting"
+                      ? "Restarting…"
+                      : `Update to ${update.latest.version}`}
+                </Button>
+                {!update.can_apply.ok && <span className="text-muted">{update.can_apply.reason}</span>}
+              </div>
+              {update.apply.phase === "restarting" && (
+                <p className="mt-1.5 text-muted">
+                  Installed. The Mothership is restarting into it; colonies keep their microVMs and reconnect.
+                </p>
+              )}
+              {update.apply.colonies.length > 0 && update.apply.phase !== "idle" && (
+                <ul className="mt-1.5 space-y-0.5 text-muted">
+                  {update.apply.colonies.map((c) => (
+                    <li key={c.id}>
+                      {c.repo} — {c.outcome}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {update.apply.phase === "failed" && update.apply.error && (
+                <p className="mt-1.5 text-err">
+                  Update failed, and the running version is untouched: {update.apply.error}
+                </p>
+              )}
+            </div>
+          )}
+
+          <Row id="update-check-switch" label="Check for new releases" inline>
+            <Switch
+              id="update-check-switch"
+              labelledBy="update-check-switch-label"
+              label="Check for new releases"
+              checked={update.enabled}
+              disabled={saving || update.blocked_by !== null}
+              onChange={(checked) => void set(checked)}
+            />
+          </Row>
+
+          {update.blocked_by && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              Kept off by <Code>{update.blocked_by}</Code> in the Mothership’s environment.
+            </p>
+          )}
+          {!update.enabled && !update.blocked_by && (
+            <p className="text-[12.5px] text-muted">Off: the Mothership makes no request to GitHub about releases.</p>
+          )}
+          {update.error && <p className="text-[12.5px] text-err">Last check failed: {update.error}</p>}
+          {update.enabled && update.last_checked && !update.error && (
+            <p className="text-[12.5px] text-faint">Last checked {new Date(update.last_checked).toLocaleString()}.</p>
+          )}
+        </div>
       )}
     </Pane>
   );
@@ -903,7 +1211,10 @@ function LiveMapPane({
         While it is on, the Mothership sends a heartbeat every 5 minutes, and within a minute when the number of running colonies changes.
         colonizer.dev/live shows a dot for its area, about 25 km across, lit while colonies run.
       </p>
-      <p>Switching it off takes the dot away at once and forgets the random id, so a later period on the map can’t be tied to this one.</p>
+      <p>
+        Switching it off takes the dot away at once and forgets the random id, so a later period on the map can’t be tied to this
+        one. The id is forgotten even if the service can’t be reached; then the dot goes out within 12 minutes instead of at once.
+      </p>
     </>
   );
 
@@ -941,7 +1252,8 @@ function LiveMapPane({
             </pre>
             <p className="mt-2 text-[12.5px] text-muted">
               Nothing else: no repositories, issues, code, names or paths. The service sees this machine’s IP address, as any website
-              would, turns it into a 25 km area and doesn’t store it. Heartbeats are kept for an hour at most.
+              would, turns it into a 25 km area and doesn’t store it. A heartbeat stops counting 12 minutes after it arrives, and
+              its row is deleted about an hour after arrival, once anything else reaches the service. If this is the only mothership in its area, that dot is this one.
             </p>
           </div>
           {telemetry.enabled && (telemetry.last_sent_at || telemetry.last_error) && (
@@ -958,6 +1270,89 @@ function LiveMapPane({
             <a className="inline-flex items-center gap-1 text-accent hover:underline" href={TELEMETRY_DOCS} target="_blank" rel="noreferrer">
               How it works <IconExternal size={12} />
             </a>
+          </div>
+        </div>
+      )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Usage data: the anonymous batch a sender would one day transmit — on by default, shown in full
+// ---------------------------------------------------------------------------
+
+function UsagePane({
+  usage,
+  onChanged,
+  back,
+}: {
+  usage: UsageStatus | null;
+  onChanged: (usage: UsageStatus) => void;
+  back?: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+
+  const set = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setUsage(enabled));
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const info = (
+    <>
+      <p>
+        The batch is built on this machine and shown here, and that is all this release does: it has no sender — no endpoint, no
+        background loop, no network call. A later one may carry the batch, composed from Cratefield’s module-telemetry.
+      </p>
+      <p>The batch carries a fresh random id while it is on — which is the default — and switching it off forgets that id, so a later period could never be tied to this one.</p>
+    </>
+  );
+
+  return (
+    <Pane title="Usage data" subtitle="An anonymous batch, collected and shown here only — nothing is sent" info={info} back={back}>
+      {!usage ? (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          <Row id="usage-switch" label="Allow an anonymous usage batch" inline>
+            <Switch
+              id="usage-switch"
+              labelledBy="usage-switch-label"
+              label="Allow an anonymous usage batch"
+              checked={usage.enabled}
+              disabled={saving || usage.blocked_by !== null}
+              onChange={(checked) => void set(checked)}
+            />
+          </Row>
+          {usage.blocked_by && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              Kept off by <Code>{usage.blocked_by}</Code> in the Mothership’s environment.
+            </p>
+          )}
+          <p className="text-[12.5px] text-muted">
+            On by default, and nothing is sent yet: this build only collects the batch and shows it here. Switch it off here or with{" "}
+            <Code>colonizer telemetry off</Code>; the Mothership’s environment can also hold it off whatever this switch says —{" "}
+            <Code>COLONIZER_TELEMETRY=0</Code>, <Code>DO_NOT_TRACK=1</Code> or <Code>CI=true</Code>.
+          </p>
+          <div>
+            <h4 className="mb-1.5 text-[12.5px] font-semibold">The whole batch</h4>
+            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-[12px] leading-5">
+              {JSON.stringify(usage.batch, null, 2)}
+            </pre>
+            <p className="mt-2 text-[12.5px] text-muted">
+              Every byte a sender would transmit, verbatim — <Code>usage_id</Code> is <Code>null</Code> while the switch is off. Nothing
+              else is in it: no repository, branch or issue names, no paths, no prompts or agent output, no tokens or URLs, and no setting
+              values — setting names only.
+            </p>
           </div>
         </div>
       )}
@@ -1990,7 +2385,7 @@ function ClaudeRow({ claude, models, onOpenConnections }: { claude: HarnessStatu
           {claude && <Badge tone={claude.configured ? "ok" : "err"}>{claude.configured ? "Connected" : "Not connected"}</Badge>}
         </div>
         <div className="mt-0.5 text-[12px] text-muted">
-          {claude?.configured ? `${claude.source ?? "Connected"} · managed in Connections` : "Managed in Connections"}
+          {claude?.configured ? [claude.account, claude.source ?? "Connected", "managed in Connections"].filter(Boolean).join(" · ") : "Managed in Connections"}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
           {own.length === 0 ? (

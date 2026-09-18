@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import type { Attention, ModelOption, Session, SessionStatus } from "../types";
+import type { Attention, HarnessStatus, ModelOption, Session, SessionStatus } from "../types";
 import { IconAlert, IconInfo } from "./icons";
 
 export function cx(...classes: (string | false | null | undefined)[]): string {
@@ -72,7 +72,9 @@ export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; 
   waiting_for_answer: { label: "Needs your answer", tone: "accent", live: true },
   idle: { label: "Idle", tone: "neutral", live: true },
   publishing: { label: "Opening PR", tone: "info", live: false },
-  pr_opened: { label: "PR opened", tone: "ok", live: false },
+  pr_opened: { label: "PR opened", tone: "info", live: false },
+  merged: { label: "PR merged", tone: "ok", live: false },
+  closed: { label: "PR closed", tone: "neutral", live: false },
   no_changes: { label: "No changes", tone: "warn", live: false },
   stopped: { label: "Stopped", tone: "neutral", live: false },
   failed: { label: "Failed", tone: "err", live: false },
@@ -81,6 +83,32 @@ export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; 
 /** Sessions whose microVM is up. */
 export function isLive(status: SessionStatus): boolean {
   return SESSION_STATUS[status]?.live ?? false;
+}
+
+/** Whether the mesh is actually broken, as opposed to unavailable on this platform.
+ *
+ *  A Mac vendors no `tailscaled`, so the mothership reports `state: "unavailable"` and colonies use a
+ *  loopback port (#32). That is by design and must not read as a fault — it used to, because every
+ *  reader tested `mesh.error` and the payload put the explanation there. Kept in one place so the
+ *  sidebar dot, the Settings nav and the Runtime row cannot disagree. */
+export function meshBroken(mesh: HarnessStatus["mesh"]): boolean {
+  if (!mesh || !mesh.enabled) return false;
+  if (mesh.state === "unavailable") return false;
+  return mesh.state === "error" || Boolean(mesh.error);
+}
+
+/** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone.
+ *  Mirrors `has_room`'s busy closure in crates/colonizer/src/sessions.rs; keep the two in step. */
+export function occupiesSlot(status: SessionStatus): boolean {
+  return isLive(status) || status === "publishing";
+}
+
+/** Statuses the publish endpoint accepts: live colonies, plus stopped, failed and no-changes ones whose worktree can still be finished. */
+const PUBLISHABLE: SessionStatus[] = ["running", "waiting_for_answer", "idle", "stopped", "failed", "no_changes"];
+
+/** Whether publishing this colony is possible: it kept its worktree (`git_admin_dir`, the server's own condition) and its status is one the endpoint reconciles — mirrored from the server, so the button never offers a publish that would 409. */
+export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git_admin_dir">): boolean {
+  return !session.cleaned_up && session.git_admin_dir != null && PUBLISHABLE.includes(session.status);
 }
 
 export function StatusBadge({ status }: { status: SessionStatus }) {

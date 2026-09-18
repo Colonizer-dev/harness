@@ -29,17 +29,22 @@ so its chat and a real terminal are one hop away. When the agent needs you, it a
 When the work is done, your machine, the **mothership**, commits it and opens the pull request.
 
 This repository is the open-source core, MIT, and it runs on one machine today: Linux with KVM, or an
-Apple Silicon Mac. [colonizer.dev](https://colonizer.dev) is the name for everything around it. Nothing
-is live there yet, and nothing in this README pretends otherwise.
+Apple Silicon Mac. [colonizer.dev](https://colonizer.dev) is the name for everything around it. The
+domain serves a page about the project, the docs, the installer and the live map. The hosted Colonizer
+is not built yet, and nothing in this README pretends otherwise.
 
 > **Colonies only ever hold placeholders.**
 > The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
 > host-side TLS proxy, for one host, on the way out. A colony that goes rogue can wreck its own
-> worktree, and that's all.
+> worktree, and that's all. That is the design, not yet the measured truth: an external audit of
+> v0.1.3 found four ways past that wall, and they are not fixed yet
+> ([docs/audit.md](docs/audit.md)).
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
-it's going, is in [docs/vision.md](docs/vision.md).
+it's going, is in [docs/vision.md](docs/vision.md). What has been decided against, and why, is in
+[docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without
+losing colonies, is in [docs/updates.md](docs/updates.md).
 
 ---
 
@@ -64,7 +69,9 @@ dist/bin/colonizer
 
 [docs/install.md](docs/install.md) has the rest: what a Linux machine needs for Claude Code, what the
 installer does on a Mac, the install options, the first run, where things live and how to update. It is
-also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install).
+also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install). The binary takes a few
+arguments, too: `colonizer --help` lists them — `telemetry show`, `telemetry on` and `telemetry off`
+for the [usage data](docs/usage-data.md) switch, and `--version`.
 
 ---
 
@@ -179,6 +186,12 @@ protocol on stdio, so an agent module can be written in anything.
 
 ---
 
+## What changed
+
+[CHANGELOG.md](CHANGELOG.md) covers every release, newest first, with the pull
+request behind each line and anything that could cost work called out. The
+mothership also tells you when a newer release is out, and can install it.
+
 ## What's in the repository
 
 | Path | What it is | Status |
@@ -187,15 +200,15 @@ protocol on stdio, so an agent module can be written in anything.
 | [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
-| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, plus a DERP map snapshot | `SHIPPING` |
-| [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build | `SHIPPING` |
+| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) | `SHIPPING` |
+| [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
 
 ## Modules
 
 | Kind | Providers today | Next |
 | :--- | :--- | :--- |
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
-| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go | other VMMs `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go, each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
 | `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
@@ -217,8 +230,8 @@ Claude when a provider is down or busy.
 Stated here rather than buried.
 
 - **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
-  Silicon Mac — where the private mesh does not work yet, so colonies use a loopback port
-  ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
+  Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
+  publishes no macOS build of it.
 - **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
 - **The web UI has no login.** It binds to `127.0.0.1`, checks `Host` and `Origin` headers, and should stay there.
 - **Colony images need glibc.** A Linux Claude Code binary is mounted read-only into the microVM: the
@@ -232,10 +245,27 @@ Stated here rather than buried.
   real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
   API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
   wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
+- **ChatGPT subscriptions are not a credential.** OpenAI-compatible providers take an API key: a ChatGPT
+  plan is honoured by the Responses API behind Codex sign-in, which the gateway's `openai` wire does not
+  speak ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](docs/decisions.md)).
 - **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
   is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
   given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
-- **No CI yet**, and nothing is published to crates.io or npm.
+- **Not ready for unattended work on sensitive repositories.** That is the v0.1.3 audit's verdict,
+  real credentials included. It found four ways a colony could cross into the host, filed as draft
+  security advisories and not fixed yet ([docs/audit.md](docs/audit.md)).
+- **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
+  crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
+  microsandbox, the in-VM daemon, the agent module and the web UI beside it — use the installer.
+  Nothing is published to npm.
+- **CI runs every suite except the one that needs KVM.** The Rust tests and clippy, the runner's, the
+  live map receiver's and the web UI's all run on every pull request; releases are built, smoke-tested
+  and attested with build provenance; dependency audits and SBOMs run with every change and on a weekly
+  schedule; runtime pins move only by reviewed pull request. What CI cannot do is boot a colony:
+  GitHub-hosted runners have no `/dev/kvm`, so that path is covered by unit tests, agentd's no-KVM
+  smoke test, and `scripts/build-agentd.sh --smoke` on a machine that has KVM
+  ([roadmap](#roadmap-in-public)). The crates are published to crates.io through Trusted Publishing;
+  nothing is published to npm.
 
 ---
 
@@ -257,6 +287,8 @@ Stated here rather than buried.
 | Daily proposals for vendored plugin updates, described in skills added, removed and changed ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
 | Token savings: terse replies (caveman) and compact command output (rtk), each a switch | `SHIPPING` |
 | Token savings: Headroom compacting tool results, its bundle downloaded when switched on ([#53](https://github.com/Colonizer-dev/harness/issues/53)) | `SHIPPING` |
+| Live map of motherships, off until you switch it on: the heartbeat and its receiver | `SHIPPING` |
+| Release provenance: every release artifact attested, colony images and the guest agent pinned, SBOMs and dependency audits, pins proposed by pull request ([#89](https://github.com/Colonizer-dev/harness/issues/89)) | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
@@ -264,7 +296,8 @@ Stated here rather than buried.
 | Fleet view and network policies | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
 
-The roadmap is the issue tracker. There is no private version of it.
+The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit
+sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 
 ---
 
@@ -278,16 +311,24 @@ The roadmap is the issue tracker. There is no private version of it.
 | Worktree | Mounted read-write at `/workspace`. |
 | Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |
 | Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
+| What a colony runs | Pinned, not floating: the image by OCI digest (`crates/colonizer/images.lock`), the guest Claude Code build by sha256 (`vendor/claude-code.lock`), the vendored tools by sha256 (`vendor/vendor.lock`). Pins move only through a reviewed pull request. |
+| Release downloads | Checked against the release's `SHA256SUMS`, which itself carries a build-provenance attestation the installer verifies whenever `gh` can reach a verdict ([docs/install.md](docs/install.md)). |
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |
 | Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
+| Usage data | On by default: an anonymous batch of counts, built and shown locally — and nothing is sent at all in this release. A different random id from the live map's; `colonizer telemetry off` switches it off ([docs/usage-data.md](docs/usage-data.md)). |
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
+An external audit read this table against the code at v0.1.3. What it confirmed, what it found
+instead, and what has to be true before unattended work: [docs/audit.md](docs/audit.md).
+
 ## Configuration
 
-Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. Process settings
-come from the environment:
+Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. The answers to
+the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) questions live beside it, in
+`telemetry.json` and `usage.json`, and `usage-last.json` beside those keeps the last usage batch
+built. Process settings come from the environment:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
@@ -298,7 +339,11 @@ come from the environment:
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
-| `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
+| `COLONIZER_APP` | `~/.local/share/colonizer/app` | The symlink an install moves; what an [update](docs/updates.md) follows |
+| `COLONIZER_UPDATE_CHECK` | on | `0` keeps the update check off whatever Settings says — then no request is made at all |
+| `COLONIZER_RELEASES_URL` | GitHub's latest release for this repo | Where the update check looks |
+| `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) off whatever Settings says |
+| `CI=true` | – | Also keeps [usage data](docs/usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 
 Two limits bound one colony, both sandbox module settings (Settings → Modules → sandbox) with an override
@@ -333,9 +378,14 @@ co_author = true
 ## Development
 
 ```sh
-cargo test --workspace                          # mothership and agentd
-(cd modules/agents/claude-code && node --test test/)
-(cd services/telemetry && node --test)          # the live map's receiver
+cargo test --workspace                          # mothership and agentd, including agentd's no-KVM smoke test
+cargo clippy --workspace --all-targets -- -D warnings
+(cd modules/agents/claude-code && npm test)
+(cd services/telemetry && npm test)             # the live map's receiver
+(cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
+node --test scripts/test/colony-report.test.mjs
+node scripts/colony-report.mjs                  # how colonies went, from what they already log
+node scripts/colony-report.mjs --transcript <id> # one colony, step by step
 (cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
 ```
@@ -351,6 +401,10 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   <a href="docs/architecture.md">Architecture</a>
   &nbsp;·&nbsp;
   <a href="docs/protocol.md">Protocol</a>
+  &nbsp;·&nbsp;
+  <a href="docs/updates.md">Updates</a>
+  &nbsp;·&nbsp;
+  <a href="docs/audit.md">Audit</a>
 </p>
 
 <p align="center">

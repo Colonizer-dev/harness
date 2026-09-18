@@ -18,7 +18,8 @@ The mothership of [Colonizer](https://colonizer.dev): the `colonizer` command.
 Every task gets a **colony**: its own KVM microVM with a fresh git worktree and a coding agent inside. The
 agent can do anything in there. The colony is linked back to your machine, the **mothership**, so its chat
 and a real terminal are one hop away. When the agent needs you, it asks with **choices**. When the work is
-done, the mothership commits it and opens the pull request.
+done, the mothership publishes it: it commits, pushes and opens the pull request, each only when not
+already done.
 
 ## Install
 
@@ -37,13 +38,15 @@ x86_64 with KVM, or an Apple Silicon Mac.
 - **A microVM per task.** Not a shared-kernel container: a colony that goes rogue can wreck its own
   worktree, and that is all.
 - **A private mesh home.** Colonies join a private network with the mothership, never your own tailnet,
-  and can't reach each other. On a Mac, colonies are reached on a loopback port instead.
+  and can't reach each other. If the mesh binaries are absent, colonies are reached on a loopback
+  port instead.
 - **Choices, not walls of text.** Questions arrive as cards with an "Other…" answer, in a web UI that shows
   each colony's chat and terminal side by side.
 - **Placeholders only.** The GitHub token never enters a colony, and the agent's API credential is swapped
   in by the sandbox's host-side TLS proxy, for one host, on the way out.
 - **The host publishes.** The microVM is gone before the mothership commits, pushes and opens the pull
-  request.
+  request. Each step runs only if it is still needed, so a publish that failed part-way can just be
+  retried.
 
 ## The crates
 

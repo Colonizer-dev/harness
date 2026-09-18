@@ -6,7 +6,7 @@ use std::{
     path::Path,
     process::Stdio,
 };
-use tokio::process::Command;
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, process::Command};
 
 pub fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
@@ -75,6 +75,135 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     f.write_all(bytes)?;
     Ok(())
+}
+
+/// Writes `data` to `path` atomically: a temp file next to the target, flushed with `sync_all`,
+/// then renamed into place. A reader never sees a partial file, and a failed write leaves the
+/// previous contents intact and reports the failure. Not crash-durable: there is no fsync of the
+/// parent directory after the rename, so a power loss can revert the rename — the right trade for
+/// these files, which are rewritten on their next change.
+pub async fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    // The temp is `<whole file name>.tmp` next to the target. `with_extension` would *replace* the
+    // extension, so `foo.jsonl` and `foo.json` would share one temp path; spelled this way,
+    // `sessions.json` still writes its historical `sessions.json.tmp`.
+    let tmp = path
+        .file_name()
+        .map(|name| path.with_file_name(format!("{}.tmp", name.to_string_lossy())))
+        .with_context(|| format!("could not write {}: it names no file, so there is no temp path to write", path.display()))?;
+    let write = async {
+        faults::check(path, faults::Op::Write)?;
+        let mut f = OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).await?;
+        f.write_all(data).await?;
+        f.sync_all().await?;
+        std::io::Result::Ok(())
+    }
+    .await;
+    if let Err(e) = write {
+        // The temp file is ours alone, so removing it is best effort: the error that matters is the write.
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e).with_context(|| format!("could not write {} (temp file {})", path.display(), tmp.display()));
+    }
+    let rename = async {
+        faults::check(path, faults::Op::Rename)?;
+        tokio::fs::rename(&tmp, path).await?;
+        std::io::Result::Ok(())
+    }
+    .await;
+    if let Err(e) = rename {
+        // Same best-effort cleanup; the target still holds the previous contents.
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e).with_context(|| format!("could not put {} in place (temp file {})", path.display(), tmp.display()));
+    }
+    Ok(())
+}
+
+/// Appends one line (a trailing newline is added) to `path`, creating it if needed. The append is
+/// flushed before returning, so a confirmed line is visible to readers — it has left the process's
+/// write buffers — but it is not fsynced, so a power loss can still lose it.
+pub async fn append_line(path: &Path, line: &str) -> Result<()> {
+    let write = async {
+        faults::check(path, faults::Op::Append)?;
+        let mut f = OpenOptions::new().create(true).append(true).open(path).await?;
+        f.write_all(format!("{line}\n").as_bytes()).await?;
+        f.flush().await?;
+        std::io::Result::Ok(())
+    }
+    .await;
+    write.with_context(|| format!("could not append to {}", path.display()))
+}
+
+/// A test-only seam for injecting filesystem faults into the two helpers above (and the startup
+/// move-aside in main.rs), so the error paths around persistence can be exercised deterministically.
+/// Real-filesystem tricks are unreliable here: the container runs as root, so chmod-based permission
+/// denial does not fail. Production builds compile this away — `check` becomes an inlined no-op.
+pub(crate) mod faults {
+    /// The step a fault applies to: the temp write or the append, or the rename into place.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Op {
+        Write,
+        Rename,
+        Append,
+    }
+
+    /// The first injected fault whose step matches and whose path fragment occurs in `path`.
+    #[cfg(not(test))]
+    #[inline]
+    pub fn check(path: &std::path::Path, op: Op) -> std::io::Result<()> {
+        let _ = (path, op);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn check(path: &std::path::Path, op: Op) -> std::io::Result<()> {
+        let text = path.display().to_string();
+        INJECTED.with_borrow(|faults| {
+            faults
+                .iter()
+                .find(|(contains, wants, _)| *wants == op && text.contains(contains.as_str()))
+                .map(|(.., make)| make())
+                .map_or(Ok(()), Err)
+        })
+    }
+
+    /// Injects a fault for every `check` on a path containing `path_contains` with step `op`, until
+    /// the returned guard is dropped. The error is made by `make`, so tests can inject real I/O
+    /// errors: `|| std::io::Error::from_raw_os_error(5)` for EIO, `ErrorKind::StorageFull.into()`
+    /// for ENOSPC.
+    #[cfg(test)]
+    pub fn inject(path_contains: &str, op: Op, make: fn() -> std::io::Error) -> FaultGuard {
+        INJECTED.with_borrow_mut(|faults| faults.push((path_contains.to_string(), op, make)));
+        FaultGuard { contains: path_contains.to_string(), op }
+    }
+
+    /// Clears the fault injected by `inject` when dropped.
+    #[cfg(test)]
+    pub struct FaultGuard {
+        contains: String,
+        op: Op,
+    }
+
+    #[cfg(test)]
+    impl std::ops::Drop for FaultGuard {
+        fn drop(&mut self) {
+            INJECTED.with_borrow_mut(|faults| {
+                if let Some(at) = faults.iter().position(|(contains, op, _)| *contains == self.contains && *op == self.op)
+                {
+                    faults.remove(at);
+                }
+            });
+        }
+    }
+
+    // A thread-local rather than a global: `#[tokio::test]` defaults to a current-thread runtime,
+    // so every fault check runs on the test's own thread and parallel tests cannot interfere.
+    #[cfg(test)]
+    thread_local! {
+        static INJECTED: std::cell::RefCell<Vec<Fault>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// One injected fault: the path fragment it matches, the step it fails, and the error it makes.
+    #[cfg(test)]
+    type Fault = (String, Op, fn() -> std::io::Error);
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
@@ -194,6 +323,22 @@ pub fn dir_size(root: &Path) -> u64 {
     total
 }
 
+/// A single path segment with no separators, no traversal and no leading dot.
+///
+/// Used where a setting names something the harness will resolve under a
+/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
+/// reach the rest of the host's filesystem.
+pub fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains(':')
+        && !name.contains(',')
+        && !name.contains('\0')
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -290,40 +435,149 @@ mod tests {
     fn dir_size_walks_a_very_deep_tree_without_blowing_the_stack() {
         let root = std::env::temp_dir().join(format!("colonizer-util-test-{}", short_id()));
         std::fs::create_dir_all(&root).unwrap();
-        // The kernel refuses any single path longer than ~4K bytes, so one-letter names bought with that
-        // budget go about as deep as any path-walking walk can follow on Linux — nearly two thousand
-        // directories. A runaway build inside a colony can nest this deep, which a recursive walk would
-        // ride down until the thread's stack gave out and took the mothership with it.
-        let levels = 4_000usize.saturating_sub(root.as_os_str().len()) / 2;
+        // Go as deep as the kernel allows a single path to be, which is as deep as any walk that builds
+        // paths can follow: about 2,000 one-letter levels inside Linux's ~4K, about 500 inside macOS's
+        // 1K. The limit is found by hitting it rather than assumed, because assuming Linux's made this
+        // test fail on a Mac. A runaway build inside a colony nests this deep, and a recursive walk
+        // rides it down until the thread's stack gives out and takes the mothership with it.
         let mut here = root.clone();
-        for _ in 0..levels {
+        let mut levels = 0;
+        while levels < 4_000 {
             here.push("d");
-            std::fs::create_dir(&here).unwrap();
+            match std::fs::create_dir(&here) {
+                Ok(()) => levels += 1,
+                // ENAMETOOLONG: this is the deepest the platform goes.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidFilename => {
+                    here.pop();
+                    break;
+                }
+                Err(e) => panic!("could not nest {levels} deep: {e}"),
+            }
         }
-        std::fs::write(here.join("bottom"), b"deep payload").unwrap();
+        assert!(levels > 200, "only nested {levels} deep; too shallow to say anything about the walk");
+        // The deepest directory is at the limit itself, so a file name may no longer fit beside it: back
+        // out a level at a time until one does.
+        loop {
+            match std::fs::write(here.join("b"), b"deep payload") {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidFilename => {
+                    here.pop();
+                    levels -= 1;
+                }
+                Err(e) => panic!("could not write the file at the bottom: {e}"),
+            }
+        }
         assert!(dir_size(&root) >= "deep payload".len() as u64, "a tree {levels} directories deep is summed right down to its bottom file");
-        // Take it apart the way it was built: absolute paths to the deepest levels no longer fit in the 4K budget.
-        std::fs::remove_file(here.join("bottom")).unwrap();
-        while here != root {
-            std::fs::remove_dir(&here).unwrap();
-            here.pop();
-        }
-        std::fs::remove_dir(&root).unwrap();
+        // `remove_dir_all` walks with `openat`, so it takes the tree apart without ever naming a path
+        // too long to open — which is exactly why the walk under test does not build paths either.
+        let _ = std::fs::remove_dir_all(&root);
     }
-}
 
-/// A single path segment with no separators, no traversal and no leading dot.
-///
-/// Used where a setting names something the harness will resolve under a
-/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
-/// reach the rest of the host's filesystem.
-pub fn is_plain_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains("..")
-        && !name.contains(':')
-        && !name.contains(',')
-        && !name.contains('\0')
+    use std::path::PathBuf;
+
+    use faults::{inject, Op};
+
+    /// A fresh directory per test, as in memory.rs; there is no tempfile dev-dependency.
+    fn temp_root(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("colonizer-util-{label}-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn enospc() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::StorageFull)
+    }
+
+    fn eio() -> std::io::Error {
+        std::io::Error::from_raw_os_error(5)
+    }
+
+    fn denied() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+    }
+
+    #[tokio::test]
+    async fn write_atomic_replaces_the_target_and_leaves_no_temp_behind() {
+        let dir = temp_root("atomic-ok");
+        let path = dir.join("sessions.json");
+        write_atomic(&path, b"first").await.unwrap();
+        write_atomic(&path, b"second").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert!(!path.with_extension("json.tmp").exists(), "sessions.json must get its old sessions.json.tmp sibling");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_temp_write_is_reported_and_keeps_the_previous_contents() {
+        let dir = temp_root("atomic-enospc");
+        let path = dir.join("sessions.json");
+        std::fs::write(&path, b"previous").unwrap();
+        let _guard = inject("sessions.json", Op::Write, enospc);
+        let err = write_atomic(&path, b"new").await.unwrap_err();
+        assert!(err.to_string().contains("sessions.json"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous", "no silent success, no lost contents");
+        assert!(!path.with_extension("json.tmp").exists(), "the leftover temp is cleaned up");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_eio_during_the_temp_write_never_replaces_the_target() {
+        let dir = temp_root("atomic-eio");
+        let path = dir.join("sessions.json");
+        std::fs::write(&path, b"previous").unwrap();
+        let _guard = inject("sessions.json", Op::Write, eio);
+        let err = write_atomic(&path, b"new").await.unwrap_err();
+        let cause = err.root_cause().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.raw_os_error(), Some(5), "the injected EIO is the cause: {err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_reports_and_keeps_the_previous_contents() {
+        let dir = temp_root("atomic-rename");
+        let path = dir.join("sessions.json");
+        std::fs::write(&path, b"previous").unwrap();
+        let _guard = inject("sessions.json", Op::Rename, eio);
+        let err = write_atomic(&path, b"new").await.unwrap_err();
+        assert!(err.to_string().contains("in place"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous", "the old file is still intact");
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn write_atomic_temps_are_named_for_the_whole_file_so_jsonl_and_json_do_not_collide() {
+        let dir = temp_root("atomic-tmp-name");
+        let path = dir.join("events.jsonl");
+        let _guard = inject("events.jsonl", Op::Write, enospc);
+        let err = write_atomic(&path, b"new").await.unwrap_err();
+        assert!(
+            err.to_string().contains("events.jsonl.tmp"),
+            "the temp keeps the target's full name, not a `with_extension` .json.tmp: {err:#}"
+        );
+        drop(_guard);
+        let err = write_atomic(Path::new("/"), b"new").await.unwrap_err();
+        assert!(
+            err.to_string().contains("names no file"),
+            "a path with no file name errors instead of panicking: {err:#}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn append_line_creates_the_file_and_reports_denied_appends() {
+        let dir = temp_root("append");
+        let path = dir.join("events.jsonl");
+        append_line(&path, "{\"seq\":1}").await.unwrap();
+        append_line(&path, "{\"seq\":2}").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"seq\":1}\n{\"seq\":2}\n");
+
+        let _guard = inject("events.jsonl", Op::Append, denied);
+        let err = append_line(&path, "{\"seq\":3}").await.unwrap_err();
+        assert!(err.to_string().contains("events.jsonl"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"seq\":1}\n{\"seq\":2}\n", "the line did not land");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

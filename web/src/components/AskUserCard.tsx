@@ -11,12 +11,16 @@ export interface QuestionActions {
   answer(questionId: string, answers: Answers, response: string | null): boolean;
   submitting: Record<string, true>;
   canAnswer: boolean;
+  /// Why answering is off, when it is: the card must not say "reconnecting" to
+  /// someone whose colony has finished.
+  blockedBy: "disconnected" | "ended" | null;
 }
 
 export const QuestionActionsContext = createContext<QuestionActions>({
   answer: () => false,
   submitting: {},
   canAnswer: false,
+  blockedBy: "disconnected",
 });
 
 interface Draft {
@@ -43,7 +47,7 @@ export function AskUserCard({ toolCallId, args, result }: ToolCallMessagePartPro
 }
 
 function OpenCard({ questionId, questions }: { questionId: string; questions: Question[] }) {
-  const { answer, submitting, canAnswer } = useContext(QuestionActionsContext);
+  const { answer, submitting, canAnswer, blockedBy } = useContext(QuestionActionsContext);
   const [drafts, setDrafts] = useState<Draft[]>(() => questions.map(() => emptyDraft));
   const isSubmitting = Boolean(submitting[questionId]);
   const complete = questions.length > 0 && questions.every((_, i) => draftComplete(drafts[i] ?? emptyDraft));
@@ -53,7 +57,10 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
     setDrafts((list) => list.map((d, i) => (i === index ? fn(d) : d)));
 
   const submit = () => {
-    if (!complete || isSubmitting) return;
+    // Not only the button's `disabled`: this form also submits on Enter from any
+    // field inside it, which is how an answer reached a finished colony — where
+    // the harness drops it, leaving the card spinning for an agent that is gone.
+    if (!complete || isSubmitting || !canAnswer) return;
     const answers: Answers = {};
     questions.forEach((q, i) => {
       const draft = drafts[i] ?? emptyDraft;
@@ -92,7 +99,7 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
             name={`${questionId}-${i}`}
             question={q}
             draft={drafts[i] ?? emptyDraft}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !canAnswer}
             onChange={(fn) => setDraft(i, fn)}
           />
         ))}
@@ -100,13 +107,15 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
 
       <div className="flex flex-wrap items-center gap-3 border-t border-border bg-panel-2/60 px-4 py-3">
         <p className="min-w-0 flex-1 text-[12.5px] text-muted">
-          {!canAnswer
-            ? "Reconnecting to the colony…"
-            : isSubmitting
+          {blockedBy === "ended"
+            ? "This colony has finished, so the agent cannot be answered."
+            : blockedBy === "disconnected"
+              ? "Reconnecting to the colony…"
+              : isSubmitting
               ? "Sending your answer to the agent…"
               : complete
                 ? "Ready to send."
-                : `Answer ${remaining === 1 ? "1 more question" : `${remaining} more questions`} to continue.`}
+                  : `Answer ${remaining === 1 ? "1 more question" : `${remaining} more questions`} to continue.`}
         </p>
         <Button type="submit" variant="primary" disabled={!complete || isSubmitting || !canAnswer}>
           {isSubmitting ? <Spinner /> : <IconCheck size={15} />}

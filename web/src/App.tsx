@@ -7,7 +7,7 @@ import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView } from "./components/Sidebar";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
-import type { HarnessStatus, ModuleInfo, OrgInfo, Session, TelemetryStatus } from "./types";
+import type { HarnessStatus, ModuleInfo, OrgInfo, Session, StorageHealth, TelemetryStatus, UsageStatus } from "./types";
 
 export function App() {
   const api = useApi();
@@ -22,12 +22,16 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
+  const [usage, setUsage] = useState<UsageStatus | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string | null>(() => stored("colonizer.org") || null);
   const [view, setView] = useState<MainView>(() => (stored("colonizer.view") === "memory" ? "memory" : "colonies"));
   const [pendingMemory, setPendingMemory] = useState(0);
   const [orgSettingsFor, setOrgSettingsFor] = useState<string | null>(null);
+  // The mothership's storage alert is sticky, so dismissal is client-side, keyed on the alert's ts
+  // (or its message when an older mothership omits the ts): a newer failure shows the card again.
+  const [dismissedStorageTs, setDismissedStorageTs] = useState<string | null>(null);
   const promptedForSettings = useRef(false);
 
   const loadStatus = useCallback(async () => {
@@ -84,10 +88,19 @@ export function App() {
     }
   }, [api]);
 
+  const loadUsage = useCallback(async () => {
+    try {
+      setUsage(await api.usage());
+    } catch {
+      /* older mothership: no usage endpoint, and nothing to ask */
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadStatus();
     void loadSessions();
     void loadTelemetry();
+    void loadUsage();
     void loadOrgs();
     void loadPendingMemory();
     api.modules().then(applyModules).catch(() => {});
@@ -98,7 +111,7 @@ export function App() {
       setInterval(loadPendingMemory, 10_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, applyModules]);
+  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -158,6 +171,11 @@ export function App() {
   }, []);
 
   const current = sessions.find((s) => s.id === selectedId) ?? null;
+
+  const storage = status?.storage;
+  const storageAlert = storage && storage.ok === false && storageAlertKey(storage) !== dismissedStorageTs ? storage : null;
+  const liveMapPrompt =
+    telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && status.github.connected && status.claude.configured;
 
   const sidebar = (
     <Sidebar
@@ -236,23 +254,31 @@ export function App() {
         onClose={() => {
           setSettingsOpen(false);
           void loadTelemetry();
+          void loadUsage();
         }}
         status={status}
         onStatusChanged={loadStatus}
         onModulesChanged={applyModules}
         telemetry={telemetry}
         onTelemetryChanged={setTelemetry}
+        usage={usage}
+        onUsageChanged={setUsage}
         initialSection={settingsSection}
       />
-      {telemetry && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status?.github.connected && status.claude.configured && (
-        <LiveMapPrompt
-          narrow={narrow}
-          onAnswered={setTelemetry}
-          onDetails={() => {
-            setSettingsSection("live-map");
-            setSettingsOpen(true);
-          }}
-        />
+      {(storageAlert || liveMapPrompt) && (
+        // Both fixed cards live in the same corner; the shared column keeps them stacked and clickable.
+        <div className={cx("fixed z-30 flex flex-col gap-3", narrow ? "inset-x-3 bottom-3" : "bottom-5 right-5 w-[380px]")}>
+          {storageAlert && <StorageAlert storage={storageAlert} onDismiss={() => setDismissedStorageTs(storageAlertKey(storageAlert))} />}
+          {liveMapPrompt && (
+            <LiveMapPrompt
+              onAnswered={setTelemetry}
+              onDetails={() => {
+                setSettingsSection("live-map");
+                setSettingsOpen(true);
+              }}
+            />
+          )}
+        </div>
       )}
       <OrgSettingsDialog
         org={orgSettingsFor}
@@ -275,11 +301,9 @@ export function App() {
 
 /** Asked once, after setup: the live map stays off until the user says otherwise (docs/telemetry.md). */
 function LiveMapPrompt({
-  narrow,
   onAnswered,
   onDetails,
 }: {
-  narrow: boolean;
   onAnswered: (telemetry: TelemetryStatus) => void;
   onDetails: () => void;
 }) {
@@ -294,18 +318,12 @@ function LiveMapPrompt({
     }
   };
   return (
-    <div
-      role="region"
-      aria-label="Live map"
-      className={cx(
-        "fixed z-30 rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]",
-        narrow ? "inset-x-3 bottom-3" : "bottom-5 right-5 w-[380px]",
-      )}
-    >
+    <div role="region" aria-label="Live map" className="rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]">
       <p className="text-[14px] font-semibold">Put this mothership on the live map?</p>
       <p className="mt-1.5 text-[12.5px] text-muted">
-        colonizer.dev/live shows where colonies are running, to within about 25 km. It gets a heartbeat every 5 minutes: a random id,
-        the version, the platform and how many colonies run. Nothing about your code. Off unless you say yes.
+        colonizer.dev/live shows where colonies are running, to within about 25 km. If yours is the only mothership in its area,
+        that dot is you. It gets a heartbeat every 5 minutes: a random id, the version, the platform and how many colonies run.
+        Nothing about your code. Off unless you say yes.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button variant="primary" size="sm" disabled={busy} onClick={() => void answer(true)}>
@@ -317,6 +335,36 @@ function LiveMapPrompt({
         <button type="button" onClick={onDetails} className="ml-auto cursor-pointer text-[12.5px] text-accent hover:underline">
           What is sent
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** Identity of a storage failure for dismissal: its ts, or — for older motherships that omit it — its message, prefixed so neither can be confused with "nothing dismissed yet" (null). */
+const storageAlertKey = (storage: StorageHealth) => storage.ts ?? `no-ts:${storage.message ?? "unknown"}`;
+
+/** A write the mothership could not make (issue #87). Sticky server-side; dismissed here per failure, a newer one reopens it. */
+function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; onDismiss: () => void }) {
+  // harness_log frames render ts with toLocaleTimeString (SessionView's activity strip); an odd or missing ts shows nothing.
+  const at = storage.ts ? new Date(storage.ts) : null;
+  const when = at && !Number.isNaN(at.getTime()) ? `At ${at.toLocaleTimeString()}` : null;
+  const meta = [
+    when,
+    storage.failures != null ? `${storage.failures} failed ${storage.failures === 1 ? "write" : "writes"}` : null,
+  ].filter(Boolean);
+  return (
+    <div role="alert" className="rounded-2xl border border-err/30 bg-err-soft p-4 shadow-[var(--shadow)]">
+      <p className="text-[14px] font-semibold text-err">The mothership could not write to disk</p>
+      {storage.message && <p className="mt-1.5 font-mono text-[12px] text-err [overflow-wrap:anywhere]">{storage.message}</p>}
+      <p className="mt-1.5 text-[12.5px] text-muted">
+        What you see here can drift from what is on disk, and colony event logs may have gaps. The alert clears only when the
+        mothership restarts — dismissing just hides this card.
+      </p>
+      {meta.length > 0 && <p className="mt-1.5 text-[12px] text-err">{meta.join(" · ")}</p>}
+      <div className="mt-3 flex justify-end">
+        <Button size="sm" onClick={onDismiss}>
+          Dismiss
+        </Button>
       </div>
     </div>
   );
