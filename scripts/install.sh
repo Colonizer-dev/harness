@@ -64,6 +64,13 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$bundle" = 0 ]; then
   "$root/scripts/fetch-agent-binary.sh"
 fi
 
+# Both locks ride in dist/: the installed app reads them back at install time (install-release.sh
+# fetches the guest agent against claude-code.lock) and at --pull-image time (the image digest in
+# images.lock), so a release has to carry its pins to stay reproducible.
+mkdir -p "$dist"
+install -m 644 "$root/vendor/claude-code.lock" "$dist/claude-code.lock"
+install -m 644 "$root/crates/colonizer/images.lock" "$dist/images.lock"
+
 # microsandbox ships with the app, so there is nothing to install separately. COLONIZER_MSB still
 # wins, for a host that would rather run its own build.
 msb="${COLONIZER_MSB:-$dist/vendor/microsandbox/bin/msb}"
@@ -87,7 +94,19 @@ prebuilt_bin colonizer-agentd || MSB="$msb" "$root/scripts/build-agentd.sh"
 echo "==> rtk (static musl build inside a microVM, for colonies that switch on compact command output)"
 prebuilt_bin rtk || MSB="$msb" "$root/scripts/build-rtk.sh"
 
+# The host's own mesh needs a tailscaled, and Tailscale publishes no macOS build of it: on a Mac the
+# vendored source is built into the app. Linux's tailscaled came from the vendored tgz above.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo "==> tailscale for the host (built from pinned source inside a microVM)"
+  MSB="$msb" "$root/scripts/build-tailscaled.sh"
+fi
+
 echo "==> agent modules"
+# Shipped so an installed mothership can apply an update with the same verified
+# installer a person would run, instead of downloading a script to execute.
+mkdir -p "$dist/scripts"
+install -m 755 "$root/scripts/install-release.sh" "$dist/scripts/install-release.sh"
+
 mkdir -p "$dist/modules/agents"
 for module in "$root"/modules/agents/*/; do
   id=$(basename "$module")
@@ -138,7 +157,11 @@ fi
 # The colony image is the one large thing that otherwise arrives lazily, during
 # the first launch, with nothing on screen to explain the wait.
 if [ "$pull_image" = 1 ]; then
-  image=${COLONIZER_IMAGE:-node:24-bookworm}
+  # The image the release was tested with, pulled by digest so the bits cannot drift under it
+  # (crates/colonizer/images.lock; the reference is <url>@sha256:<sha256>). A missing lock or row
+  # falls back to the bare tag: an install that is otherwise done beats a failed one.
+  pinned=$(awk '$1 !~ /^#/ && $6 == "node:24-bookworm" && $4 == "image" { print $6 "@sha256:" $5; exit }' "$root/crates/colonizer/images.lock" 2>/dev/null)
+  image=${COLONIZER_IMAGE:-${pinned:-node:24-bookworm}}
   echo "==> pulling colony image $image"
   "$dist/vendor/microsandbox/bin/msb" pull "$image"
 fi

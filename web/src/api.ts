@@ -1,6 +1,7 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
   HarnessStatus,
+  HeadroomStatus,
   Issue,
   LoginView,
   Mem0Check,
@@ -15,7 +16,6 @@ import type {
   NewNoteRequest,
   NewSessionRequest,
   OrgInfo,
-  HeadroomStatus,
   OrgSettings,
   PluginListing,
   ProviderHealth,
@@ -24,6 +24,8 @@ import type {
   SaveProviderRequest,
   Session,
   TelemetryStatus,
+  UpdateStatus,
+  UsageStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -58,7 +60,12 @@ export interface Api {
   headroom(): Promise<HeadroomStatus>;
   headroomDownload(): Promise<HeadroomStatus>;
   telemetry(): Promise<TelemetryStatus>;
+  update(): Promise<UpdateStatus>;
+  setUpdateCheck(enabled: boolean): Promise<UpdateStatus>;
+  applyUpdate(): Promise<{ started: boolean }>;
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
+  usage(): Promise<UsageStatus>;
+  setUsage(enabled: boolean): Promise<UsageStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   sessions(): Promise<Session[]>;
@@ -149,7 +156,12 @@ export const httpApi: Api = {
   headroom: () => request("/api/headroom"),
   headroomDownload: () => post("/api/headroom/download"),
   telemetry: () => request("/api/telemetry"),
+  update: () => request("/api/update"),
+  setUpdateCheck: (enabled) => put("/api/update", { enabled }),
+  applyUpdate: () => post("/api/update/apply"),
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
+  usage: () => request("/api/telemetry/usage"),
+  setUsage: (enabled) => put("/api/telemetry/usage", { enabled }),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

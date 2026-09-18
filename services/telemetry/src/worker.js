@@ -8,27 +8,36 @@
 // The location comes from Cloudflare's own estimate for the request (request.cf), is snapped to a grid cell
 // here, and only the cell is stored. The IP address is used for rate limiting in memory and never stored.
 
-import { NEXT_IN_SECONDS, ONLINE_SECONDS, RETAIN_SECONDS, cellOf, installKey, parseHeartbeat, presenceView } from './presence.js';
+import { NEXT_IN_SECONDS, ONLINE_SECONDS, PRUNE_EVERY_MS, RETAIN_SECONDS, cellOf, installKey, parseHeartbeat, presenceView } from './presence.js';
 
 const MAX_BODY_BYTES = 1024;
 
-// Nothing is kept for long: rows older than an hour are deleted, at most once every 10 minutes per isolate,
-// on the back of a heartbeat. (A cron trigger would need a workers.dev subdomain on the account.)
-const PRUNE_EVERY_MS = 10 * 60 * 1000;
+// Nothing is kept for long: reads already ignore anything past the online window (the presence query filters
+// on seen_at), and rows past the retention window are deleted on the back of a request to either route, at
+// most once every 10 minutes per isolate. There is no scheduled prune — a cron trigger would need a
+// workers.dev subdomain on the account, which it doesn't have (deploy error 10063).
 let lastPrune = 0;
+
+// The prune runs through waitUntil so it never delays the response, and the throttle keeps it from being a
+// D1 write on every request.
+function maybePrune(env, ctx) {
+  if (Date.now() - lastPrune <= PRUNE_EVERY_MS) return;
+  lastPrune = Date.now();
+  ctx.waitUntil(prune(env));
+}
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
     if (url.pathname === '/v1/heartbeat' && request.method === 'POST') {
-      if (Date.now() - lastPrune > PRUNE_EVERY_MS) {
-        lastPrune = Date.now();
-        ctx.waitUntil(prune(env));
-      }
+      maybePrune(env, ctx);
       return heartbeat(request, env);
     }
-    if (url.pathname === '/v1/presence' && request.method === 'GET') return presence(env);
+    if (url.pathname === '/v1/presence' && request.method === 'GET') {
+      maybePrune(env, ctx);
+      return presence(env);
+    }
     if (url.pathname === '/' && request.method === 'GET') {
       return new Response(
         'Colonizer telemetry: the live map on https://colonizer.dev/live.\nWhat is collected, and how to switch it off: https://colonizer.dev/docs/telemetry\n',

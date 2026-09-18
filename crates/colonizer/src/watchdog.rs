@@ -50,7 +50,8 @@ pub enum Decision {
 }
 
 /// Attention reasons the watchdog sets and may clear; others (such as `autopilot_held`) belong to their setter.
-const WATCHDOG_REASONS: [&str; 3] = ["stalled", "waiting_for_answer", "nudges_exhausted"];
+/// Shared with usage.rs, which buckets them as its closed failure labels.
+pub(crate) const WATCHDOG_REASONS: [&str; 3] = ["stalled", "waiting_for_answer", "nudges_exhausted"];
 
 pub fn decide(
     settings: &WatchdogSettings,

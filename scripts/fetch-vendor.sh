@@ -41,11 +41,19 @@ while read -r name version plat kind sha url; do
   case "$name" in
     headscale) install -m 755 "$file" "$out/headscale" ;;
     tailscale)
-      tmp=$(mktemp -d)
-      tar -xzf "$file" -C "$tmp"
-      install -m 755 "$tmp"/tailscale_*/tailscale "$out/tailscale/tailscale"
-      install -m 755 "$tmp"/tailscale_*/tailscaled "$out/tailscale/tailscaled"
-      rm -rf "$tmp"
+      # The Linux rows are upstream's own tgz. The darwin row is source, verified above and left in
+      # the cache like rtk's: macOS has no prebuilt tailscaled, so scripts/build-tailscaled.sh builds
+      # tailscale and tailscaled from it.
+      case "$kind" in
+        source) ;;
+        *)
+          tmp=$(mktemp -d)
+          tar -xzf "$file" -C "$tmp"
+          install -m 755 "$tmp"/tailscale_*/tailscale "$out/tailscale/tailscale"
+          install -m 755 "$tmp"/tailscale_*/tailscaled "$out/tailscale/tailscaled"
+          rm -rf "$tmp"
+          ;;
+      esac
       ;;
     ecc)
       # Staged as a Claude Code plugin directory, not a binary, at dist/plugins/<name>:

@@ -1,13 +1,13 @@
 // In-browser mock of the harness API and event streams, enabled with `?mock=1`.
 import { ApiError, type Api, type SocketLike } from "./api";
+import { canPublish } from "./components/ui";
 import type {
-  AgentRef,
   AgentEvent,
-  HeadroomStatus,
-  TelemetryStatus,
   AgentEventBody,
+  AgentRef,
   Answers,
   HarnessStatus,
+  HeadroomStatus,
   Issue,
   LogLevel,
   LoginView,
@@ -24,6 +24,9 @@ import type {
   Repo,
   Session,
   SessionStatus,
+  TelemetryStatus,
+  UpdateStatus,
+  UsageStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -40,6 +43,7 @@ function rhythm(seed: number): () => number {
 }
 const now = () => new Date().toISOString();
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+const ahead = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
 const clone = <T>(value: T): T => structuredClone(value);
 const LIVE: SessionStatus[] = ["starting", "running", "waiting_for_answer", "idle"];
 const isLive = (status: SessionStatus) => LIVE.includes(status);
@@ -390,13 +394,13 @@ class MockSession {
     if (s.status === "starting") {
       this.log(`Creating worktree ${s.branch} from origin/${s.base ?? "main"}`);
       await sleep(700);
-      this.log(`Booting microVM ${s.sandbox} (node:24-bookworm, 4 vCPU, 8G)`);
+      this.log(`Booting microVM ${s.sandbox} (node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0, 4 vCPU, 8G)`);
       await sleep(900);
       this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
       this.patch({ status: "running" });
     } else {
       this.log(`Worktree ${s.branch} created from origin/${s.base ?? "main"}`);
-      this.log(`microVM ${s.sandbox} booted (node:24-bookworm, 4 vCPU, 8G)`);
+      this.log(`microVM ${s.sandbox} booted (node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0, 4 vCPU, 8G)`);
       this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
     }
     this.emit({ type: "status", state: "working" });
@@ -758,6 +762,7 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
     branch: `colonizer/${slug}`,
     base: "main",
     worktree: `/home/you/.local/share/colonizer/worktrees/${repo}/${slug}`,
+    git_admin_dir: `/home/you/.local/share/colonizer/repos/${repo}.git/worktrees/${slug}`,
     sandbox: `colony-${id}`,
     mesh: { name: `colony-${id}`, ip: `100.64.0.${Math.floor(Math.random() * 200) + 10}` },
     agent: "claude-code",
@@ -771,18 +776,49 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
   };
 }
 
+// The same digest pins the real backend boots (crates/colonizer/images.lock), so the mock
+// shows references in exactly the shape the app produces.
 const MOCK_PRESET_IMAGES: Record<string, string> = {
-  node: "node:24-bookworm",
-  python: "python:3.13-bookworm",
-  rust: "rust:1-bookworm",
-  go: "golang:1-bookworm",
+  node: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0",
+  python: "python:3.13-bookworm@sha256:933b46a028fd786c9c3d426ebabc237e29a15912231ea8de576e95f0e4f41a4c",
+  rust: "rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa",
+  go: "golang:1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b",
 };
-const mockPulled = new Set<string>(["node:24-bookworm"]);
+const mockPulled = new Set<string>(["node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0"]);
 let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finished_at: null, error: null };
 // Headroom's bundle: a few seconds of download progress, then installed.
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
 // The live map: not asked yet, so the prompt shows.
+/** `?mesh=unavailable` models a Mac; `?mesh=error` models a mesh that actually failed. */
+const mockMeshParam = () => {
+  try {
+    return new URLSearchParams(location.search).get("mesh");
+  } catch {
+    return null;
+  }
+};
+
+const MOCK_LATEST = {
+  version: "v0.1.4",
+  url: "https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4",
+  notes: "- Colonies keep their worktree when the Mothership restarts\n- Settings shows which Claude account is connected",
+  published_at: "2026-09-17T17:21:32Z",
+};
+
+// An install one release behind, so the update banner can be seen in the mock.
+let mockUpdate: UpdateStatus = {
+  enabled: true,
+  blocked_by: null,
+  installed: { version: "v0.1.3", commit: "abc1234def5678", dirty: false, built_at: "2026-09-05T09:20:00Z", release: "v0.1.3" },
+  latest: MOCK_LATEST,
+  available: true,
+  last_checked: "2026-09-17T18:00:00Z",
+  error: null,
+  can_apply: { ok: true, reason: null },
+  apply: { phase: "idle", version: null, started_at: null, error: null, log: "", colonies: [] },
+};
+
 let mockTelemetry: TelemetryStatus = {
   enabled: null,
   blocked_by: null,
@@ -791,6 +827,32 @@ let mockTelemetry: TelemetryStatus = {
   last_sent_at: null,
   last_error: null,
   heartbeat: { install_id: null, version: "0.1.3", platform: "darwin-arm64", colonies: 1 },
+};
+
+// The usage batch: reporting is on by default, so `enabled` arrives already resolved to true — the
+// "never answered" distinction lives only in usage.json and is not exposed over the API. This build
+// has no sender; the batch is only collected and shown.
+let mockUsage: UsageStatus = {
+  enabled: true,
+  blocked_by: null,
+  payload_version: 1,
+  batch: {
+    payload_version: 1,
+    usage_id: "0f8a6c1e-4d2b-4a9e-9c3f-5b7d1e2a6c48",
+    harness_version: "0.1.3",
+    platform: "darwin-arm64",
+    colonies: { parallel_now: "1", terminal: { pr_opened: "2-3", no_changes: "0", stopped: "1", failed: "0" } },
+    sandbox: { preset: "node", image_changed_from_default: false },
+    autopilot: { enabled: true, held: "0" },
+    settings_set: ["agent.model", "sandbox.preset"],
+    boot_ms: [
+      { phase: "issue", bucket: "<1s" },
+      { phase: "vm-boot", bucket: "5-15s" },
+      { phase: "agentd", bucket: "1-2s" },
+    ],
+    providers: "1",
+    error_kinds: { vm_stopped: "1" },
+  },
 };
 
 export function createMockApi(): Api {
@@ -822,9 +884,24 @@ export function createMockApi(): Api {
   });
   failed.seedFailedHistory();
   failed.session.updated_at = ago(93);
+  // A colony whose publish failed after committing (issue #85): "Finish PR" completes it on the
+  // existing worktree, no resume needed.
+  const stuck = new MockSession({
+    ...baseSession("stuck2468", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
+    status: "failed",
+    mesh: null,
+    error: "publish failed: git push was rejected by the remote",
+    publish_stage: "committed",
+    created_at: ago(50),
+  });
+  stuck.seedFailedHistory();
+  stuck.log("Publish committed 2 files on colonizer/issue-43-stuck2468");
+  stuck.log("Publish failed: git push was rejected by the remote", "error");
+  stuck.session.updated_at = ago(48);
   sessions.set(demo.session.id, demo);
   sessions.set(failed.session.id, failed);
   sessions.set(old.session.id, old);
+  sessions.set(stuck.session.id, stuck);
 
   const mem0: Mem0Status = { has_key: false, source: null, active: false };
 
@@ -948,6 +1025,36 @@ export function createMockApi(): Api {
   octo.session.updated_at = ago(300);
   sessions.set(octo.session.id, octo);
 
+  // The rest of the lifecycle: a launch waiting for a slot, and a PR that was merged or closed.
+  const queued = new MockSession({
+    ...baseSession("queue1357", "acme/webshop", 51, "Rate-limit the checkout API"),
+    status: "queued",
+    mesh: null,
+    created_at: ago(2),
+  });
+  queued.session.updated_at = ago(2);
+  sessions.set(queued.session.id, queued);
+  const merged = new MockSession({
+    ...baseSession("merge5678", "acme/design-system", 12, "Add focus ring tokens for dark mode"),
+    status: "merged",
+    mesh: null,
+    pr_url: "https://github.com/acme/design-system/pull/18",
+    cost_usd: 0.87,
+    created_at: ago(240),
+  });
+  merged.session.updated_at = ago(238);
+  sessions.set(merged.session.id, merged);
+  const closed = new MockSession({
+    ...baseSession("close0987", "acme/webshop", 29, "Support multiple discount codes at checkout"),
+    status: "closed",
+    mesh: null,
+    pr_url: "https://github.com/acme/webshop/pull/44",
+    cost_usd: 0.64,
+    created_at: ago(700),
+  });
+  closed.session.updated_at = ago(690);
+  sessions.set(closed.session.id, closed);
+
   const DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
   const providers: ModelProvider[] = [
     {
@@ -1023,7 +1130,16 @@ export function createMockApi(): Api {
   const orgOfKey = (note: MemoryNote) => (note.scope === "org" ? note.key : note.scope === "repo" ? note.key.split("/")[0] : null);
 
   let githubSource = "gh CLI login";
-  let claude: HarnessStatus["claude"] = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+  let claude: HarnessStatus["claude"] = {
+    configured: true,
+    source: "Claude subscription",
+    kind: "CLAUDE_CODE_OAUTH_TOKEN",
+    account: null,
+    account_note: "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+    saved_at: ago(52 * 24 * 60),
+    expires_at: ahead(313),
+    expires_estimated: true,
+  };
   let login: LoginView = { state: "idle", url: null, message: null };
   const modules: ModuleInfo[] = [
     { kind: "source", provider: "github", providers: [{ id: "github", name: "GitHub", description: "Issues from repositories you can access" }], enabled: true, settings: {}, schema: null },
@@ -1032,11 +1148,11 @@ export function createMockApi(): Api {
       provider: "microsandbox",
       providers: [{ id: "microsandbox", name: "microsandbox", description: "Rootless libkrun microVMs" }],
       enabled: true,
-      settings: { image: "node:24-bookworm", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0" },
+      settings: { image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0" },
       schema: {
         type: "object",
         properties: {
-          image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm" },
+          image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0" },
           cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
           memory: { type: "string", title: "Memory", default: "8G" },
           max_parallel: { type: "integer", title: "Parallel colonies", minimum: 1, maximum: 16, default: 3 },
@@ -1186,17 +1302,39 @@ export function createMockApi(): Api {
     mock: true,
     status: () =>
       later(() => ({
-        github: { connected: true, login: "octocat", name: "The Octocat", source: githubSource },
+        github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
         claude,
-        sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
-        mesh: {
-          enabled: true,
-          provider: "headscale",
-          state: "running",
-          harness_ip: "100.64.0.1",
-          nodes: [...sessions.values()].filter((s) => isLive(s.session.status)).length + 1,
-          error: null,
-        },
+        sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+        // ?mesh=unavailable models a Mac, which vendors no tailscaled: by design, and
+        // not a fault. It used to paint the runtime red (#128), and the mock could not
+        // show that because it only ever reported a healthy mesh.
+        mesh: mockMeshParam() === "error"
+          ? {
+              enabled: true,
+              provider: "headscale",
+              state: "error",
+              harness_ip: null,
+              nodes: 0,
+              error: "headscale did not start: address already in use",
+            }
+          : mockMeshParam() === "unavailable"
+          ? {
+              enabled: true,
+              provider: "headscale",
+              state: "unavailable",
+              harness_ip: null,
+              nodes: 0,
+              detail: "colonies use a loopback port on this platform",
+              error: null,
+            }
+          : {
+              enabled: true,
+              provider: "headscale",
+              state: "running",
+              harness_ip: "100.64.0.1",
+              nodes: [...sessions.values()].filter((s) => isLive(s.session.status)).length + 1,
+              error: null,
+            },
       })),
     modules: () => later(() => modules),
     saveModule: async (kind, body) => {
@@ -1212,7 +1350,7 @@ export function createMockApi(): Api {
     sandboxPull: async () => {
       const sandbox = modules.find((m) => m.kind === "sandbox");
       const preset = String(sandbox?.settings?.preset ?? "node");
-      const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm");
+      const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0");
       if (mockPulled.has(image)) {
         mockPull = { image, state: "cached", started_at: null, finished_at: null, error: null };
         return clone(mockPull);
@@ -1229,6 +1367,27 @@ export function createMockApi(): Api {
       return clone(mockPull);
     },
     sandboxPullStatus: async () => clone(mockPull),
+    applyUpdate: async () => {
+      await sleep(200);
+      const live = [...sessions.values()].map((s) => s.session).filter((s) => isLive(s.status));
+      if (live.some((s) => s.status === "publishing")) throw new ApiError("a colony is publishing", 409);
+      mockUpdate = {
+        ...mockUpdate,
+        apply: {
+          phase: "installing",
+          version: mockUpdate.latest?.version ?? null,
+          started_at: new Date().toISOString(),
+          error: null,
+          log: "",
+          colonies: live.map((s) => ({ id: s.id, repo: s.repo, outcome: "reconnected after the restart" })),
+        },
+      };
+      // The real one replaces the process here; the mock just reports it did.
+      setTimeout(() => {
+        mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "restarting", log: "==> installed Colonizer" } };
+      }, 2500);
+      return { started: true };
+    },
     headroom: async () => {
       if (mockHeadroom.state === "downloading" && mockHeadroom.started_at) {
         const total = 231_330_241;
@@ -1243,6 +1402,16 @@ export function createMockApi(): Api {
       }
       return clone(mockHeadroom);
     },
+    update: async () => clone(mockUpdate),
+    setUpdateCheck: async (enabled) => {
+      await sleep(200);
+      // Matches the backend: switching off forgets the last answer, so no banner
+      // lingers for a check that is no longer running.
+      mockUpdate = enabled
+        ? { ...mockUpdate, enabled, latest: MOCK_LATEST, available: true, last_checked: new Date().toISOString() }
+        : { ...mockUpdate, enabled, latest: null, available: false, last_checked: null, error: null };
+      return clone(mockUpdate);
+    },
     telemetry: async () => clone(mockTelemetry),
     setTelemetry: async (enabled) => {
       await sleep(250);
@@ -1254,6 +1423,18 @@ export function createMockApi(): Api {
         heartbeat: { ...mockTelemetry.heartbeat, install_id },
       };
       return clone(mockTelemetry);
+    },
+    usage: async () => clone(mockUsage),
+    setUsage: async (enabled) => {
+      await sleep(250);
+      if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);
+      mockUsage = {
+        ...mockUsage,
+        enabled,
+        // Switching on creates the id; switching off forgets it, so the next period cannot be joined to this one.
+        batch: { ...mockUsage.batch, usage_id: enabled ? (mockUsage.batch.usage_id ?? crypto.randomUUID()) : null },
+      };
+      return clone(mockUsage);
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
@@ -1285,13 +1466,19 @@ export function createMockApi(): Api {
     },
     publishSession: async (id) => {
       const s = find(id);
-      if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
+      if (!canPublish(s.session)) throw new ApiError("this colony cannot be published", 409);
+      const live = isLive(s.session.status);
       s.halt();
-      s.patch({ status: "publishing" });
-      s.log("Stopping the agent and removing the microVM");
+      s.patch({ status: "publishing", error: null });
+      s.log(live ? "Stopping the agent and removing the microVM" : "Finishing the last publish on the existing worktree");
       setTimeout(() => {
         s.log(`Committed 3 files on ${s.session.branch} and pushed`);
-        s.patch({ status: "pr_opened", mesh: null, pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}` });
+        s.patch({
+          status: "pr_opened",
+          mesh: null,
+          pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}`,
+          publish_stage: "pr_opened",
+        });
         s.log("Opened pull request");
       }, 1800);
       return clone(s.session);
@@ -1332,11 +1519,23 @@ export function createMockApi(): Api {
       if (!token.trim().startsWith("sk-ant-")) {
         throw new ApiError("expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)", 400);
       }
-      claude = { configured: true, source: token.includes("-api") ? "saved API key" : "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+      const apiKey = token.trim().startsWith("sk-ant-api");
+      claude = {
+        configured: true,
+        source: apiKey ? "saved API key" : "Claude subscription",
+        kind: apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN",
+        account: null,
+        account_note: apiKey
+          ? "an API key does not identify an account"
+          : "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+        saved_at: now(),
+        expires_at: apiKey ? null : ahead(365),
+        expires_estimated: !apiKey,
+      };
       return { ok: true };
     },
     deleteClaudeToken: async () => {
-      claude = { configured: false, source: null, kind: null };
+      claude = { configured: false, source: null, kind: null, account: null, account_note: null, saved_at: null, expires_at: null, expires_estimated: false };
       return { ok: true };
     },
     claudeLogin: () => later(() => login, 60),
@@ -1355,7 +1554,16 @@ export function createMockApi(): Api {
       login = { ...login, state: "verifying" };
       setTimeout(() => {
         login = { state: "done", url: null, message: "Connected your Claude subscription" };
-        claude = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+        claude = {
+          configured: true,
+          source: "Claude subscription",
+          kind: "CLAUDE_CODE_OAUTH_TOKEN",
+          account: null,
+          account_note: "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+          saved_at: now(),
+          expires_at: ahead(365),
+          expires_estimated: true,
+        };
       }, 1200);
       return clone(login);
     },

@@ -105,7 +105,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "description": "Picks the image and machine size for a colony. Every preset is glibc-based, which the agent binary requires. Choose 'custom' to set the fields below yourself; anything you set explicitly wins over the preset either way.",
                     "enum": crate::presets::ids(), "default": "node"
                 },
-                "image": {"type": "string", "title": "Image", "description": "glibc-based OCI image with the tools your projects need. Set by the stack unless you change it.", "default": "node:24-bookworm"},
+                "image": {"type": "string", "title": "Image", "description": "glibc-based OCI image with the tools your projects need, pinned by digest. Set by the stack unless you change it.", "default": crate::presets::pinned_image("node")},
                 "cpus": {"type": "integer", "title": "vCPUs", "minimum": 1, "maximum": 64, "default": 4},
                 "memory": {"type": "string", "title": "Memory", "description": "e.g. 8G", "default": "8G"},
                 "root_disk": {"type": "string", "title": "Root disk", "default": "16G"},
@@ -269,20 +269,20 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
         if !ok {
             return Err(format!("setting `{key}` has the wrong type"));
         }
-        if let Some(options) = spec["enum"].as_array() {
-            if !options.contains(value) {
-                return Err(format!("setting `{key}` must be one of the listed options"));
-            }
+        if let Some(options) = spec["enum"].as_array()
+            && !options.contains(value)
+        {
+            return Err(format!("setting `{key}` must be one of the listed options"));
         }
-        if let Some(n) = value.as_f64() {
-            if spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max) {
-                return Err(format!("setting `{key}` is out of range"));
-            }
+        if let Some(n) = value.as_f64()
+            && (spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max))
+        {
+            return Err(format!("setting `{key}` is out of range"));
         }
-        if let Some(s) = value.as_str() {
-            if s.len() > 500 || s.contains('\n') {
-                return Err(format!("setting `{key}` is too long"));
-            }
+        if let Some(s) = value.as_str()
+            && (s.len() > 500 || s.contains('\n'))
+        {
+            return Err(format!("setting `{key}` is too long"));
         }
         // A size string is parsed where its quota is enforced, so garbage is refused here, at save time,
         // while the operator is looking — not silently read as no quota at all.

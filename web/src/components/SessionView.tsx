@@ -17,7 +17,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, attentionText, buttonClass, cx, isLive, minutesAgo, orgOf } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, attentionText, buttonClass, canPublish, cx, isLive, minutesAgo, orgOf } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -82,6 +82,15 @@ export function SessionView({
   }
 
   const live = isLive(session.status);
+  /** A publish that already got somewhere is finished, not started over. */
+  const finishing = session.publish_stage != null || session.status === "failed" || session.status === "no_changes";
+  /** How far the last publish got, when it never reached a pull request. */
+  const publishStage =
+    session.pr_url || !session.publish_stage || session.publish_stage === "pr_opened"
+      ? null
+      : session.publish_stage === "committed"
+        ? "The last publish committed locally — not pushed yet."
+        : "The last publish pushed the branch — no pull request yet.";
   const showTerminal = interfaces.terminal;
   const showChat = interfaces.chat || !showTerminal;
   const split = showChat && showTerminal;
@@ -92,7 +101,7 @@ export function SessionView({
   const deleteWarning =
     session.status === "queued"
       ? "Remove this colony from the queue and the list? It never started, so nothing else is lost."
-      : session.status === "pr_opened"
+      : ["pr_opened", "merged", "closed"].includes(session.status)
         ? "Delete this colony? Its chat, logs and local worktree are removed. The pull request and its pushed branch stay on GitHub."
         : session.cleaned_up
           ? "Delete this colony's chat and logs? Its worktree was already cleaned up. This cannot be undone."
@@ -181,11 +190,15 @@ export function SessionView({
             {!session.pr_url && (
               <Button
                 variant="primary"
-                disabled={!live || busy !== null}
+                disabled={!canPublish(session) || busy !== null}
                 onClick={() => act("publish", (a, id) => a.publishSession(id))}
-                title="Stop the agent, commit, push and open the pull request"
+                title={
+                  finishing
+                    ? "Commit, push or open the pull request — finishing the last publish without booting a new microVM"
+                    : "Stop the agent, commit, push and open the pull request"
+                }
               >
-                {busy === "publish" ? <Spinner /> : <IconGitPR size={15} />} Create PR
+                {busy === "publish" ? <Spinner /> : <IconGitPR size={15} />} {finishing ? "Finish PR" : "Create PR"}
               </Button>
             )}
             {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed") && (
@@ -240,7 +253,9 @@ export function SessionView({
               <span className="opacity-80">Check the terminal, message the agent, or stop the colony.</span>
             )}
             {attention.reason === "autopilot_held" && (
-              <span className="opacity-80">The agent's turn ended with an error. Check the chat, then press Create PR or message the agent.</span>
+              <span className="opacity-80">
+                The agent's turn ended with an error. Check the chat, then press {finishing ? "Finish PR" : "Create PR"} or message the agent.
+              </span>
             )}
           </div>
         )}
@@ -249,6 +264,7 @@ export function SessionView({
             {session.error}
           </div>
         )}
+        {publishStage && <div className="mt-2 text-[12.5px] text-muted">{publishStage}</div>}
       </header>
 
       <ActivityStrip logs={state.logs} />

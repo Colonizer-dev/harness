@@ -26,7 +26,10 @@ mod sandbox;
 mod sessions;
 mod telemetry;
 mod timing;
+mod usage;
 mod util;
+mod update;
+mod version;
 mod watchdog;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -38,6 +41,7 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use config::{setting_u64, ModulesConfig, Settings};
 use mesh::{Mesh, Ports};
 use modules::AgentModule;
@@ -46,6 +50,7 @@ use sessions::Session;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path as FsPath, PathBuf},
+    process::ExitCode,
     sync::Arc,
     time::Duration,
 };
@@ -68,12 +73,22 @@ pub struct ClaudeCred {
     pub source: &'static str,
 }
 
+/// The latest confirmed storage failure, shown by the UI until it is dismissed. Sticky on purpose:
+/// a later successful write does not clear it, because the gap the alert reports did happen.
+#[derive(Clone, Debug)]
+pub struct StorageAlert {
+    pub message: String,
+    pub ts: DateTime<Utc>,
+    pub failures: u64,
+}
+
 pub struct App {
     pub cfg: Settings,
     pub modules: RwLock<ModulesConfig>,
     pub agents: Vec<AgentModule>,
     pub sessions: RwLock<Vec<Session>>,
     session_persist: Mutex<()>,
+    pub storage_alert: RwLock<Option<StorageAlert>>,
     pub runtimes: Mutex<HashMap<String, Arc<sessions::Runtime>>>,
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     mesh: Mutex<Option<Arc<Mesh>>>,
@@ -84,12 +99,19 @@ pub struct App {
     pub repo_owners: RwLock<BTreeSet<String>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// The last Anthropic profile lookup for the Claude credential, cached so the status poll does not
+    /// hammer Anthropic. Keyed on a fingerprint of the token; the token itself is never stored.
+    pub claude_account: Mutex<Option<claude_login::AccountStatus>>,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<headroom::Status>,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
+    pub updates: version::Updates,
+    pub updater: update::Updater,
+    /// Anonymous usage reporting, local half only: the batch that would be sent and the switch for it.
+    pub usage: usage::Usage,
 }
 
 pub type Shared = Arc<App>;
@@ -117,6 +139,15 @@ impl App {
 
     pub async fn repo_lock(&self, repo: &str) -> Arc<Mutex<()>> {
         self.repo_locks.lock().await.entry(repo.to_string()).or_default().clone()
+    }
+
+    /// Records a confirmed storage failure: printed loudly here, kept as the sticky alert the UI
+    /// shows, and counted so a run of failures reads as more than one.
+    pub async fn storage_failed(&self, what: &str, err: &anyhow::Error) {
+        eprintln!("storage: {what}: {err:#}");
+        let mut alert = self.storage_alert.write().await;
+        let failures = alert.as_ref().map_or(0, |a| a.failures) + 1;
+        *alert = Some(StorageAlert { message: format!("{what} failed: {err:#}"), ts: Utc::now(), failures });
     }
 
     /// The mesh manager, created on first use from the bundled binaries and mesh module settings.
@@ -177,10 +208,10 @@ async fn find_claude_bin(cfg: &Settings, elf_only: bool) -> Result<PathBuf> {
         if elf_only && !is_elf(&real) {
             continue;
         }
-        if let Ok(version) = exec(Command::new(&real).arg("--version")).await {
-            if version.contains("Claude Code") {
-                return Ok(real);
-            }
+        if let Ok(version) = exec(Command::new(&real).arg("--version")).await
+            && version.contains("Claude Code")
+        {
+            return Ok(real);
         }
     }
     bail!("no Claude Code binary found")
@@ -210,18 +241,34 @@ pub fn client_error(status: StatusCode, message: &str) -> AppError {
 
 pub type ApiResult<T> = Result<Json<T>, AppError>;
 
+/// The `storage` key of `/api/status`: `ok` while every write was confirmed, else the sticky alert
+/// (`ts` in the same RFC 3339 form the `harness_log` frames use).
+fn storage_status(alert: Option<StorageAlert>) -> Value {
+    match alert {
+        None => json!({"ok": true}),
+        Some(alert) => json!({"ok": false, "message": alert.message, "ts": alert.ts, "failures": alert.failures}),
+    }
+}
+
 async fn status(State(app): State<Shared>) -> Json<Value> {
     let mut msb = Command::new(&app.cfg.msb);
     msb.arg("--version");
-    let (user, msb_version, claude_bin) = tokio::join!(github::viewer(&app), exec(&mut msb), resolve_guest_claude_bin(&app.cfg));
     let cred = app.claude_cred();
+    let (user, msb_version, claude_bin, claude) = tokio::join!(
+        github::viewer(&app),
+        exec(&mut msb),
+        resolve_guest_claude_bin(&app.cfg),
+        claude_login::claude_status(&app, cred.as_ref()),
+    );
     let modules = app.modules.read().await.clone();
     let mesh = if !modules.mesh_enabled() {
         json!({"enabled": false, "provider": "none"})
     } else if !app.cfg.assets.as_deref().is_some_and(mesh::binaries_present) {
-        // Not an error the operator can clear: this platform has no mesh binaries to vendor.
+        // Not an error the operator can clear: this platform has no mesh binaries to
+        // vendor. It goes in `detail`, not `error`: anything in `error` is read as a
+        // fault, and this one used to paint every Mac's runtime red.
         json!({"enabled": true, "provider": "headscale", "state": "unavailable",
-               "error": "no mesh binaries for this platform; colonies use a loopback port"})
+               "detail": "colonies use a loopback port on this platform", "error": Value::Null})
     } else {
         match app.mesh().await {
             Ok(mesh) => mesh.status().await,
@@ -230,16 +277,13 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     };
     let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
+    let storage_alert = app.storage_alert.read().await.clone();
     Json(json!({
         "github": match user {
-            Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "source": github::token_source(&app)}),
+            Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
             Err(e) => json!({"connected": false, "error": format!("{e:#}")}),
         },
-        "claude": {
-            "configured": cred.is_some(),
-            "source": cred.as_ref().map(|c| c.source),
-            "kind": cred.as_ref().map(|c| c.env),
-        },
+        "claude": claude,
         "sandbox": {
             "provider": modules.sandbox.provider,
             "image": config::setting_str(&modules.sandbox, &sandbox_schema, "image"),
@@ -251,6 +295,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
             "claude_bin_error": claude_bin.err().map(|e| format!("{e:#}")),
         },
         "mesh": mesh,
+        "storage": storage_status(storage_alert),
         "modules": {
             "source": modules.source.provider,
             "sandbox": modules.sandbox.provider,
@@ -298,16 +343,15 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
     let bind_host = app.cfg.bind.rsplit_once(':').map_or(app.cfg.bind.as_str(), |(h, _)| h);
     let allowed = matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]")
         || hostname == bind_host
-        || app.cfg.allowed_hosts.iter().any(|h| *h == hostname);
+        || app.cfg.allowed_hosts.contains(&hostname);
     if !allowed {
         return (StatusCode::FORBIDDEN, "Host not allowed (set COLONIZER_ALLOWED_HOSTS)").into_response();
     }
-    if req.method() != Method::GET || req.headers().contains_key(header::UPGRADE) {
-        if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-            if origin.split("://").nth(1) != Some(host.as_str()) {
-                return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
-            }
-        }
+    if (req.method() != Method::GET || req.headers().contains_key(header::UPGRADE))
+        && let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok())
+        && origin.split("://").nth(1) != Some(host.as_str())
+    {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
     next.run(req).await
 }
@@ -327,16 +371,151 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     }
 }
 
+/// Load the session list from `sessions.json`. A file we cannot read or parse is moved aside to
+/// `sessions.json.corrupt-<unix-timestamp>` — never overwritten, so its bytes stay recoverable —
+/// and the harness starts with an empty list and a sticky alert: the colonies on that list are
+/// missing from it although their worktrees, branches and microVMs may still exist. If even the
+/// move-aside fails, the next save would overwrite the file, so that is an error rather than a
+/// degraded start.
+fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> {
+    let reason = match std::fs::read(path) {
+        // A missing file is a first run, not a corruption.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+        Err(e) => format!("could not be read ({e})"),
+        Ok(data) => match serde_json::from_slice::<Vec<Session>>(&data) {
+            Ok(sessions) => return Ok((sessions, None)),
+            Err(e) => format!("could not be parsed ({e})"),
+        },
+    };
+    let saved = move_corrupt_aside(path)?;
+    let message = format!(
+        "{} {reason} and was saved as {}; colonies are missing from the list, although their worktrees, branches and microVMs may still exist",
+        path.display(),
+        saved.display()
+    );
+    eprintln!("sessions: {message}");
+    Ok((Vec::new(), Some(StorageAlert { message, ts: Utc::now(), failures: 1 })))
+}
+
+/// Moves a `sessions.json` the harness cannot use aside, into the same directory, so its bytes survive.
+fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sessions.json".into());
+    let saved = path.with_file_name(format!("{name}.corrupt-{stamp}"));
+    let aside = || format!("could not move the unusable {} aside to {}; move it aside yourself and restart", path.display(), saved.display());
+    util::faults::check(path, util::faults::Op::Rename).with_context(aside)?;
+    std::fs::rename(path, &saved).with_context(aside)?;
+    Ok(saved)
+}
+
+const USAGE: &str = "colonizer — turn a task into a pull request; see https://colonizer.dev/docs
+
+usage: colonizer
+       colonizer version | update
+       colonizer telemetry show|on|off
+
+  (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
+  version         print what this build is, and whether it is a release (also --version, -V)
+  update          install the newest release against a running mothership and restart into it
+  telemetry show  print the exact anonymous usage batch that would be sent
+  telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
+  telemetry off   record no to anonymous usage reporting
+  --help, -h      print this help
+
+Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
+COLONIZER_HOME and the rest are in docs/install.md.";
+
+/// What the binary was asked to do. Starting the mothership is the default; every other command
+/// runs without one, except `update`, which is a client of a mothership that is already running.
+///
+/// An argument nobody planned for is an error with the usage text, not a silently started server:
+/// a typo like `colonizer updat` should say so rather than take over the port for an afternoon.
+enum Args {
+    Serve,
+    Version,
+    Update,
+    TelemetryShow,
+    TelemetrySet(bool),
+}
+
+impl Args {
+    /// `Ok(None)` means the command was fully handled (`--help`).
+    fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
+        let mut iter = argv.into_iter();
+        let Some(arg) = iter.next() else { return Ok(Some(Self::Serve)) };
+        let command = match arg.as_str() {
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(None);
+            }
+            "version" | "--version" | "-V" => Self::Version,
+            "update" => Self::Update,
+            "telemetry" => {
+                let sub = iter.next().ok_or_else(|| "telemetry needs a command: show, on or off".to_string())?;
+                match sub.as_str() {
+                    "show" => Self::TelemetryShow,
+                    "on" => Self::TelemetrySet(true),
+                    "off" => Self::TelemetrySet(false),
+                    other => return Err(format!("unknown telemetry command: {other}")),
+                }
+            }
+            _ => return Err(format!("unknown argument: {arg}")),
+        };
+        if let Some(extra) = iter.next() {
+            return Err(format!("unknown argument: {extra}"));
+        }
+        Ok(Some(command))
+    }
+
+    async fn run(self) -> Result<()> {
+        match self {
+            Self::Serve => serve().await,
+            // The stamped build, not CARGO_PKG_VERSION: the crate version says nothing about
+            // which commit an install came from.
+            Self::Version => {
+                println!("{}", version::build().line());
+                Ok(())
+            }
+            Self::Update => update::command().await,
+            Self::TelemetryShow => {
+                let cfg = Settings::from_env()?;
+                usage::cli_show(&cfg.config_dir)
+            }
+            Self::TelemetrySet(enabled) => {
+                let cfg = Settings::from_env()?;
+                usage::cli_set(&cfg.config_dir, enabled)
+            }
+        }
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    let args = match Args::parse(std::env::args().skip(1).collect()) {
+        Ok(Some(args)) => args,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match args.run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
+/// background loops.
+async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
-    let mut sessions: Vec<Session> = std::fs::read(cfg.data_dir.join("sessions.json"))
-        .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_default();
+    let (mut sessions, corrupt) = load_sessions(&cfg.data_dir.join("sessions.json"))?;
     for s in &mut sessions {
         if s.org.is_empty() {
             s.org = s.repo.split('/').next().unwrap_or_default().to_string();
@@ -350,6 +529,7 @@ async fn main() -> Result<()> {
         agents,
         sessions: RwLock::new(sessions),
         session_persist: Mutex::new(()),
+        storage_alert: RwLock::new(corrupt),
         runtimes: Mutex::new(HashMap::new()),
         repo_locks: Mutex::new(HashMap::new()),
         mesh: Mutex::new(None),
@@ -358,9 +538,13 @@ async fn main() -> Result<()> {
         gateway: gateway::Gateway::new()?,
         repo_owners: RwLock::new(BTreeSet::new()),
         orgs_refreshed: Mutex::new(None),
+        claude_account: Mutex::new(None),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
+        updates: version::Updates::new(&cfg.config_dir)?,
+        updater: update::Updater::new(),
+        usage: usage::Usage::new(&cfg.config_dir),
         cfg,
     });
 
@@ -378,6 +562,10 @@ async fn main() -> Result<()> {
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
+        .route("/api/version", get(version::version))
+        .route("/api/update", get(version::status).put(version::put))
+        .route("/api/update/apply", post(update::apply))
+        .route("/api/telemetry/usage", get(usage::status).put(usage::put))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -417,6 +605,8 @@ async fn main() -> Result<()> {
         Some(assets) => println!("assets: {}", assets.display()),
         None => println!("assets: not found (run scripts/install.sh)"),
     }
+    // The first-run notice: once, while nobody has answered yet, show the exact usage batch on stderr.
+    usage::first_run_notice(&app).await;
     match tokio::net::TcpListener::bind(&app.cfg.gateway_bind).await {
         Ok(listener) => {
             println!("provider gateway on http://{}", app.cfg.gateway_bind);
@@ -431,19 +621,37 @@ async fn main() -> Result<()> {
     }
 
     let recovery = app.clone();
-    tokio::spawn(async move { sessions::recover(&recovery).await });
+    tokio::spawn(async move {
+        sessions::recover(&recovery).await;
+        // Once recovery has settled, an app directory kept by an earlier update
+        // can go, unless a colony that survived it still mounts from there.
+        let live: Vec<std::path::PathBuf> = recovery
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| update::will_reconnect(s.status))
+            .filter_map(|s| s.app_slot.as_deref().map(std::path::PathBuf::from))
+            .collect();
+        for gone in update::sweep_slots(recovery.cfg.assets.as_deref(), &live) {
+            println!("removed the app directory left by an earlier update: {}", gone.display());
+        }
+    });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();
     tokio::spawn(async move { sessions::run_queue(queue).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { sessions::watch_host_disks(disk_watch).await });
+    let pr_watch = app.clone();
+    tokio::spawn(async move { sessions::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
+    tokio::spawn(version::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
-        // Retrying would never help: no mesh binary is published for this platform, so there is
-        // nothing for another `scripts/install.sh` to fetch. Colonies use a loopback port instead.
+        // Restarting would never help: the binaries are missing from this install, and the app does
+        // not fetch them at runtime. Colonies use a loopback port instead.
         println!("mesh: no mesh binaries for this platform; colonies will use a loopback port");
     }
     if app.modules.read().await.mesh_enabled() && mesh_vendored {
@@ -481,4 +689,151 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A minimal App over a throwaway directory, shared with sessions.rs's tests. Nothing here
+    /// binds a port, spawns a microVM or reaches the network.
+    pub(crate) fn test_app(root: &FsPath) -> Shared {
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        Arc::new(App {
+            cfg: Settings {
+                bind: "127.0.0.1:0".into(),
+                data_dir: root.join("data"),
+                config_dir: root.join("config"),
+                runtime_dir: root.join("run"),
+                assets: None,
+                msb: "msb".into(),
+                claude_bin: None,
+                gateway_bind: "127.0.0.1:0".into(),
+                allowed_hosts: Vec::new(),
+            },
+            modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
+            agents: Vec::new(),
+            sessions: RwLock::new(Vec::new()),
+            session_persist: Mutex::new(()),
+            storage_alert: RwLock::new(None),
+            runtimes: Mutex::new(HashMap::new()),
+            repo_locks: Mutex::new(HashMap::new()),
+            mesh: Mutex::new(None),
+            login: Default::default(),
+            memory: memory::MemoryStore::new(root.join("memory")),
+            // Added on main while this branch was open; kept in step with the real constructor.
+            claude_account: Mutex::new(None),
+            usage: usage::Usage::new(&root.join("config")),
+            updates: version::Updates::new(&root.join("config")).unwrap(),
+            updater: update::Updater::new(),
+            gateway: gateway::Gateway::new().unwrap(),
+            repo_owners: RwLock::new(BTreeSet::new()),
+            orgs_refreshed: Mutex::new(None),
+            pull: Mutex::new(Default::default()),
+            headroom: Mutex::new(Default::default()),
+            telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
+        })
+    }
+
+    fn temp_root() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("colonizer-load-{}", util::short_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        dir
+    }
+
+    /// A session list with exactly the fields the format requires; everything else defaults.
+    fn session_json() -> String {
+        json!([{
+            "id": "abc123",
+            "repo": "acme/app",
+            "issue_title": "Fix the deploy",
+            "status": "idle",
+            "branch": "colonizer/issue-1-abc123",
+            "worktree": "/colonizer/worktrees/acme/app/issue-1-abc123",
+            "sandbox": "colonizer-abc123",
+            "agent": "claude",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn a_missing_sessions_file_loads_as_empty_with_no_alert() {
+        let root = temp_root();
+        let (sessions, alert) = load_sessions(&root.join("data/sessions.json")).unwrap();
+        assert!(sessions.is_empty());
+        assert!(alert.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_valid_sessions_file_loads_with_no_alert() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        std::fs::write(&path, session_json()).unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "abc123");
+        assert!(alert.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_corrupt_sessions_file_is_saved_aside_and_the_harness_starts_empty_with_an_alert() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        std::fs::write(&path, b"this is not json").unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert!(sessions.is_empty());
+        let alert = alert.unwrap();
+        assert!(alert.message.contains(".corrupt-"), "{}", alert.message);
+        assert!(alert.message.contains("worktrees, branches and microVMs"), "{}", alert.message);
+        // The original path no longer holds the corrupt bytes; the saved copy keeps them byte for byte.
+        let saved = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(".corrupt-"))
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), b"this is not json");
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unsalvageable_sessions_file_stops_startup_and_is_left_untouched() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        std::fs::write(&path, b"this is not json").unwrap();
+        let _guard =
+            util::faults::inject("sessions.json", util::faults::Op::Rename, || std::io::Error::from_raw_os_error(5));
+        let err = load_sessions(&path).unwrap_err();
+        assert!(err.to_string().contains("move it aside yourself"), "{err:#}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"this is not json", "the file is untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn storage_failures_are_counted_and_sticky() {
+        let root = temp_root();
+        let app = test_app(&root);
+        app.storage_failed("write the list", &anyhow!("disk is full")).await;
+        app.storage_failed("write the list", &anyhow!("disk is still full")).await;
+        let alert = app.storage_alert.read().await.clone().unwrap();
+        assert_eq!(alert.failures, 2, "each failure increments the counter");
+        assert!(alert.message.contains("write the list failed"), "{}", alert.message);
+        assert!(alert.message.contains("disk is still full"), "the latest failure wins: {}", alert.message);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_status_storage_key_is_ok_until_a_write_goes_unconfirmed() {
+        assert_eq!(storage_status(None), json!({"ok": true}));
+        let alert = StorageAlert { message: "save the session list failed: disk is full".into(), ts: Utc::now(), failures: 3 };
+        let value = storage_status(Some(alert));
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["message"], "save the session list failed: disk is full");
+        assert_eq!(value["failures"], 3);
+        assert!(value["ts"].is_string(), "the ts is the RFC 3339 string the harness_log frames use: {value}");
+    }
 }
