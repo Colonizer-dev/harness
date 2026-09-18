@@ -405,8 +405,42 @@ fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
     Ok(saved)
 }
 
+/// What `colonizer` does before it decides to be a server.
+///
+/// Hand-rolled rather than a parser dependency: there are three words, settings
+/// come from the environment, and anything unrecognised still serves — so an
+/// argument nobody planned for cannot stop a mothership starting.
+async fn cli(arg: &str) -> Option<Result<()>> {
+    match arg {
+        "version" | "--version" | "-V" => {
+            println!("{}", version::build().line());
+            Some(Ok(()))
+        }
+        "update" => Some(update::command().await),
+        "--help" | "-h" => {
+            println!("colonizer — turn a task into a pull request; see https://colonizer.dev/docs");
+            println!();
+            println!("usage: colonizer [--help] [--version] [update]");
+            println!();
+            println!("  (no argument)  serve the harness and its web UI");
+            println!("  update         update a running mothership to its newest release");
+            println!("  version        print what this build is (also --version, -V)");
+            println!();
+            println!("Settings come from the environment, not flags: COLONIZER_BIND,");
+            println!("COLONIZER_DATA_DIR, COLONIZER_HOME and the rest are in docs/install.md.");
+            Some(Ok(()))
+        }
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(arg) = std::env::args().nth(1)
+        && let Some(done) = cli(&arg).await
+    {
+        return done;
+    }
     let cfg = Settings::from_env()?;
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
