@@ -251,6 +251,13 @@ impl Updates {
         }
     }
 
+    /// The latest release tag, when it is newer than what is installed.
+    pub async fn latest_release(&self) -> Option<String> {
+        let state = self.state.lock().await;
+        let build = build();
+        state.latest.as_ref().filter(|l| is_newer(build.release.as_deref(), &l.version)).map(|l| l.version.clone())
+    }
+
     async fn view(&self) -> Value {
         let state = self.state.lock().await;
         let build = build();
@@ -275,9 +282,16 @@ pub async fn version(State(app): State<Shared>) -> Json<&'static Build> {
     Json(build())
 }
 
-/// `GET /api/update` — the installed version, the latest release, and whether to act.
+/// `GET /api/update` — the installed version, the latest release, whether to act,
+/// and how an update being applied is getting on.
 pub async fn status(State(app): State<Shared>) -> Json<Value> {
-    Json(app.updates.view().await)
+    let mut view = app.updates.view().await;
+    view["apply"] = serde_json::to_value(app.updater.progress().await).unwrap_or(Value::Null);
+    view["can_apply"] = match crate::update::blocker(app.cfg.assets.as_deref()) {
+        Some(reason) => json!({ "ok": false, "reason": reason }),
+        None => json!({ "ok": true, "reason": Value::Null }),
+    };
+    Json(view)
 }
 
 #[derive(Deserialize)]

@@ -235,6 +235,16 @@ export interface UpdateStatus {
   available: boolean;
   last_checked: string | null;
   error: string | null;
+  /// Whether this install can update itself, and why not if it cannot.
+  can_apply: { ok: boolean; reason: string | null };
+  apply: {
+    phase: "idle" | "installing" | "restarting" | "failed";
+    version: string | null;
+    started_at: string | null;
+    error: string | null;
+    log: string;
+    colonies: { id: string; repo: string; outcome: string }[];
+  };
 }
 
 /** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */
