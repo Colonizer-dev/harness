@@ -160,7 +160,7 @@ impl Telemetry {
         if let Some(id) = forgotten {
             if let Err(e) = self.send_off(&id).await {
                 // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
-                // deleted within the hour.
+                // and pruned once the row is over an hour old, by the prune that rides the next request.
                 self.report.lock().await.last_error = Some(format!("{e:#}"));
             }
         }
@@ -374,6 +374,22 @@ mod tests {
         assert_eq!(bodies[0], json!({"install_id": id, "version": "0.1.3", "platform": "darwin-arm64", "colonies": 1}));
         assert_eq!(bodies[1], json!({"install_id": id, "online": false}));
 
+        telemetry.set(true).await.unwrap();
+        assert_ne!(telemetry.active_id().await.unwrap(), id, "a new period on the map gets a new id");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn switching_off_forgets_the_id_even_when_the_service_is_unreachable() {
+        let dir = std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("telemetry.json");
+        let telemetry = Telemetry::with(path.clone(), "http://127.0.0.1:9".into(), None).unwrap();
+        telemetry.set(true).await.unwrap();
+        let id = telemetry.active_id().await.expect("an id once switched on");
+
+        telemetry.set(false).await.unwrap();
+        assert_eq!(telemetry.active_id().await, None);
+        assert_eq!(Choice::load(&path), Choice { enabled: Some(false), install_id: None }, "forgotten on disk although the goodbye never arrived");
         telemetry.set(true).await.unwrap();
         assert_ne!(telemetry.active_id().await.unwrap(), id, "a new period on the map gets a new id");
         std::fs::remove_dir_all(&dir).unwrap();
