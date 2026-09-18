@@ -40,7 +40,8 @@ is not built yet, and nothing in this README pretends otherwise.
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
-it's going, is in [docs/vision.md](docs/vision.md).
+it's going, is in [docs/vision.md](docs/vision.md). What has been decided against, and why, is in
+[docs/decisions.md](docs/decisions.md).
 
 ---
 
@@ -238,6 +239,9 @@ Stated here rather than buried.
   real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
   API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
   wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
+- **ChatGPT subscriptions are not a credential.** OpenAI-compatible providers take an API key: a ChatGPT
+  plan is honoured by the Responses API behind Codex sign-in, which the gateway's `openai` wire does not
+  speak ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](docs/decisions.md)).
 - **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
   is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
   given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
