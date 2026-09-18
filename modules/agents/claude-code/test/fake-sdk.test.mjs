@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
+import { z } from 'zod';
+
+import { createFindingsServer } from '../findings.mjs';
+import { createMemoryServer } from '../memory.mjs';
 import {
   AsyncQueue,
   buildOptions as buildOptionsWithDefaults,
@@ -66,6 +70,26 @@ const askInput = {
   ],
 };
 
+/**
+ * The colony's two in-process MCP servers, wired to one event stream, with the tool defs captured so
+ * the fake turn can call them the way Claude Code would. Real zod, so the proposals and findings
+ * that reach the test have passed the runner's own validation.
+ */
+function contractTools(emit) {
+  const defs = [];
+  const tool = (name, description, shape, handler) => {
+    const def = { name, description, shape, handler };
+    defs.push(def);
+    return def;
+  };
+  const createSdkMcpServer = (server) => server;
+  // memory_propose never reads the mount; only memory_search does, and the turn never calls it.
+  createMemoryServer({ dir: join(tmpdir(), 'colonizer-contract-memory'), emit, createSdkMcpServer, tool, z });
+  createFindingsServer({ emit, createSdkMcpServer, tool, z });
+  const byName = (name) => defs.find((def) => def.name === name);
+  return { propose: byName('memory_propose'), file: byName('finding_file') };
+}
+
 async function* issueTurn(options, calls) {
   yield { type: 'system', subtype: 'init', session_id: 's1', model: 'fake-model' };
   yield stream({ type: 'message_start', message: { id: 'msg_1' } });
@@ -83,17 +107,32 @@ async function* issueTurn(options, calls) {
   yield stream({ type: 'message_start', message: { id: 'msg_2' } });
   yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_bash', name: 'Bash' } });
   const bashInput = { command: 'echo hi > hello.txt' };
-  yield assistant('msg_2', [{ type: 'tool_use', id: 'toolu_bash', name: 'Bash', input: bashInput }]);
+  yield assistant('msg_2', [{ type: 'thinking', thinking: 'Create hello.txt with a shell redirect.' }, { type: 'tool_use', id: 'toolu_bash', name: 'Bash', input: bashInput }]);
   calls.decisions.push(
     await options.canUseTool('Bash', bashInput, { signal: new AbortController().signal, toolUseID: 'toolu_bash' }),
   );
   yield user([{ type: 'tool_result', tool_use_id: 'toolu_bash', content: [{ type: 'text', text: 'x'.repeat(25_000) }] }]);
-  yield { type: 'result', subtype: 'success', is_error: false, result: 'Created hello.txt', total_cost_usd: 0.01, duration_ms: 1234 };
+  // The colony's own tools emit protocol events too: a shared-memory proposal (§6.2) and a finding (§6.6).
+  await calls.tools.propose.handler({ scope: 'repo', title: 'Redirect with > to create files', content: 'The colony image ships a plain shell; `>` creates the file without a heredoc.', tags: ['workspace'] });
+  await calls.tools.file.handler({ title: 'hello.txt is written outside /harness/out', body: 'The turn writes `hello.txt` into the worktree root, where it would land in the pull request.', evidence: 'This turn: the Bash call above runs `echo hi > hello.txt` and the file appears in the worktree.' });
+  // modelUsage is per model: `cost_usd` sums the Claude models only, `model_usage` reports the rest as tokens.
+  yield {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: 'Created hello.txt',
+    total_cost_usd: 0.01,
+    duration_ms: 1234,
+    modelUsage: {
+      'claude-opus-5': { inputTokens: 1200, outputTokens: 300, cacheReadInputTokens: 90_000, cacheCreationInputTokens: 8_000, costUSD: 0.42 },
+    },
+  };
 }
 
 test('maps a turn with a question to protocol events', async () => {
   const { query, calls } = fakeQuery(issueTurn);
   const events = [];
+  calls.tools = contractTools((e) => events.push(e));
   const commands = new AsyncQueue();
   const emit = (event) => {
     events.push(event);
@@ -159,13 +198,70 @@ test('maps a turn with a question to protocol events', async () => {
   assert.match(results[0].output, /truncated 5000 characters\]$/);
 
   assert.deepEqual(ofType('turn_end'), [
-    { type: 'turn_end', is_error: false, result: 'Created hello.txt', cost_usd: 0.01, duration_ms: 1234 },
+    {
+      type: 'turn_end',
+      is_error: false,
+      result: 'Created hello.txt',
+      cost_usd: 0.42,
+      duration_ms: 1234,
+      model_usage: { 'claude-opus-5': { input_tokens: 1200, output_tokens: 300, cache_read_tokens: 90_000, cache_write_tokens: 8_000 } },
+    },
   ]);
 
   const states = ofType('status').map((e) => e.state);
   assert.deepEqual(states, ['idle', 'working', 'waiting_for_answer', 'working', 'idle', 'exited']);
   const turnEnd = events.findIndex((e) => e.type === 'turn_end');
   assert.deepEqual(events[turnEnd + 1], { type: 'status', state: 'idle' });
+});
+
+test('a full turn emits exactly the committed contract fixture, so runner drift fails here', async () => {
+  // The fixture is the same turn, one event per line, in order. The Rust harness deserialises the
+  // same file into its AgentEvent enum (crates/colonizer/src/protocol.rs) against the JSON Schema
+  // (docs/agent-events.schema.json), which makes this file the seam between the JS runner and the
+  // Rust harness: a changed event shape fails a test on both sides.
+  const { query, calls } = fakeQuery(issueTurn);
+  const events = [];
+  calls.tools = contractTools((e) => events.push(e));
+  const commands = new AsyncQueue();
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'question') {
+      const [q] = event.questions;
+      commands.push({ type: 'answer', question_id: event.question_id, answers: { [q.question]: q.options[0].label } });
+    }
+    if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', id: 'initial', text: 'Fix the issue' });
+
+  await runAgent({ query, commands, emit, options: { model: 'fake' }, graceMs: 100 });
+
+  const fixture = readFileSync(new URL('./fixtures/events.jsonl', import.meta.url), 'utf8')
+    .trimEnd()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(events, fixture);
+
+  // Every event type of the protocol appears, and nothing outside it. The schema is not validated
+  // here — node has no JSON-Schema validator and this module's tests stay on a lean npm ci — so
+  // this type census is what keeps the fixture covering the whole contract, not a subset.
+  const protocolTypes = [
+    'status',
+    'user_message',
+    'assistant_text_delta',
+    'assistant_text',
+    'thinking',
+    'tool_call',
+    'tool_result',
+    'question',
+    'question_answered',
+    'turn_end',
+    'log',
+    'memory_proposal',
+    'finding',
+  ];
+  const types = new Set(fixture.map((e) => e.type));
+  for (const type of protocolTypes) assert.ok(types.has(type), `the fixture has no ${type} event`);
+  assert.deepEqual([...types].sort(), protocolTypes.slice().sort());
 });
 
 test('interrupt reaches the query, unknown answers are logged, EOF exits', async () => {

@@ -243,10 +243,10 @@ fn forward_headers(incoming: &HeaderMap, credential: Option<(HeaderName, HeaderV
     }
     if let Some(betas) = incoming.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
         let betas = strip_oauth_betas(betas);
-        if let Ok(value) = HeaderValue::from_str(&betas) {
-            if !betas.is_empty() {
-                out.insert("anthropic-beta", value);
-            }
+        if let Ok(value) = HeaderValue::from_str(&betas)
+            && !betas.is_empty()
+        {
+            out.insert("anthropic-beta", value);
         }
     }
     if let Some((name, value)) = credential {
