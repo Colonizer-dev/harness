@@ -12,6 +12,11 @@ microsandbox 0.6.18    darwin-arm64  msb     1e8c40859142cd38fb99b301bdb1fb4095a
 headscale    0.29.3    darwin-arm64  binary  fb55b6d3d1ef3b850fe02837299ac1853f383a06f561d7f180d36b9ce406904b  https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_darwin_arm64
 tailscale    1.102.4   darwin-arm64  source  784b023e825e1cca7b146ac6a7aff08b179d60d10839b51019f315dab426c871  https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/v1.102.4
 
+# A colony is a Linux microVM even when the host is a Mac, so it cannot run the Mach-O tailscaled
+# built above: it needs upstream's linux-arm64 build, vendored beside it and mounted instead. On a
+# Linux host the one download serves both, and there is no guest row.
+tailscale-guest 1.102.4 darwin-arm64  tgz     9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f  https://pkgs.tailscale.com/stable/tailscale_1.102.4_arm64.tgz
+
 # Claude Code plugin directories, staged read-only into the app and loadable per
 # colony with the claude-code module's `plugins` setting. Platform `any`.
 #

@@ -936,7 +936,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         mesh.delete_nodes_named(&s.sandbox).await?;
         write_private(&vm_dir.join("mesh-authkey"), mesh.mint_vm_key().await?.as_bytes())?;
         mounts.push(Mount {
-            source: app.cfg.asset("vendor/tailscale")?,
+            // The guest's own build when the host's is not a Linux one (a Mac builds Mach-O for the
+            // mesh it runs itself); otherwise the single vendored copy serves both sides.
+            source: app
+                .cfg
+                .asset("vendor/tailscale-guest")
+                .or_else(|_| app.cfg.asset("vendor/tailscale"))?,
             target: "/opt/colonizer/tailscale".into(),
             read_only: true,
         });

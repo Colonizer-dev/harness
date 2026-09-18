@@ -55,6 +55,16 @@ while read -r name version plat kind sha url; do
           ;;
       esac
       ;;
+    tailscale-guest)
+      # Upstream's Linux build for the guest's architecture: what a colony mounts when the host's own
+      # tailscaled is not a Linux one.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      mkdir -p "$out/tailscale-guest"
+      install -m 755 "$tmp"/tailscale_*/tailscale "$out/tailscale-guest/tailscale"
+      install -m 755 "$tmp"/tailscale_*/tailscaled "$out/tailscale-guest/tailscaled"
+      rm -rf "$tmp"
+      ;;
     ecc)
       # Staged as a Claude Code plugin directory, not a binary, at dist/plugins/<name>:
       # the mothership resolves vendored plugins at <app>/plugins/<name>
