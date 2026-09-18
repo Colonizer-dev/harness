@@ -1837,10 +1837,23 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
     }
 }
 
+/// Whether a colony can still be sent a message, an answer or an interrupt.
+///
+/// The microVM has to be up: once a colony is publishing, stopped or finished
+/// there is no agent to receive it.
+fn accepts_commands(status: SessionStatus) -> bool {
+    status.is_live()
+}
+
 async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
     let Ok(command) = serde_json::from_str::<Value>(body) else { return };
     let Some(s) = app.session(id).await else { return };
-    if !s.status.is_live() {
+    if !accepts_commands(s.status) {
+        // Dropping it silently left the browser showing an answer on its way to an
+        // agent that is gone. Send the session back instead: a client whose view is
+        // stale corrects itself, and its card stops offering to answer.
+        let view = with_activity(app, s.clone()).await;
+        rt.broadcast(None, json!({"type": "session", "session": view}).to_string());
         return;
     }
     let forward = match command["type"].as_str() {
@@ -1939,6 +1952,19 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn commands_only_reach_a_colony_whose_microvm_is_up() {
+        use SessionStatus::*;
+        for status in [Starting, Running, WaitingForAnswer, Idle] {
+            assert!(accepts_commands(status), "{status:?} should accept an answer");
+        }
+        // Publishing included: the microVM is already gone, and an answer sent then
+        // used to vanish while the card kept spinning.
+        for status in [Publishing, PrOpened, Merged, Closed, NoChanges, Stopped, Failed, Queued] {
+            assert!(!accepts_commands(status), "{status:?} must not accept an answer");
+        }
+    }
 
     #[test]
     fn only_colonies_with_nothing_running_can_be_deleted() {
