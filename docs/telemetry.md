@@ -9,7 +9,7 @@ can change your answer at any time in Settings, under Live map. Until you answer
 the mothership sends nothing.
 
 **This is not [usage data](usage-data.md).** That is a second, separate thing: a batch of counts about
-how the harness is used, with its own switch and a different random id, and on by default — though in
+how the harness is used, with its own switch and a different random id, and on by default, though in
 its current release it is never sent at all, only built, shown and kept. The environment switches below
 keep both off.
 

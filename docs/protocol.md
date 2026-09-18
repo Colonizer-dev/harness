@@ -130,7 +130,7 @@ Rules:
   only the Claude models in it (keys without a `/`): Claude Code prices a model it does not know, such as a routed
   `zai/glm-5.3-flash`, at the main model's rate, so its estimate for routed models is dropped and they are reported
   as tokens instead. Without `model_usage`, `cost_usd` is the SDK's total. What the provider gateway routed and
-  priced is accounted separately, on the session's `routed_cost_usd` (§6.5) — never in this field.
+  priced is accounted separately, on the session's `routed_cost_usd` (§6.5), never in this field.
 - A question is **never** also emitted as `tool_call`/`tool_result`; use `question` / `question_answered`.
 - Agents must ask the user only through `question` events (the Claude Code runner appends a system
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
@@ -184,15 +184,15 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}` — sticky, set by the first failed write and cleared only by a restart |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
-| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one — so a publish that failed part-way can just be retried |
+| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
-| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` — worktree kept — and boots when a slot frees |
+| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
@@ -234,7 +234,7 @@ missing values mean the `default`.
 }
 ```
 
-`publish_stage` records how far the last publish got — committed, pushed or pr_opened — so a retry
+`publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish
 commits something, kept in place when a publish fails part-way, and cleared when a publish finds no
 changes; the publish re-derives the truth from git and origin, so the field is the record, not the
@@ -261,7 +261,7 @@ reads the API.
 
 `routed_cost_usd` is what the provider gateway has recorded for responses it routed (§6.5), on top of
 `cost_usd`, which is only what Claude itself reports, when a turn ends. `host_disk_bytes` is what the
-colony leaves on the host — its worktree plus its session directory — as last measured; the walk runs
+colony leaves on the host (its worktree plus its session directory) as last measured; the walk runs
 only when a host-disk quota applies, so `null` until the first measurement, which without a quota never
 comes. Both are estimates. A colony's budget answers to `cost_usd + routed_cost_usd` and its
 host-disk quota to `host_disk_bytes`; past either, the mothership stops the colony: `status` `stopped`,
@@ -281,9 +281,9 @@ land there. It stages three vendored plugins today:
 
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
-| `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE` — 8.2 MB of the 58 MB source |
-| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.3.0, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (12 of 14), `LICENSE` — 468 KB of the 2.1 MB source |
-| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (142 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE` — 6.5 MB |
+| `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE`. 8.2 MB of the 58 MB source |
+| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.3.0, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (12 of 14), `LICENSE`. 468 KB of the 2.1 MB source |
+| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (142 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 6.5 MB |
 
 **ECC's hooks are not staged.** Its plugin manifest sets `userConfig.hooks_enabled` to `true` by
 default and Claude Code discovers `hooks/hooks.json` by convention, so "skills and agents only" cannot
@@ -299,7 +299,7 @@ prompt inside the hook's own `<EXTREMELY_IMPORTANT>` wrapper. The system prompt 
 which is what the hook's `compact` matcher was for.
 
 **Two superpowers skills are not staged.** `using-git-worktrees` creates another worktree and
-`finishing-a-development-branch` merges, pushes or opens a pull request — from inside the colony, around
+`finishing-a-development-branch` merges, pushes or opens a pull request, from inside the colony, around
 the worktree, branch and publish step Colonizer already owns. Other skills name them, so the appended
 text says they are missing on purpose and to stop at those steps. `fetch-vendor.sh` fails if either, or
 `hooks/`, survives staging.
@@ -320,23 +320,23 @@ to a staged file, on a hook or MCP configuration anywhere in the plugin, on a `r
 URL left in the catalog or the finder, and on any second skill under `skills/`.
 
 **Keeping vendored plugins current.** `scripts/update-vendored-plugins.mjs` checks every `plugin` entry in
-`vendor/vendor.lock` against its upstream — the latest GitHub release for a `refs/tags/` pin, the default
-branch for a commit pin — and reports skills added, removed and changed between the pinned archive and the
+`vendor/vendor.lock` against its upstream (the latest GitHub release for a `refs/tags/` pin, the default
+branch for a commit pin) and reports skills added, removed and changed between the pinned archive and the
 new one. `--write` rewrites the lock, comments included. `.github/workflows/vendored-plugin-updates.yml`
 runs it daily, stages the result with `VENDOR_KINDS=plugin scripts/fetch-vendor.sh` so a failing check
-stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request — or, while the repository
+stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request, or, while the repository
 doesn't let GitHub Actions open pull requests, keeps an issue open with the same description and a link to
 open it. It never merges.
 
 **Keeping the runtime pins current.** The same model covers the two runtime locks:
-`crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest —
-one pin serves both linux/amd64 and linux/arm64 colonies, and the lock is compiled into the mothership —
+`crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest:
+one pin serves both linux/amd64 and linux/arm64 colonies, and the lock is compiled into the mothership,
 and `vendor/claude-code.lock`, which pins the Linux Claude Code build colonies run by version and sha256.
 `scripts/update-runtime-pins.mjs` checks both upstreams, the registry's manifest API for the images and
 Anthropic's `stable` channel for Claude Code, and stages the newly pinned Claude Code build through
 `scripts/fetch-agent-binary.sh`, so an update that fails the checksum check a real install does never
 becomes a proposal. `.github/workflows/runtime-pin-updates.yml` runs it daily, pushes `runtime/pin-updates`,
-and opens a pull request — or keeps an issue open with a link, the way the vendored plugins do. It never
+and opens a pull request, or keeps an issue open with a link, the way the vendored plugins do. It never
 merges: a pin bump changes what every release runs.
 
 **Skillsets are switches, all off by default.** Settings shows the `claude-code` module's `plugins`
@@ -358,7 +358,7 @@ works only when the install has what it needs; otherwise the colony boots withou
 
 **caveman.** caveman switches itself on with `SessionStart` and `UserPromptSubmit` hooks that inject its
 ruleset and track a per-session level. In a colony the level is the setting, and the runner puts the
-ruleset — `skills/caveman/SKILL.md` without its frontmatter — into the system prompt, followed by the one
+ruleset (`skills/caveman/SKILL.md` without its frontmatter) into the system prompt, followed by the one
 Colonizer exception: the pull request description, AskUserQuestion questions and options, memory
 proposals and code comments stay in plain sentences. Only that file and `LICENSE` are staged, and both are
 MIT. caveman's compression engine, proxy and MCP server are BSL-1.1 and are neither staged nor used.
@@ -402,8 +402,8 @@ releases stay on disk.
 
 **rtk.** The runner registers an in-process `PreToolUse` hook on `Bash` that runs `rtk rewrite <command>`.
 Exit 0 or 3 with output replaces the command (3 is a rewrite rtk's ask rules flag; the colony's own
-permission handling still applies), and anything else — 1 for no rtk equivalent, 2 for a deny rule, rtk
-missing, or no answer within 2 seconds — runs the command unchanged. The hook returns only
+permission handling still applies), and anything else (1 for no rtk equivalent, 2 for a deny rule, rtk
+missing, or no answer within 2 seconds) runs the command unchanged. The hook returns only
 `updatedInput`, never a permission decision, so it can't allow what `delegate = enforce` denies. Rewritten
 commands call `rtk`, so `/opt/colonizer/bin` is put first on the agent's `PATH`. Read, Grep and Glob
 don't go through the shell and aren't rewritten.
@@ -423,12 +423,12 @@ the terminal remains reachable.
 
 **This is advisory, not a security boundary.** A repository's own `.claude/settings.json` hooks and
 `.mcp.json` servers already run inside colonies by design. The boundary is the microVM, the publish
-step's sanitizing, and a human reading the pull request. What a scan protects is the task outcome —
+step's sanitizing, and a human reading the pull request. What a scan protects is the task outcome:
 prompt injection steering the agent into work nobody asked for.
 
 It runs inside the colony and never on the mothership: repository content is attacker-controlled, and
 the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
-reported and treated as no findings — a broken scanner must not be able to halt every colony.
+reported and treated as no findings: a broken scanner must not be able to halt every colony.
 
 ### `GET /api/version`
 
@@ -451,7 +451,7 @@ Whether a newer release exists. **On by default**; `PUT {"enabled": false}` turn
 The check asks GitHub for the latest release of `Colonizer-dev/harness` a minute after start and every
 six hours after that, and only while it is on: switched off, the mothership makes no request for it,
 and forgets the last answer so no banner lingers. Drafts and prereleases are ignored. The request
-carries a user agent and nothing about the install — the live map is separate, and off until switched
+carries a user agent and nothing about the install: the live map is separate, and off until switched
 on (`telemetry.md`). `COLONIZER_RELEASES_URL` points the check elsewhere, for a fork or a test.
 
 ```json
@@ -464,19 +464,19 @@ whose version cannot be placed is never told it is behind.
 
 `apply` reports an update being installed: `phase` is `idle`, `installing`, `restarting` or `failed`,
 with the installer's output and a line per live colony. `can_apply` says whether this install can update
-itself at all — a source checkout cannot, and says so.
+itself at all: a source checkout cannot, and says so.
 
 ### `POST /api/update/apply`
 
 Installs the latest release and restarts into it. Answers as soon as the work starts.
 
-It runs `scripts/install-release.sh` from inside the app — the same installer a person would run — so the
+It runs `scripts/install-release.sh` from inside the app (the same installer a person would run) so the
 download, its checksum and the symlink swap are not reimplemented. A failure leaves the running version
 untouched, because the installer unpacks beside it and moves the symlink last.
 
 Refused with `409` when a colony is `publishing`: its microVM is already gone and the host is committing
 and pushing, and interrupting that leaves the colony failed with its pull request unopened. A colony that
-is merely working does not hold an update — it is detached, and `sessions::recover` reconnects it.
+is merely working does not hold an update: it is detached, and `sessions::recover` reconnects it.
 
 The installer is run with `COLONIZER_KEEP_PREVIOUS=1`, because colonies mount vendored plugins out of the
 app directory this mothership started from (`resolve_assets` canonicalises the symlink away), and taking
@@ -488,12 +488,12 @@ it.
 
 Downloads the configured colony image (after the stack preset) into microsandbox's cache, so a launch
 boots instead of waiting on a registry. Settings calls `POST` when the sandbox module is saved, which
-is the moment a stack is chosen. The image is the preset's reference pinned by digest —
-`crates/colonizer/images.lock`, compiled into the mothership — so the cache ends up with the exact
+is the moment a stack is chosen. The image is the preset's reference pinned by digest in
+`crates/colonizer/images.lock` and compiled into the mothership, so the cache ends up with the exact
 bytes the release was tested with. An image set by hand with no lock row boots as written.
 
-`POST` returns at once — a cold pull of `node:24-bookworm` measured 108 s, too long to hold a request
-open — and the download runs in the background. Calling it again while the same image is pulling
+`POST` returns at once (a cold pull of `node:24-bookworm` measured 108 s, too long to hold a request
+open) and the download runs in the background. Calling it again while the same image is pulling
 returns the running pull rather than starting a second. `GET` returns the most recent status:
 
 ```json
@@ -613,7 +613,7 @@ Runner environment set by the mothership:
 | Variable | Meaning |
 | --- | --- |
 | `COLONIZER_MODEL` | Orchestrator (main thread) model; nearly all of a colony's model traffic |
-| `COLONIZER_SUBAGENT_MODEL` | Model for subagents; only used when the agent delegates to one, which colonies rarely do (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model — Claude Code's built-in Explore is `inherit` — use it too) |
+| `COLONIZER_SUBAGENT_MODEL` | Model for subagents; only used when the agent delegates to one, which colonies rarely do (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model (Claude Code's built-in Explore is `inherit`) use it too) |
 | `COLONIZER_IMAGE` | The container image the colony booted; the runner tells the agent what it can and cannot run |
 | `COLONIZER_BACKGROUND_MODEL` | Model for small auxiliary background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
@@ -668,14 +668,14 @@ API (v3), and the runner side is identical:
 - Proposals queue on the mothership either way. mem0 only receives a note once it is approved (or stored
   with review off), written with `infer: false` and `immutable: true` so mem0's extraction model never
   rewrites or later consolidates text a human reviewed.
-- Each scope is a mem0 `user_id` — `colonizer:global`, `colonizer:org:<org>`, `colonizer:repo:<owner>/<repo>`
-  — and every memory carries `app_id: "colonizer"`. Colonizer's own fields (`colonizer_id`, `scope`, `key`,
+- Each scope is a mem0 `user_id` (`colonizer:global`, `colonizer:org:<org>`, `colonizer:repo:<owner>/<repo>`)
+  and every memory carries `app_id: "colonizer"`. Colonizer's own fields (`colonizer_id`, `scope`, `key`,
   `title`, `tags`, `source`, `created_at`) ride in `metadata`. Listing and deleting are filtered on both, so a
   mem0 project shared with other tools is safe to point at.
 - At boot the mothership lists the colony's three scopes from mem0 and writes them into the colony's session
   directory in the layout above. The colony never talks to mem0 and never sees the key, and a resume
   rewrites the layout rather than keeping deleted notes. `MEMORY.md` is ordered by mem0's relevance to the
-  task (the issue title, the instructions, then the issue body — not the full prompt).
+  task (the issue title, the instructions, then the issue body, not the full prompt).
 - If mem0 cannot be reached at boot, the colony still starts, with an empty layout and a `warn` in its log.
   An approval that cannot reach mem0 fails with `502` and the proposal stays in the queue; with review off, a
   note that cannot be stored is queued for review instead of dropped.
@@ -698,13 +698,13 @@ waited long enough. It sends the model the task and the question with its option
 
 The judge chooses **only among the labels the agent offered**, and the reply is checked against them
 before anything is sent. A label that was not offered, a question left out, a reply that is not that
-JSON, or free text while `free_text` is off — each leaves the question for the person rather than
+JSON, or free text while `free_text` is off: each leaves the question for the person rather than
 guessing, and stops this colony being judged again. This is the boundary that keeps a colony's own
 output (which can carry repository content, which can carry instructions) from becoming an
 instruction to the Mothership.
 
 An accepted answer travels the ordinary path (§6.2's `answer` command), so the colony cannot tell it
-apart from a person's — except that its `response` says so in words, and the session log records the
+apart from a person's, except that its `response` says so in words, and the session log records the
 model and its reason. A pull request that came out of autonomous mode reads as one afterwards.
 
 ### 6.3 Mothership API additions
@@ -740,7 +740,7 @@ strings; UIs offer `GET /api/models` as suggestions).
 | `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value |
 
 The PUT is a merge, not a replace. A field of `settings` the body does not name keeps its saved value; a
-field it names always wins, `null` included — an explicit `null` is how a client inherits the global
+field it names always wins, `null` included: an explicit `null` is how a client inherits the global
 module setting. The merge reaches one level deeper for two nested fields: an `agent` object without
 `skillsets` keeps the saved skillset overrides, and a `watchdog` object without `waiting_minutes` keeps
 its saved value (the web form never sends `waiting_minutes`, and a save from a client that predates a
@@ -754,7 +754,7 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 `max_parallel` overrides the sandbox module's parallel limit for the org's colonies. So do the two
 per-colony limits: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
 host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
-`host_disk`); `0` — or `"0"` — means unlimited, which is how an org opts out of a global limit. The same
+`host_disk`); `0` (or `"0"`) means unlimited, which is how an org opts out of a global limit. The same
 validation applies as at the module setting: a budget is `0` or more dollars, a quota must parse as a size.
 Past either limit the mothership stops the colony with its worktree kept (§6.5 covers the budget's
 gateway half).
@@ -912,16 +912,16 @@ and added to the colony's `routed_cost_usd`. The budget is re-checked after each
 request is served; Claude's own `cost_usd` landing at a turn end re-checks it too. The two wires are
 counted differently but on one scale, Anthropic's token names:
 
-- `wire: anthropic` — the body is tapped while it forwards; the bytes the colony receives are never
+- `wire: anthropic`: the body is tapped while it forwards; the bytes the colony receives are never
   changed. An SSE stream is read event by event (`message_start` fixes the input side, `message_delta`
   carries the running output total); a non-streaming JSON body is buffered only to count, up to 4 MiB,
   past which the response forwards unpriced. Anything the tap cannot parse counts as zero, so an
   estimate can only undercount.
-- `wire: openai` — the usage the translation already extracted is reused; the body is never read twice.
+- `wire: openai`: the usage the translation already extracted is reused; the body is never read twice.
 
 `pricing` is four rates in dollars per million tokens: `input_per_mtok`, `output_per_mtok`,
-`cache_read_per_mtok` and `cache_write_per_mtok`, each `0` or more. A provider without it — or with all
-four at `0` — still counts its tokens, which reach `model_usage` as usual, but contributes nothing to
+`cache_read_per_mtok` and `cache_write_per_mtok`, each `0` or more. A provider without it (or with all
+four at `0`) still counts its tokens, which reach `model_usage` as usual, but contributes nothing to
 `routed_cost_usd`. `PUT /api/providers/{id}` with `pricing` omitted keeps the saved rates, like the key;
 an all-`0` object clears them in effect. Claude traffic does not pass through the gateway at all:
 microsandbox injects the credential straight to `api.anthropic.com`, so Claude's spend is only seen when
@@ -933,7 +933,7 @@ unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_toke
 `fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `pricing`, `in_flight`,
 `queued`, `usage` and `used_by`.
 
-**Usage.** `usage` is the provider's cumulative counters — what says a request has ever actually gone to it,
+**Usage.** `usage` is the provider's cumulative counters: what says a request has ever actually gone to it,
 which the momentary `in_flight`/`queued` gauges cannot:
 
 ```json
@@ -941,27 +941,27 @@ which the momentary `in_flight`/`queued` gauges cannot:
 ```
 
 `requests` counts every request the gateway accepted for the provider, from the moment everything that can
-refuse a request locally has passed (colony auth, provider lookup, path and body translation) — queueing,
+refuse a request locally has passed (colony auth, provider lookup, path and body translation), queueing,
 the upstream call and the streamed body are included, a request the gateway itself refuses is not, and an
 attempt that queued past `queue_timeout_secs` without ever reaching the provider still counts. `failures`
 is the subset that produced no usable upstream response: one of the gateway's three fallback answers (queue
 timeout, unreachable, timeout), an upstream status ≥ 400, or an openai-wire response whose body failed or
 never finished. `fallbacks` is the subset of `failures` the
-gateway predicts will fall back to Claude — it answered with `x-colonizer-fallback` and the provider has a
+gateway predicts will fall back to Claude: it answered with `x-colonizer-fallback` and the provider has a
 `fallback_model`, which is exactly when the colony's router retries on Claude; the retry never comes back
 through the gateway, so this is a prediction, not an observation. `duration_ms` is the cumulative
-wall-clock of dispatched requests, streamed body included — timed from when a request's slot was acquired,
+wall-clock of dispatched requests, streamed body included, timed from when a request's slot was acquired,
 so time spent queued is not. `last_request_at` is RFC 3339, `null` before
 the first request. The counters live in `provider-usage.json` in the mothership's data directory, written
 by a background task every 5 s when they changed and once more at shutdown, so a crash loses at most 5 s
 of the tally and a restart carries on where it left off; `DELETE /api/providers/{id}` also removes the
 provider's tally.
 
-`used_by` names the model settings — `model`, `subagent_model`, `background_model` — whose resolved value
+`used_by` names the model settings (`model`, `subagent_model`, `background_model`) whose resolved value
 (schema default, global setting or org override) routes to this provider as `<provider>/<model>`, across
 the global agent env and every org override, e.g. `["subagent_model"]`. Empty means the provider is
 configured but no model setting points at it: wired only to `subagent_model`, say, on a harness whose
-colonies never spawn subagents — unused so far, not broken. A bare alias or a partial id prefix is
+colonies never spawn subagents: unused so far, not broken. A bare alias or a partial id prefix is
 another provider's model and doesn't match, same rule as the "used" routes above.
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
@@ -975,13 +975,13 @@ At colony start the mothership probes every used provider and logs a warning for
 
 ### 6.6 Findings
 
-A colony that notices a real problem outside its task — a bug, a security gap, documentation promising
-what the code does not do — files it as a GitHub issue instead of fixing it in the pull request.
+A colony that notices a real problem outside its task (a bug, a security gap, documentation promising
+what the code does not do) files it as a GitHub issue instead of fixing it in the pull request.
 
 Runner side. When the mothership sets `COLONIZER_FINDINGS=true`, the Claude Code runner adds an
 in-process MCP server `colonizer_findings` with one tool, `finding_file { title, body, evidence }`,
 and a system prompt instruction: confirm a finding with a fresh subagent before filing it, and put
-how it was confirmed in `evidence`. Only the orchestrator may call it — a `PreToolUse` hook refuses a
+how it was confirmed in `evidence`. Only the orchestrator may call it: a `PreToolUse` hook refuses a
 call that carries `agent_id`, whatever the delegation mode, and tells the subagent to report the
 finding instead. A call emits:
 
@@ -1002,6 +1002,6 @@ Mothership side. The GitHub token never enters a colony, so filing happens on th
 - Filing: `gh issue create` on the colony's own repository, labelled `colonizer-finding` (created if
   missing, and dropped if the token cannot apply it). The body carries the finding, a "How it was
   confirmed" section and a footer naming the colony and the issue it was working on.
-- Every outcome — filed, duplicate, over the cap, rejected, failed — is a line in the colony log. The
+- Every outcome (filed, duplicate, over the cap, rejected, failed) is a line in the colony log. The
   agent is told only that the finding was handed over.
 

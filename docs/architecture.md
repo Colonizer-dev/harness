@@ -116,15 +116,15 @@ stateDiagram-v2
    `ws://<mesh-ip>:7070/v1/events` through its SOCKS5 proxy, persists events, and fans them out to
    browsers. agentd sends the initial prompt to the agent runner.
 4. **Interact** – the user watches the chat, answers questions (always multiple choice + "Other"),
-   sends follow-ups, and opens terminals (`/v1/pty`) — all over the mesh.
+   sends follow-ups, and opens terminals (`/v1/pty`), all over the mesh.
 5. **Publish** – "Create PR", or autopilot (the `publish` module's `autopilot` setting, on by default)
    when a turn ends without an error or open question and the agent wrote or updated `pr.md` during
    it: agentd shuts the runner down, the VM is removed, and the host publishes with the hardened
-   publish step — committing (co-authored by Colonizer) only what is uncommitted, pushing the colony's
+   publish step: committing (co-authored by Colonizer) only what is uncommitted, pushing the colony's
    own `colonizer/…` branch only when origin is behind it, and reusing a pull request that is already
    open for the branch instead of opening a second one. It refuses to push anything else, checked
    before the VM is removed. A publish that fails part-way leaves the colony `failed`, and it can be
-   published again from there — the kept worktree and the remote are enough, no new microVM — with the
+   published again from there (the kept worktree and the remote are enough, no new microVM) with the
    remaining steps picked up where the attempt stopped. A turn that ends with an error
    (not an interrupt) holds autopilot and flags the colony (`autopilot_held`). The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
@@ -138,18 +138,18 @@ stateDiagram-v2
 
 Three sandbox module settings bound one colony, each with a per-org override that shadows the default:
 
-- `max_parallel` caps colonies live at once, global or per org — the queue above.
+- `max_parallel` caps colonies live at once, global or per org, which is the queue above.
 - `budget_usd` caps a colony's whole model spend. The provider gateway counts the usage of every response
   it routes, prices it with the provider's `pricing`, and adds it to the colony's `routed_cost_usd`; the
   budget answers to that plus Claude's own `cost_usd`. Past it, a routed request is refused with `403` and
   the host stops the colony.
-- `host_disk` caps what a colony leaves on the host — its worktree plus its session directory — measured
+- `host_disk` caps what a colony leaves on the host (its worktree plus its session directory), measured
   every five minutes. It does not cover the microVM's root filesystem, which `root_disk` bounds. A colony
   past the quota is stopped and its worktree kept: removing a colony's work is the operator's call.
 
-`max_parallel` defaults to 3. The other two default to unlimited — there is no dollar figure or byte
+`max_parallel` defaults to 3. The other two default to unlimited: there is no dollar figure or byte
 count that suits every deployment, and a default that silently stopped running colonies on upgrade would
-be a surprise. When the host stops a colony — the only stop it decides on its own — the
+be a surprise. When the host stops a colony, the only stop it decides on its own, the
 microVM is torn down, the status goes to `stopped` with the reason in the colony log, and the worktree is
 kept: Resume continues once the limit is raised, queued if the parallel limit is full.
 
@@ -187,16 +187,16 @@ release checkpoints are in [audit.md](audit.md).
 `cargo test --workspace` is the gate every change passes, and none of it needs KVM, network or
 credentials. The deepest layer in it is agentd's (`crates/colonizer-agentd/tests/`): it boots the
 real binary as a host process on loopback against a stub agent runner and asserts the documented
-behaviour (docs/protocol.md §2–§3) — the bearer-token wall, the initial prompt, events stamped with a
+behaviour (docs/protocol.md §2–§3): the bearer-token wall, the initial prompt, events stamped with a
 gap-free `seq` and an RFC 3339 `ts`, `user_message` and `answer` frames reaching the runner's stdin,
 replay from `since`, the PTY roundtrip, and clean shutdown. `cargo test -p colonizer-agentd --test
 smoke` runs just the single boot-path pass of those.
 
 What it does not cover is the colony around agentd: the `msb run` boot itself, the session directory
 the mothership writes (plugin mounts, `boot.sh`, the mesh key), subagent model resolution and cost
-accounting — everything that needs a real microVM and a real model. `scripts/build-agentd.sh --smoke`
+accounting: everything that needs a real microVM and a real model. `scripts/build-agentd.sh --smoke`
 runs agentd's boot checks inside a real microVM on a machine with `/dev/kvm`, and CI's `colony-smoke`
-job runs that on a self-hosted KVM runner — skipped until the repository has one (set the
+job runs that on a self-hosted KVM runner, skipped until the repository has one (set the
 `COLONIZER_KVM_RUNNER` repository variable when it does), so the boot path stays covered by unit
 tests only until then.
 
