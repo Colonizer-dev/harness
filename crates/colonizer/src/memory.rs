@@ -10,24 +10,23 @@
 //! the same layout either way.
 
 use crate::{
-    client_error,
+    ApiResult, App, Shared, client_error,
     config::setting_str,
     mem0::{self, Mem0},
     modules::schema_for,
     orgs::valid_org,
     util::{env_nonempty, read_trimmed, short_id, truncate, valid_repo, write_secret},
-    ApiResult, App, Shared,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
+    Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 use tokio::sync::Mutex;
 
@@ -67,7 +66,12 @@ pub fn draft(scope: &str, key: &str, title: &str, content: &str, tags: &[String]
         "repo" if valid_repo(key) => {}
         _ => bail!("scope must be global (no key), org (key = org) or repo (key = owner/repo)"),
     }
-    let title: String = title.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string();
+    let title: String = title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string();
     if title.is_empty() || title.chars().count() > MAX_TITLE {
         bail!("title must be 1-{MAX_TITLE} characters");
     }
@@ -95,7 +99,10 @@ pub fn draft(scope: &str, key: &str, title: &str, content: &str, tags: &[String]
 
 impl MemoryStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root, lock: Mutex::new(()) }
+        Self {
+            root,
+            lock: Mutex::new(()),
+        }
     }
 
     fn scope_dir(&self, scope: &str, key: &str) -> Result<PathBuf> {
@@ -118,7 +125,10 @@ impl MemoryStore {
     }
 
     fn read_notes(dir: &FsPath) -> Vec<Note> {
-        std::fs::read(dir.join("notes.json")).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(dir.join("notes.json"))
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     fn write_notes(dir: &FsPath, scope: &str, key: &str, notes: &[Note]) -> Result<()> {
@@ -136,7 +146,10 @@ impl MemoryStore {
     pub async fn add_note(&self, note: Note) -> Result<Note> {
         let _guard = self.lock.lock().await;
         let dir = self.ensure_scope(&note.scope, &note.key)?;
-        std::fs::write(dir.join("notes").join(format!("{}.md", note.id)), format!("# {}\n\n{}\n", note.title, note.content))?;
+        std::fs::write(
+            dir.join("notes").join(format!("{}.md", note.id)),
+            format!("# {}\n\n{}\n", note.title, note.content),
+        )?;
         let mut notes = Self::read_notes(&dir);
         notes.push(note.clone());
         Self::write_notes(&dir, &note.scope, &note.key, &notes)?;
@@ -164,7 +177,10 @@ impl MemoryStore {
     }
 
     fn read_proposals(&self) -> Vec<Proposal> {
-        std::fs::read(self.proposals_path()).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(self.proposals_path())
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     fn write_proposals(&self, proposals: &[Proposal]) -> Result<()> {
@@ -189,7 +205,10 @@ impl MemoryStore {
         if proposals.len() >= 500 {
             bail!("too many pending memory proposals; review some first");
         }
-        let proposal = Proposal { note, status: "pending".into() };
+        let proposal = Proposal {
+            note,
+            status: "pending".into(),
+        };
         proposals.push(proposal.clone());
         self.write_proposals(&proposals)?;
         Ok(proposal)
@@ -198,7 +217,9 @@ impl MemoryStore {
     pub async fn take_proposal(&self, id: &str) -> Result<Option<Proposal>> {
         let _guard = self.lock.lock().await;
         let mut proposals = self.read_proposals();
-        let Some(index) = proposals.iter().position(|p| p.note.id == id) else { return Ok(None) };
+        let Some(index) = proposals.iter().position(|p| p.note.id == id) else {
+            return Ok(None);
+        };
         let proposal = proposals.remove(index);
         self.write_proposals(&proposals)?;
         Ok(Some(proposal))
@@ -212,7 +233,11 @@ fn write_index(dir: &FsPath, scope: &str, key: &str, notes: &[Note], ranked: boo
         "org" => format!("colonies in the {key} org"),
         _ => format!("colonies on {key}"),
     };
-    let order = if ranked { " They are listed most relevant to this colony's task first." } else { "" };
+    let order = if ranked {
+        " They are listed most relevant to this colony's task first."
+    } else {
+        ""
+    };
     let mut index = format!(
         "# Shared memory for {label}\n\nApproved notes from earlier colonies and the maintainer. Read the ones that matter for your task.{order}\n\n"
     );
@@ -222,7 +247,11 @@ fn write_index(dir: &FsPath, scope: &str, key: &str, notes: &[Note], ranked: boo
     for note in notes {
         let first_line = note.content.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
         let title = note.title.replace(['[', ']'], "");
-        index.push_str(&format!("- [{title}](notes/{}.md) — {}\n", note.id, truncate(first_line.trim(), 120)));
+        index.push_str(&format!(
+            "- [{title}](notes/{}.md) — {}\n",
+            note.id,
+            truncate(first_line.trim(), 120)
+        ));
     }
     std::fs::write(dir.join("MEMORY.md"), index).context("writing MEMORY.md")?;
     Ok(())
@@ -256,7 +285,14 @@ async fn mem0_client(app: &App) -> Result<Mem0> {
         setting_str(&modules.memory, &schema_for("memory", MEM0, &app.agents), "base_url")
     };
     let (key, _) = mem0_key(app).context("add a mem0 API key in Settings → Modules → Memory")?;
-    Mem0::new(if base_url.is_empty() { mem0::DEFAULT_BASE_URL } else { &base_url }, key)
+    Mem0::new(
+        if base_url.is_empty() {
+            mem0::DEFAULT_BASE_URL
+        } else {
+            &base_url
+        },
+        key,
+    )
 }
 
 pub async fn list_notes(app: &App, scope: &str, key: &str) -> Result<Vec<Note>> {
@@ -291,8 +327,16 @@ pub fn task_query(title: &str, issue: Option<&Value>, instructions: &str) -> Str
     let text = |v: &Value| v.as_str().unwrap_or_default().trim().to_string();
     let issue_title = issue.map(|i| text(&i["title"])).unwrap_or_default();
     let issue_body = issue.map(|i| text(&i["body"])).unwrap_or_default();
-    let title = if issue_title.is_empty() { title.trim().to_string() } else { issue_title };
-    [title, instructions.trim().to_string(), issue_body].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n")
+    let title = if issue_title.is_empty() {
+        title.trim().to_string()
+    } else {
+        issue_title
+    };
+    [title, instructions.trim().to_string(), issue_body]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 pub struct Materialized {
@@ -318,7 +362,11 @@ async fn materialize(client: &Mem0, root: &FsPath, org: &str, repo: &str, task: 
         listed.push(client.list(scope, key).await?);
     }
     let total: usize = listed.iter().map(Vec::len).sum();
-    let ranks = if total == 0 || task.trim().is_empty() { None } else { client.rank(task, &scopes, total.min(100)).await.ok() };
+    let ranks = if total == 0 || task.trim().is_empty() {
+        None
+    } else {
+        client.rank(task, &scopes, total.min(100)).await.ok()
+    };
     for ((scope, key), mut notes) in scopes.into_iter().zip(listed) {
         if let Some(ranks) = &ranks {
             // Stable: notes mem0 did not rank keep their oldest-first order after the ranked ones.
@@ -326,7 +374,10 @@ async fn materialize(client: &Mem0, root: &FsPath, org: &str, repo: &str, task: 
         }
         write_scope(&root.join(scope), scope, key, &notes, ranks.is_some())?;
     }
-    Ok(Materialized { notes: total, ranked: ranks.is_some() })
+    Ok(Materialized {
+        notes: total,
+        ranked: ranks.is_some(),
+    })
 }
 
 /// Replaces one scope directory with `notes`. A note whose id could not be a file name is left out
@@ -338,7 +389,10 @@ fn write_scope(dir: &FsPath, scope: &str, key: &str, notes: &[Note], ranked: boo
     std::fs::create_dir_all(dir.join("notes"))?;
     let notes: Vec<Note> = notes.iter().filter(|n| mem0::safe_id(&n.id)).cloned().collect();
     for note in &notes {
-        std::fs::write(dir.join("notes").join(format!("{}.md", note.id)), format!("# {}\n\n{}\n", note.title, note.content))?;
+        std::fs::write(
+            dir.join("notes").join(format!("{}.md", note.id)),
+            format!("# {}\n\n{}\n", note.title, note.content),
+        )?;
     }
     write_index(dir, scope, key, &notes, ranked)
 }
@@ -366,12 +420,18 @@ pub struct ScopeQuery {
 /// A note store that could not answer: a bad scope is the caller's fault, anything else (mem0 down,
 /// a rejected key) is upstream's.
 fn store_error(scope: &str, key: &str, e: &anyhow::Error) -> crate::AppError {
-    let status = if mem0::scope_id(scope, key).is_err() { StatusCode::BAD_REQUEST } else { StatusCode::BAD_GATEWAY };
+    let status = if mem0::scope_id(scope, key).is_err() {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
     client_error(status, &format!("{e:#}"))
 }
 
 pub async fn get(State(app): State<Shared>, Query(query): Query<ScopeQuery>) -> ApiResult<Value> {
-    let notes = list_notes(&app, &query.scope, &query.key).await.map_err(|e| store_error(&query.scope, &query.key, &e))?;
+    let notes = list_notes(&app, &query.scope, &query.key)
+        .await
+        .map_err(|e| store_error(&query.scope, &query.key, &e))?;
     let proposals: Vec<Proposal> = app
         .memory
         .proposals()
@@ -380,7 +440,9 @@ pub async fn get(State(app): State<Shared>, Query(query): Query<ScopeQuery>) -> 
         .filter(|p| p.note.scope == query.scope && p.note.key == query.key)
         .collect();
     let provider = app.modules.read().await.memory.provider.clone();
-    Ok(Json(json!({"scope": query.scope, "key": query.key, "provider": provider, "notes": notes, "proposals": proposals})))
+    Ok(Json(
+        json!({"scope": query.scope, "key": query.key, "provider": provider, "notes": notes, "proposals": proposals}),
+    ))
 }
 
 pub async fn list_proposals(State(app): State<Shared>) -> Json<Vec<Proposal>> {
@@ -399,7 +461,11 @@ pub async fn approve(State(app): State<Shared>, Path(id): Path<String>, body: By
     } else {
         serde_json::from_slice(&body).map_err(|_| client_error(StatusCode::BAD_REQUEST, "expected {title?, content?}"))?
     };
-    let proposal = app.memory.take_proposal(&id).await?.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such proposal"))?;
+    let proposal = app
+        .memory
+        .take_proposal(&id)
+        .await?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such proposal"))?;
     let original = proposal.note.clone();
     let note = draft(
         &original.scope,
@@ -431,7 +497,10 @@ pub async fn approve(State(app): State<Shared>, Path(id): Path<String>, body: By
 }
 
 pub async fn reject(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
-    app.memory.take_proposal(&id).await?.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such proposal"))?;
+    app.memory
+        .take_proposal(&id)
+        .await?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such proposal"))?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -447,17 +516,26 @@ pub struct NewNote {
 }
 
 pub async fn create_note(State(app): State<Shared>, Json(req): Json<NewNote>) -> ApiResult<Note> {
-    let note = draft(&req.scope, &req.key, &req.title, &req.content, &req.tags, json!({"user": true}))
-        .map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
-    Ok(Json(store_note(&app, note).await.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("{e:#}")))?))
+    let note = draft(
+        &req.scope,
+        &req.key,
+        &req.title,
+        &req.content,
+        &req.tags,
+        json!({"user": true}),
+    )
+    .map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
+    Ok(Json(
+        store_note(&app, note)
+            .await
+            .map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("{e:#}")))?,
+    ))
 }
 
-pub async fn delete_note(
-    State(app): State<Shared>,
-    Path(id): Path<String>,
-    Query(query): Query<ScopeQuery>,
-) -> ApiResult<Value> {
-    let removed = remove_note(&app, &query.scope, &query.key, &id).await.map_err(|e| store_error(&query.scope, &query.key, &e))?;
+pub async fn delete_note(State(app): State<Shared>, Path(id): Path<String>, Query(query): Query<ScopeQuery>) -> ApiResult<Value> {
+    let removed = remove_note(&app, &query.scope, &query.key, &id)
+        .await
+        .map_err(|e| store_error(&query.scope, &query.key, &e))?;
     if !removed {
         return Err(client_error(StatusCode::NOT_FOUND, "no such note"));
     }
@@ -515,7 +593,15 @@ mod tests {
     async fn proposals_become_notes_with_an_index() {
         let root = temp_root();
         let store = MemoryStore::new(root.clone());
-        let note = draft("repo", "Colonizer-dev/harness", "Run tests\nwith --locked", "Use `cargo test --locked`.", &["Tests".into()], json!({"session_id": "abc"})).unwrap();
+        let note = draft(
+            "repo",
+            "Colonizer-dev/harness",
+            "Run tests\nwith --locked",
+            "Use `cargo test --locked`.",
+            &["Tests".into()],
+            json!({"session_id": "abc"}),
+        )
+        .unwrap();
         assert_eq!(note.title, "Run tests with --locked");
         assert_eq!(note.tags, vec!["tests"]);
 
@@ -530,7 +616,12 @@ mod tests {
         assert!(index.contains(&format!("[Run tests with --locked](notes/{}.md)", taken.note.id)));
         assert!(dir.join("notes").join(format!("{}.md", taken.note.id)).exists());
 
-        assert!(store.delete_note("repo", "Colonizer-dev/harness", &taken.note.id).await.unwrap());
+        assert!(
+            store
+                .delete_note("repo", "Colonizer-dev/harness", &taken.note.id)
+                .await
+                .unwrap()
+        );
         assert!(store.notes("repo", "Colonizer-dev/harness").await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -540,13 +631,47 @@ mod tests {
         let mock = crate::mem0::mock::Mock::default();
         let base = crate::mem0::mock::serve(mock.clone()).await;
         let client = Mem0::new(&base, crate::mem0::mock::KEY.into()).unwrap();
-        let older = client.add(&draft("repo", "o/r", "Commit style", "keep commits small", &[], Value::Null).unwrap()).await.unwrap();
-        let newer = client.add(&draft("repo", "o/r", "Deploys", "deploy to staging before production", &[], Value::Null).unwrap()).await.unwrap();
-        client.add(&draft("org", "o", "Org rule", "sign every commit", &[], Value::Null).unwrap()).await.unwrap();
-        client.add(&draft("repo", "o/elsewhere", "Not this repo", "deploy something else entirely", &[], Value::Null).unwrap()).await.unwrap();
+        let older = client
+            .add(&draft("repo", "o/r", "Commit style", "keep commits small", &[], Value::Null).unwrap())
+            .await
+            .unwrap();
+        let newer = client
+            .add(
+                &draft(
+                    "repo",
+                    "o/r",
+                    "Deploys",
+                    "deploy to staging before production",
+                    &[],
+                    Value::Null,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        client
+            .add(&draft("org", "o", "Org rule", "sign every commit", &[], Value::Null).unwrap())
+            .await
+            .unwrap();
+        client
+            .add(
+                &draft(
+                    "repo",
+                    "o/elsewhere",
+                    "Not this repo",
+                    "deploy something else entirely",
+                    &[],
+                    Value::Null,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
 
         let root = temp_root();
-        let result = materialize(&client, &root, "o", "o/r", "Fix the staging deploy").await.unwrap();
+        let result = materialize(&client, &root, "o", "o/r", "Fix the staging deploy")
+            .await
+            .unwrap();
         assert_eq!(result.notes, 3, "global, this org and this repo; not another repo");
         assert!(result.ranked);
 
@@ -555,13 +680,26 @@ mod tests {
         let deploys = index.find(&format!("(notes/{newer}.md)")).unwrap();
         let commits = index.find(&format!("(notes/{older}.md)")).unwrap();
         assert!(deploys < commits, "the deploy note is the relevant one:\n{index}");
-        assert_eq!(std::fs::read_to_string(root.join(format!("repo/notes/{newer}.md"))).unwrap(), "# Deploys\n\ndeploy to staging before production\n");
-        assert!(std::fs::read_to_string(root.join("org/MEMORY.md")).unwrap().contains("Org rule"));
-        assert!(std::fs::read_to_string(root.join("global/MEMORY.md")).unwrap().contains("No notes yet."));
+        assert_eq!(
+            std::fs::read_to_string(root.join(format!("repo/notes/{newer}.md"))).unwrap(),
+            "# Deploys\n\ndeploy to staging before production\n"
+        );
+        assert!(
+            std::fs::read_to_string(root.join("org/MEMORY.md"))
+                .unwrap()
+                .contains("Org rule")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("global/MEMORY.md"))
+                .unwrap()
+                .contains("No notes yet.")
+        );
 
         // A resume rewrites the scope rather than leaving a deleted note behind.
         assert!(client.delete("repo", "o/r", &older).await.unwrap());
-        materialize(&client, &root, "o", "o/r", "Fix the staging deploy").await.unwrap();
+        materialize(&client, &root, "o", "o/r", "Fix the staging deploy")
+            .await
+            .unwrap();
         assert!(!root.join(format!("repo/notes/{older}.md")).exists());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -570,7 +708,10 @@ mod tests {
     fn the_relevance_query_is_the_task_not_the_prompt() {
         let issue = json!({"title": "Fix the staging deploy", "body": "It fails on the migrate step."});
         let query = task_query("ignored when there is an issue", Some(&issue), "Keep the diff small.");
-        assert_eq!(query, "Fix the staging deploy\n\nKeep the diff small.\n\nIt fails on the migrate step.");
+        assert_eq!(
+            query,
+            "Fix the staging deploy\n\nKeep the diff small.\n\nIt fails on the migrate step."
+        );
         // Instructions come before the body: a long issue body is what gets cut, not what was asked.
         assert_eq!(task_query("Tidy the README", None, ""), "Tidy the README");
         assert_eq!(task_query("", None, ""), "");

@@ -37,20 +37,20 @@ mod util;
 mod version;
 mod watchdog;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::{
+    Json, Router,
     extract::{Request, State},
-    http::{header, Method, StatusCode},
+    http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use chrono::{DateTime, Utc};
-use config::{setting_u64, ModulesConfig, Settings};
+use config::{ModulesConfig, Settings, setting_u64};
 use mesh::{Mesh, Ports};
 use modules::AgentModule;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sessions::Session;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -132,14 +132,34 @@ impl App {
 
     pub fn claude_cred(&self) -> Option<ClaudeCred> {
         if let Some(token) = read_trimmed(&self.claude_token_file()) {
-            let env = if token.starts_with("sk-ant-api") { "ANTHROPIC_API_KEY" } else { "CLAUDE_CODE_OAUTH_TOKEN" };
-            let source = if env == "ANTHROPIC_API_KEY" { "saved API key" } else { "Claude subscription" };
-            return Some(ClaudeCred { env, value: token, source });
+            let env = if token.starts_with("sk-ant-api") {
+                "ANTHROPIC_API_KEY"
+            } else {
+                "CLAUDE_CODE_OAUTH_TOKEN"
+            };
+            let source = if env == "ANTHROPIC_API_KEY" {
+                "saved API key"
+            } else {
+                "Claude subscription"
+            };
+            return Some(ClaudeCred {
+                env,
+                value: token,
+                source,
+            });
         }
         if let Some(value) = env_nonempty("CLAUDE_CODE_OAUTH_TOKEN") {
-            return Some(ClaudeCred { env: "CLAUDE_CODE_OAUTH_TOKEN", value, source: "CLAUDE_CODE_OAUTH_TOKEN" });
+            return Some(ClaudeCred {
+                env: "CLAUDE_CODE_OAUTH_TOKEN",
+                value,
+                source: "CLAUDE_CODE_OAUTH_TOKEN",
+            });
         }
-        env_nonempty("ANTHROPIC_API_KEY").map(|value| ClaudeCred { env: "ANTHROPIC_API_KEY", value, source: "ANTHROPIC_API_KEY" })
+        env_nonempty("ANTHROPIC_API_KEY").map(|value| ClaudeCred {
+            env: "ANTHROPIC_API_KEY",
+            value,
+            source: "ANTHROPIC_API_KEY",
+        })
     }
 
     pub async fn repo_lock(&self, repo: &str) -> Arc<Mutex<()>> {
@@ -152,7 +172,11 @@ impl App {
         eprintln!("storage: {what}: {err:#}");
         let mut alert = self.storage_alert.write().await;
         let failures = alert.as_ref().map_or(0, |a| a.failures) + 1;
-        *alert = Some(StorageAlert { message: format!("{what} failed: {err:#}"), ts: Utc::now(), failures });
+        *alert = Some(StorageAlert {
+            message: format!("{what} failed: {err:#}"),
+            ts: Utc::now(),
+            failures,
+        });
     }
 
     /// The mesh manager, created on first use from the bundled binaries and mesh module settings.
@@ -161,11 +185,19 @@ impl App {
         if let Some(m) = mesh.as_ref() {
             return Ok(m.clone());
         }
-        let assets = self.cfg.assets.clone().context("app assets not found: run scripts/install.sh")?;
+        let assets = self
+            .cfg
+            .assets
+            .clone()
+            .context("app assets not found: run scripts/install.sh")?;
         let modules = self.modules.read().await;
         let schema = modules::schema_for("mesh", "headscale", &self.agents);
         let port = |key: &str| u16::try_from(setting_u64(&modules.mesh, &schema, key)).unwrap_or_default();
-        let ports = Ports { control: port("control_port"), udp: port("udp_port"), socks: port("socks_port") };
+        let ports = Ports {
+            control: port("control_port"),
+            udp: port("udp_port"),
+            socks: port("socks_port"),
+        };
         let created = Arc::new(Mesh::new(&assets, &self.cfg.data_dir, &self.cfg.runtime_dir, ports));
         *mesh = Some(created.clone());
         Ok(created)
@@ -209,7 +241,9 @@ async fn find_claude_bin(cfg: &Settings, elf_only: bool) -> Result<PathBuf> {
         home.join(".claude/local/claude"),
     ]);
     for candidate in candidates {
-        let Ok(real) = std::fs::canonicalize(&candidate) else { continue };
+        let Ok(real) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
         if elf_only && !is_elf(&real) {
             continue;
         }
@@ -339,7 +373,12 @@ async fn delete_claude_token(State(app): State<Shared>) -> ApiResult<Value> {
 /// Rejects DNS rebinding (unexpected Host) and cross-origin writes or WebSocket upgrades; the API has
 /// no other authentication, so it binds to loopback by default.
 async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Response {
-    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default().to_string();
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let hostname = if host.starts_with('[') {
         host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default()
     } else {
@@ -399,15 +438,34 @@ fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> 
         saved.display()
     );
     eprintln!("sessions: {message}");
-    Ok((Vec::new(), Some(StorageAlert { message, ts: Utc::now(), failures: 1 })))
+    Ok((
+        Vec::new(),
+        Some(StorageAlert {
+            message,
+            ts: Utc::now(),
+            failures: 1,
+        }),
+    ))
 }
 
 /// Moves a `sessions.json` the harness cannot use aside, into the same directory, so its bytes survive.
 fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sessions.json".into());
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sessions.json".into());
     let saved = path.with_file_name(format!("{name}.corrupt-{stamp}"));
-    let aside = || format!("could not move the unusable {} aside to {}; move it aside yourself and restart", path.display(), saved.display());
+    let aside = || {
+        format!(
+            "could not move the unusable {} aside to {}; move it aside yourself and restart",
+            path.display(),
+            saved.display()
+        )
+    };
     util::faults::check(path, util::faults::Op::Rename).with_context(aside)?;
     std::fs::rename(path, &saved).with_context(aside)?;
     Ok(saved)
@@ -447,7 +505,9 @@ impl Args {
     /// `Ok(None)` means the command was fully handled (`--help`).
     fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
         let mut iter = argv.into_iter();
-        let Some(arg) = iter.next() else { return Ok(Some(Self::Serve)) };
+        let Some(arg) = iter.next() else {
+            return Ok(Some(Self::Serve));
+        };
         let command = match arg.as_str() {
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -456,7 +516,9 @@ impl Args {
             "version" | "--version" | "-V" => Self::Version,
             "update" => Self::Update,
             "telemetry" => {
-                let sub = iter.next().ok_or_else(|| "telemetry needs a command: show, on or off".to_string())?;
+                let sub = iter
+                    .next()
+                    .ok_or_else(|| "telemetry needs a command: show, on or off".to_string())?;
                 match sub.as_str() {
                     "show" => Self::TelemetryShow,
                     "on" => Self::TelemetrySet(true),
@@ -557,8 +619,14 @@ async fn serve() -> Result<()> {
         .route("/api/status", get(status))
         .route("/api/modules", get(modules::list))
         .route("/api/modules/{kind}", put(modules::update))
-        .route("/api/settings/github-token", post(github::set_token).delete(github::delete_token))
-        .route("/api/settings/claude-token", post(set_claude_token).delete(delete_claude_token))
+        .route(
+            "/api/settings/github-token",
+            post(github::set_token).delete(github::delete_token),
+        )
+        .route(
+            "/api/settings/claude-token",
+            post(set_claude_token).delete(delete_claude_token),
+        )
         .route("/api/claude-login", get(claude_login::status))
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
@@ -622,7 +690,10 @@ async fn serve() -> Result<()> {
                 }
             });
         }
-        Err(e) => eprintln!("provider gateway: cannot bind {}: {e}; colonies can't use model providers", app.cfg.gateway_bind),
+        Err(e) => eprintln!(
+            "provider gateway: cannot bind {}: {e}; colonies can't use model providers",
+            app.cfg.gateway_bind
+        ),
     }
 
     let recovery = app.clone();
@@ -796,7 +867,11 @@ pub(crate) mod tests {
         assert!(sessions.is_empty());
         let alert = alert.unwrap();
         assert!(alert.message.contains(".corrupt-"), "{}", alert.message);
-        assert!(alert.message.contains("worktrees, branches and microVMs"), "{}", alert.message);
+        assert!(
+            alert.message.contains("worktrees, branches and microVMs"),
+            "{}",
+            alert.message
+        );
         // The original path no longer holds the corrupt bytes; the saved copy keeps them byte for byte.
         let saved = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
@@ -813,8 +888,9 @@ pub(crate) mod tests {
         let root = temp_root();
         let path = root.join("data/sessions.json");
         std::fs::write(&path, b"this is not json").unwrap();
-        let _guard =
-            util::faults::inject("sessions.json", util::faults::Op::Rename, || std::io::Error::from_raw_os_error(5));
+        let _guard = util::faults::inject("sessions.json", util::faults::Op::Rename, || {
+            std::io::Error::from_raw_os_error(5)
+        });
         let err = load_sessions(&path).unwrap_err();
         assert!(err.to_string().contains("move it aside yourself"), "{err:#}");
         assert_eq!(std::fs::read(&path).unwrap(), b"this is not json", "the file is untouched");
@@ -830,18 +906,29 @@ pub(crate) mod tests {
         let alert = app.storage_alert.read().await.clone().unwrap();
         assert_eq!(alert.failures, 2, "each failure increments the counter");
         assert!(alert.message.contains("write the list failed"), "{}", alert.message);
-        assert!(alert.message.contains("disk is still full"), "the latest failure wins: {}", alert.message);
+        assert!(
+            alert.message.contains("disk is still full"),
+            "the latest failure wins: {}",
+            alert.message
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn the_status_storage_key_is_ok_until_a_write_goes_unconfirmed() {
         assert_eq!(storage_status(None), json!({"ok": true}));
-        let alert = StorageAlert { message: "save the session list failed: disk is full".into(), ts: Utc::now(), failures: 3 };
+        let alert = StorageAlert {
+            message: "save the session list failed: disk is full".into(),
+            ts: Utc::now(),
+            failures: 3,
+        };
         let value = storage_status(Some(alert));
         assert_eq!(value["ok"], false);
         assert_eq!(value["message"], "save the session list failed: disk is full");
         assert_eq!(value["failures"], 3);
-        assert!(value["ts"].is_string(), "the ts is the RFC 3339 string the harness_log frames use: {value}");
+        assert!(
+            value["ts"].is_string(),
+            "the ts is the RFC 3339 string the harness_log frames use: {value}"
+        );
     }
 }

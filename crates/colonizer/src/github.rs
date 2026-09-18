@@ -1,20 +1,19 @@
 //! GitHub source and publish modules: repositories, issues, worktrees and pull requests.
 
 use crate::{
-    client_error,
+    ApiResult, App, Shared, client_error,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger},
     util::{env_nonempty, exec, exec_status, read_trimmed, truncate, valid_repo, write_secret},
-    ApiResult, App, Shared,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
@@ -51,12 +50,18 @@ impl App {
     pub fn git_plain(&self) -> Command {
         let mut c = Command::new("git");
         c.args([
-            "-c", "credential.helper=",
-            "-c", "credential.helper=!gh auth git-credential",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "core.fsmonitor=false",
-            "-c", "gc.auto=0",
-            "-c", "maintenance.auto=false",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!gh auth git-credential",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
         ])
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GH_PROMPT_DISABLED", "1");
@@ -98,8 +103,13 @@ pub fn token_source(app: &App) -> &'static str {
 pub async fn fetch_issue(app: &App, repo: &str, number: u64) -> Result<Value> {
     let number = number.to_string();
     let out = exec(&mut app.gh([
-        "issue", "view", number.as_str(), "-R", repo,
-        "--json", "number,title,body,labels,comments,url,author",
+        "issue",
+        "view",
+        number.as_str(),
+        "-R",
+        repo,
+        "--json",
+        "number,title,body,labels,comments,url,author",
     ]))
     .await?;
     Ok(serde_json::from_str(&out)?)
@@ -137,7 +147,10 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
     let raw = format!("{error:#}");
     let Some(denial) = classify(&raw) else { return error };
     let who = match viewer(app).await {
-        Ok(user) => user["login"].as_str().map(|login| format!("@{login}")).unwrap_or_else(|| "this machine".into()),
+        Ok(user) => user["login"]
+            .as_str()
+            .map(|login| format!("@{login}"))
+            .unwrap_or_else(|| "this machine".into()),
         Err(_) => "this machine".into(),
     };
     match denial {
@@ -155,7 +168,10 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
 
 pub async fn default_branch(app: &App, repo: &str) -> Result<String> {
     let path = format!("repos/{repo}");
-    Ok(exec(&mut app.gh(["api", path.as_str(), "--jq", ".default_branch"])).await?.trim().to_string())
+    Ok(exec(&mut app.gh(["api", path.as_str(), "--jq", ".default_branch"]))
+        .await?
+        .trim()
+        .to_string())
 }
 
 pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger) -> Result<()> {
@@ -166,7 +182,11 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
             tokio::fs::create_dir_all(parent).await?;
         }
         exec(app.git_plain().args(["clone", "--bare", "--quiet"]).arg(&url).arg(bare)).await?;
-        exec(app.git(bare).args(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"])).await?;
+        exec(
+            app.git(bare)
+                .args(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]),
+        )
+        .await?;
     }
     log.info("fetching origin").await;
     exec(app.git(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
@@ -221,11 +241,18 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
             let _ = writeln!(p, "You are resolving GitHub issue #{number} in the repository {}.\n", s.repo);
         }
         _ => {
-            let _ = writeln!(p, "You are working in the repository {} in an interactive session with its maintainer.\n", s.repo);
+            let _ = writeln!(
+                p,
+                "You are working in the repository {} in an interactive session with its maintainer.\n",
+                s.repo
+            );
         }
     }
     let branch = if resumed {
-        format!("`{}`, which already carries this colony's earlier work on top of `origin/{base}`", s.branch)
+        format!(
+            "`{}`, which already carries this colony's earlier work on top of `origin/{base}`",
+            s.branch
+        )
     } else {
         format!("`{}`, freshly created from `origin/{base}`", s.branch)
     };
@@ -279,7 +306,11 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
         );
     }
     if !s.instructions.trim().is_empty() {
-        let _ = writeln!(p, "Additional instructions from the maintainer who started this session:\n{}\n", s.instructions.trim());
+        let _ = writeln!(
+            p,
+            "Additional instructions from the maintainer who started this session:\n{}\n",
+            s.instructions.trim()
+        );
     }
     if !s.autopilot || s.issue.is_none() {
         let _ = writeln!(
@@ -352,8 +383,7 @@ pub async fn pr_state(app: &App, url: &str) -> Result<PrState> {
     .await
     .context("GitHub API timed out")??;
     let view: PrView = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
-    pr_state_from(&view.state, view.merged)
-        .with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
+    pr_state_from(&view.state, view.merged).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
 }
 
 const COLONIZER_CO_AUTHOR: &str = "Co-Authored-By: Colonizer <noreply@colonizer.dev>";
@@ -384,7 +414,9 @@ pub fn check_publish_branch(branch: &str, base: &str) -> Result<()> {
 
 /// Identifies the current `pr.md` (a non-empty regular file), so autopilot can tell whether a turn wrote it.
 pub fn pr_description_mark(out: &FsPath) -> Option<(std::time::SystemTime, u64)> {
-    let meta = std::fs::symlink_metadata(out.join("pr.md")).ok().filter(|m| m.is_file() && m.len() > 0)?;
+    let meta = std::fs::symlink_metadata(out.join("pr.md"))
+        .ok()
+        .filter(|m| m.is_file() && m.len() > 0)?;
     Some((meta.modified().ok()?, meta.len()))
 }
 
@@ -436,20 +468,23 @@ async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
     // A genuine no-op needs both an empty index and a branch even with origin/<base>; a commit that was
     // never pushed leaves the branch ahead with nothing staged.
     if !staged && !ops.commits_ahead().await? {
-        ops.note("the agent left no changes in the worktree; nothing to publish".to_string()).await;
+        ops.note("the agent left no changes in the worktree; nothing to publish".to_string())
+            .await;
         return Ok(Published::NoChanges);
     }
 
     let local = ops.local_head().await?;
     if ops.remote_head().await?.as_deref() == Some(local.as_str()) {
-        ops.note("the branch is already on origin; skipping the push".to_string()).await;
+        ops.note("the branch is already on origin; skipping the push".to_string())
+            .await;
     } else {
         ops.push().await?;
     }
     ops.checkpoint(PublishStage::Pushed).await;
 
     if let Some(url) = ops.existing_pr().await? {
-        ops.note(format!("a pull request is already open for this branch: {url}")).await;
+        ops.note(format!("a pull request is already open for this branch: {url}"))
+            .await;
         return Ok(Published::PullRequest(url));
     }
     let url = ops.create_pr(&title, &body).await?;
@@ -504,8 +539,10 @@ impl PublishOps for GitPublishOps<'_> {
         let email = format!("{}+{login}@users.noreply.github.com", v["id"]);
         exec(
             self.wt_git()
-                .arg("-c").arg(format!("user.name={name}"))
-                .arg("-c").arg(format!("user.email={email}"))
+                .arg("-c")
+                .arg(format!("user.name={name}"))
+                .arg("-c")
+                .arg(format!("user.email={email}"))
                 .args(["commit", "--quiet", "--no-verify", "-m"])
                 .arg(title)
                 .arg("-m")
@@ -546,7 +583,9 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     async fn push(&self) -> Result<()> {
-        self.log.info(format!("pushing {} to github.com/{}", self.s.branch, self.s.repo)).await;
+        self.log
+            .info(format!("pushing {} to github.com/{}", self.s.branch, self.s.repo))
+            .await;
         let refspec = format!("refs/heads/{0}:refs/heads/{0}", self.s.branch);
         exec(self.app.git(&self.bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
         Ok(())
@@ -554,28 +593,65 @@ impl PublishOps for GitPublishOps<'_> {
 
     async fn existing_pr(&self) -> Result<Option<String>> {
         let out = exec(&mut self.app.gh([
-            "pr", "list", "-R", self.s.repo.as_str(), "--head", self.s.branch.as_str(),
-            "--state", "open", "--json", "url", "--limit", "1",
+            "pr",
+            "list",
+            "-R",
+            self.s.repo.as_str(),
+            "--head",
+            self.s.branch.as_str(),
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--limit",
+            "1",
         ]))
         .await?;
         let prs: Value = serde_json::from_str(&out).context("gh pr list did not return JSON")?;
-        Ok(prs.as_array().and_then(|prs| prs.first()).and_then(|pr| pr["url"].as_str()).map(String::from))
+        Ok(prs
+            .as_array()
+            .and_then(|prs| prs.first())
+            .and_then(|pr| pr["url"].as_str())
+            .map(String::from))
     }
 
     async fn create_pr(&self, title: &str, body: &str) -> Result<String> {
         let body_path = self.session_dir.join("pr-body.md");
         tokio::fs::write(&body_path, compose_pr_body(body, self.s.issue)).await?;
-        let draft = self.app.modules.read().await.publish.settings.get("draft").and_then(Value::as_bool).unwrap_or(false);
+        let draft = self
+            .app
+            .modules
+            .read()
+            .await
+            .publish
+            .settings
+            .get("draft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut create = self.app.gh([
-            "pr", "create", "-R", self.s.repo.as_str(), "--base", self.base.as_str(), "--head",
-            self.s.branch.as_str(), "--title", title, "--body-file",
+            "pr",
+            "create",
+            "-R",
+            self.s.repo.as_str(),
+            "--base",
+            self.base.as_str(),
+            "--head",
+            self.s.branch.as_str(),
+            "--title",
+            title,
+            "--body-file",
         ]);
         create.arg(&body_path);
         if draft {
             create.arg("--draft");
         }
         let pr = exec(&mut create).await?;
-        Ok(pr.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(pr.trim()).to_string())
+        Ok(pr
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("https://"))
+            .unwrap_or(pr.trim())
+            .to_string())
     }
 
     async fn checkpoint(&self, stage: PublishStage) {
@@ -627,7 +703,11 @@ pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Publ
 
 fn read_gitdir(wt: &FsPath) -> Result<PathBuf> {
     let content = std::fs::read_to_string(wt.join(".git")).context("worktree has no .git file")?;
-    let dir = content.trim().strip_prefix("gitdir:").context("unexpected .git file in worktree")?.trim();
+    let dir = content
+        .trim()
+        .strip_prefix("gitdir:")
+        .context("unexpected .git file in worktree")?
+        .trim();
     Ok(PathBuf::from(dir))
 }
 
@@ -641,7 +721,11 @@ fn restore_gitfile(wt: &FsPath, admin: &FsPath) -> Result<()> {
         Ok(_) => std::fs::remove_file(&path)?,
         Err(_) => {}
     }
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&path)?;
     writeln!(f, "gitdir: {}", admin.display())?;
     Ok(())
 }
@@ -687,11 +771,18 @@ fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
     let (title, body) = match content.as_deref().map(str::trim) {
         Some(text) if !text.is_empty() => {
             let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
-            (first.trim().trim_start_matches('#').trim().to_string(), rest.trim().to_string())
+            (
+                first.trim().trim_start_matches('#').trim().to_string(),
+                rest.trim().to_string(),
+            )
         }
         _ => (default_title.clone(), String::new()),
     };
-    let title = if title.is_empty() { default_title } else { truncate(&title, 200) };
+    let title = if title.is_empty() {
+        default_title
+    } else {
+        truncate(&title, 200)
+    };
     (title, body)
 }
 
@@ -701,7 +792,9 @@ fn strip_agent_attribution(body: &str) -> String {
     let mut lines: Vec<&str> = body.trim_end().lines().collect();
     while let Some(line) = lines.last() {
         let trimmed = line.trim();
-        let words = trimmed.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).to_lowercase();
+        let words = trimmed
+            .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_lowercase();
         let signature = trimmed.is_empty()
             || trimmed == "---"
             || words.starts_with("co-authored-by:")
@@ -720,7 +813,10 @@ fn compose_pr_body(body: &str, issue: Option<u64>) -> String {
     if let Some(number) = issue {
         let lower = out.to_lowercase();
         let reference = format!("#{number}");
-        if !["closes", "fixes", "resolves"].iter().any(|k| lower.contains(&format!("{k} {reference}"))) {
+        if !["closes", "fixes", "resolves"]
+            .iter()
+            .any(|k| lower.contains(&format!("{k} {reference}")))
+        {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
@@ -746,7 +842,10 @@ pub async fn set_token(State(app): State<Shared>, Json(body): Json<TokenBody>) -
         return Err(client_error(StatusCode::BAD_REQUEST, "empty or malformed token"));
     }
     let login = exec(
-        Command::new("gh").args(["api", "user", "--jq", ".login"]).env("GH_TOKEN", token).env("GH_PROMPT_DISABLED", "1"),
+        Command::new("gh")
+            .args(["api", "user", "--jq", ".login"])
+            .env("GH_TOKEN", token)
+            .env("GH_PROMPT_DISABLED", "1"),
     )
     .await
     .map_err(|_| client_error(StatusCode::BAD_REQUEST, "GitHub rejected this token"))?;
@@ -761,12 +860,17 @@ pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
 
 pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
     let out = exec(&mut app.gh([
-        "api", "--paginate", "/user/repos?per_page=100&sort=pushed",
-        "--jq", ".[] | {full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}",
+        "api",
+        "--paginate",
+        "/user/repos?per_page=100&sort=pushed",
+        "--jq",
+        ".[] | {full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}",
     ]))
     .await?;
     let repos: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let owners = repos.iter().filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
+    let owners = repos
+        .iter()
+        .filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
     app.repo_owners.write().await.extend(owners);
     Ok(Json(repos))
 }
@@ -774,11 +878,23 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
 /// Adds the signed-in user and every GitHub org they belong to to the known owners, so org workspaces
 /// show orgs whose repositories haven't been listed yet. Refreshes at most every five minutes.
 pub async fn refresh_orgs(app: &App) {
-    if app.orgs_refreshed.lock().await.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300)) {
+    if app
+        .orgs_refreshed
+        .lock()
+        .await
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300))
+    {
         return;
     }
-    let Ok(orgs) = exec(&mut app.gh(["api", "--paginate", "/user/orgs?per_page=100", "--jq", ".[].login"])).await else { return };
-    let mut owners: Vec<String> = orgs.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+    let Ok(orgs) = exec(&mut app.gh(["api", "--paginate", "/user/orgs?per_page=100", "--jq", ".[].login"])).await else {
+        return;
+    };
+    let mut owners: Vec<String> = orgs
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
     if let Ok(login) = exec(&mut app.gh(["api", "user", "--jq", ".login"])).await {
         owners.push(login.trim().to_string());
     }
@@ -792,8 +908,16 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
     }
     let out = exec(&mut app.gh([
-        "issue", "list", "-R", repo.as_str(), "--state", "open", "--limit", "200",
-        "--json", "number,title,body,labels,author,updatedAt,url",
+        "issue",
+        "list",
+        "-R",
+        repo.as_str(),
+        "--state",
+        "open",
+        "--limit",
+        "200",
+        "--json",
+        "number,title,body,labels,author,updatedAt,url",
     ]))
     .await?;
     Ok(Json(serde_json::from_str(&out)?))
@@ -803,13 +927,19 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
 mod tests {
     #[test]
     fn gh_failures_are_classified_by_what_the_user_can_do() {
-        use super::{classify, Denial};
+        use super::{Denial, classify};
         // What a deleted repository, a renamed one and one this account cannot see all look like.
         let raw = "`gh api repos/o/r --jq .default_branch` failed (exit status: 1): gh: Not Found (HTTP 404)";
         assert_eq!(classify(raw), Some(Denial::NotVisible));
-        assert_eq!(classify("GraphQL: Could not resolve to a Repository with the name 'o/r'."), Some(Denial::NotVisible));
+        assert_eq!(
+            classify("GraphQL: Could not resolve to a Repository with the name 'o/r'."),
+            Some(Denial::NotVisible)
+        );
         assert_eq!(classify("gh: Bad credentials (HTTP 401)"), Some(Denial::BadCredential));
-        assert_eq!(classify("gh: Resource not accessible (HTTP 403)"), Some(Denial::BadCredential));
+        assert_eq!(
+            classify("gh: Resource not accessible (HTTP 403)"),
+            Some(Denial::BadCredential)
+        );
         // Anything else keeps its own message rather than being dressed up as an access problem.
         assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);
     }
@@ -858,7 +988,10 @@ mod tests {
 
     #[test]
     fn colonizer_signs_the_commit_unless_the_config_says_otherwise() {
-        assert_eq!(commit_trailer(Some(5), "ab12cd34", true), format!("Refs #5\n\n{COLONIZER_CO_AUTHOR}"));
+        assert_eq!(
+            commit_trailer(Some(5), "ab12cd34", true),
+            format!("Refs #5\n\n{COLONIZER_CO_AUTHOR}")
+        );
         assert_eq!(commit_trailer(Some(5), "ab12cd34", false), "Refs #5");
         assert_eq!(commit_trailer(None, "ab12cd34", false), "Colonizer session ab12cd34");
         // The reference keeps its own paragraph, so git still reads the trailer from the last one.
@@ -1047,7 +1180,10 @@ mod tests {
         assert_eq!(repo.count("commit"), 1);
         assert_eq!(repo.count("push"), 1);
         assert_eq!(repo.count("create_pr"), 1);
-        assert_eq!(repo.checkpoints(), vec![PublishStage::Committed, PublishStage::Pushed, PublishStage::PrOpened]);
+        assert_eq!(
+            repo.checkpoints(),
+            vec![PublishStage::Committed, PublishStage::Pushed, PublishStage::PrOpened]
+        );
         assert!(repo.noted("opened pull request"));
     }
 
@@ -1067,7 +1203,11 @@ mod tests {
     async fn a_failed_push_is_retried_without_a_second_commit_or_pr() {
         let mut repo = FakeRepo::new(true, false, None, None).failing_at("push");
         assert!(run_publish(&repo).await.is_err());
-        assert_eq!(repo.checkpoints(), vec![PublishStage::Committed], "the reached checkpoint survives the failure");
+        assert_eq!(
+            repo.checkpoints(),
+            vec![PublishStage::Committed],
+            "the reached checkpoint survives the failure"
+        );
         repo.heal();
         let Published::PullRequest(url) = run_publish(&repo).await.unwrap() else {
             panic!("expected the retry to open the pull request");
@@ -1143,7 +1283,10 @@ mod tests {
     #[tokio::test]
     async fn a_diverged_remote_rejects_the_push_instead_of_being_force_pushed() {
         let repo = FakeRepo::new(true, false, Some(DIVERGED), None);
-        assert!(run_publish(&repo).await.is_err(), "a diverged remote must fail the publish loudly");
+        assert!(
+            run_publish(&repo).await.is_err(),
+            "a diverged remote must fail the publish loudly"
+        );
         assert_eq!(repo.checkpoints(), vec![PublishStage::Committed]);
         assert_eq!(repo.count("create_pr"), 0, "a rejected push must not end in a pull request");
     }
@@ -1171,7 +1314,9 @@ mod tests {
     /// listed alongside it and sort first; only the exact ref name may answer.
     #[test]
     fn ls_remote_parsing_ignores_refs_that_merely_end_with_the_branch() {
-        let out = format!("{DIVERGED}\trefs/heads/archive/colonizer/issue-7-ab12cd34\n{LOCAL}\trefs/heads/colonizer/issue-7-ab12cd34\n");
+        let out = format!(
+            "{DIVERGED}\trefs/heads/archive/colonizer/issue-7-ab12cd34\n{LOCAL}\trefs/heads/colonizer/issue-7-ab12cd34\n"
+        );
         assert_eq!(parse_ls_remote(&out, "colonizer/issue-7-ab12cd34").as_deref(), Some(LOCAL));
     }
 

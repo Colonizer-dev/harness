@@ -41,7 +41,10 @@ fn main() {
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or_else(|| {
-            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or_default()
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or_default()
         });
 
     println!("cargo:rustc-env=COLONIZER_DESCRIBE={describe}");

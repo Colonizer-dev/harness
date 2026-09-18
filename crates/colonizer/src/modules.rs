@@ -2,20 +2,28 @@
 //! Settings → Modules API.
 
 use crate::{
-    client_error,
+    ApiResult, Shared, client_error,
     config::{ModuleChoice, ModulesConfig},
-    ApiResult, Shared,
 };
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 8] = ["source", "sandbox", "mesh", "agent", "interfaces", "publish", "memory", "watchdog"];
+pub const KINDS: [&str; 8] = [
+    "source",
+    "sandbox",
+    "mesh",
+    "agent",
+    "interfaces",
+    "publish",
+    "memory",
+    "watchdog",
+];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
 #[derive(Clone, Debug)]
@@ -34,20 +42,32 @@ impl AgentModule {
     pub fn vm_command(&self) -> Vec<String> {
         self.entry
             .iter()
-            .map(|arg| if self.dir.join(arg).exists() { format!("/opt/colonizer/agent/{arg}") } else { arg.clone() })
+            .map(|arg| {
+                if self.dir.join(arg).exists() {
+                    format!("/opt/colonizer/agent/{arg}")
+                } else {
+                    arg.clone()
+                }
+            })
             .collect()
     }
 }
 
 pub fn discover_agents(assets: Option<&FsPath>) -> Vec<AgentModule> {
     let Some(root) = assets else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(root.join("modules/agents")) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(root.join("modules/agents")) else {
+        return Vec::new();
+    };
     let mut modules: Vec<AgentModule> = entries
         .flatten()
         .filter_map(|entry| {
             let dir = entry.path();
             let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("module.json")).ok()?).ok()?;
-            let entry_cmd: Vec<String> = manifest["entry"].as_array()?.iter().filter_map(|a| a.as_str().map(String::from)).collect();
+            let entry_cmd: Vec<String> = manifest["entry"]
+                .as_array()?
+                .iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect();
             if entry_cmd.is_empty() {
                 return None;
             }
@@ -94,7 +114,12 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         schema,
     };
     match kind {
-        "source" => vec![p("github", "GitHub", "Issues from repositories your GitHub account can access", json!({"type":"object","properties":{}}))],
+        "source" => vec![p(
+            "github",
+            "GitHub",
+            "Issues from repositories your GitHub account can access",
+            json!({"type":"object","properties":{}}),
+        )],
         "sandbox" => vec![p(
             "microsandbox",
             "microsandbox",
@@ -128,9 +153,17 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "socks_port": {"type": "integer", "title": "Harness SOCKS5 port (loopback)", "minimum": 1024, "maximum": 65535, "default": 41744}
                 }}),
             ),
-            p("none", "Loopback port", "No mesh: reach each VM through a published loopback port", json!({"type":"object","properties":{}})),
+            p(
+                "none",
+                "Loopback port",
+                "No mesh: reach each VM through a published loopback port",
+                json!({"type":"object","properties":{}}),
+            ),
         ],
-        "agent" => agents.iter().map(|a| p(&a.id, &a.name, &a.description, a.schema.clone())).collect(),
+        "agent" => agents
+            .iter()
+            .map(|a| p(&a.id, &a.name, &a.description, a.schema.clone()))
+            .collect(),
         "interfaces" => vec![p(
             "default",
             "Session panels",
@@ -210,7 +243,12 @@ fn describe_kind(kind: &str, choice: &ModuleChoice, agents: &[AgentModule]) -> V
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     let modules = app.modules.read().await;
-    Json(KINDS.iter().filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app.agents))).collect())
+    Json(
+        KINDS
+            .iter()
+            .filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app.agents)))
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -226,24 +264,29 @@ fn yes() -> bool {
     true
 }
 
-pub async fn update(
-    State(app): State<Shared>,
-    Path(kind): Path<String>,
-    Json(req): Json<UpdateModule>,
-) -> ApiResult<Value> {
+pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(req): Json<UpdateModule>) -> ApiResult<Value> {
     let providers = providers(&kind, &app.agents);
     let Some(provider) = providers.iter().find(|p| p.id == req.provider) else {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown module kind or provider"));
     };
     if matches!(kind.as_str(), "source" | "sandbox" | "agent" | "publish") && !req.enabled {
-        return Err(client_error(StatusCode::BAD_REQUEST, "this module kind is required and can't be disabled"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "this module kind is required and can't be disabled",
+        ));
     }
-    let settings = validate_settings(&provider.schema, &req.settings)
-        .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    let settings =
+        validate_settings(&provider.schema, &req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
 
     let mut modules = app.modules.write().await;
-    let choice = modules.get_mut(&kind).ok_or_else(|| client_error(StatusCode::NOT_FOUND, "unknown module kind"))?;
-    *choice = ModuleChoice { provider: req.provider, enabled: req.enabled, settings };
+    let choice = modules
+        .get_mut(&kind)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "unknown module kind"))?;
+    *choice = ModuleChoice {
+        provider: req.provider,
+        enabled: req.enabled,
+        settings,
+    };
     let described = describe_kind(&kind, choice, &app.agents);
     save_modules(&app.modules_file(), &modules)?;
     Ok(Json(described))
@@ -256,7 +299,9 @@ fn save_modules(path: &FsPath, modules: &ModulesConfig) -> anyhow::Result<()> {
 /// Keeps only known keys and checks types, enums and ranges.
 fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<String, Value>, String> {
     let mut out = Map::new();
-    let Some(properties) = schema["properties"].as_object() else { return Ok(out) };
+    let Some(properties) = schema["properties"].as_object() else {
+        return Ok(out);
+    };
     for (key, value) in input {
         let Some(spec) = properties.get(key) else { continue };
         let ok = match spec["type"].as_str() {
@@ -290,7 +335,9 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
             && let Some(s) = value.as_str()
             && crate::util::parse_disk_size(s).is_none()
         {
-            return Err(format!("setting `{key}` is not a disk size like 512M or 16G (0 means unlimited)"));
+            return Err(format!(
+                "setting `{key}` is not a disk size like 512M or 16G (0 means unlimited)"
+            ));
         }
         out.insert(key.clone(), value.clone());
     }
@@ -320,26 +367,46 @@ mod tests {
     #[test]
     fn the_sandbox_budget_defaults_to_off_and_rejects_negatives() {
         let schema = providers("sandbox", &[]).remove(0).schema;
-        assert_eq!(schema["properties"]["budget_usd"]["default"], json!(0), "no budget unless the operator names one");
+        assert_eq!(
+            schema["properties"]["budget_usd"]["default"],
+            json!(0),
+            "no budget unless the operator names one"
+        );
         let mut input = Map::new();
         input.insert("budget_usd".into(), json!(-1));
         assert!(validate_settings(&schema, &input).is_err());
         input.insert("budget_usd".into(), json!(12.5));
-        assert_eq!(validate_settings(&schema, &input).unwrap().get("budget_usd"), Some(&json!(12.5)));
+        assert_eq!(
+            validate_settings(&schema, &input).unwrap().get("budget_usd"),
+            Some(&json!(12.5))
+        );
     }
 
     #[test]
     fn the_sandbox_host_disk_quota_is_a_size_and_malformed_ones_are_refused_at_save_time() {
         let schema = providers("sandbox", &[]).remove(0).schema;
-        assert_eq!(schema["properties"]["host_disk"]["default"], json!("0"), "no quota unless the operator names one");
+        assert_eq!(
+            schema["properties"]["host_disk"]["default"],
+            json!("0"),
+            "no quota unless the operator names one"
+        );
         let mut input = Map::new();
         input.insert("host_disk".into(), json!("16G"));
-        assert_eq!(validate_settings(&schema, &input).unwrap().get("host_disk"), Some(&json!("16G")));
+        assert_eq!(
+            validate_settings(&schema, &input).unwrap().get("host_disk"),
+            Some(&json!("16G"))
+        );
         input.insert("host_disk".into(), json!(""));
-        assert!(validate_settings(&schema, &input).is_ok(), "empty means unlimited, which is a size");
+        assert!(
+            validate_settings(&schema, &input).is_ok(),
+            "empty means unlimited, which is a size"
+        );
         for bad in ["eight", "1.5G", "16 GB"] {
             input.insert("host_disk".into(), json!(bad));
-            assert!(validate_settings(&schema, &input).is_err(), "{bad:?} must be refused while the operator is looking");
+            assert!(
+                validate_settings(&schema, &input).is_err(),
+                "{bad:?} must be refused while the operator is looking"
+            );
         }
     }
 

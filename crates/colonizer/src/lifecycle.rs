@@ -9,29 +9,22 @@
 //! passing one ends a colony exactly the way the max session length does.
 
 use crate::{
-    client_error, github,
-    orgs, providers,
+    ApiResult, App, Shared, client_error, github, orgs, providers,
     sandbox::{self},
     util::{
         dir_size,
         faults::{self, Op},
         format_disk_size,
     },
-    ApiResult, App, Shared,
 };
 use axum::{
-    extract::{
-        Path, State,
-    },
-    http::StatusCode,
     Json,
+    extract::{Path, State},
+    http::StatusCode,
 };
 use chrono::Utc;
-use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    time::Duration,
-};
+use serde_json::{Value, json};
+use std::{path::PathBuf, time::Duration};
 
 #[allow(unused_imports)]
 use crate::{events::*, publish::*, queue::*, sessions::*};
@@ -87,7 +80,8 @@ pub async fn recover(app: &Shared) {
                     Err(e) => app.session_log(&s.id, "error", format!("{e:#}")).await,
                 }
             }
-            app.session_log(&s.id, "info", "harness restarted: reconnecting to the running microVM".into()).await;
+            app.session_log(&s.id, "info", "harness restarted: reconnecting to the running microVM".into())
+                .await;
             start_link(app, &s.id).await;
         } else {
             teardown_vm(app, &s).await;
@@ -110,7 +104,9 @@ pub async fn watch_sandboxes(app: Shared) {
     loop {
         tick.tick().await;
         // A failed `msb ls` says nothing about the colonies, so leave them alone until it answers again.
-        let Ok(running) = sandbox::running(&app.cfg.msb).await else { continue };
+        let Ok(running) = sandbox::running(&app.cfg.msb).await else {
+            continue;
+        };
         // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
         // deadlock against update_session's write lock.
         let sessions = app.sessions.read().await.clone();
@@ -118,7 +114,12 @@ pub async fn watch_sandboxes(app: Shared) {
             if !s.status.is_live() || s.status == SessionStatus::Starting || running.contains(&s.sandbox) {
                 continue;
             }
-            app.session_log(&s.id, "error", "the microVM stopped; the worktree is kept, so this colony can be resumed".into()).await;
+            app.session_log(
+                &s.id,
+                "error",
+                "the microVM stopped; the worktree is kept, so this colony can be resumed".into(),
+            )
+            .await;
             teardown_vm(&app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Stopped;
@@ -142,7 +143,13 @@ fn over_budget(total_usd: f64, budget_usd: f64) -> bool {
 /// final re-check under that lock. The status goes to `stopped` with a human-readable `error`, the
 /// harness log says why, and the worktree is kept so the colony can be resumed. Returns whether this call
 /// did the stopping.
-pub(crate) async fn stop_colony(app: &Shared, s: &Session, due: impl FnOnce(&Session) -> bool, error: String, warn: String) -> bool {
+pub(crate) async fn stop_colony(
+    app: &Shared,
+    s: &Session,
+    due: impl FnOnce(&Session) -> bool,
+    error: String,
+    warn: String,
+) -> bool {
     let claimed = app
         .update_session(&s.id, |x| {
             let due = x.status.is_live() && due(x);
@@ -217,7 +224,9 @@ async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
     let (worktree, session_dir) = (PathBuf::from(&s.worktree), app.session_dir(&s.id));
     // A walk that never finishes (a shutdown) measures 0, which can only under-report — never a reason to
     // stop a colony.
-    tokio::task::spawn_blocking(move || dir_size(&worktree) + dir_size(&session_dir)).await.unwrap_or(0)
+    tokio::task::spawn_blocking(move || dir_size(&worktree) + dir_size(&session_dir))
+        .await
+        .unwrap_or(0)
 }
 
 /// The host-disk check and its consequence, in one place, called from [`watch_host_disks`] — the only
@@ -277,7 +286,10 @@ pub async fn watch_host_disks(app: Shared) {
         // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
         // deadlock against update_session's write lock.
         let sessions = app.sessions.read().await.clone();
-        for s in sessions.into_iter().filter(|s| s.status.is_live() && s.status != SessionStatus::Starting) {
+        for s in sessions
+            .into_iter()
+            .filter(|s| s.status.is_live() && s.status != SessionStatus::Starting)
+        {
             enforce_host_disk(&app, &s).await;
         }
     }
@@ -322,7 +334,10 @@ pub(crate) fn rotate_events(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
@@ -349,7 +364,11 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
             return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
         }
-        x.status = if room { SessionStatus::Starting } else { SessionStatus::Queued };
+        x.status = if room {
+            SessionStatus::Starting
+        } else {
+            SessionStatus::Queued
+        };
         x.error = None;
         x.attention = None;
         x.mesh = None;
@@ -401,10 +420,15 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
     }
     if admitted {
-        app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
+        app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into())
+            .await;
         tokio::spawn(boot(app.clone(), id, true));
     } else {
-        let ahead = if waiting == 0 { String::new() } else { format!(", behind {waiting} already waiting") };
+        let ahead = if waiting == 0 {
+            String::new()
+        } else {
+            format!(", behind {waiting} already waiting")
+        };
         app.session_log(
             &id,
             "info",
@@ -436,7 +460,8 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     if !was.is_live() {
         return Err(client_error(StatusCode::CONFLICT, "session is not running"));
     }
-    app.session_log(&id, "info", "stopping: removing the microVM (the worktree is kept)".into()).await;
+    app.session_log(&id, "info", "stopping: removing the microVM (the worktree is kept)".into())
+        .await;
     teardown_vm(&app, &s).await;
     Ok(Json(app.session(&id).await.unwrap_or(s)))
 }
@@ -450,7 +475,10 @@ fn cleanable(status: SessionStatus) -> bool {
 }
 
 pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if !cleanable(s.status) {
         return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
     }
@@ -478,7 +506,10 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // Out of the list before any file is touched, so neither the queue nor Resume can start it meanwhile.
     let (at, s) = {
         let mut sessions = app.sessions.write().await;
-        let at = sessions.iter().position(|s| s.id == id).ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+        let at = sessions
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
         if !deletable(sessions[at].status) {
             return Err(client_error(StatusCode::CONFLICT, "stop the colony first"));
         }
@@ -495,7 +526,9 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             let mut sessions = app.sessions.write().await;
             let at = at.min(sessions.len());
             sessions.insert(at, s);
-            return Err(e.context("could not remove the colony's worktree; nothing was deleted").into());
+            return Err(e
+                .context("could not remove the colony's worktree; nothing was deleted")
+                .into());
         }
     }
     if let Err(e) = app.persist_sessions().await {
@@ -529,10 +562,10 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::tests::{admit_resume, app_with_colony, stopped_colony_with_worktree};
     use crate::util::short_id;
     use std::sync::Arc;
     use tokio::sync::RwLock;
-    use crate::sessions::tests::{admit_resume, app_with_colony, stopped_colony_with_worktree};
 
     #[test]
     fn only_colonies_with_nothing_running_can_be_deleted() {
@@ -602,7 +635,11 @@ mod tests {
         let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
         assert!(rotate_events(&dir).is_err());
         drop(_guard);
-        assert_eq!(std::fs::read_to_string(dir.join("events.jsonl")).unwrap(), "{\"seq\":1}\n", "the log is untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
+            "{\"seq\":1}\n",
+            "the log is untouched"
+        );
         rotate_events(&dir).unwrap();
         assert!(!dir.join("events.jsonl").exists());
         assert_eq!(std::fs::read_to_string(dir.join("events-1.jsonl")).unwrap(), "{\"seq\":1}\n");
@@ -612,14 +649,19 @@ mod tests {
     #[tokio::test]
     async fn a_failed_event_log_rotation_refuses_the_resume_and_leaves_the_colony_stopped() {
         let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
-        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into())).await.unwrap();
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into()))
+            .await
+            .unwrap();
         std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
         let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
         let err = resume(State(app.clone()), Path("abc".to_string())).await.unwrap_err();
         let body = err.1.to_string();
         assert!(body.contains("the colony was not resumed"), "{body}");
         assert!(body.contains("aside yourself and try again"), "{body}");
-        assert!(app.storage_alert.read().await.is_some(), "the failure is recorded, not swallowed");
+        assert!(
+            app.storage_alert.read().await.is_some(),
+            "the failure is recorded, not swallowed"
+        );
         assert_eq!(
             app.session("abc").await.unwrap().status,
             SessionStatus::Stopped,
@@ -646,7 +688,10 @@ mod tests {
         }
         let message = rotate_events(&dir).unwrap_err().to_string();
         assert!(message.contains("every archive slot"), "{message}");
-        assert!(message.contains(&dir.display().to_string()), "the error names the directory that filled up: {message}");
+        assert!(
+            message.contains(&dir.display().to_string()),
+            "the error names the directory that filled up: {message}"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
             "{\"seq\":1}\n",
@@ -658,7 +703,9 @@ mod tests {
     #[tokio::test]
     async fn a_resume_does_not_rotate_while_another_task_holds_the_runtime_s_file_lock() {
         let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
-        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into())).await.unwrap();
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into()))
+            .await
+            .unwrap();
         std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
         // A runtime in the map, as a just-stopped colony still has while its link task drains.
         let rt = app.runtime("abc").await;
@@ -683,7 +730,10 @@ mod tests {
             !app.session_dir("abc").join("events.jsonl").exists(),
             "the rotation went ahead once the lock freed up"
         );
-        assert_eq!(std::fs::read_to_string(app.session_dir("abc").join("events-1.jsonl")).unwrap(), "{\"seq\":7}\n");
+        assert_eq!(
+            std::fs::read_to_string(app.session_dir("abc").join("events-1.jsonl")).unwrap(),
+            "{\"seq\":7}\n"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -691,7 +741,9 @@ mod tests {
     async fn a_failed_save_keeps_the_colony_listed_and_the_delete_reports_failure() {
         let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
         app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
-        let _guard = faults::inject("sessions.json", Op::Write, || std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let _guard = faults::inject("sessions.json", Op::Write, || {
+            std::io::Error::from(std::io::ErrorKind::StorageFull)
+        });
         let result = delete(State(app.clone()), Path("abc".to_string())).await;
         assert!(result.unwrap_err().1.to_string().contains("the colony is kept"));
         assert!(app.session("abc").await.is_some(), "the colony goes back in the list");
@@ -704,7 +756,9 @@ mod tests {
         let max_parallel = 3;
         let resumable = 12;
         let sessions = Arc::new(RwLock::new(
-            (0..resumable).map(|i| stopped_colony_with_worktree("acme", format!("resume-{i}"))).collect::<Vec<_>>(),
+            (0..resumable)
+                .map(|i| stopped_colony_with_worktree("acme", format!("resume-{i}")))
+                .collect::<Vec<_>>(),
         ));
         let barrier = Arc::new(tokio::sync::Barrier::new(resumable));
         let mut tasks = Vec::new();
