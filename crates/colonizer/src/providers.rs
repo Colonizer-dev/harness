@@ -7,6 +7,8 @@
 use crate::{
     client_error,
     gateway::{DEFAULT_TIMEOUT_SECS, COLONY_HEADER},
+    orgs::effective_agent,
+    sessions::agent_env,
     util::{read_trimmed, write_secret},
     ApiResult, App, Shared,
 };
@@ -215,7 +217,38 @@ pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
     ColonyRoutes { routes, providers }
 }
 
-fn describe(app: &App, provider: &Provider) -> Value {
+/// The model settings (`model`, `subagent_model`, `background_model`) whose resolved value — schema
+/// default, global setting or org override — routes to this provider as `<provider-id>/<model>`, named
+/// for a human, e.g. `["subagent_model"]`. Empty means no model setting points at it. A bare alias or a
+/// partial id prefix is Claude's or another provider's model, so it doesn't match, same rule as
+/// [`ColonyRoutes::used`].
+fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> {
+    let mut used: Vec<&'static str> = Vec::new();
+    for env in envs {
+        for (var, setting) in MODEL_VARS.iter().zip(["model", "subagent_model", "background_model"]) {
+            let points_here =
+                env.get(*var).and_then(Value::as_str).is_some_and(|m| m.strip_prefix(provider_id).is_some_and(|rest| rest.starts_with('/')));
+            if points_here && !used.contains(&setting) {
+                used.push(setting);
+            }
+        }
+    }
+    used
+}
+
+/// The claude-code runner env for the global agent settings (schema defaults layered under
+/// modules.json), plus one per org that overrides them: every configuration a colony could start with.
+async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
+    let Some(agent) = app.agents.iter().find(|a| a.id == "claude-code") else { return Vec::new() };
+    let modules = app.modules.read().await;
+    let mut envs = vec![agent_env(agent, &modules.agent)];
+    for org in app.all_org_settings().into_values() {
+        envs.push(agent_env(agent, &effective_agent(&modules, &org)));
+    }
+    envs
+}
+
+fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Value {
     let (in_flight, queued) = app.gateway.load(&provider.id);
     json!({
         "id": provider.id,
@@ -233,11 +266,14 @@ fn describe(app: &App, provider: &Provider) -> Value {
         "fallback_model": provider.fallback_model,
         "in_flight": in_flight,
         "queued": queued,
+        "usage": app.gateway.usage(&provider.id),
+        "used_by": used_by(&provider.id, envs),
     })
 }
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
-    Json(app.providers().iter().map(|p| describe(&app, p)).collect())
+    let envs = runner_envs(&app).await;
+    Json(app.providers().iter().map(|p| describe(&app, p, &envs)).collect())
 }
 
 #[derive(Deserialize)]
@@ -345,7 +381,8 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         None => providers.push(provider.clone()),
     }
     app.save_providers(&providers)?;
-    Ok(Json(describe(&app, &provider)))
+    let envs = runner_envs(&app).await;
+    Ok(Json(describe(&app, &provider, &envs)))
 }
 
 pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
@@ -359,6 +396,8 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     if valid_id(&id) {
         let _ = std::fs::remove_file(app.provider_key_file(&id));
     }
+    // A provider that no longer exists must not keep its usage record forever.
+    app.gateway.forget_usage(&id);
     Ok(Json(json!({"ok": true})))
 }
 
@@ -468,5 +507,24 @@ mod tests {
         env.insert("COLONIZER_EFFORT".into(), json!("deepseek/not-a-model-var"));
         let used: Vec<String> = routes.used(&env).into_iter().map(|p| p.id).collect();
         assert_eq!(used, vec!["strix"]);
+    }
+
+    #[test]
+    fn used_by_names_the_settings_that_point_at_a_provider() {
+        let mut global = Map::new();
+        global.insert("COLONIZER_MODEL".into(), json!("opus"));
+        global.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        global.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("str/llama"));
+        let mut org = Map::new();
+        org.insert("COLONIZER_MODEL".into(), json!("strix/qwen3"));
+        assert_eq!(used_by("strix", &[global.clone(), org]), vec!["subagent_model", "model"], "an org override counts");
+        // "strix/deepseek-v4-flash" shares "str" as a prefix but only "str/llama" is provider str's model.
+        assert_eq!(used_by("str", &[global.clone()]), vec!["background_model"]);
+
+        // A bare alias is a Claude model and a partial id prefix is another provider's, so neither matches.
+        let mut aliases = Map::new();
+        aliases.insert("COLONIZER_MODEL".into(), json!("strix"));
+        aliases.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strixish/qwen"));
+        assert_eq!(used_by("strix", &[aliases]), Vec::<&str>::new());
     }
 }
