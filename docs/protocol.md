@@ -214,7 +214,7 @@ missing values mean the `default`.
 ```json
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
-  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|no_changes|stopped|failed",
+  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|merged|closed|no_changes|stopped|failed",
   "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
