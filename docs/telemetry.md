@@ -4,9 +4,10 @@
 mothership is online, which lights up while colonies run there. It shows only motherships whose user
 switched it on.
 
-**It is off until you switch it on.** After GitHub and Claude are connected, the web UI asks once. You
-can change your answer at any time in Settings, under Live map. Until you answer, and whenever it is off,
-the mothership sends nothing.
+**It is off until you switch it on.** The first-run Setup checklist ends with the question, on its live
+map row: switch it on there, or leave it off. If Setup has already been shown, the web UI asks once with
+a small prompt instead. You can change your answer at any time in Settings, under Live map. Until you
+answer, and whenever it is off, the mothership sends nothing.
 
 **This is not [usage data](usage-data.md).** That is a second, separate thing: a batch of counts about
 how the harness is used, with its own switch and a different random id, and on by default, though in

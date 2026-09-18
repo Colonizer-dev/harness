@@ -29,6 +29,7 @@ mod protocol;
 mod providers;
 mod publish;
 mod queue;
+mod runtime;
 mod sandbox;
 mod sessions;
 mod telemetry;
@@ -42,7 +43,7 @@ mod watchdog;
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -52,6 +53,7 @@ use chrono::{DateTime, Utc};
 use config::{ModulesConfig, Settings, setting_u64};
 use mesh::{Mesh, Ports};
 use modules::AgentModule;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sessions::Session;
 use std::{
@@ -123,6 +125,9 @@ pub struct App {
     /// only: Settings re-renders the red "missing" row from every poll, so a binary installed while
     /// the harness runs must be picked up without a restart.
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
+    /// The last `runtime` probe for the status payload, cached so the poll does not re-spawn the
+    /// version probes for every open tab. `GET /api/status?fresh=1` bypasses it.
+    pub runtime_cache: Mutex<Option<runtime::Cached>>,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
@@ -408,15 +413,25 @@ async fn mesh_status(modules: &ModulesConfig, assets: Option<&FsPath>, live: imp
     }
 }
 
-async fn status(State(app): State<Shared>) -> Json<Value> {
+/// The query parameters of `GET /api/status`. `fresh=1` skips the runtime cache and re-probes, so
+/// the UI's "Check again" button gets a real answer instead of a cached one; any value but `0` or
+/// `false` counts, so a bare `?fresh` works too.
+#[derive(Deserialize)]
+pub struct StatusQuery {
+    fresh: Option<String>,
+}
+
+async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> Json<Value> {
     let mut msb = Command::new(&app.cfg.msb);
     msb.arg("--version");
     let cred = app.claude_cred();
-    let (user, msb_version, claude_bin, claude) = tokio::join!(
+    let fresh = query.fresh.as_deref().is_some_and(|v| !matches!(v, "0" | "false"));
+    let (user, msb_version, claude_bin, claude, runtime) = tokio::join!(
         github::viewer(&app),
         exec_within(PROBE_LIMIT, &mut msb),
         resolve_guest_claude_bin(&app),
         claude_login::claude_status(&app, cred.as_ref()),
+        runtime::status_runtime(&app, fresh),
     );
     let modules = app.modules.read().await.clone();
     let live = async {
@@ -447,6 +462,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
         },
         "mesh": mesh,
         "storage": storage_status(storage_alert),
+        "runtime": runtime,
         "modules": {
             "source": modules.source.provider,
             "sandbox": modules.sandbox.provider,
@@ -808,6 +824,7 @@ async fn serve() -> Result<()> {
         claude_account: Mutex::new(None),
         github_viewer: Mutex::new(None),
         claude_bins: Mutex::new(HashMap::new()),
+        runtime_cache: Mutex::new(None),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
@@ -982,19 +999,27 @@ pub(crate) mod tests {
     /// A minimal App over a throwaway directory, shared with sessions.rs's tests. Nothing here
     /// binds a port, spawns a microVM or reaches the network.
     pub(crate) fn test_app(root: &FsPath) -> Shared {
+        test_app_with(root, |_| {})
+    }
+
+    /// The same App, with a hook to adjust the settings before it is built: `Settings` lives
+    /// inside an `Arc<App>`, so a test that needs its own `claude_bin` cannot patch one afterwards.
+    pub(crate) fn test_app_with(root: &FsPath, settings: impl FnOnce(&mut Settings)) -> Shared {
         std::fs::create_dir_all(root.join("data")).unwrap();
+        let mut cfg = Settings {
+            bind: "127.0.0.1:0".into(),
+            data_dir: root.join("data"),
+            config_dir: root.join("config"),
+            runtime_dir: root.join("run"),
+            assets: None,
+            msb: "msb".into(),
+            claude_bin: None,
+            gateway_bind: "127.0.0.1:0".into(),
+            allowed_hosts: Vec::new(),
+        };
+        settings(&mut cfg);
         Arc::new(App {
-            cfg: Settings {
-                bind: "127.0.0.1:0".into(),
-                data_dir: root.join("data"),
-                config_dir: root.join("config"),
-                runtime_dir: root.join("run"),
-                assets: None,
-                msb: "msb".into(),
-                claude_bin: None,
-                gateway_bind: "127.0.0.1:0".into(),
-                allowed_hosts: Vec::new(),
-            },
+            cfg,
             modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
             agents: Vec::new(),
             sessions: RwLock::new(Vec::new()),
@@ -1010,6 +1035,7 @@ pub(crate) mod tests {
             claude_account: Mutex::new(None),
             github_viewer: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
+            runtime_cache: Mutex::new(None),
             usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),
             updater: update::Updater::new(),
@@ -1292,7 +1318,7 @@ pub(crate) mod tests {
     async fn the_status_mesh_is_unavailable_with_a_null_error_where_no_binaries_are_vendored() {
         let root = temp_root();
         let app = test_app(&root);
-        let Json(payload) = status(State(app)).await;
+        let Json(payload) = status(State(app), Query(StatusQuery { fresh: None })).await;
         let mesh = &payload["mesh"];
         assert_eq!(mesh["enabled"], true);
         assert_eq!(mesh["provider"], "headscale");
@@ -1372,7 +1398,7 @@ pub(crate) mod tests {
         std::fs::set_permissions(&wedged, std::fs::Permissions::from_mode(0o755)).unwrap();
         Arc::get_mut(&mut app).unwrap().cfg.msb = wedged.display().to_string();
         let started = std::time::Instant::now();
-        let Json(payload) = status(State(app)).await;
+        let Json(payload) = status(State(app), Query(StatusQuery { fresh: None })).await;
         assert!(
             payload["sandbox"]["msb_version"].is_null(),
             "the wedged probe is reported as absent, not hung: {payload}"

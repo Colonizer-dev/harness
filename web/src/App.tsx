@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "./context";
 import { IconMenu, IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
-import { Sidebar, type MainView } from "./components/Sidebar";
+import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
 import {
   NOTIFICATIONS_KEY,
@@ -23,6 +23,8 @@ import {
   type NotificationPrefs,
   type SessionSnapshot,
 } from "./notifications";
+import { setupView, stackPresetOf, type SetupView } from "./setup";
+import { useImagePull } from "./useImagePull";
 import type { HarnessStatus, ModuleInfo, OrgInfo, Session, StorageHealth, TelemetryStatus, UsageStatus } from "./types";
 
 export function App() {
@@ -50,10 +52,20 @@ export function App() {
   // (or its message when an older mothership omits the ts): a newer failure shows the card again.
   const [dismissedStorageTs, setDismissedStorageTs] = useState<string | null>(null);
   const promptedForSettings = useRef(false);
+  // Setup's own state lives only in this page load: "Not now" holds the auto-open off, and
+  // "has been shown" retires the standalone live-map prompt. Neither is ever persisted.
+  const setupDismissed = useRef(false);
+  const [setupShown, setSetupShown] = useState(false);
+  // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
+  // (colonizer.sidebar-tab stays the sidebar's own memory of itself.)
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
+  const [modules, setModules] = useState<ModuleInfo[]>([]);
+  // One image-pull poller for the whole app; Setup, Settings and the sidebar all read it.
+  const pull = useImagePull(true);
 
-  const loadStatus = useCallback(async () => {
+  const loadStatus = useCallback(async (fresh?: boolean) => {
     try {
-      setStatus(await api.status());
+      setStatus(await api.status(fresh));
       setStatusError(false);
     } catch {
       setStatusError(true);
@@ -86,6 +98,7 @@ export function App() {
   }, [api]);
 
   const applyModules = useCallback((modules: ModuleInfo[]) => {
+    setModules(modules);
     const publish = modules.find((m) => m.kind === "publish");
     setAutopilotDefault((publish?.settings?.autopilot ?? publish?.schema?.properties?.autopilot?.default) === true);
     const module = modules.find((m) => m.kind === "interfaces");
@@ -159,11 +172,51 @@ export function App() {
     applyFavicon(count > 0);
   }, [sessions, notifyPrefs.inTab]);
 
+  // The Setup view, derived once from the same state the dialog renders. `pull.status` and the
+  // module list ride along so the checklist reacts to a finished download or a stack change.
+  // `now` is read here rather than inside setup.ts so the derivation stays pure; the 30-second
+  // status poll is what refreshes the Claude row's expiry advisory.
+  const sandboxModule = modules.find((m) => m.kind === "sandbox") ?? null;
+  const setup = useMemo<SetupView | null>(
+    () =>
+      status
+        ? setupView({
+            status,
+            pull: pull.status,
+            telemetry,
+            stackPreset: stackPresetOf(sandboxModule?.settings),
+            sessionCount: sessions.length,
+            now: Date.now(),
+          })
+        : null,
+    [status, pull.status, telemetry, sandboxModule, sessions.length],
+  );
+
+  // Replaces the old `!github.connected || !claude.configured` auto-open: `setup.autoOpen` is
+  // "a row that gates launch is unmet", which also catches runtime failures. Fires at most once
+  // per page load, and "Not now" (setupDismissed) holds it closed until the next one.
   useEffect(() => {
-    if (promptedForSettings.current || !status) return;
+    if (promptedForSettings.current || !setup) return;
     promptedForSettings.current = true;
-    if (!status.github.connected || !status.claude.configured) setSettingsOpen(true);
-  }, [status]);
+    if (setup.autoOpen && !setupDismissed.current) {
+      setSettingsSection("setup");
+      setSettingsOpen(true);
+    }
+  }, [setup]);
+
+  /** "Not now": in-memory only, so the next page load asks again. */
+  const dismissSetup = useCallback(() => {
+    setupDismissed.current = true;
+    setSettingsOpen(false);
+  }, []);
+
+  /** Setup's launch row: close Setup, open the existing launcher. */
+  const openLauncher = useCallback(() => {
+    setSettingsOpen(false);
+    setSidebarTab("new");
+    setView("colonies");
+    setSidebarOpen(true);
+  }, []);
 
   const removeSession = useCallback((id: string) => {
     setSessions((list) => list.filter((s) => s.id !== id));
@@ -253,8 +306,9 @@ export function App() {
 
   const storage = status?.storage;
   const storageAlert = storage && storage.ok === false && storageAlertKey(storage) !== dismissedStorageTs ? storage : null;
-  const liveMapPrompt =
-    telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && status.github.connected && status.claude.configured;
+  // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;
+  // a mothership already set up still gets asked, in memory, on its first load of the page.
+  const liveMapPrompt = telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && !setupShown;
 
   const sidebar = (
     <Sidebar
@@ -272,7 +326,9 @@ export function App() {
       }}
       onOpenSettings={() => {
         setSidebarOpen(false);
-        setSettingsSection(undefined);
+        // Reopening mid-setup lands back on the checklist, at the first row needing the user
+        // (the pane scrolls itself there). With nothing blocking, the landing is unchanged.
+        setSettingsSection(setup?.autoOpen ? "setup" : undefined);
         setSettingsOpen(true);
       }}
       onClose={narrow ? () => setSidebarOpen(false) : undefined}
@@ -288,6 +344,9 @@ export function App() {
       pendingMemory={pendingMemory}
       autopilotDefault={autopilotDefault}
       attentionStrip={notifyPrefs.inTab}
+      tab={sidebarTab}
+      onTab={setSidebarTab}
+      pull={pull}
     />
   );
 
@@ -347,6 +406,11 @@ export function App() {
         notifications={notifyPrefs}
         onNotificationsChanged={setNotifyPrefs}
         initialSection={settingsSection}
+        setup={setup}
+        pull={pull}
+        onLaunch={openLauncher}
+        onSetupShown={() => setSetupShown(true)}
+        onSetupDismissed={dismissSetup}
       />
       {(storageAlert || liveMapPrompt) && (
         // Both fixed cards live in the same corner; the shared column keeps them stacked and clickable.

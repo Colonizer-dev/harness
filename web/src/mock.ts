@@ -23,6 +23,7 @@ import type {
   PullStatus,
   Question,
   Repo,
+  RuntimeInfo,
   Session,
   SessionStatus,
   TelemetryStatus,
@@ -846,6 +847,78 @@ const mockMeshParam = () => {
   }
 };
 
+/**
+ * `?runtime=` models the machines Setup has to tell apart (issue #129): `mac` is an Apple-silicon
+ * Mac, `kvm` a Linux box whose `/dev/kvm` this user cannot use, `old` a mothership from before it
+ * probed the machine at all. Anything else — the default — is a healthy Linux box.
+ */
+const mockRuntimeParam = () => {
+  try {
+    return new URLSearchParams(location.search).get("runtime");
+  } catch {
+    return null;
+  }
+};
+
+function mockRuntime(): RuntimeInfo | undefined {
+  const linux = (kvm: RuntimeInfo["kvm"]): RuntimeInfo => ({
+    platform: "linux-x86_64",
+    kvm,
+    git: { ok: true, version: "2.45.0" },
+    gh: { ok: true, version: "2.60.0" },
+    host_claude_bin: "/usr/local/bin/claude",
+    host_claude_bin_error: null,
+  });
+  switch (mockRuntimeParam()) {
+    case "mac":
+      return {
+        platform: "darwin-arm64",
+        kvm: null, // libkrun needs none on a Mac; the mothership reports null off Linux
+        git: { ok: true, version: "2.52.0" },
+        gh: { ok: true, version: "2.60.0" },
+        host_claude_bin: "/Users/you/.local/bin/claude",
+        host_claude_bin_error: null,
+      };
+    case "kvm":
+      return linux({ ok: false, error: "/dev/kvm: Permission denied" });
+    case "old":
+      return undefined;
+    default:
+      return linux({ ok: true, error: null });
+  }
+}
+
+/** The mesh payload for this load. A Mac vendors no tailscaled, so its mesh is `unavailable` by
+ *  design (#32) and must never read as a fault (#128): `?runtime=mac` implies it unless `?mesh=`
+ *  says otherwise, and `?mesh=error` stays a genuine failure. */
+function mockMesh(nodes: number): HarnessStatus["mesh"] {
+  const param = mockMeshParam();
+  const kind = param === "error" ? "error" : param === "unavailable" || mockRuntimeParam() === "mac" ? "unavailable" : "running";
+  switch (kind) {
+    case "error":
+      return {
+        enabled: true,
+        provider: "headscale",
+        state: "error",
+        harness_ip: null,
+        nodes: 0,
+        error: "headscale did not start: address already in use",
+      };
+    case "unavailable":
+      return {
+        enabled: true,
+        provider: "headscale",
+        state: "unavailable",
+        harness_ip: null,
+        nodes: 0,
+        detail: "colonies use a loopback port on this platform",
+        error: null,
+      };
+    case "running":
+      return { enabled: true, provider: "headscale", state: "running", harness_ip: "100.64.0.1", nodes, error: null };
+  }
+}
+
 const MOCK_LATEST = {
   version: "v0.1.4",
   url: "https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4",
@@ -1205,10 +1278,13 @@ export function createMockApi(): Api {
       provider: "microsandbox",
       providers: [{ id: "microsandbox", name: "microsandbox", description: "Rootless libkrun microVMs" }],
       enabled: true,
-      settings: { image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0" },
+      settings: { preset: "node", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0" },
       schema: {
         type: "object",
         properties: {
+          // Same enum the mothership's schema declares; a preset is a stack you pick instead of
+          // an image tag you type, and the pinned digests below are the lock's own.
+          preset: { type: "string", title: "Stack", enum: ["node", "python", "rust", "go", "custom"], default: "node", description: "Picks the image and machine size for a colony. Choose 'custom' to set the fields below yourself; anything you set explicitly wins over the preset either way." },
           image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0" },
           cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
           memory: { type: "string", title: "Memory", default: "8G" },
@@ -1377,36 +1453,11 @@ export function createMockApi(): Api {
         github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
         claude,
         sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
-        // ?mesh=unavailable models a Mac, which vendors no tailscaled: by design, and
-        // not a fault. It used to paint the runtime red (#128), and the mock could not
-        // show that because it only ever reported a healthy mesh.
-        mesh: mockMeshParam() === "error"
-          ? {
-              enabled: true,
-              provider: "headscale",
-              state: "error",
-              harness_ip: null,
-              nodes: 0,
-              error: "headscale did not start: address already in use",
-            }
-          : mockMeshParam() === "unavailable"
-          ? {
-              enabled: true,
-              provider: "headscale",
-              state: "unavailable",
-              harness_ip: null,
-              nodes: 0,
-              detail: "colonies use a loopback port on this platform",
-              error: null,
-            }
-          : {
-              enabled: true,
-              provider: "headscale",
-              state: "running",
-              harness_ip: "100.64.0.1",
-              nodes: [...sessions.values()].filter((s) => isLive(s.session.status)).length + 1,
-              error: null,
-            },
+        mesh: mockMesh([...sessions.values()].filter((s) => isLive(s.session.status)).length + 1),
+        // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
+        // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
+        // runtime at all, as a mothership from before the probe did not.
+        runtime: mockRuntime(),
       })),
     modules: () => later(() => modules),
     saveModule: async (kind, body) => {

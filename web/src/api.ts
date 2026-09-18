@@ -52,7 +52,11 @@ export interface SaveModuleRequest {
 
 export interface Api {
   readonly mock: boolean;
-  status(): Promise<HarnessStatus>;
+  /**
+   * GET /api/status. The mothership serves plain polls from a short-TTL cache; `fresh` asks it to
+   * re-probe (`?fresh=1`), which is what Setup's "Check again" uses.
+   */
+  status(fresh?: boolean): Promise<HarnessStatus>;
   modules(): Promise<ModuleInfo[]>;
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
   sandboxPull(): Promise<PullStatus>;
@@ -148,7 +152,7 @@ function wsUrl(path: string): string {
 
 export const httpApi: Api = {
   mock: false,
-  status: () => request("/api/status"),
+  status: (fresh) => request(fresh ? "/api/status?fresh=1" : "/api/status"),
   modules: () => request("/api/modules"),
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
   sandboxPull: () => post("/api/sandbox/pull"),

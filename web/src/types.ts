@@ -112,6 +112,24 @@ export interface HarnessStatus {
   } | null;
   /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */
   storage?: StorageHealth;
+  /** The machine facts a colony's first minute depends on (issue #129); older mothership builds omit it. */
+  runtime?: RuntimeInfo;
+}
+
+/** GET /api/status `runtime` (issue #129): what kind of machine the mothership runs on, and what it can reach. The mothership re-probes all of it; the frontend only reads. */
+export interface RuntimeInfo {
+  /** `linux-x86_64`, `darwin-arm64`, or `other` for a platform Setup must call unsupported. */
+  platform: string;
+  /** Whether `/dev/kvm` is readable and writable by the mothership. Linux only; null on other platforms. */
+  kvm: { ok: boolean; error: string | null } | null;
+  /** Git on the mothership's PATH; colonies use it. */
+  git: { ok: boolean; version?: string; error?: string | null };
+  /** The GitHub CLI on the mothership's PATH; the installer and colonies use it. */
+  gh: { ok: boolean; version?: string; error?: string | null };
+  /** The Claude Code binary on the host, used for subscription login; null when not found. */
+  host_claude_bin: string | null;
+  /** Why the host binary is missing, when it is. */
+  host_claude_bin_error: string | null;
 }
 
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
