@@ -97,6 +97,7 @@ const turn = (afterMessageId: string | null, result = "ok"): TurnSummary => ({
   result,
   costUsd: 0,
   durationMs: 1,
+  models: [],
   ts: SENT_AT,
 });
 
@@ -345,7 +346,7 @@ describe("reduceFrame", () => {
       let s = send(colony(), event({ type: "assistant_text", message_id: "m1", block_index: 0, text: "Done." }));
       s = send(s, event({ type: "turn_end", is_error: false, result: "3 files changed", cost_usd: 0.42, duration_ms: 1200 }));
       expect(s.turns).toEqual([
-        { afterMessageId: "m1", isError: false, result: "3 files changed", costUsd: 0.42, durationMs: 1200, ts: SENT_AT },
+        { afterMessageId: "m1", isError: false, result: "3 files changed", costUsd: 0.42, durationMs: 1200, models: [], ts: SENT_AT },
       ]);
     });
 
@@ -358,6 +359,62 @@ describe("reduceFrame", () => {
     it("an empty colony has nothing to anchor the summary to", () => {
       const s = send(colony(), event({ type: "turn_end", is_error: false, result: null, cost_usd: null, duration_ms: null }));
       expect(s.turns[0].afterMessageId).toBeNull();
+    });
+
+    /** One model's cumulative usage; the cache halves stay zero here. */
+    const tokens = (input: number, output: number) => ({
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+
+    it("names the models that served this turn, the biggest share first", () => {
+      // `model_usage` is the colony's cumulative total, so a turn's own models
+      // are the ones whose total grew since the previous `turn_end`.
+      let s = send(
+        colony(),
+        event({
+          type: "turn_end",
+          is_error: false,
+          result: null,
+          cost_usd: null,
+          duration_ms: null,
+          model_usage: { "claude-opus-5": tokens(10, 10) },
+        }),
+      );
+      expect(s.turns[0].models).toEqual(["claude-opus-5"]);
+
+      s = send(
+        s,
+        event({
+          type: "turn_end",
+          is_error: false,
+          result: null,
+          cost_usd: null,
+          duration_ms: null,
+          model_usage: {
+            // Unchanged since the turn before: it served nothing this turn.
+            "claude-opus-5": tokens(10, 10),
+            "claude-haiku-4-5": tokens(5, 5),
+            "grok-4": tokens(40, 40),
+          },
+        }),
+      );
+      expect(s.turns[1].models).toEqual(["grok-4", "claude-haiku-4-5"]);
+    });
+
+    it("a turn that spent nothing new names no model", () => {
+      const usage = { "claude-opus-5": tokens(7, 7) };
+      let s = send(
+        colony(),
+        event({ type: "turn_end", is_error: false, result: null, cost_usd: null, duration_ms: null, model_usage: usage }),
+      );
+      s = send(
+        s,
+        event({ type: "turn_end", is_error: false, result: null, cost_usd: null, duration_ms: null, model_usage: usage }),
+      );
+      expect(s.turns[1].models).toEqual([]);
     });
 
     it("ending the turn finishes text that was still streaming", () => {
