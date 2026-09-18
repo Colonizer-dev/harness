@@ -610,8 +610,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // What the colony can and cannot run is part of the agent's brief (runner.mjs).
     runner_env.insert("COLONIZER_IMAGE".into(), Value::String(colony_image(app, &modules)));
 
-    // The private mesh needs the vendored tailscale, which has no macOS build yet. Without it a colony
-    // is reached on a loopback port rather than failing to boot.
+    // The private mesh needs the three vendored binaries. Without them a colony is reached on a
+    // loopback port rather than failing to boot.
     let mesh_on = modules.mesh_enabled()
         && app.cfg.assets.as_deref().is_some_and(crate::mesh::binaries_present);
     if modules.mesh_enabled() && !mesh_on {
