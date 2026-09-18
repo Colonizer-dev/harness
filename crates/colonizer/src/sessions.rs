@@ -239,6 +239,21 @@ pub struct Runtime {
     pub(crate) events_path: PathBuf,
     pub(crate) logs_path: PathBuf,
     pub activity: Mutex<Activity>,
+    /// A read failure from `load`, already worded to name the file and the consequence that
+    /// restarts, carried until the first caller that has an `App` to report it with. Leaving it
+    /// silent is what issue #107 was about.
+    pub(crate) load_error: Mutex<Option<String>>,
+}
+
+/// Reads a JSONL file as raw bytes, leaving UTF-8 decoding to the caller's per-line pass. A file
+/// that is not there is not a failure — a colony that has never emitted an event has no
+/// `events.jsonl` — but anything else is handed back for the caller to report.
+fn read_jsonl(path: &std::path::Path) -> (Vec<u8>, Option<std::io::Error>) {
+    match std::fs::read(path) {
+        Ok(bytes) => (bytes, None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+        Err(e) => (Vec::new(), Some(e)),
+    }
 }
 
 pub(crate) struct Broadcast {
@@ -255,21 +270,45 @@ impl Runtime {
     fn load(dir: &std::path::Path) -> Self {
         let events_path = dir.join("events.jsonl");
         let logs_path = dir.join("harness.jsonl");
-        let last_seq = std::fs::read_to_string(&events_path)
-            .ok()
-            .and_then(|content| {
-                content
-                    .lines()
-                    .rev()
-                    .find_map(|l| serde_json::from_str::<Value>(l).ok()?["seq"].as_u64())
-            })
+        let (events_bytes, events_err) = read_jsonl(&events_path);
+        // Decoded one line at a time, as agentd reads its own store (colonizer-agentd/src/store.rs): a
+        // final line torn inside a multi-byte character then costs that line and not the whole file. A
+        // whole-file failure here would silently reset the reconnect cursor, and the colony would replay
+        // and duplicate its entire transcript.
+        let last_seq = events_bytes
+            .split(|b| *b == b'\n')
+            .rev()
+            .find_map(|line| serde_json::from_str::<Value>(std::str::from_utf8(line).ok()?).ok()?["seq"].as_u64())
             .unwrap_or(0);
-        let logs: VecDeque<Value> = std::fs::read_to_string(&logs_path)
-            .map(|content| {
-                let all: Vec<Value> = content.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-                all.into_iter().rev().take(MAX_LOGS).rev().collect()
-            })
-            .unwrap_or_default();
+        let (logs_bytes, logs_err) = read_jsonl(&logs_path);
+        // The take counts parsed entries, not raw split segments: `append_line` ends every entry
+        // with a newline, so a well-formed file always yields one empty trailing segment, and
+        // taking segments first would keep one entry too few.
+        let logs: VecDeque<Value> = logs_bytes
+            .split(|b| *b == b'\n')
+            .rev()
+            .filter_map(|line| serde_json::from_str(std::str::from_utf8(line).ok()?).ok())
+            .take(MAX_LOGS)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        // Each file's message names its own consequence: only a failed events.jsonl restarts the
+        // reconnect cursor, only a failed harness.jsonl restarts the log ring.
+        let mut read_errors = Vec::new();
+        if let Some(e) = events_err {
+            read_errors.push(format!(
+                "could not read the saved events ({}: {e}); \
+                 the reconnect cursor restarts, so events already on disk may be recorded a second time",
+                events_path.display()
+            ));
+        }
+        if let Some(e) = logs_err {
+            read_errors.push(format!(
+                "could not read the saved colony log ({}: {e}); the log history starts over",
+                logs_path.display()
+            ));
+        }
         let (commands, commands_rx) = mpsc::unbounded_channel();
         Self {
             events: broadcast::channel(1024).0,
@@ -286,6 +325,7 @@ impl Runtime {
             events_path,
             logs_path,
             activity: Mutex::new(Activity::new(Utc::now())),
+            load_error: Mutex::new((!read_errors.is_empty()).then_some(read_errors.join("; "))),
         }
     }
 
@@ -403,6 +443,19 @@ impl App {
             logs.pop_front();
         }
         rt.broadcast(None, entry.to_string());
+    }
+
+    /// Reports a read failure from `Runtime::load`, once, the first time the colony's runtime is
+    /// actually used. Not done inside `runtime()`: `session_log` calls back into it, and the
+    /// runtimes map is locked there. The message is built per file in `load` — this only puts it
+    /// on the record.
+    pub(crate) async fn report_load_error(&self, id: &str, rt: &Runtime) {
+        let Some(message) = rt.load_error.lock().await.take() else {
+            return;
+        };
+        let err = anyhow::Error::msg(message.clone());
+        self.storage_failed("read the colony's saved history", &err).await;
+        self.session_log(id, "error", message).await;
     }
 
     pub(crate) fn logger(self: &Arc<Self>, id: &str) -> SessionLogger {
@@ -1249,6 +1302,9 @@ pub async fn events_ws(
 }
 
 async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, socket: WebSocket) {
+    // Before this socket subscribes and the log ring is drained, so its alert lands in the
+    // drained history once instead of arriving twice.
+    app.report_load_error(&id, &rt).await;
     let (mut tx, mut rx) = socket.split();
     let mut subscription = rt.events.subscribe();
     let text = |s: String| Message::Text(s.into());
@@ -1715,6 +1771,153 @@ pub(crate) mod tests {
         assert_eq!(
             events, "{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n",
             "seq 1 stays lost"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_event_log_torn_inside_a_multibyte_character_keeps_the_last_good_seq() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;
+        let mut events = Vec::new();
+        events.extend_from_slice(b"{\"seq\":1,\"type\":\"status\",\"state\":\"working\"}\n");
+        events.extend_from_slice(b"{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n");
+        // A final line cut mid-write, inside the first byte of an em-dash — the ordinary debris of a crash.
+        events.extend_from_slice(b"{\"seq\":3,\"type\":\"log\",\"message\":\"restarting \xE2");
+        tokio::fs::write(app.session_dir("abc").join("events.jsonl"), &events)
+            .await
+            .unwrap();
+        let rt = app.runtime("abc").await;
+        assert_eq!(
+            rt.last_seq.load(Ordering::SeqCst),
+            2,
+            "the torn line costs itself, not the whole file"
+        );
+        assert!(
+            app.storage_alert.read().await.is_none(),
+            "a torn line is a crash's debris, not a storage emergency"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_harness_log_torn_inside_a_multibyte_character_keeps_the_good_lines() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let mut logs = Vec::new();
+        logs.extend_from_slice(b"{\"type\":\"harness_log\",\"level\":\"info\",\"message\":\"first\"}\n");
+        logs.extend_from_slice(b"{\"type\":\"harness_log\",\"level\":\"info\",\"message\":\"second\"}\n");
+        logs.extend_from_slice(b"{\"type\":\"harness_log\",\"level\":\"info\",\"message\":\"torn \xE2");
+        tokio::fs::write(app.session_dir("abc").join("harness.jsonl"), &logs)
+            .await
+            .unwrap();
+        let rt = app.runtime("abc").await;
+        let logs = rt.logs.lock().await;
+        assert_eq!(logs.len(), 2, "the torn line is dropped, the good lines stay in order");
+        assert_eq!(logs[0]["message"], "first");
+        assert_eq!(logs[1]["message"], "second");
+        drop(logs);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_long_harness_log_keeps_exactly_the_last_max_logs_entries() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let mut logs = Vec::new();
+        for i in 1..=250 {
+            logs.extend_from_slice(
+                format!("{{\"type\":\"harness_log\",\"level\":\"info\",\"message\":\"line {i}\"}}\n").as_bytes(),
+            );
+        }
+        tokio::fs::write(app.session_dir("abc").join("harness.jsonl"), &logs)
+            .await
+            .unwrap();
+        let rt = app.runtime("abc").await;
+        let kept = rt.logs.lock().await;
+        assert_eq!(kept.len(), MAX_LOGS, "the ring holds exactly {MAX_LOGS} well-formed entries");
+        assert_eq!(
+            kept[0]["message"], "line 51",
+            "the first kept entry is the first of the last {MAX_LOGS}"
+        );
+        assert_eq!(kept.back().unwrap()["message"], "line 250", "the newest entry is last");
+        drop(kept);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_event_log_alerts_on_first_use_and_admits_the_history_restarts() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;
+        // The fault seam has no read op, but reading a directory is an error here (EISDIR), so an
+        // unreadable file is staged as one — both files, to pin that both failures are carried.
+        let dir = app.session_dir("abc");
+        tokio::fs::create_dir(dir.join("events.jsonl")).await.unwrap();
+        tokio::fs::create_dir(dir.join("harness.jsonl")).await.unwrap();
+        let rt = app.runtime("abc").await;
+        assert!(
+            app.storage_alert.read().await.is_none(),
+            "the failure waits for a caller that can report it, not the load itself"
+        );
+        app.report_load_error("abc", &rt).await;
+        assert!(
+            app.storage_alert.read().await.is_some(),
+            "the read failure is recorded, not swallowed"
+        );
+        let logs = rt.logs.lock().await;
+        let last = logs.back().unwrap();
+        assert_eq!(last["type"], "harness_log");
+        let message = last["message"].as_str().unwrap();
+        assert!(message.contains("events.jsonl"), "{message}");
+        assert!(message.contains("harness.jsonl"), "{message}");
+        assert!(
+            message.contains("may be recorded a second time"),
+            "the events consequence is said plainly: {message}"
+        );
+        assert!(
+            message.contains("the log history starts over"),
+            "the log consequence is said plainly: {message}"
+        );
+        drop(logs);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_event_log_names_only_its_own_consequence() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;
+        // Reading a directory is an error here (EISDIR); harness.jsonl is left alone, so nothing
+        // else can overwrite the alert and the report can be read back verbatim.
+        tokio::fs::create_dir(app.session_dir("abc").join("events.jsonl"))
+            .await
+            .unwrap();
+        let rt = app.runtime("abc").await;
+        app.report_load_error("abc", &rt).await;
+        let alert = app.storage_alert.read().await.clone().unwrap();
+        assert!(
+            alert.message.contains("read the colony's saved history"),
+            "either file failing is a failure of the colony's saved history: {}",
+            alert.message
+        );
+        let logs = rt.logs.lock().await;
+        let message = logs.back().unwrap()["message"].as_str().unwrap();
+        assert!(
+            message.contains("the reconnect cursor restarts"),
+            "the events consequence is named: {message}"
+        );
+        assert!(
+            !message.contains("harness.jsonl") && !message.contains("log history starts over"),
+            "a log that loaded fine is not accused of restarting: {message}"
+        );
+        drop(logs);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_colony_with_no_stored_events_loads_quietly_at_seq_zero() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;
+        let rt = app.runtime("abc").await;
+        app.report_load_error("abc", &rt).await;
+        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 0);
+        assert!(rt.logs.lock().await.is_empty());
+        assert!(
+            app.storage_alert.read().await.is_none(),
+            "a colony that has never emitted an event has no events.jsonl, and that is not a failure"
         );
         let _ = std::fs::remove_dir_all(root);
     }
