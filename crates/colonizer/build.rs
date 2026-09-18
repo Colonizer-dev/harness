@@ -11,11 +11,19 @@ use std::{path::Path, process::Command, time::SystemTime};
 
 fn main() {
     // A stamped binary must not claim a commit it no longer has. HEAD covers
-    // checkouts and switching branches; packed-refs covers a fetch that moves a
-    // tag. Neither exists in a source package, hence the `exists` check.
-    for candidate in ["../../.git/HEAD", "../../.git/packed-refs"] {
-        if Path::new(candidate).exists() {
-            println!("cargo:rerun-if-changed={candidate}");
+    // checkouts and switching branches, but a commit, pull or reset on the
+    // current branch moves only the branch's ref file and leaves HEAD alone, so
+    // that file is watched too; packed-refs covers a fetch that moves a tag and
+    // a branch whose ref has been packed. Git is asked for the paths rather than
+    // assuming `../../.git`, which is a file in a worktree. A source package has
+    // no repository, so none of them exist and nothing is watched.
+    let mut watched = vec![git_path("HEAD"), git_path("packed-refs")];
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watched.push(git_path(&branch));
+    }
+    for path in watched.into_iter().flatten() {
+        if Path::new(&path).exists() {
+            println!("cargo:rerun-if-changed={path}");
         }
     }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
@@ -39,6 +47,11 @@ fn main() {
     println!("cargo:rustc-env=COLONIZER_DESCRIBE={describe}");
     println!("cargo:rustc-env=COLONIZER_COMMIT={commit}");
     println!("cargo:rustc-env=COLONIZER_BUILT_AT={built_at}");
+}
+
+/// Where git keeps `name` for this checkout, as an absolute path.
+fn git_path(name: &str) -> Option<String> {
+    git(&["rev-parse", "--path-format=absolute", "--git-path", name])
 }
 
 fn git(args: &[&str]) -> Option<String> {
