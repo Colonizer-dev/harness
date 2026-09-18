@@ -45,6 +45,9 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
 
 pub(crate) async fn start_link(app: &Shared, id: &str) {
     let rt = app.runtime(id).await;
+    // Before `agent_link` reads `last_seq` for the reconnect URL: a load that failed to read the
+    // stored events must be on the record before the colony starts using the restarted cursor.
+    app.report_load_error(id, &rt).await;
     rt.stop.send_replace(false);
     let Some(commands) = rt.commands_rx.lock().await.take() else {
         return;
