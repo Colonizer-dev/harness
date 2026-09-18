@@ -231,6 +231,10 @@ pub fn setting_u64(choice: &ModuleChoice, schema: &Value, key: &str) -> u64 {
     setting(choice, schema, key).and_then(Value::as_u64).unwrap_or_default()
 }
 
+pub fn setting_f64(choice: &ModuleChoice, schema: &Value, key: &str) -> f64 {
+    setting(choice, schema, key).and_then(Value::as_f64).unwrap_or_default()
+}
+
 /// `colonizer.toml`: hand-edited settings with no place in the UI. Colonizer never writes this file, so
 /// a missing file, a missing key or a key we don't know are all the same thing — the default.
 #[derive(Clone, Debug, Default, Deserialize)]

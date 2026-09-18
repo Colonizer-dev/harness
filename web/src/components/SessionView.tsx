@@ -177,6 +177,7 @@ export function SessionView({
               )}
               <span>{session.agent}</span>
               <CostSummary session={session} />
+              <HostDiskSummary session={session} />
               {live && session.last_activity_at && !attention && <span>Last activity {minutesAgo(session.last_activity_at)}</span>}
             </div>
           </div>
@@ -420,13 +421,36 @@ function compactTokens(n: number): string {
   return String(n);
 }
 
+/** The colony's host footprint, in the same 16G / 512M shape the sandbox settings write sizes in. */
+function diskSize(n: number): string {
+  if (n >= 1024 ** 3) return `${+(n / 1024 ** 3).toFixed(1)}G`;
+  if (n >= 1024 ** 2) return `${+(n / 1024 ** 2).toFixed(1)}M`;
+  if (n >= 1024) return `${Math.round(n / 1024)}K`;
+  return `${n}B`;
+}
+
 /**
- * The colony's cost and what it is made of. With per-model usage the dollar figure is Claude's alone, since Claude Code
- * cannot price routed models; the tooltip lists tokens for every model. Older colonies carry only the SDK's total.
+ * What the colony leaves on the host, measured every few minutes by the mothership: its worktree plus its
+ * session files and logs. Not the microVM's root disk, which the Root disk setting covers.
+ */
+function HostDiskSummary({ session }: { session: Session }) {
+  if (session.host_disk_bytes == null) return null;
+  return (
+    <span title="What this colony leaves on the host: its worktree plus its session files and logs.">
+      {diskSize(session.host_disk_bytes)} on host
+    </span>
+  );
+}
+
+/**
+ * The colony's cost and what it is made of. The dollar figure is Claude's own estimate plus what the gateway priced
+ * on routed providers (`routed_cost_usd`); the tooltip lists tokens for every model. Older colonies carry only the
+ * SDK's total.
  */
 function CostSummary({ session }: { session: Session }) {
   const usage = session.model_usage ? Object.entries(session.model_usage) : [];
-  if (session.cost_usd == null && usage.length === 0) return null;
+  const routed = session.routed_cost_usd ?? 0;
+  if (session.cost_usd == null && routed === 0 && usage.length === 0) return null;
   const tokens = usage.reduce(
     (sum, [, u]) => sum + u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens,
     0,
@@ -438,10 +462,12 @@ function CostSummary({ session }: { session: Session }) {
         `${compactTokens(u.cache_read_tokens)} cache read · ${compactTokens(u.cache_write_tokens)} cache write`,
     )
     .join("\n");
+  const priced = session.cost_usd != null || routed > 0;
   return (
     <span title={detail || undefined}>
       {session.cost_usd != null && `$${session.cost_usd.toFixed(2)}${usage.length ? " on Claude" : ""}`}
-      {usage.length > 0 && `${session.cost_usd != null ? " · " : ""}${compactTokens(tokens)} tokens`}
+      {routed > 0 && `${session.cost_usd != null ? " · " : ""}$${routed.toFixed(2)} routed`}
+      {usage.length > 0 && `${priced ? " · " : ""}${compactTokens(tokens)} tokens`}
     </span>
   );
 }

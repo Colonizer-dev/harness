@@ -1114,6 +1114,8 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["deepseek-flash", "deepseek-v4-pro"],
       preset: "deepseek",
+      // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
+      pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
       ...DEFAULT_LIMITS,
       in_flight: 0,
       queued: 0,
@@ -1203,7 +1205,7 @@ export function createMockApi(): Api {
       provider: "microsandbox",
       providers: [{ id: "microsandbox", name: "microsandbox", description: "Rootless libkrun microVMs" }],
       enabled: true,
-      settings: { image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G" },
+      settings: { image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0" },
       schema: {
         type: "object",
         properties: {
@@ -1211,6 +1213,8 @@ export function createMockApi(): Api {
           cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
           memory: { type: "string", title: "Memory", default: "8G" },
           max_parallel: { type: "integer", title: "Parallel colonies", minimum: 1, maximum: 16, default: 3 },
+          budget_usd: { type: "number", title: "Budget per colony (USD)", minimum: 0, default: 0, description: "Dollars one colony may spend on models in total. 0, the default, means unlimited." },
+          host_disk: { type: "string", title: "Host disk per colony", default: "0", format: "disk-size", description: "How much disk one colony may leave on the host, like 512M or 16G. 0, the default, means unlimited." },
         },
       },
     },
@@ -1685,6 +1689,11 @@ export function createMockApi(): Api {
       if (fallback && (fallback.includes("/") || !/^[a-z0-9][a-z0-9.-]*$/.test(fallback))) {
         throw new ApiError("fallback_model must be an Anthropic model id or alias like sonnet", 400);
       }
+      for (const rate of Object.values(body.pricing ?? {})) {
+        if (!Number.isFinite(rate) || rate < 0) {
+          throw new ApiError("pricing rates must be dollar amounts per million tokens, zero or more", 400);
+        }
+      }
       const existing = providers.find((p) => p.id === id);
       const has_key = body.api_key === undefined ? (existing?.has_key ?? false) : body.api_key.trim() !== "";
       const provider: ModelProvider = {
@@ -1701,6 +1710,8 @@ export function createMockApi(): Api {
         queue_timeout_secs: body.queue_timeout_secs ?? null,
         context_tokens: body.context_tokens ?? null,
         fallback_model: fallback,
+        // Omitted keeps the saved rates, like the key; the Mothership treats an all-0 object the same as none.
+        pricing: body.pricing ?? existing?.pricing ?? null,
         in_flight: existing?.in_flight ?? 0,
         queued: existing?.queued ?? 0,
         usage: existing?.usage ?? zeroUsage(),

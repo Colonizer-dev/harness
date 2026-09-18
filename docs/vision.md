@@ -53,7 +53,7 @@ These are the design, and where the code does not reach them yet, [audit.md](aud
 - **More frontiers:** GitLab, Linear and Jira as sources; review comments as follow-up tasks.
 - **Remote outposts:** other machines (a GPU box, a home server) join the mesh and host colonies.
 - **Fleet view:** a live board of every colony, what it's waiting on, and what it costs.
-- **Guardrails:** per-colony budgets, network policies and approval rules as modules.
+- **Guardrails:** network policies and approval rules as modules.
 - **Previews:** dev servers inside colonies reachable from the mothership over the mesh.
 
 ## Brand

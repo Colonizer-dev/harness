@@ -12,7 +12,9 @@ use crate::{
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     util::{
-        append_line, faults::{self, Op}, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic,
+        append_line, dir_size,
+        faults::{self, Op},
+        format_disk_size, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic,
         write_private,
     },
     watchdog::Activity,
@@ -43,7 +45,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{broadcast, mpsc, watch, Mutex},
+    sync::{broadcast, mpsc, watch, Mutex, RwLock},
 };
 use tokio_tungstenite::{
     tungstenite::{self, client::IntoClientRequest},
@@ -88,6 +90,14 @@ impl SessionStatus {
     /// A microVM is expected to be running.
     pub fn is_live(self) -> bool {
         matches!(self, Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle)
+    }
+}
+
+impl Session {
+    /// The colony's whole model spend: Claude's own estimate (`cost_usd`) plus everything the gateway
+    /// routed and priced (`routed_cost_usd`).
+    pub fn total_cost_usd(&self) -> f64 {
+        self.cost_usd.unwrap_or_default() + self.routed_cost_usd.unwrap_or_default()
     }
 }
 
@@ -140,11 +150,23 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
     pub error: Option<String>,
+    /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
+    /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
+    /// [`Session::total_cost_usd`] is the two added up.
     pub cost_usd: Option<f64>,
     /// Tokens per model from the last turn end, cumulative: `{model: {input_tokens, output_tokens, cache_read_tokens,
-    /// cache_write_tokens}}`. `cost_usd` covers only the Claude models among them.
+    /// cache_write_tokens}}` — every model the colony used, priced or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<Value>,
+    /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
+    /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
+    #[serde(default)]
+    pub routed_cost_usd: Option<f64>,
+    /// What the colony leaves on the host — its worktree plus its session directory — as last measured by
+    /// the host-disk check, which runs only when a host-disk quota applies to the colony. Not the
+    /// microVM's root disk, which is a separate limit (microsandbox's `--root-disk`).
+    #[serde(default)]
+    pub host_disk_bytes: Option<u64>,
     #[serde(default)]
     pub cleaned_up: bool,
     /// Set by the watchdog: `{reason, since, nudges}`.
@@ -280,19 +302,26 @@ impl App {
             session.updated_at = Utc::now();
             (session.clone(), result)
         };
+        self.persist_and_broadcast(&session).await;
+        Some((session, result))
+    }
+
+    /// Everything `update_session` does after letting go of the write lock: persist the list to disk and
+    /// tell every open browser the session changed. Claims made directly under `with_slot` (the queue, a
+    /// queued resume) call this too, or the web UI would stop updating.
+    async fn persist_and_broadcast(&self, session: &Session) {
         if let Err(e) = self.persist_sessions().await {
             // The change in memory is real, and the broadcast below tells the truth about it —
             // hiding it would make the UI more wrong, not less. But the saved list now lags, so
             // the gap is recorded loudly, in the app alert and in the colony's own log.
             self.storage_failed("save the session list", &e).await;
-            self.session_log(id, "error", format!("could not save the session list: {e:#}")).await;
+            self.session_log(&session.id, "error", format!("could not save the session list: {e:#}")).await;
         }
-        let rt = self.runtimes.lock().await.get(id).cloned();
+        let rt = self.runtimes.lock().await.get(&session.id).cloned();
         if let Some(rt) = rt {
             let view = with_activity(self, session.clone()).await;
             rt.broadcast(None, json!({"type": "session", "session": view}).to_string());
         }
-        Some((session, result))
     }
 
     async fn persist_sessions(&self) -> Result<()> {
@@ -410,6 +439,22 @@ fn has_room(sessions: &[Session], org: &str, max_parallel: usize, org_limit: Opt
     }
 }
 
+/// Check for a free slot and claim it without letting go of the lock in between: `claim` runs while the
+/// write guard is still held, so nothing can slip between the check and the claim and two launches can
+/// never both take the last free slot. `max_parallel` and `org_limit` must be resolved before calling this
+/// (`org_settings` does blocking file IO), and `claim` must not `.await` anything.
+async fn with_slot<T>(
+    sessions: &RwLock<Vec<Session>>,
+    org: &str,
+    max_parallel: usize,
+    org_limit: Option<u64>,
+    claim: impl FnOnce(&mut Vec<Session>, bool) -> T,
+) -> T {
+    let mut guard = sessions.write().await;
+    let room = has_room(&guard, org, max_parallel, org_limit);
+    claim(&mut guard, room)
+}
+
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
@@ -430,8 +475,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
-    let existing = app.sessions.read().await.clone();
-    let queued = !has_room(&existing, owner, max_parallel, orgs::org_max_parallel(&app.org_settings(owner)));
+    // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
+    let org_limit = orgs::org_max_parallel(&app.org_settings(owner));
 
     let id = short_id();
     let slug = match req.issue {
@@ -450,7 +495,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         issue: req.issue,
         issue_title: title,
         instructions: truncate(req.instructions.trim(), 20_000),
-        status: if queued { SessionStatus::Queued } else { SessionStatus::Starting },
+        status: SessionStatus::Starting, // decided by admission, just before the push
         branch: format!("colonizer/{slug}"),
         base: None,
         worktree: app.cfg.data_dir.join("worktrees").join(owner).join(name).join(&slug).display().to_string(),
@@ -465,6 +510,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         error: None,
         cost_usd: None,
         model_usage: None,
+        routed_cost_usd: None,
+        host_disk_bytes: None,
         cleaned_up: false,
         attention: None,
         last_activity_at: None,
@@ -476,7 +523,16 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     let dir = app.session_dir(&id);
     tokio::fs::create_dir_all(dir.join("vm")).await?;
     tokio::fs::create_dir_all(dir.join("out")).await?;
-    app.sessions.write().await.push(session.clone());
+    // The room check and the push share one write lock, so two launches colliding on the last free slot
+    // cannot both take it. Counted before the push, so this colony is never waiting behind itself.
+    let (session, queued, waiting) = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
+        let mut session = session;
+        session.status = if room { SessionStatus::Starting } else { SessionStatus::Queued };
+        let waiting = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
+        sessions.push(session.clone());
+        (session, !room, waiting)
+    })
+    .await;
     if let Err(e) = app.persist_sessions().await {
         // Nothing has been reported as done yet — no boot, no log line, no reply — so the record
         // comes back out rather than leaving a colony only memory has heard of, and the caller
@@ -499,7 +555,6 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     }
     app.runtime(&id).await;
     if queued {
-        let waiting = existing.iter().filter(|s| s.status == SessionStatus::Queued).count();
         let ahead = if waiting == 0 { String::new() } else { format!(", behind {waiting} already waiting") };
         app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}")).await;
     } else {
@@ -1072,6 +1127,10 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
             })
             .await
             {
+                // Claude's own cost just landed, so the budget can trip here exactly as it can in the
+                // gateway; checked before autopilot, which must not publish a colony the budget stopped.
+                enforce_budget(app, id).await;
+                let s = app.session(id).await.unwrap_or(s);
                 let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
                 let pr_written = {
                     let mut last = rt.pr_mark.lock().await;
@@ -1389,6 +1448,160 @@ pub async fn watch_sandboxes(app: Shared) {
     }
 }
 
+/// Whether `total_usd` is past a colony's budget. A budget of `0` means no budget at all: there is no
+/// dollar figure the harness can pick for someone else's deployment, so colonies are unlimited until the
+/// operator names a number.
+fn over_budget(total_usd: f64, budget_usd: f64) -> bool {
+    budget_usd > 0.0 && total_usd > budget_usd
+}
+
+/// The one way the host stops a colony on its own decision — a past spend budget, a past host-disk quota.
+/// The stop is claimed under `update_session`'s write lock, so of all the observers that see "over" only
+/// the first tears the microVM down and an already stopped colony is never torn down again; `due` is the
+/// final re-check under that lock. The status goes to `stopped` with a human-readable `error`, the
+/// harness log says why, and the worktree is kept so the colony can be resumed. Returns whether this call
+/// did the stopping.
+async fn stop_colony(app: &Shared, s: &Session, due: impl FnOnce(&Session) -> bool, error: String, warn: String) -> bool {
+    let claimed = app
+        .update_session(&s.id, |x| {
+            let due = x.status.is_live() && due(x);
+            if due {
+                x.status = SessionStatus::Stopped;
+                x.error = Some(error);
+            }
+            due
+        })
+        .await
+        .is_some_and(|(_, due)| due);
+    if claimed {
+        app.session_log(&s.id, "warn", warn).await;
+        teardown_vm(app, s).await;
+    }
+    claimed
+}
+
+/// The budget check and its consequence, in one place, called wherever a colony's spend can change: after
+/// the gateway records routed usage, when Claude's own cost arrives at turn end, and before the gateway
+/// serves a request. A colony past its budget — the org's own if it set one, else the sandbox module's
+/// default — is refused *and* stopped like the max-duration path stops one: microVM removed, status
+/// `stopped`, a clear error, the worktree kept so it can be resumed once the budget is raised. Returns
+/// whether the colony is over its budget.
+pub async fn enforce_budget(app: &Shared, id: &str) -> bool {
+    let Some(s) = app.session(id).await else { return false };
+    let org = app.org_settings(&s.org);
+    let modules = app.modules.read().await;
+    let budget = orgs::budget_usd(&modules, &org);
+    if !over_budget(s.total_cost_usd(), budget) {
+        return false;
+    }
+    let (spent, source) = (s.total_cost_usd(), orgs::budget_source(&org));
+    stop_colony(
+        app,
+        &s,
+        |x| over_budget(x.total_cost_usd(), budget),
+        format!("passed its spend budget of ${budget:.2} ({source}) at ${spent:.2} of model spend; the worktree is kept, so raise the budget and press Resume to continue"),
+        format!("passed its spend budget of ${budget:.2} ({source}) at ${spent:.2}; stopping the colony, which can be resumed once the budget is raised"),
+    )
+    .await;
+    true
+}
+
+/// Adds one gateway response's spend to the colony and re-checks its budget. A response with nothing
+/// priced in it (a provider without pricing) changes nothing: its tokens still reach the session through
+/// the runner's per-model usage.
+pub async fn record_routed_usage(app: &Shared, colony: &str, provider: &providers::Provider, usage: providers::Usage) {
+    let cost = provider.cost_usd(usage);
+    if cost <= 0.0 {
+        return;
+    }
+    app.update_session(colony, |x| {
+        x.routed_cost_usd = Some(x.routed_cost_usd.unwrap_or_default() + cost);
+    })
+    .await;
+    enforce_budget(app, colony).await;
+}
+
+/// Whether `bytes` on the host is past a colony's host-disk quota. A quota of `0` means no quota at all:
+/// how much disk a colony deserves is a decision about someone else's deployment, so colonies are
+/// unlimited until the operator names a size — the same opt-in the spend budget uses.
+fn over_host_disk(bytes: u64, quota_bytes: u64) -> bool {
+    quota_bytes > 0 && bytes > quota_bytes
+}
+
+/// What a colony leaves on the host: its worktree (bind-mounted rw at `/workspace` inside the microVM,
+/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, and the
+/// append-only logs). The microVM's root disk is a separate limit, microsandbox's `--root-disk`. Walked
+/// on the blocking pool: it is plain IO over trees that can be gigabytes.
+async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
+    let (worktree, session_dir) = (PathBuf::from(&s.worktree), app.session_dir(&s.id));
+    // A walk that never finishes (a shutdown) measures 0, which can only under-report — never a reason to
+    // stop a colony.
+    tokio::task::spawn_blocking(move || dir_size(&worktree) + dir_size(&session_dir)).await.unwrap_or(0)
+}
+
+/// The host-disk check and its consequence, in one place, called from [`watch_host_disks`] — the only
+/// observer, so the measurement is fresh whenever it matters. With no quota for the colony — neither the
+/// org's own nor the sandbox module's default — it does nothing at all: the measurement is a full walk of
+/// trees a `cargo build` can make gigabytes deep, and without a quota it would run every five minutes
+/// purely to fill in a UI number, so `host_disk_bytes` stays `None` until the operator names a size.
+/// Under a quota it records what the colony leaves on the host, whatever the verdict, and stops a colony
+/// past it through the same [`stop_colony`] the budget uses: microVM removed, status `stopped`, a clear
+/// error naming the quota and the measured size, the worktree kept, because deleting a colony's work is
+/// the operator's call.
+async fn enforce_host_disk(app: &Shared, s: &Session) {
+    let org = app.org_settings(&s.org);
+    let modules = app.modules.read().await.clone();
+    let quota = orgs::host_disk(&modules, &org);
+    // A quota of 0 is no quota, so there is no verdict to reach and the walk would be real IO for
+    // nothing; skipping it keeps stock deployments from re-reading every colony's tree every tick.
+    if quota == 0 {
+        return;
+    }
+    let measured = host_footprint_bytes(app, s).await;
+    if s.host_disk_bytes != Some(measured) {
+        app.update_session(&s.id, |x| x.host_disk_bytes = Some(measured)).await;
+    }
+    if !over_host_disk(measured, quota) {
+        return;
+    }
+    let source = orgs::host_disk_source(&org);
+    let (quota, measured) = (format_disk_size(quota), format_disk_size(measured));
+    // There is nothing colony-held to re-check under the lock that the measurement has not already seen,
+    // and the loop is the only caller, so `due` has nothing left to ask beyond `stop_colony`'s own
+    // still-live check.
+    stop_colony(
+        app,
+        s,
+        |_| true,
+        format!(
+            "passed its host-disk quota of {quota} ({source}) at {measured} on the host, worktree and session files together; the worktree is kept, so clean up or raise the quota and press Resume to continue"
+        ),
+        format!(
+            "passed its host-disk quota of {quota} ({source}) at {measured} on the host; stopping the colony, which can be resumed once the quota is raised or the worktree cleaned up"
+        ),
+    )
+    .await;
+}
+
+/// The host-disk check runs every five minutes — far slower than the 60-second loops on purpose: unlike
+/// them it walks the worktree and session directory of every live colony under a quota, real IO over
+/// trees a `cargo build` can make gigabytes deep, and growth past a quota is a matter of minutes and
+/// hours, not seconds. A colony still booting is skipped, like the other loops skip it. Missed ticks are
+/// skipped, so a busy machine never piles up walks.
+pub async fn watch_host_disks(app: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(300));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
+        // deadlock against update_session's write lock.
+        let sessions = app.sessions.read().await.clone();
+        for s in sessions.into_iter().filter(|s| s.status.is_live() && s.status != SessionStatus::Starting) {
+            enforce_host_disk(&app, &s).await;
+        }
+    }
+}
+
 /// How often a colony's pull request is checked, at first and at most: this spends the user's GitHub API
 /// quota, so a freshly opened PR is noticed within a minute while one sitting for days costs an hour.
 const PR_POLL_FIRST: Duration = Duration::from_secs(60);
@@ -1506,6 +1719,42 @@ pub async fn run_queue(app: Shared) {
     }
 }
 
+/// What the queue decided to do with the queued colony it examined under the admission lock. `None` from
+/// [`claim_queued`] means this tick leaves it be: the room it counted on vanished, or the colony was
+/// claimed or removed in between, and the next tick looks again.
+enum Claim {
+    /// The colony is admitted: it is `Starting`, and the caller boots it.
+    Start(Session),
+    /// The colony can never start, so the claim has taken it out of the queue; the caller says so and
+    /// moves on to the colonies behind it.
+    Retire(Session),
+}
+
+/// The queue's decision for one colony, made while the admission lock is held. A colony that is still
+/// queued and still has everything a boot needs is started; one that was cleaned up while it waited can
+/// never start and is retired instead — retired, not merely skipped, or it would sit `Queued` at the head
+/// of the queue and block every tick and every colony behind it.
+fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
+    if !room {
+        return None; // the slot vanished between the snapshot and the lock; wait for the next tick
+    }
+    if s.status != SessionStatus::Queued {
+        return None; // another tick claimed it between the snapshot and the lock
+    }
+    if s.cleaned_up {
+        // Cleaned up while it waited (a cleanup racing a queued resume): its worktree and branch are
+        // gone, so starting it would boot onto a worktree that no longer exists, and `can_resume` would
+        // never take it back afterwards.
+        s.status = SessionStatus::Failed;
+        s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
+        s.updated_at = Utc::now();
+        return Some(Claim::Retire(s.clone()));
+    }
+    s.status = SessionStatus::Starting;
+    s.updated_at = Utc::now();
+    Some(Claim::Start(s.clone()))
+}
+
 async fn start_queued(app: &Shared) {
     let modules = app.modules.read().await.clone();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
@@ -1521,22 +1770,32 @@ async fn start_queued(app: &Shared) {
         else {
             return;
         };
-        // Claimed under the write lock, so two ticks can't start the same colony twice.
-        let claimed = app
-            .update_session(&next.id, |x| {
-                let queued = x.status == SessionStatus::Queued;
-                if queued {
-                    x.status = SessionStatus::Starting;
-                }
-                queued
-            })
-            .await
-            .is_some_and(|(_, queued)| queued);
-        if !claimed {
-            return;
+        // Re-checked and claimed under one write lock, so neither another tick nor a concurrent create or
+        // resume can take the slot in between.
+        let org_limit = orgs::org_max_parallel(&app.org_settings(&next.org));
+        let claimed = with_slot(&app.sessions, &next.org, max_parallel, org_limit, |sessions, room| {
+            let s = sessions.iter_mut().find(|s| s.id == next.id)?;
+            claim_queued(s, room)
+        })
+        .await;
+        match claimed {
+            None => return,
+            Some(Claim::Retire(retired)) => {
+                app.persist_and_broadcast(&retired).await;
+                app.session_log(&retired.id, "warn", "was cleaned up while it waited in the queue, so it can never start".into()).await;
+                continue;
+            }
+            Some(Claim::Start(starting)) => {
+                app.persist_and_broadcast(&starting).await;
+                app.session_log(&next.id, "info", "a slot came free; starting".into()).await;
+                // A colony that already has a worktree came from Resume, not Create: `git_admin_dir` stays None
+                // until a colony's first boot has created the worktree (boot_inner), and Resume refuses colonies
+                // without one (can_resume). Booting a resumed colony as fresh would try to create the worktree it
+                // already has, so the queue carries the resume through.
+                let resume = next.git_admin_dir.is_some();
+                tokio::spawn(boot(app.clone(), next.id.clone(), resume));
+            }
         }
-        app.session_log(&next.id, "info", "a slot came free; starting".into()).await;
-        tokio::spawn(boot(app.clone(), next.id.clone(), false));
     }
 }
 
@@ -1722,31 +1981,44 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
     let previous_status = s.status;
-    // Re-checked inside the write, exactly as the publish claim below it is: `failed` is both
-    // resumable and publishable now, so a resume landing just after a publish claimed the colony
-    // must be refused, not overwrite `publishing` with `starting` and boot an agent onto the
-    // worktree while the host is committing and pushing.
-    let Some((s, claimed)) = app
-        .update_session(&id, |x| {
-            let allowed = can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some());
-            if allowed {
-                x.status = SessionStatus::Starting;
-                x.error = None;
-                x.attention = None;
-                x.mesh = None;
-                x.local_port = None;
-            }
-            allowed
-        })
-        .await
-    else {
-        return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
+    // Past the limit a colony waits its turn rather than being refused, as in `create`; `run_queue`
+    // resumes it later.
+    let modules = app.modules.read().await.clone();
+    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
+    let org_limit = orgs::org_max_parallel(&app.org_settings(&s.org));
+    // The claim comes first, exactly as the publish claim does: `failed` is both resumable and
+    // publishable, so a resume landing just after a publish claimed the colony must be refused
+    // rather than overwrite `publishing`. Nothing outside the list is touched until it succeeds, so
+    // a refused resume leaves the agent link and the event log as it found them.
+    // The closure distinguishes its two non-outcomes: `Err` is the not-resumable re-check, answered with
+    // a 409 below, while `Ok(None)` is a colony that has vanished, which stays a 404.
+    let claimed = with_slot(&app.sessions, &s.org, max_parallel, org_limit, |sessions, room| {
+        // Counted before the flip: the colony itself is Stopped or Failed here, so it isn't counted.
+        let waiting = sessions.iter().filter(|other| other.status == SessionStatus::Queued).count();
+        let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
+            return Ok(None);
+        };
+        // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
+        if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
+            return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
+        }
+        x.status = if room { SessionStatus::Starting } else { SessionStatus::Queued };
+        x.error = None;
+        x.attention = None;
+        x.mesh = None;
+        x.local_port = None;
+        x.updated_at = Utc::now();
+        Ok(Some((x.clone(), room, waiting)))
+    })
+    .await;
+    let (s, admitted, waiting) = match claimed {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => return Err(client_error(StatusCode::NOT_FOUND, "no such session")),
+        Err(message) => return Err(client_error(StatusCode::CONFLICT, message)),
     };
-    if !claimed {
-        return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
-    }
-    // The colony is ours: only now is the old agent link dropped and the event log rotated, so a
-    // refused resume leaves both as it found them.
+    app.persist_and_broadcast(&s).await;
+    // The colony is ours: only now is the old agent link dropped and the event log rotated.
     let runtime = app.runtimes.lock().await.remove(&id);
     if let Some(rt) = &runtime {
         rt.stop.send_replace(true);
@@ -1767,10 +2039,12 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         rotate_events(&dir)
     };
     if let Err(e) = rotated {
-        // The claim already moved this colony to `starting`, so unlike the pre-claim ordering there
-        // is something to roll back: put the status back, or the colony is left mid-resume and
-        // `can_resume` refuses the retry this error asks for.
-        app.update_session(&id, |x| x.status = previous_status).await;
+        // The claim already moved this colony off its old status — and may have taken a parallel
+        // slot with it — so put it back, or the colony is left mid-resume and `can_resume` refuses
+        // the retry this error asks for.
+        if let Some((s, ())) = app.update_session(&id, |x| x.status = previous_status).await {
+            app.persist_and_broadcast(&s).await;
+        }
         let e = anyhow::Error::from(e);
         let message = format!(
             "could not move the old event log aside ({e}); the colony was not resumed — move {} aside yourself and try again",
@@ -1780,8 +2054,18 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         app.session_log(&id, "error", message.clone()).await;
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
     }
-    app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
-    tokio::spawn(boot(app.clone(), id, true));
+    if admitted {
+        app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
+        tokio::spawn(boot(app.clone(), id, true));
+    } else {
+        let ahead = if waiting == 0 { String::new() } else { format!(", behind {waiting} already waiting") };
+        app.session_log(
+            &id,
+            "info",
+            format!("queued: the parallel limit is {max_parallel}{ahead}; the colony resumes when a slot frees up"),
+        )
+        .await;
+    }
     Ok(Json(s))
 }
 
@@ -1811,9 +2095,17 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     Ok(Json(app.session(&id).await.unwrap_or(s)))
 }
 
+/// Whether a colony in this state can be cleaned up — its worktree and local branch freed. A live or
+/// publishing colony has a microVM or a push in flight, and a queued colony is still waiting to start:
+/// cleaning one up would leave it queued with nothing left to start on, and the next queue tick would
+/// start it anyway, cleanup undone. Stop first, which takes a queued colony out of the queue.
+fn cleanable(status: SessionStatus) -> bool {
+    !status.is_live() && status != SessionStatus::Publishing && status != SessionStatus::Queued
+}
+
 pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
     let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    if s.status.is_live() || s.status == SessionStatus::Publishing {
+    if !cleanable(s.status) {
         return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
     }
     {
@@ -2114,6 +2406,50 @@ mod tests {
         assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
     }
 
+    #[test]
+    fn a_budget_of_zero_is_unlimited_and_only_a_positive_one_can_be_passed() {
+        assert!(!over_budget(4.99, 5.0), "under the budget");
+        assert!(!over_budget(5.0, 5.0), "exactly at the budget is still within it");
+        assert!(over_budget(5.01, 5.0), "the first cent past the budget is over it");
+        assert!(!over_budget(1_000.0, 0.0), "0 means no budget at all");
+        assert!(!over_budget(1_000.0, -5.0), "a negative budget is no budget either");
+    }
+
+    #[test]
+    fn total_cost_is_claude_plus_routed() {
+        let mut s = colony("acme", SessionStatus::Running);
+        assert_eq!(s.total_cost_usd(), 0.0);
+        s.cost_usd = Some(1.25);
+        assert_eq!(s.total_cost_usd(), 1.25);
+        s.routed_cost_usd = Some(0.75);
+        assert!((s.total_cost_usd() - 2.0).abs() < 1e-9, "Claude and routed spend add up");
+    }
+
+    /// sessions.json written before `routed_cost_usd` existed must still load, cost and all.
+    #[test]
+    fn a_session_saved_before_routed_cost_still_deserialises() {
+        let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"running","branch":"b","base":null,"worktree":"","git_admin_dir":null,"sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":1.5,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: Session = serde_json::from_str(saved).unwrap();
+        assert_eq!(s.routed_cost_usd, None);
+        assert!((s.total_cost_usd() - 1.5).abs() < 1e-9, "the old cost still counts on its own");
+    }
+
+    /// So must one saved before the host-disk check existed, which measured nothing yet.
+    #[test]
+    fn a_session_saved_before_host_disk_was_measured_still_deserialises() {
+        let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"running","branch":"b","base":null,"worktree":"","git_admin_dir":null,"sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: Session = serde_json::from_str(saved).unwrap();
+        assert_eq!(s.host_disk_bytes, None);
+    }
+
+    #[test]
+    fn a_host_disk_quota_of_zero_is_unlimited_and_only_a_positive_one_can_be_passed() {
+        assert!(!over_host_disk(100, 200), "under the quota");
+        assert!(!over_host_disk(200, 200), "exactly at the quota is still within it");
+        assert!(over_host_disk(201, 200), "the first byte past the quota is over it");
+        assert!(!over_host_disk(1 << 40, 0), "0 means no quota at all");
+    }
+
     fn colony(org: &str, status: SessionStatus) -> Session {
         Session {
             id: String::new(),
@@ -2137,6 +2473,8 @@ mod tests {
             error: None,
             cost_usd: None,
             model_usage: None,
+            routed_cost_usd: None,
+            host_disk_bytes: None,
             cleaned_up: false,
             attention: None,
             last_activity_at: None,
@@ -2192,6 +2530,198 @@ mod tests {
         ] {
             assert!(!can_resume(status, false, true), "{status:?}");
         }
+    }
+
+    /// A colony queued for a resume whose worktree a cleanup deleted while it waited: starting it would
+    /// boot onto nothing and leave it `Failed` with no way back, so the claim retires it — out of the
+    /// queue for good, with the reason in `error`.
+    #[test]
+    fn a_queued_colony_that_was_cleaned_up_is_retired_and_never_started() {
+        let mut s = stopped_colony_with_worktree("acme", "queued-then-cleaned".into());
+        s.status = SessionStatus::Queued;
+        s.cleaned_up = true;
+        let claim = claim_queued(&mut s, true);
+        assert!(matches!(claim, Some(Claim::Retire(_))), "a cleaned-up colony is retired, not started");
+        assert_eq!(s.status, SessionStatus::Failed, "out of the queue, so no later tick can pick it up");
+        assert!(!can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()), "there is no worktree to resume onto");
+        assert!(s.error.is_some(), "the operator is told why it will never start");
+
+        // An ordinary queued colony is still claimed for starting.
+        let mut waiting = colony("acme", SessionStatus::Queued);
+        assert!(matches!(claim_queued(&mut waiting, true), Some(Claim::Start(_))), "a queued colony with everything intact starts");
+        assert_eq!(waiting.status, SessionStatus::Starting);
+    }
+
+    /// Cleanup frees a colony's worktree and branch, so a colony still waiting to start — or with anything
+    /// running or in flight — has to be stopped first. Otherwise a cleaned-up queued colony would be left
+    /// `Queued`, and the next queue tick would start it as if the cleanup had never happened.
+    #[test]
+    fn only_a_colony_that_has_finished_can_be_cleaned_up() {
+        use SessionStatus::*;
+        for status in [Starting, Running, WaitingForAnswer, Idle, Publishing, Queued] {
+            assert!(!cleanable(status), "{status:?}");
+        }
+        for status in [Stopped, Failed, NoChanges, PrOpened] {
+            assert!(cleanable(status), "{status:?}");
+        }
+    }
+
+    /// The shape of `create`'s admission, shared by the concurrency tests below: check for room and push a
+    /// fresh colony in one step.
+    async fn admit_create(
+        sessions: &RwLock<Vec<Session>>,
+        org: &str,
+        max_parallel: usize,
+        org_limit: Option<u64>,
+        id: String,
+    ) {
+        with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
+            let mut s = colony(org, if room { SessionStatus::Starting } else { SessionStatus::Queued });
+            s.id = id;
+            sessions.push(s);
+        })
+        .await
+    }
+
+    /// The shape of `resume`'s admission: re-check resumability and flip the colony under one lock.
+    async fn admit_resume(sessions: &RwLock<Vec<Session>>, org: &str, max_parallel: usize, org_limit: Option<u64>, id: &str) {
+        with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
+            let Some(s) = sessions.iter_mut().find(|s| s.id == id) else {
+                return;
+            };
+            if can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
+                s.status = if room { SessionStatus::Starting } else { SessionStatus::Queued };
+            }
+        })
+        .await
+    }
+
+    fn stopped_colony_with_worktree(org: &str, id: String) -> Session {
+        let mut s = colony(org, SessionStatus::Stopped);
+        s.id = id;
+        s.git_admin_dir = Some("git".into());
+        s
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_creates_cannot_both_take_the_last_free_slot() {
+        let max_parallel = 4;
+        let attempts = 32;
+        let sessions = Arc::new(RwLock::new(Vec::new()));
+        // Everything is released onto the workers at once, so all `attempts` collide on the slots the way
+        // concurrent HTTP handlers would. Snapshot-then-push (the old create) let more than the limit past
+        // this barrier; one lock-held check-and-claim may not.
+        let barrier = Arc::new(tokio::sync::Barrier::new(attempts));
+        let mut tasks = Vec::new();
+        for i in 0..attempts {
+            let (sessions, barrier) = (sessions.clone(), barrier.clone());
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                admit_create(&sessions, "acme", max_parallel, None, format!("create-{i}")).await;
+            }));
+        }
+        for task in tasks {
+            task.await.expect("create task joined");
+        }
+        let done = sessions.read().await;
+        assert_eq!(done.len(), attempts, "every create landed");
+        assert_eq!(
+            done.iter().filter(|s| s.status == SessionStatus::Starting).count(),
+            max_parallel,
+            "exactly the limit started, no matter how many collide"
+        );
+        assert_eq!(
+            done.iter().filter(|s| s.status == SessionStatus::Queued).count(),
+            attempts - max_parallel,
+            "every colony past the limit queued instead"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_resumes_cannot_overshoot_the_limit() {
+        let max_parallel = 3;
+        let resumable = 12;
+        let sessions = Arc::new(RwLock::new(
+            (0..resumable).map(|i| stopped_colony_with_worktree("acme", format!("resume-{i}"))).collect::<Vec<_>>(),
+        ));
+        let barrier = Arc::new(tokio::sync::Barrier::new(resumable));
+        let mut tasks = Vec::new();
+        for i in 0..resumable {
+            let (sessions, barrier) = (sessions.clone(), barrier.clone());
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                admit_resume(&sessions, "acme", max_parallel, None, &format!("resume-{i}")).await;
+            }));
+        }
+        for task in tasks {
+            task.await.expect("resume task joined");
+        }
+        let done = sessions.read().await;
+        assert_eq!(
+            done.iter().filter(|s| s.status.is_live()).count(),
+            max_parallel,
+            "the live count never passes the limit"
+        );
+        assert_eq!(
+            done.iter().filter(|s| s.status == SessionStatus::Queued).count(),
+            resumable - max_parallel,
+            "the resumes that did not fit queued instead of being refused"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_mixed_rush_of_creates_and_resumes_respects_the_per_org_limit() {
+        // The global limit is 8, but acme is held to 2 of them: acme floods the queue with both creates and
+        // resumes, while another org keeps starting, since acme's limit holds back only acme.
+        let max_parallel = 8;
+        let acme_limit = 2;
+        let acme_org_limit = Some(acme_limit as u64);
+        let acme_creates = 6;
+        let acme_resumes = 6;
+        let other_creates = 4;
+        let attempts = acme_creates + acme_resumes + other_creates;
+        let sessions = Arc::new(RwLock::new(
+            (0..acme_resumes)
+                .map(|i| stopped_colony_with_worktree("acme", format!("acme-resume-{i}")))
+                .collect::<Vec<_>>(),
+        ));
+        let barrier = Arc::new(tokio::sync::Barrier::new(attempts));
+        let mut tasks = Vec::new();
+        for i in 0..attempts {
+            let (sessions, barrier) = (sessions.clone(), barrier.clone());
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let (org, id, resume) = if i < acme_creates {
+                    ("acme", format!("acme-create-{i}"), false)
+                } else if i < acme_creates + acme_resumes {
+                    ("acme", format!("acme-resume-{}", i - acme_creates), true)
+                } else {
+                    ("other", format!("other-create-{i}"), false)
+                };
+                let org_limit = if org == "acme" { acme_org_limit } else { None };
+                if resume {
+                    admit_resume(&sessions, org, max_parallel, org_limit, &id).await;
+                } else {
+                    admit_create(&sessions, org, max_parallel, org_limit, id).await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("admission task joined");
+        }
+        let done = sessions.read().await;
+        let starting = |org: &str| done.iter().filter(|s| s.org == org && s.status == SessionStatus::Starting).count();
+        assert_eq!(starting("acme"), acme_limit, "acme never passes its own limit");
+        assert_eq!(starting("other"), other_creates, "acme's limit holds back only acme");
+        assert!(
+            starting("acme") + starting("other") <= max_parallel,
+            "the global limit holds across the mix too"
+        );
+        assert_eq!(
+            done.iter().filter(|s| s.status == SessionStatus::Queued).count(),
+            attempts - starting("acme") - starting("other"),
+            "every colony past a limit queued instead"
+        );
     }
 
     #[test]

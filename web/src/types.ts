@@ -45,10 +45,14 @@ export interface Session {
   /** How far the last publish attempt got; absent when no publish has made progress. */
   publish_stage?: "committed" | "pushed" | "pr_opened";
   error: string | null;
-  /** Claude models only; routed models are counted in `model_usage` as tokens. */
+  /** Claude models only, as the agent itself reports them; routed models are counted in `model_usage` as tokens. */
   cost_usd: number | null;
   /** Cumulative tokens per model, as of the last turn end. */
   model_usage?: Record<string, ModelTokens> | null;
+  /** What the gateway recorded for responses it routed to other providers, on top of `cost_usd`. */
+  routed_cost_usd?: number | null;
+  /** What the colony leaves on the host — its worktree plus its session files — as last measured. */
+  host_disk_bytes?: number | null;
   cleaned_up: boolean;
   created_at: string;
   updated_at: string;
@@ -178,6 +182,17 @@ export interface ProviderLimits {
   fallback_model: string | null;
 }
 
+/**
+ * Dollars per million tokens, the rates the gateway prices a provider's routed usage at (§6.5). A rate
+ * left out, `0`, or no pricing at all still counts tokens but contributes $0 to `routed_cost_usd`.
+ */
+export interface ProviderPricing {
+  input_per_mtok?: number;
+  output_per_mtok?: number;
+  cache_read_per_mtok?: number;
+  cache_write_per_mtok?: number;
+}
+
 export interface ModelProvider extends ProviderLimits {
   id: string;
   name: string;
@@ -187,6 +202,8 @@ export interface ModelProvider extends ProviderLimits {
   has_key: boolean;
   models: string[];
   preset: ProviderPreset;
+  /** null = unpriced: routed tokens are counted but their spend counts as $0. */
+  pricing?: ProviderPricing | null;
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -233,6 +250,8 @@ export interface SaveProviderRequest {
   preset?: ProviderPreset;
   /** Omitted keeps the saved key; `""` removes it. */
   api_key?: string;
+  /** Omitted keeps the saved rates, like the key; an all-`0` object clears them in effect. */
+  pricing?: ProviderPricing;
   /** For each limit, null uses the default. */
   timeout_secs?: number | null;
   max_concurrent?: number | null;
@@ -396,6 +415,10 @@ export interface OrgSettings {
     skillsets?: Record<string, boolean> | null;
   } | null;
   max_parallel?: number | null;
+  /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
+  budget_usd?: number | null;
+  /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
+  host_disk?: string | null;
   memory?: { enabled?: boolean | null } | null;
   watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;
 }

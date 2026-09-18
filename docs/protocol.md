@@ -124,7 +124,8 @@ Rules:
 - `turn_end.cost_usd` and `model_usage` are cumulative for the colony. When `model_usage` is present, `cost_usd` sums
   only the Claude models in it (keys without a `/`): Claude Code prices a model it does not know, such as a routed
   `zai/glm-5.3-flash`, at the main model's rate, so its estimate for routed models is dropped and they are reported
-  as tokens instead. Without `model_usage`, `cost_usd` is the SDK's total.
+  as tokens instead. Without `model_usage`, `cost_usd` is the SDK's total. What the provider gateway routed and
+  priced is accounted separately, on the session's `routed_cost_usd` (§6.5) — never in this field.
 - A question is **never** also emitted as `tool_call`/`tool_result`; use `question` / `question_answered`.
 - Agents must ask the user only through `question` events (the Claude Code runner appends a system
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
@@ -186,7 +187,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one — so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
-| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree) |
+| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` — worktree kept — and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
@@ -221,7 +222,8 @@ missing values mean the `default`.
   "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
-  "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null, "cost_usd": 0.42, "cleaned_up": false,
+  "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
+  "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
 }
@@ -251,6 +253,15 @@ sum to at most `total_ms`:
 The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
+
+`routed_cost_usd` is what the provider gateway has recorded for responses it routed (§6.5), on top of
+`cost_usd`, which is only what Claude itself reports, when a turn ends. `host_disk_bytes` is what the
+colony leaves on the host — its worktree plus its session directory — as last measured; the walk runs
+only when a host-disk quota applies, so `null` until the first measurement, which without a quota never
+comes. Both are estimates. A colony's budget answers to `cost_usd + routed_cost_usd` and its
+host-disk quota to `host_disk_bytes`; past either, the mothership stops the colony: `status` `stopped`,
+the reason in `error`, and the worktree kept, so raising the limit (or, for the quota, cleaning up) and
+pressing Resume continues it.
 
 ### Plugin directories
 
@@ -566,7 +577,7 @@ Byte-for-byte proxy of agentd `/v1/pty` (same binary/text frame rules).
 - Stack: Vite + React + TypeScript + Tailwind v4 + assistant-ui (`useExternalStoreRuntime`) + xterm.js.
   Built to `web/dist`; dev server proxies `/api` (incl. WebSockets) to `http://127.0.0.1:7878`.
 - Layout: sidebar (repositories → issues, sessions list) · session view (header with status, branch,
-  mesh name, cost, actions: Create PR, Stop, Clean up) · chat panel and terminal panel side by side
+  mesh name, cost, host disk, actions: Create PR, Stop, Clean up) · chat panel and terminal panel side by side
   (tabs below 900 px). Settings dialog: Connections (GitHub, Claude subscription login) and Modules.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
@@ -694,17 +705,35 @@ strings; UIs offer `GET /api/models` as suggestions).
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings}]` for every org seen in repositories, colonies or saved settings |
-| `PUT /api/orgs/{org}` | `{settings}`; every field optional, missing or `null` inherits the global module setting |
+| `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value |
+
+The PUT is a merge, not a replace. A field of `settings` the body does not name keeps its saved value; a
+field it names always wins, `null` included — an explicit `null` is how a client inherits the global
+module setting. The merge reaches one level deeper for two nested fields: an `agent` object without
+`skillsets` keeps the saved skillset overrides, and a `watchdog` object without `waiting_minutes` keeps
+its saved value (the web form never sends `waiting_minutes`, and a save from a client that predates a
+field must not quietly clear it). So a body naming only `max_parallel` changes just that, where a plain
+replace would have cleared everything it left out.
 
 `agent.skillsets` is a map of plugin directory name to `true` or `false`: those skillsets are switched on
 or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
 global switch. Names are plain directory names, at most 64. An empty map is stored as `null`.
+
+`max_parallel` overrides the sandbox module's parallel limit for the org's colonies. So do the two
+per-colony limits: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
+host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
+`host_disk`); `0` — or `"0"` — means unlimited, which is how an org opts out of a global limit. The same
+validation applies as at the module setting: a budget is `0` or more dollars, a quota must parse as a size.
+Past either limit the mothership stops the colony with its worktree kept (§6.5 covers the budget's
+gateway half).
 
 ```json
 {"settings": {
   "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
             "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
+  "budget_usd": 20,
+  "host_disk": "32G",
   "memory": {"enabled": true},
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
 }}
@@ -764,7 +793,8 @@ talking to.
 
 Routed (non-Anthropic) model traffic goes through a gateway on the mothership instead of straight from
 the colony. The mothership is on the operator's networks (tailnet, LAN), holds the provider keys, and
-sees every colony, so it can enforce per-provider concurrency, long timeouts, health and fallback.
+sees every colony, so it can enforce per-provider concurrency, long timeouts, health, fallback and the
+per-colony spend budget.
 
 The gateway listens on `127.0.0.1:41750` (`COLONIZER_GATEWAY_BIND`). Colonies reach it as
 `http://host.microsandbox.internal:41750`; a colony with any route gets the `host` network profile.
@@ -797,6 +827,9 @@ Provider keys never enter colonies.
 **Gateway endpoint** `ANY /providers/{id}/{path}`:
 
 - Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
+- A colony past its spend budget is refused `403` `permission_error` before it waits for a slot, with no
+  `x-colonizer-fallback`: there is nothing to fall back to. The same check stops the colony on the host,
+  worktree kept, so raising the budget and resuming continues it.
 - `wire: anthropic` (the default): forwards to the provider's `base_url` + `/{path}` + query, with `content-type`, `accept`,
   `anthropic-version` and `anthropic-beta` (minus `oauth-*` betas) plus the provider credential. It never
   forwards the client's `authorization` or `x-api-key`.
@@ -842,9 +875,30 @@ untranslated request, so it is unaffected.
   `permission_error`, so it isn't retried. Of the upstream headers only `retry-after` is kept. None of
   these errors carries `x-colonizer-fallback`.
 
+**Spend accounting.** Every response the gateway serves is counted, priced with the provider's `pricing`,
+and added to the colony's `routed_cost_usd`. The budget is re-checked after each addition and before a
+request is served; Claude's own `cost_usd` landing at a turn end re-checks it too. The two wires are
+counted differently but on one scale, Anthropic's token names:
+
+- `wire: anthropic` — the body is tapped while it forwards; the bytes the colony receives are never
+  changed. An SSE stream is read event by event (`message_start` fixes the input side, `message_delta`
+  carries the running output total); a non-streaming JSON body is buffered only to count, up to 4 MiB,
+  past which the response forwards unpriced. Anything the tap cannot parse counts as zero, so an
+  estimate can only undercount.
+- `wire: openai` — the usage the translation already extracted is reused; the body is never read twice.
+
+`pricing` is four rates in dollars per million tokens: `input_per_mtok`, `output_per_mtok`,
+`cache_read_per_mtok` and `cache_write_per_mtok`, each `0` or more. A provider without it — or with all
+four at `0` — still counts its tokens, which reach `model_usage` as usual, but contributes nothing to
+`routed_cost_usd`. `PUT /api/providers/{id}` with `pricing` omitted keeps the saved rates, like the key;
+an all-`0` object clears them in effect. Claude traffic does not pass through the gateway at all:
+microsandbox injects the credential straight to `api.anthropic.com`, so Claude's spend is only seen when
+a turn ends, as the runner's `cost_usd`. A colony's budget answers to the two added together, and both
+are estimates.
+
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
-`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `in_flight`,
+`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `pricing`, `in_flight`,
 `queued`, `usage` and `used_by`.
 
 **Usage.** `usage` is the provider's cumulative counters — what says a request has ever actually gone to it,
