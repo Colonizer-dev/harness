@@ -203,8 +203,9 @@ protocol on stdio, so an agent module can be written in anything.
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 
-Every GitHub org is a workspace with its own overrides for models, the parallel limit, memory and the
-watchdog. Model providers (DeepSeek, a server on your LAN or tailnet, any Anthropic-compatible endpoint)
+Every GitHub org is a workspace with its own overrides for models, the parallel limit, the per-colony
+budget and host-disk quota, memory and the watchdog. Model providers (DeepSeek, a server on your LAN or
+tailnet, any Anthropic-compatible endpoint)
 are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
 keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
 Claude when a provider is down or busy.
@@ -259,7 +260,8 @@ Stated here rather than buried.
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
-| Fleet view, per-colony budgets and network policies | `PLANNED` |
+| Per-colony budgets and host-disk quotas ([#86](https://github.com/Colonizer-dev/harness/issues/86)) | `SHIPPING` |
+| Fleet view and network policies | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
 
 The roadmap is the issue tracker. There is no private version of it.
@@ -298,6 +300,25 @@ come from the environment:
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
 | `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
+
+Two limits bound one colony, both sandbox module settings (Settings → Modules → sandbox) with an override
+per org. Both default to `0` — unlimited — on purpose: there is no dollar figure or byte count that suits
+every deployment, and a default that silently stopped running colonies on upgrade would be a surprise.
+
+- **`budget_usd`** is the most one colony may spend on models, in dollars: Claude's own estimate plus what
+  the provider gateway priced on routed providers. When the recorded spend passes it, the mothership stops
+  the colony, and a routed request arriving past it is refused with `403`. Claude traffic does not go through
+  the gateway — microsandbox swaps the credential for `api.anthropic.com` at its TLS edge — so Claude's
+  spend is only seen when a turn ends, and both halves of the total are estimates. The worktree is kept:
+  raise the budget and press Resume to continue.
+- **`host_disk`** is the most one colony may leave on the host, a size like `16G`: its worktree plus its
+  session directory and logs, measured every five minutes. It is not the microVM's root disk, which the
+  `root_disk` setting bounds. Past the quota the colony is stopped with its worktree kept, because
+  removing a colony's work is your call: clean up or raise the quota and press Resume to continue.
+
+An org's own value beats the sandbox default, and an org set to `0` opts out of a global limit. Routed
+providers need `pricing` — dollars per million tokens for input, output, cached read and cache write — to
+count toward the budget; an unpriced provider still counts its tokens but contributes $0.
 
 A few things belong in neither the UI nor the environment. They live in `~/.config/colonizer/colonizer.toml`,
 which you write and Colonizer only reads — a missing file means the defaults:

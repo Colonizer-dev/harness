@@ -110,7 +110,11 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "memory": {"type": "string", "title": "Memory", "description": "e.g. 8G", "default": "8G"},
                 "root_disk": {"type": "string", "title": "Root disk", "default": "16G"},
                 "max_duration": {"type": "string", "title": "Max session length", "description": "e.g. 8h", "default": "8h"},
-                "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3}
+                "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
+                "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
+                    "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
+                "host_disk": {"type": "string", "title": "Host disk per colony", "default": "0", "format": "disk-size",
+                    "description": "How much disk one colony may leave on the host: its worktree, where everything built inside the colony lands, plus its session files and logs. The microVM's own root disk is the Root disk setting above and is not counted here. 0, the default, means unlimited: there is no size that suits every deployment. Measured every few minutes. When a colony passes the quota it is stopped on the host and its worktree is kept; clean up or raise the quota and press Resume to continue."}
             }}),
         )],
         "mesh" => vec![
@@ -280,6 +284,14 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
                 return Err(format!("setting `{key}` is too long"));
             }
         }
+        // A size string is parsed where its quota is enforced, so garbage is refused here, at save time,
+        // while the operator is looking — not silently read as no quota at all.
+        if spec["format"].as_str() == Some("disk-size")
+            && let Some(s) = value.as_str()
+            && crate::util::parse_disk_size(s).is_none()
+        {
+            return Err(format!("setting `{key}` is not a disk size like 512M or 16G (0 means unlimited)"));
+        }
         out.insert(key.clone(), value.clone());
     }
     Ok(out)
@@ -303,6 +315,32 @@ mod tests {
         assert!(validate_settings(&schema, &input).is_err());
         input.insert("cpus".into(), json!("eight"));
         assert!(validate_settings(&schema, &input).is_err());
+    }
+
+    #[test]
+    fn the_sandbox_budget_defaults_to_off_and_rejects_negatives() {
+        let schema = providers("sandbox", &[]).remove(0).schema;
+        assert_eq!(schema["properties"]["budget_usd"]["default"], json!(0), "no budget unless the operator names one");
+        let mut input = Map::new();
+        input.insert("budget_usd".into(), json!(-1));
+        assert!(validate_settings(&schema, &input).is_err());
+        input.insert("budget_usd".into(), json!(12.5));
+        assert_eq!(validate_settings(&schema, &input).unwrap().get("budget_usd"), Some(&json!(12.5)));
+    }
+
+    #[test]
+    fn the_sandbox_host_disk_quota_is_a_size_and_malformed_ones_are_refused_at_save_time() {
+        let schema = providers("sandbox", &[]).remove(0).schema;
+        assert_eq!(schema["properties"]["host_disk"]["default"], json!("0"), "no quota unless the operator names one");
+        let mut input = Map::new();
+        input.insert("host_disk".into(), json!("16G"));
+        assert_eq!(validate_settings(&schema, &input).unwrap().get("host_disk"), Some(&json!("16G")));
+        input.insert("host_disk".into(), json!(""));
+        assert!(validate_settings(&schema, &input).is_ok(), "empty means unlimited, which is a size");
+        for bad in ["eight", "1.5G", "16 GB"] {
+            input.insert("host_disk".into(), json!(bad));
+            assert!(validate_settings(&schema, &input).is_err(), "{bad:?} must be refused while the operator is looking");
+        }
     }
 
     #[test]
