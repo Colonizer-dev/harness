@@ -23,6 +23,11 @@ pub struct Activity {
     pub question_since: Option<DateTime<Utc>>,
     /// Questions autonomous mode has answered for this colony, against its own cap.
     pub judged: u64,
+    /// Judged attempts in a row that failed short of a refusal — a provider that could not be
+    /// reached, an HTTP error, a reply that could not be used. A good answer or a cleared
+    /// question resets it; enough in a row and the judge stops retrying, so the question reaches
+    /// a person.
+    pub judge_failures: u64,
 }
 
 impl Activity {
@@ -33,6 +38,7 @@ impl Activity {
             last_nudge: None,
             question_since: None,
             judged: 0,
+            judge_failures: 0,
         }
     }
 }
@@ -273,6 +279,7 @@ mod tests {
             last_nudge: Some(at(15)),
             question_since: None,
             judged: 0,
+            judge_failures: 0,
         };
         assert_eq!(
             decide(&SETTINGS, at(34), Observed::Working, &activity, None),
@@ -289,6 +296,7 @@ mod tests {
             last_nudge: None,
             question_since: Some(at(0)),
             judged: 0,
+            judge_failures: 0,
         };
         assert_eq!(
             decide(&SETTINGS, at(29), Observed::WaitingForAnswer, &activity, None),
