@@ -641,6 +641,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();
     tokio::spawn(async move { sessions::run_queue(queue).await });
+    let disk_watch = app.clone();
+    tokio::spawn(async move { sessions::watch_host_disks(disk_watch).await });
     let pr_watch = app.clone();
     tokio::spawn(async move { sessions::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));

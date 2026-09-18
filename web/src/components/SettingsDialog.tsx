@@ -24,6 +24,7 @@ import type {
   ProviderHealth,
   ProviderLimits,
   ProviderPreset,
+  ProviderPricing,
   ProviderWire,
   PullStatus,
   SchemaField,
@@ -2027,6 +2028,32 @@ function parseLimit(key: LimitKey, raw: string): { value: number | null; error: 
 
 const limitText = (value: number | null | undefined) => (value == null ? "" : String(value));
 
+/** The four pricing rates, as they sit in the form's text fields. */
+type PricingDraft = Record<keyof ProviderPricing, string>;
+
+const PRICING_KEYS = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok"] as const;
+
+const emptyPricingDraft = (): PricingDraft => ({ input_per_mtok: "", output_per_mtok: "", cache_read_per_mtok: "", cache_write_per_mtok: "" });
+
+const pricingDraftOf = (pricing: ProviderPricing | null | undefined): PricingDraft =>
+  pricing ? Object.fromEntries(PRICING_KEYS.map((key) => [key, String(pricing[key] ?? "")])) as PricingDraft : emptyPricingDraft();
+
+/** A rate is a dollar amount per million tokens: finite, never negative. Blank leaves the rate unset. */
+function parsePrice(raw: string): { value: number | null; error: string | null } {
+  const text = raw.trim().replace(/[_,\s]/g, "");
+  if (!text) return { value: null, error: null };
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0) return { value: null, error: "A dollar amount, 0 or more" };
+  return { value, error: null };
+}
+
+/** The collapsed Pricing summary: the rates currently in the fields, at 0 decimals or as given. */
+function pricingSummaryOf(pricing: Record<keyof ProviderPricing, { value: number | null }>): string[] {
+  return PRICING_KEYS.map((key) => [key.replace(/_per_mtok$/, "").replace("_", " "), pricing[key].value] as const)
+    .filter((entry): entry is [string, number] => entry[1] != null)
+    .map(([label, value]) => `${label} $${value}`);
+}
+
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1000) return `${Math.round(n / 1000)}k`;
@@ -2715,6 +2742,9 @@ function ProviderForm({
     context_tokens: limitText(start.context_tokens),
   });
   const [fallback, setFallback] = useState(start.fallback_model ?? "");
+  // The saved rates sit in the fields; `pricing` only goes on the save once they differ from them, the
+  // same convention as the key: omitted keeps what is saved, so a save never silently rezeros a rate.
+  const [pricingDraft, setPricingDraft] = useState<PricingDraft>(() => pricingDraftOf(initial?.pricing));
   // A catalogue entry whose base URL has ${…} holes: ask for them, and the URL follows.
   const template = initial ? [] : (CATALOG_BY_ID.get(preset)?.variables ?? []);
   const [vars, setVars] = useState<Record<string, string>>(() =>
@@ -2740,6 +2770,20 @@ function ProviderForm({
   };
   const limitsInvalid = Object.values(limits).some((l) => l.error);
   const setLimit = (k: LimitKey, value: string) => setLimitDraft((d) => ({ ...d, [k]: value }));
+  const pricing = {
+    input_per_mtok: parsePrice(pricingDraft.input_per_mtok),
+    output_per_mtok: parsePrice(pricingDraft.output_per_mtok),
+    cache_read_per_mtok: parsePrice(pricingDraft.cache_read_per_mtok),
+    cache_write_per_mtok: parsePrice(pricingDraft.cache_write_per_mtok),
+  };
+  const pricingInvalid = Object.values(pricing).some((rate) => rate.error);
+  const setPricing = (k: keyof ProviderPricing, value: string) => setPricingDraft((d) => ({ ...d, [k]: value }));
+  const savedPricing = initial?.pricing;
+  const pricingChanged =
+    (pricing.input_per_mtok.value ?? 0) !== (savedPricing?.input_per_mtok ?? 0) ||
+    (pricing.output_per_mtok.value ?? 0) !== (savedPricing?.output_per_mtok ?? 0) ||
+    (pricing.cache_read_per_mtok.value ?? 0) !== (savedPricing?.cache_read_per_mtok ?? 0) ||
+    (pricing.cache_write_per_mtok.value ?? 0) !== (savedPricing?.cache_write_per_mtok ?? 0);
   const advancedSummary = limitLabels({
     timeout_secs: limits.timeout_secs.value ?? undefined,
     max_concurrent: limits.max_concurrent.value,
@@ -2747,6 +2791,7 @@ function ProviderForm({
     context_tokens: limits.context_tokens.value,
     fallback_model: fallback || null,
   });
+  const pricingSummary = pricingSummaryOf(pricing);
 
   const isNew = !initial;
   const idError = !isNew
@@ -2767,7 +2812,7 @@ function ProviderForm({
       ? null
       : "An http(s) URL";
   const keyError = auth !== "none" && keyMode === "replace" && initial?.has_key && !key.trim() ? "Paste the new key" : null;
-  const invalid = Boolean(idError || urlError || keyError || limitsInvalid || !name.trim());
+  const invalid = Boolean(idError || urlError || keyError || limitsInvalid || pricingInvalid || !name.trim());
   const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url.trim());
 
   const save = async (event: FormEvent) => {
@@ -2788,6 +2833,14 @@ function ProviderForm({
         models,
         preset: initial?.preset ?? preset,
         api_key,
+        pricing: pricingChanged
+          ? {
+              input_per_mtok: pricing.input_per_mtok.value ?? 0,
+              output_per_mtok: pricing.output_per_mtok.value ?? 0,
+              cache_read_per_mtok: pricing.cache_read_per_mtok.value ?? 0,
+              cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
+            }
+          : undefined,
         timeout_secs: limits.timeout_secs.value,
         max_concurrent: limits.max_concurrent.value,
         queue_timeout_secs: limits.queue_timeout_secs.value,
@@ -3020,6 +3073,54 @@ function ProviderForm({
             </FormField>
           </div>
         </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Pricing</span>
+            <span className={cx("min-w-0 flex-1 truncate text-[12px]", pricingInvalid ? "text-err" : "text-faint")}>
+              {pricingInvalid
+                ? "Some values are out of range"
+                : pricingSummary.length
+                  ? `${pricingSummary.join(" · ")} per million tokens`
+                  : "Optional — unset counts as $0 spent"}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+            <PriceField
+              label="Input ($ per million tokens)"
+              value={pricingDraft.input_per_mtok}
+              onChange={(v) => setPricing("input_per_mtok", v)}
+              error={pricing.input_per_mtok.error}
+              help="What a million fresh input tokens cost."
+            />
+            <PriceField
+              label="Output ($ per million tokens)"
+              value={pricingDraft.output_per_mtok}
+              onChange={(v) => setPricing("output_per_mtok", v)}
+              error={pricing.output_per_mtok.error}
+              help="What a million output tokens cost."
+            />
+            <PriceField
+              label="Cache read ($ per million tokens)"
+              value={pricingDraft.cache_read_per_mtok}
+              onChange={(v) => setPricing("cache_read_per_mtok", v)}
+              error={pricing.cache_read_per_mtok.error}
+              help="What a million tokens read back from the provider's prompt cache cost."
+            />
+            <PriceField
+              label="Cache write ($ per million tokens)"
+              value={pricingDraft.cache_write_per_mtok}
+              onChange={(v) => setPricing("cache_write_per_mtok", v)}
+              error={pricing.cache_write_per_mtok.error}
+              help="What a million tokens written to the provider's prompt cache cost."
+            />
+            <p className="text-[12px] leading-snug text-faint sm:col-span-2">
+              Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
+              provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
+              spend — the budget then only sees Claude's cost.
+            </p>
+          </div>
+        </details>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
         {!isNew && (
@@ -3062,6 +3163,38 @@ function LimitField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        aria-invalid={Boolean(error)}
+        className={cx(inputClass, "font-mono text-[13px]", error && "border-err")}
+      />
+    </FormField>
+  );
+}
+
+/** One pricing rate, in dollars per million tokens. Blank is allowed and prices that token kind at $0. */
+function PriceField({
+  label,
+  value,
+  onChange,
+  error,
+  help,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  error: string | null;
+  help: string;
+}) {
+  const id = useId();
+  return (
+    <FormField id={id} label={label} info={<p>{help}</p>} error={error}>
+      <input
+        id={id}
+        inputMode="decimal"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Unset"
         spellCheck={false}
         autoComplete="off"
         aria-invalid={Boolean(error)}

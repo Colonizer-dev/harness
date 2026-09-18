@@ -623,6 +623,8 @@ mod tests {
             pr_url: Some("https://github.com/acme-corp/secret-project/pull/7".into()),
             error: None,
             cost_usd: Some(0.42),
+            routed_cost_usd: None,
+            host_disk_bytes: None,
             model_usage: None,
             cleaned_up: false,
             attention: None,
@@ -738,6 +740,7 @@ mod tests {
             queue_timeout_secs: None,
             context_tokens: None,
             fallback_model: None,
+            pricing: None,
         }];
 
         let batch = build(

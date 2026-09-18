@@ -75,8 +75,9 @@ Two settings layers sit next to the modules:
   key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
-- **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, memory
-  and the watchdog. A colony belongs to its repository owner's org.
+- **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
+  per-colony budget and host-disk quota, memory and the watchdog. A colony belongs to its repository
+  owner's org.
 
 ## Session lifecycle
 
@@ -85,20 +86,23 @@ stateDiagram-v2
   direction LR
   [*] --> Queued: past the parallel limit
   [*] --> Create
-  Queued --> Create: a slot frees up
+  Queued --> Create: a slot frees a launch
+  Queued --> Boot: a slot frees a resume
   Queued --> Stopped: left the queue
   Create --> Boot: worktree, session dir, mesh key
   Boot --> Connect: agentd up on the mesh
   Connect --> Interact: prompt sent
   Interact --> Interact: questions, follow-ups, terminals
   Interact --> Publish: autopilot, or "Create PR"
-  Interact --> Stopped: microVM gone
+  Interact --> Stopped: microVM gone, or a limit passed
+  Stopped --> Queued: Resume past the limit
   Stopped --> Boot: Resume, same worktree
   Publish --> [*]: VM removed, then the host publishes the branch
 ```
 
 0. **Queued** – a colony launched past the parallel limit (global, or the org's own) is created
-   `queued`: no worktree, no microVM, nothing claimed. Every five seconds the harness starts the oldest
+   `queued`: no worktree, no microVM, nothing claimed. A resume that lands on a full limit queues too,
+   keeping its worktree while it waits. Every five seconds the harness starts the oldest
    queued colony that fits, so a queue drains on its own as colonies finish.
    An org at its own limit doesn't hold up the colonies behind it, and leaving the queue is just Stop.
 1. **Create** – source module fetches the issue; the host creates a bare clone + git worktree on a
@@ -125,8 +129,28 @@ stateDiagram-v2
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
    a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM
-   on the same worktree and branch and tells the agent to continue from what is already there. The new
+   on the same worktree and branch and tells the agent to continue from what is already there. A resume past
+   the parallel limit queues instead, and boots on its worktree when a slot frees. The new
    agentd numbers its events from 1, so the previous transcript is rotated to `events-<n>.jsonl` first.
+
+## Per-colony limits
+
+Three sandbox module settings bound one colony, each with a per-org override that shadows the default:
+
+- `max_parallel` caps colonies live at once, global or per org — the queue above.
+- `budget_usd` caps a colony's whole model spend. The provider gateway counts the usage of every response
+  it routes, prices it with the provider's `pricing`, and adds it to the colony's `routed_cost_usd`; the
+  budget answers to that plus Claude's own `cost_usd`. Past it, a routed request is refused with `403` and
+  the host stops the colony.
+- `host_disk` caps what a colony leaves on the host — its worktree plus its session directory — measured
+  every five minutes. It does not cover the microVM's root filesystem, which `root_disk` bounds. A colony
+  past the quota is stopped and its worktree kept: removing a colony's work is the operator's call.
+
+`max_parallel` defaults to 3. The other two default to unlimited — there is no dollar figure or byte
+count that suits every deployment, and a default that silently stopped running colonies on upgrade would
+be a surprise. When the host stops a colony — the only stop it decides on its own — the
+microVM is torn down, the status goes to `stopped` with the reason in the colony log, and the worktree is
+kept: Resume continues once the limit is raised, queued if the parallel limit is full.
 
 ## Mesh design
 

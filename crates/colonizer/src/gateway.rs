@@ -4,8 +4,8 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    client_error, openai,
-    providers::{strip_oauth_betas, Provider, Wire},
+    client_error, openai, sessions,
+    providers::{strip_oauth_betas, Provider, Usage, Wire},
     util::read_trimmed,
     ApiResult, App, Shared,
 };
@@ -18,7 +18,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -44,6 +44,10 @@ const DROP_RESPONSE_HEADERS: [&str; 6] = ["connection", "keep-alive", "proxy-con
 /// connection (and any byte-level idle watchdog downstream) alive during a long prefill.
 const SSE_PING_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_PING: &[u8] = b": keep-alive\n\n";
+/// Longest response body buffered purely to count a non-streaming usage. Past this the response still
+/// forwards whole; its tokens just aren't priced.
+const MAX_TAP_BODY: usize = 4 * 1024 * 1024;
+
 /// How long dirty usage counters may go unwritten; a crash loses at most this much of the tally.
 const USAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -405,6 +409,166 @@ fn ends_sse_event(chunk: &[u8]) -> bool {
     chunk.ends_with(b"\n\n") || chunk.ends_with(b"\r\n\r\n") || chunk.ends_with(b"\r\r")
 }
 
+/// A body-end callback that records what passed through.
+type Recorder = Box<dyn FnOnce(Usage) + Send>;
+
+/// Counts the tokens of a passing Anthropic response without touching the bytes the colony receives:
+/// [`counted_body`] feeds every forwarded chunk here and reads the totals when the body ends. Anything
+/// unexpected (a proxy in front of the provider, a shape this version doesn't know) counts nothing and
+/// never breaks the pass-through.
+#[derive(Default)]
+enum UsageTap {
+    /// A non-streaming JSON body, buffered up to `MAX_TAP_BODY` purely for counting.
+    Json(Vec<u8>),
+    /// An SSE body, read event by event as it passes: `message_start` fixes the input side,
+    /// `message_delta` carries the running output total.
+    Sse(SseTap),
+    /// A body too big or too odd to count. Bytes still pass; nothing is recorded.
+    #[default]
+    Skip,
+}
+
+impl UsageTap {
+    fn anthropic(is_sse: bool) -> Self {
+        if is_sse { Self::Sse(SseTap::default()) } else { Self::Json(Vec::new()) }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        let overflow = matches!(self, Self::Json(buffer) if buffer.len() + chunk.len() > MAX_TAP_BODY);
+        if overflow {
+            *self = Self::Skip;
+            return;
+        }
+        match self {
+            Self::Json(buffer) => buffer.extend_from_slice(chunk),
+            Self::Sse(tap) => tap.push(chunk),
+            Self::Skip => {}
+        }
+    }
+
+    fn finish(self) -> Usage {
+        match self {
+            // Malformed or truncated JSON parses to nothing, which is the deal: count only what is certain.
+            Self::Json(buffer) => serde_json::from_slice::<Value>(&buffer).map(|body| anthropic_usage(&body["usage"])).unwrap_or_default(),
+            Self::Sse(tap) => tap.usage,
+            Self::Skip => Usage::default(),
+        }
+    }
+}
+
+/// The token counts an Anthropic usage object carries, as far as they are there. A missing or malformed
+/// field counts as zero, so a half-readable body can only ever undercount.
+fn anthropic_usage(usage: &Value) -> Usage {
+    Usage {
+        input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        cache_write_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+    }
+}
+
+/// Assembles SSE events out of the chunks a forwarded body arrives in, keeping only what accounting
+/// needs. Never holds the bytes back: it watches a private copy of the stream.
+#[derive(Default)]
+struct SseTap {
+    line: Vec<u8>,
+    data: String,
+    usage: Usage,
+}
+
+impl SseTap {
+    fn push(&mut self, chunk: &[u8]) {
+        self.line.extend_from_slice(chunk);
+        while let Some(end) = self.line.iter().position(|&b| b == b'\n') {
+            let mut line: Vec<u8> = self.line.drain(..=end).collect();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            self.handle_line(&line);
+        }
+        // A line growing past the cap is not an event this accounting speaks; drop it and count nothing.
+        if self.line.len() > MAX_TAP_BODY {
+            self.line.clear();
+            self.data.clear();
+        }
+    }
+
+    fn handle_line(&mut self, line: &[u8]) {
+        if line.is_empty() {
+            return self.dispatch();
+        }
+        // `event:` names and `:` keep-alive comments (the gateway's own pings included) carry nothing to
+        // count; the data's own `type` field does.
+        if let Some(data) = line.strip_prefix(b"data:") {
+            let data = data.strip_prefix(b" ").unwrap_or(data);
+            if !self.data.is_empty() {
+                self.data.push('\n');
+            }
+            self.data.push_str(&String::from_utf8_lossy(data));
+        }
+    }
+
+    fn dispatch(&mut self) {
+        let data = std::mem::take(&mut self.data);
+        let Ok(event) = serde_json::from_str::<Value>(&data) else { return };
+        match event["type"].as_str() {
+            Some("message_start") => {
+                let message = anthropic_usage(&event["message"]["usage"]);
+                self.usage.input_tokens = message.input_tokens;
+                self.usage.cache_read_tokens = message.cache_read_tokens;
+                self.usage.cache_write_tokens = message.cache_write_tokens;
+            }
+            // Deltas carry the running output total, so the last one seen is the final count.
+            Some("message_delta") => {
+                let output = event["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                self.usage.output_tokens = self.usage.output_tokens.max(output);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Wraps a body that is being forwarded to a colony, counting the tokens that pass through `tap` and
+/// handing the totals to `record` once the body ends. The bytes themselves are never changed: whatever
+/// the tap makes of the body, every chunk forwards exactly as it arrived.
+fn counted_body(
+    inner: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+    tap: UsageTap,
+    record: Option<Recorder>,
+) -> impl Stream<Item = std::io::Result<Bytes>> + Send + 'static {
+    let state = (Box::pin(inner), tap, record);
+    futures_util::stream::unfold(state, |(mut inner, mut tap, record)| async move {
+        let item = match inner.next().await {
+            Some(Ok(chunk)) => {
+                tap.push(&chunk);
+                Some(Ok(chunk))
+            }
+            other => other,
+        };
+        let Some(item) = item else {
+            // The body is over (or its error was delivered): report whatever the tap managed to read.
+            let usage = tap.finish();
+            if usage.total_tokens() > 0
+                && let Some(record) = record
+            {
+                record(usage);
+            }
+            return None;
+        };
+        Some((item, (inner, tap, record)))
+    })
+}
+
+/// The body-end callback for a routed response: add its spend to the colony and re-check its budget.
+/// That runs as its own task, so accounting never delays the colony's bytes.
+fn usage_recorder(app: &Shared, colony: &str, provider: &Provider) -> Recorder {
+    let (app, colony, provider) = (app.clone(), colony.to_string(), provider.clone());
+    Box::new(move |usage| {
+        tokio::spawn(async move { sessions::record_routed_usage(&app, &colony, &provider, usage).await });
+    })
+}
+
 /// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`.
 fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> Option<String> {
     let clean = rest.starts_with('/')
@@ -460,6 +624,16 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     let Some(provider) = app.providers().into_iter().find(|p| p.id == id) else {
         return api_error(StatusCode::NOT_FOUND, "not_found_error", format!("colonizer gateway: no provider \"{id}\""), None);
     };
+    // Refused before it waits for a slot, and the colony is stopped like the max-duration path stops one.
+    // The 403 follows the empty-balance precedent in openai.rs: Claude Code does not retry it in a loop.
+    if sessions::enforce_budget(&app, &colony).await {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            format!("colonizer gateway: colony {colony} passed its spend budget and was stopped; raise the budget and resume it"),
+            None,
+        );
+    }
     let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
     // Everything that can refuse the request happens here, before it waits for a slot. The anthropic wire
     // never parses the body; the openai wire has to rebuild it.
@@ -554,7 +728,8 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     // The guards live as long as the body, so slots and activity cover the whole streamed response.
     let guards = (busy, in_flight, permit, timed);
     if let Some(info) = translation {
-        return openai_response(upstream, guards, usage, timeout, &info, &id).await;
+        let record = usage_recorder(&app, &colony, &provider);
+        return openai_response(upstream, guards, usage, record, timeout, &info, &id).await;
     }
 
     let status = upstream.status();
@@ -571,7 +746,12 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     // keeps the connection alive with comment lines in that case, which only makes sense for SSE:
     // injecting bytes into a non-streaming JSON body would corrupt it.
     let is_sse = response_headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("text/event-stream"));
-    let body = stream_body(upstream.bytes_stream(), guards, timeout, is_sse);
+    // The body forwards exactly as upstream sent it; the tap only watches a private copy for usage.
+    let body = counted_body(
+        stream_body(upstream.bytes_stream(), guards, timeout, is_sse),
+        UsageTap::anthropic(is_sse),
+        Some(usage_recorder(&app, &colony, &provider)),
+    );
     let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
@@ -580,12 +760,14 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
 
 /// An `openai`-wire provider's response in Anthropic's shape. Only `retry-after` is copied from upstream:
 /// OpenAI's other headers (`openai-*`, `x-ratelimit-*`) describe a different API. Once response headers
+/// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`. The usage
+/// the translation already extracted is teed out to `record_routed_usage` on both paths.
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
-async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc<UsageCounters>, timeout: Duration, info: &openai::RequestInfo, id: &str) -> Response {
+async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc<UsageCounters>, record: Recorder, timeout: Duration, info: &openai::RequestInfo, id: &str) -> Response {
     let status = upstream.status();
     let retry_after = upstream.headers().get("retry-after").cloned();
     if status.is_success() && info.stream {
-        let body = stream_body(openai::translate_stream(upstream.bytes_stream(), info.model.clone()), guards, timeout, true);
+        let body = stream_body(openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record), guards, timeout, true);
         let mut response = Response::new(Body::from_stream(body));
         response.headers_mut().insert("content-type", HeaderValue::from_static("text/event-stream"));
         response.headers_mut().insert("cache-control", HeaderValue::from_static("no-cache"));
@@ -605,7 +787,10 @@ async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc
     drop(guards);
     let mut response = if status.is_success() {
         match openai::translate_response(&bytes, info) {
-            Ok(message) => (StatusCode::OK, Json(message)).into_response(),
+            Ok((message, priced)) => {
+                record(priced);
+                (StatusCode::OK, Json(message)).into_response()
+            }
             Err(message) => api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\": {message}"), None),
         }
     } else {
@@ -724,6 +909,7 @@ mod tests {
             queue_timeout_secs: None,
             context_tokens: None,
             fallback_model: fallback_model.map(str::to_string),
+            pricing: None,
         }
     }
 
@@ -800,12 +986,12 @@ mod tests {
                 futures_util::stream::once(futures_util::future::ready(Err(std::io::Error::other("connection reset mid-body"))));
             reqwest::Response::from(axum::http::Response::builder().status(status).body(reqwest::Body::wrap_stream(reset)).unwrap())
         };
-        let response = openai_response(broken_body(200), guards(), usage.clone(), Duration::from_secs(30), &info, "strix").await;
+        let response = openai_response(broken_body(200), guards(), usage.clone(), Box::new(|_| {}), Duration::from_secs(30), &info, "strix").await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(usage.snapshot().failures, 1, "the body-phase failure is counted");
 
         // A >= 400 status whose body then fails must not count twice: the body-phase count is the only one.
-        let response = openai_response(broken_body(500), guards(), usage.clone(), Duration::from_secs(30), &info, "strix").await;
+        let response = openai_response(broken_body(500), guards(), usage.clone(), Box::new(|_| {}), Duration::from_secs(30), &info, "strix").await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(usage.snapshot().failures, 2, "one per request, never a header-phase count on top of the body-phase one");
     }
@@ -952,7 +1138,7 @@ mod tests {
             (Duration::ZERO, openai_chunk(r#"{"role":"assistant"}"#, "null")),
             (Duration::from_secs(40), [openai_chunk(r#"{"content":"hi"}"#, "\"stop\""), Bytes::from_static(b"data: [DONE]\n\n")].concat().into()),
         ]);
-        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into()), guards(), Duration::from_secs(120), true);
+        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into(), |_| {}), guards(), Duration::from_secs(120), true);
         tokio::pin!(body);
 
         let (mut pings, mut out) = (0, Vec::new());
@@ -981,7 +1167,7 @@ mod tests {
             (Duration::from_secs(10), Bytes::from_static(b": OPENROUTER PROCESSING\n\n")),
             (Duration::from_secs(10), [openai_chunk(r#"{"content":"done"}"#, "\"stop\""), Bytes::from_static(b"data: [DONE]\n\n")].concat().into()),
         ]);
-        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into()), guards(), Duration::from_secs(25), true);
+        let body = stream_body(openai::translate_stream(upstream, "gpt-5.5".into(), |_| {}), guards(), Duration::from_secs(25), true);
         tokio::pin!(body);
         let mut out = Vec::new();
         while let Some(chunk) = body.next().await {
@@ -1021,6 +1207,99 @@ mod tests {
         let chunk = body.next().await.unwrap().unwrap();
         assert_eq!(chunk.as_ref(), b"{\"ok\":true}");
         assert!(body.next().await.is_none());
+    }
+
+    /// Drains `chunks` through a counting body over an Anthropic SSE tap, returning the bytes the colony
+    /// would receive and the usage the tap read.
+    async fn counted(chunks: Vec<std::io::Result<Bytes>>, is_sse: bool) -> (Vec<u8>, Option<Usage>) {
+        let seen = Arc::new(Mutex::new(None));
+        let sink = seen.clone();
+        let body = counted_body(
+            futures_util::stream::iter(chunks),
+            UsageTap::anthropic(is_sse),
+            Some(Box::new(move |usage| *sink.lock().unwrap() = Some(usage))),
+        );
+        tokio::pin!(body);
+        let mut forwarded = Vec::new();
+        while let Some(chunk) = body.next().await {
+            forwarded.extend_from_slice(&chunk.expect("the body forwards"));
+        }
+        let counted = seen.lock().unwrap().take();
+        (forwarded, counted)
+    }
+
+    fn message_start(input: u64, cache_read: u64, cache_write: u64) -> String {
+        format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":{input},\
+             \"cache_read_input_tokens\":{cache_read},\"cache_creation_input_tokens\":{cache_write},\"output_tokens\":1}}}}}}\n\n"
+        )
+    }
+
+    fn message_delta(output: u64) -> String {
+        format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{output}}}}}\n\n")
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_stream_is_counted_without_its_bytes_being_touched() {
+        let body = message_start(25, 40, 5)
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
+            + &message_delta(15);
+        let (forwarded, counted) = counted(vec![Ok(Bytes::from(body.clone()))], true).await;
+        assert_eq!(String::from_utf8_lossy(&forwarded), body, "the colony receives exactly the bytes upstream sent");
+        assert_eq!(counted, Some(Usage { input_tokens: 25, output_tokens: 15, cache_read_tokens: 40, cache_write_tokens: 5 }));
+    }
+
+    #[tokio::test]
+    async fn counting_survives_chunks_split_mid_event() {
+        let body = message_start(25, 40, 5) + &message_delta(15);
+        let pieces: Vec<std::io::Result<Bytes>> =
+            body.as_bytes().chunks(7).map(|piece| Ok(Bytes::copy_from_slice(piece))).collect();
+        let (forwarded, counted) = counted(pieces, true).await;
+        assert_eq!(String::from_utf8_lossy(&forwarded), body);
+        assert_eq!(
+            counted,
+            Some(Usage { input_tokens: 25, output_tokens: 15, cache_read_tokens: 40, cache_write_tokens: 5 }),
+            "a data line split across chunks is waited for, not half-read"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_json_body_is_counted_and_passes_through_unchanged() {
+        let body = br#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"cache_read_input_tokens":80,"cache_creation_input_tokens":2,"output_tokens":9}}"#;
+        let (forwarded, counted) = counted(vec![Ok(Bytes::from_static(body))], false).await;
+        assert_eq!(forwarded, body.to_vec(), "the colony receives exactly the bytes upstream sent");
+        assert_eq!(counted, Some(Usage { input_tokens: 12, output_tokens: 9, cache_read_tokens: 80, cache_write_tokens: 2 }));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_or_truncated_body_counts_nothing_and_still_forwards() {
+        // A data line that never becomes valid JSON, and a stream cut off mid-event, both account zero.
+        for (body, is_sse) in [
+            (b"event: message_start\ndata: not json\n\nevent: message_delta\ndata: {}\n\n".as_slice(), true),
+            (b"event: message_start\ndata: {\"type\":\"message_star".as_slice(), true),
+            (b"<html>gateway error</html>".as_slice(), false),
+            (b" &".as_slice(), false),
+        ] {
+            let (forwarded, counted) = counted(vec![Ok(Bytes::from_static(body))], is_sse).await;
+            assert_eq!(forwarded, body.to_vec(), "bytes must pass unchanged no matter what they say");
+            assert_eq!(counted, None, "no spend is recorded for {body:?}");
+        }
+    }
+
+    /// `pings` are injected by `stream_body` upstream of the tap, so the tap must read past them.
+    #[tokio::test]
+    async fn keep_alive_pings_do_not_confuse_the_counting() {
+        let body = message_start(10, 0, 0) + ": keep-alive\n\n" + &message_delta(4);
+        let (forwarded, counted) = counted(vec![Ok(Bytes::from(body.clone()))], true).await;
+        assert_eq!(String::from_utf8_lossy(&forwarded), body);
+        assert_eq!(counted, Some(Usage { input_tokens: 10, output_tokens: 4, ..Default::default() }));
+    }
+
+    #[tokio::test]
+    async fn an_empty_body_records_nothing_at_all() {
+        let (forwarded, counted) = counted(vec![], true).await;
+        assert!(forwarded.is_empty());
+        assert_eq!(counted, None, "no body end callback fires for a body that never arrived");
     }
 
     #[tokio::test(start_paused = true)]
