@@ -122,6 +122,21 @@ jobs:
       - name: Test
         run: npm test
 
+  # The colony report's tests import node's own modules and ../colony-report.mjs only; the repository
+  # root has no package.json or lockfile, so there is nothing to install and `node --test` is the job.
+  colony-report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: node --test scripts/test/colony-report.test.mjs
+
   # This job does not run by default, and until the repository has the runner it wants, it has never
   # run. A colony boot needs nested virtualisation: microsandbox starts KVM microVMs, GitHub-hosted
   # runners have no /dev/kvm, so even the rust:1-alpine build VM inside `scripts/build-agentd.sh`
