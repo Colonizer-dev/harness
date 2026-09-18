@@ -607,10 +607,10 @@ Runner environment set by the mothership:
 
 | Variable | Meaning |
 | --- | --- |
-| `COLONIZER_MODEL` | Orchestrator (main thread) model |
-| `COLONIZER_SUBAGENT_MODEL` | Model for every subagent (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model — Claude Code's built-in Explore is `inherit` — use it too) |
+| `COLONIZER_MODEL` | Orchestrator (main thread) model; nearly all of a colony's model traffic |
+| `COLONIZER_SUBAGENT_MODEL` | Model for subagents; only used when the agent delegates to one, which colonies rarely do (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model — Claude Code's built-in Explore is `inherit` — use it too) |
 | `COLONIZER_IMAGE` | The container image the colony booted; the runner tells the agent what it can and cannot run |
-| `COLONIZER_BACKGROUND_MODEL` | Model for background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
+| `COLONIZER_BACKGROUND_MODEL` | Model for small auxiliary background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | JSON array of routes (below); empty or absent means Anthropic only |
 | `COLONIZER_SCAN` | `off` (default), `warn` or `block`. Pre-flight scan of the workspace before the agent starts |
 | `COLONIZER_SCAN_COMMAND` | The scanner to run, resolved **inside the colony**. Split on whitespace and run without a shell. Empty means no scan runs |
@@ -898,8 +898,39 @@ are estimates.
 
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
-`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `pricing`, `in_flight` and
-`queued`.
+`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `pricing`, `in_flight`,
+`queued`, `usage` and `used_by`.
+
+**Usage.** `usage` is the provider's cumulative counters — what says a request has ever actually gone to it,
+which the momentary `in_flight`/`queued` gauges cannot:
+
+```json
+{"requests": 12, "failures": 2, "fallbacks": 1, "duration_ms": 48021, "last_request_at": "…"}
+```
+
+`requests` counts every request the gateway accepted for the provider, from the moment everything that can
+refuse a request locally has passed (colony auth, provider lookup, path and body translation) — queueing,
+the upstream call and the streamed body are included, a request the gateway itself refuses is not, and an
+attempt that queued past `queue_timeout_secs` without ever reaching the provider still counts. `failures`
+is the subset that produced no usable upstream response: one of the gateway's three fallback answers (queue
+timeout, unreachable, timeout), an upstream status ≥ 400, or an openai-wire response whose body failed or
+never finished. `fallbacks` is the subset of `failures` the
+gateway predicts will fall back to Claude — it answered with `x-colonizer-fallback` and the provider has a
+`fallback_model`, which is exactly when the colony's router retries on Claude; the retry never comes back
+through the gateway, so this is a prediction, not an observation. `duration_ms` is the cumulative
+wall-clock of dispatched requests, streamed body included — timed from when a request's slot was acquired,
+so time spent queued is not. `last_request_at` is RFC 3339, `null` before
+the first request. The counters live in `provider-usage.json` in the mothership's data directory, written
+by a background task every 5 s when they changed and once more at shutdown, so a crash loses at most 5 s
+of the tally and a restart carries on where it left off; `DELETE /api/providers/{id}` also removes the
+provider's tally.
+
+`used_by` names the model settings — `model`, `subagent_model`, `background_model` — whose resolved value
+(schema default, global setting or org override) routes to this provider as `<provider>/<model>`, across
+the global agent env and every org override, e.g. `["subagent_model"]`. Empty means the provider is
+configured but no model setting points at it: wired only to `subagent_model`, say, on a harness whose
+colonies never spawn subagents — unused so far, not broken. A bare alias or a partial id prefix is
+another provider's model and doesn't match, same rule as the "used" routes above.
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 
