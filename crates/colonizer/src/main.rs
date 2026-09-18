@@ -96,6 +96,11 @@ pub struct App {
     pub storage_alert: RwLock<Option<StorageAlert>>,
     pub runtimes: Mutex<HashMap<String, Arc<sessions::Runtime>>>,
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One lifecycle lock per colony id. It serialises the moments a colony gains or loses its
+    /// microVM — the claim that starts a boot, and the teardown that removes one — so a resume can
+    /// never claim a colony whose stop is still tearing that VM down, and a cleanup can never free
+    /// the worktree a boot is starting on. See `session_lock` for what it deliberately does not cover.
+    session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     mesh: Mutex<Option<Arc<Mesh>>>,
     pub login: claude_login::LoginManager,
     pub memory: memory::MemoryStore,
@@ -164,6 +169,34 @@ impl App {
 
     pub async fn repo_lock(&self, repo: &str) -> Arc<Mutex<()>> {
         self.repo_locks.lock().await.entry(repo.to_string()).or_default().clone()
+    }
+
+    /// The colony's lifecycle lock, held from a resume's claim through the spawn of its boot, across a
+    /// stop's (and `stop_colony`'s) claim and teardown, across a cleanup's claim and worktree removal,
+    /// and across `watch_sandboxes`' teardown. The load-bearing hold is the stopping side: `stop` keeps
+    /// the lock across its status flip and its teardown, so a resume cannot be admitted on the freshly
+    /// written `stopped` while the removal is still in flight — without it, that resume would claim
+    /// `starting` and boot a microVM under the one deterministic sandbox name the stop's in-flight
+    /// `msb rm --force` is about to remove. A cleanup leans on the same serialisation: its `cleaned_up`
+    /// claim and worktree removal are one critical section, so a resume waiting on the lock is refused
+    /// outright rather than admitted onto the worktree being deleted. The resume's own hold through the
+    /// spawn is deliberate but belt-and-braces — it keeps the claim and the handoff to `boot` in one
+    /// critical section, and a stop landing before the spawn only makes the boot's first
+    /// `ensure_starting` bail, there being no microVM yet to tear down.
+    ///
+    /// What it deliberately does not cover:
+    ///
+    /// - a whole boot. A boot runs for minutes and `stop` has to stay responsive, so a boot holds
+    ///   nothing and is interrupted instead: the `ensure_starting` checkpoints bail once a stop has
+    ///   flipped the status out of `starting`, and `boot`'s failure teardown runs before it flips the
+    ///   colony to `failed`, so a resume admitted after that flip finds the teardown already done.
+    /// - `publish`. Its claim (`can_publish`) refuses `starting` and `queued` — the only statuses a
+    ///   boot can be in — so it can never tear a microVM down while a boot is creating one.
+    /// - `delete`. It checks `deletable` and removes the record under one write guard, so a colony a
+    ///   boot is starting on (`starting` is live) cannot be deleted mid-boot, and once the record is
+    ///   gone nothing can claim the colony at all.
+    pub async fn session_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.session_locks.lock().await.entry(id.to_string()).or_default().clone()
     }
 
     /// Records a confirmed storage failure: printed loudly here, kept as the sticky alert the UI
@@ -599,6 +632,7 @@ async fn serve() -> Result<()> {
         storage_alert: RwLock::new(corrupt),
         runtimes: Mutex::new(HashMap::new()),
         repo_locks: Mutex::new(HashMap::new()),
+        session_locks: Mutex::new(HashMap::new()),
         mesh: Mutex::new(None),
         login: Default::default(),
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
@@ -797,6 +831,7 @@ pub(crate) mod tests {
             storage_alert: RwLock::new(None),
             runtimes: Mutex::new(HashMap::new()),
             repo_locks: Mutex::new(HashMap::new()),
+            session_locks: Mutex::new(HashMap::new()),
             mesh: Mutex::new(None),
             login: Default::default(),
             memory: memory::MemoryStore::new(root.join("memory")),
