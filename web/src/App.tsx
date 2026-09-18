@@ -308,8 +308,9 @@ function LiveMapPrompt({
     <div role="region" aria-label="Live map" className="rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]">
       <p className="text-[14px] font-semibold">Put this mothership on the live map?</p>
       <p className="mt-1.5 text-[12.5px] text-muted">
-        colonizer.dev/live shows where colonies are running, to within about 25 km. It gets a heartbeat every 5 minutes: a random id,
-        the version, the platform and how many colonies run. Nothing about your code. Off unless you say yes.
+        colonizer.dev/live shows where colonies are running, to within about 25 km. If yours is the only mothership in its area,
+        that dot is you. It gets a heartbeat every 5 minutes: a random id, the version, the platform and how many colonies run.
+        Nothing about your code. Off unless you say yes.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button variant="primary" size="sm" disabled={busy} onClick={() => void answer(true)}>
