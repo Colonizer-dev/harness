@@ -218,7 +218,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let mesh = if !modules.mesh_enabled() {
         json!({"enabled": false, "provider": "none"})
     } else if !app.cfg.assets.as_deref().is_some_and(mesh::binaries_present) {
-        // Not an error the operator can clear: this platform has no mesh binaries to vendor.
+        // Not an error the operator can clear: this install simply has no mesh binaries.
         json!({"enabled": true, "provider": "headscale", "state": "unavailable",
                "error": "no mesh binaries for this platform; colonies use a loopback port"})
     } else {
@@ -437,8 +437,8 @@ async fn main() -> Result<()> {
     tokio::spawn(telemetry::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
-        // Retrying would never help: no mesh binary is published for this platform, so there is
-        // nothing for another `scripts/install.sh` to fetch. Colonies use a loopback port instead.
+        // Restarting would never help: the binaries are missing from this install, and the app does
+        // not fetch them at runtime. Colonies use a loopback port instead.
         println!("mesh: no mesh binaries for this platform; colonies will use a loopback port");
     }
     if app.modules.read().await.mesh_enabled() && mesh_vendored {

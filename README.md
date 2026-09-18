@@ -188,7 +188,7 @@ protocol on stdio, so an agent module can be written in anything.
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, plus a DERP map snapshot | `SHIPPING` |
-| [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build | `SHIPPING` |
+| [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM builds | `SHIPPING` |
 
 ## Modules
 
@@ -216,8 +216,8 @@ Claude when a provider is down or busy.
 Stated here rather than buried.
 
 - **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
-  Silicon Mac — where the private mesh does not work yet, so colonies use a loopback port
-  ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
+  Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
+  publishes no macOS build of it.
 - **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
 - **The web UI has no login.** It binds to `127.0.0.1`, checks `Host` and `Origin` headers, and should stay there.
 - **Colony images need glibc.** A Linux Claude Code binary is mounted read-only into the microVM: the

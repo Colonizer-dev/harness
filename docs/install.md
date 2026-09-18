@@ -7,7 +7,8 @@ repository.
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
   or an Apple Silicon Mac. An Intel Mac can't run Colonizer, because microsandbox's libkrun backend is
-  aarch64-only.
+  aarch64-only. On Linux the host also needs glibc 2.28 or newer, which the pinned microsandbox
+  binary requires.
 - **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar`. A build from source also needs
   Node.js 20 or newer and a Rust toolchain of 1.88 or newer. Homebrew's `rust` can lag a long way
   behind, so `rustup` is the safe bet.
@@ -84,9 +85,21 @@ channel and is checked against Anthropic's own manifest. This is needed because 
 microVM and the Mac's own binary is Mach-O. `colonizer-agentd` is built for the guest's architecture.
 
 A colony has been taken end to end on Apple Silicon, from install to an open pull request
-([#36](https://github.com/Colonizer-dev/harness/issues/36)). The one gap is the bundled private mesh.
-Tailscale publishes no macOS `tailscaled` to vendor, so on a Mac colonies are reached on a loopback
-port instead ([#32](https://github.com/Colonizer-dev/harness/issues/32)).
+([#36](https://github.com/Colonizer-dev/harness/issues/36)).
+
+The bundled private mesh comes with a Mac install too. That path is new: the build has been exercised
+from Linux, but it has not yet been taken end to end on Apple hardware. Headscale ships a
+`darwin-arm64` binary, just as it does for Linux. Tailscale publishes no macOS `tailscaled` anywhere
+— its macOS release is a GUI app plus a system extension, with no command-line pair to extract — so
+a build from source compiles
+`tailscale` and `tailscaled` itself. The source is the same v1.102.4 tag the Linux binaries come
+from, pinned and sha256-verified, and the build runs inside a `golang:1-alpine` microVM, the way
+`rtk` is already built. That build takes a minute or so and needs a few GB of Go build and module
+cache under `target/`, on the first install only; a re-run finds the stamp and does nothing. A
+release install instead gets the binaries in the tarball and builds nothing. The host's `tailscaled`
+runs with userspace networking and a SOCKS5 listener, so a Mac needs no TUN device, no root and no
+special entitlements — Go's linker signs the binaries ad hoc, which is all Apple Silicon requires.
+If the three mesh binaries are absent, colonies fall back to a loopback port, as before.
 
 ## Where things live
 
