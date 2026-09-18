@@ -102,6 +102,8 @@ export interface HarnessStatus {
     state?: string;
     harness_ip?: string | null;
     nodes?: number;
+    /** A fact about the platform, not a fault: shown plainly, never as an error. */
+    detail?: string | null;
     error?: string | null;
   } | null;
   /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */

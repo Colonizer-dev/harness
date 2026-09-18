@@ -260,9 +260,11 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let mesh = if !modules.mesh_enabled() {
         json!({"enabled": false, "provider": "none"})
     } else if !app.cfg.assets.as_deref().is_some_and(mesh::binaries_present) {
-        // Not an error the operator can clear: this platform has no mesh binaries to vendor.
+        // Not an error the operator can clear: this platform has no mesh binaries to
+        // vendor. It goes in `detail`, not `error`: anything in `error` is read as a
+        // fault, and this one used to paint every Mac's runtime red.
         json!({"enabled": true, "provider": "headscale", "state": "unavailable",
-               "error": "no mesh binaries for this platform; colonies use a loopback port"})
+               "detail": "colonies use a loopback port on this platform", "error": Value::Null})
     } else {
         match app.mesh().await {
             Ok(mesh) => mesh.status().await,
