@@ -687,13 +687,14 @@ for a person. `judge` means a model answers one the person has not.
 
 | Setting | Default | |
 | --- | --- | --- |
-| `model` | none | A plain id (`fable`, `opus`) goes to Anthropic with the saved Claude credential; `provider/model` goes to a configured model provider. Any model may be chosen; a frontier model judges best |
+| `model` | none | `provider/model` goes to that configured provider with the key saved for it, on the `anthropic` or `openai` wire. A plain id (`fable`, `opus`) resolves to a configured provider whose base URL host is Anthropic's API (`api.anthropic.com`) and spends that provider's key; with none configured the judge does not answer — it logs why and the question waits for a person. The Mothership's own Claude login is never spent on judging. A frontier model judges best |
 | `after_minutes` | 10 | How long a question waits for a person first; `0` answers as soon as it is seen |
 | `max_answers` | 5 | Judged answers per colony, after which it is left for the person |
 | `free_text` | false | Whether a question with no options may be answered |
 
 Every thirty seconds the Mothership looks for colonies in `waiting_for_answer` whose question has
-waited long enough. It sends the model the task and the question with its options, and expects
+waited long enough. It sends the model the task, the question with its options, and the last few
+colony events as context, and expects
 `{"answers": {"<question>": "<label>"}, "reason": "<sentence>"}` back.
 
 The judge chooses **only among the labels the agent offered**, and the reply is checked against them
@@ -702,6 +703,12 @@ JSON, or free text while `free_text` is off — each leaves the question for the
 guessing, and stops this colony being judged again. This is the boundary that keeps a colony's own
 output (which can carry repository content, which can carry instructions) from becoming an
 instruction to the Mothership.
+
+Not reaching an answer is different from refusing one. Any failure short of a refusal — a provider
+that cannot be reached, an HTTP error status (a 401 from a stale key as much as a 5xx), a reply
+that is not JSON at all, no provider configured for the id — is retried on a later tick rather
+than taken as final, so a brief outage does not silence the judge for the colony; only a refusal
+as above, or three consecutive failures, hands the colony back to the person.
 
 An accepted answer travels the ordinary path (§6.2's `answer` command), so the colony cannot tell it
 apart from a person's — except that its `response` says so in words, and the session log records the

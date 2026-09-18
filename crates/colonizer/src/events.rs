@@ -227,7 +227,10 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
         AgentEvent::QuestionAnswered { .. } => {
             *rt.open_question.lock().await = None;
-            rt.activity.lock().await.question_since = None;
+            let mut activity = rt.activity.lock().await;
+            activity.question_since = None;
+            // The question is resolved either way, so an unanswered-provider streak behind it is over.
+            activity.judge_failures = 0;
         }
         AgentEvent::MemoryProposal {
             scope,
