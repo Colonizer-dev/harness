@@ -64,6 +64,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
+| `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
 
 Two settings layers sit next to the modules:
 

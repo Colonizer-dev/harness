@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 8] = [
+pub const KINDS: [&str; 9] = [
     "source",
     "sandbox",
     "mesh",
@@ -23,6 +23,7 @@ pub const KINDS: [&str; 8] = [
     "publish",
     "memory",
     "watchdog",
+    "autonomy",
 ];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
@@ -212,6 +213,25 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30}
             }}),
         )],
+        "autonomy" => vec![
+            p(
+                "off",
+                "Off",
+                "Questions wait for you, however long that takes",
+                json!({"type": "object", "properties": {}}),
+            ),
+            p(
+                "judge",
+                "Judge model",
+                "A model answers a colony's questions when nobody does, choosing only among the options the agent offered",
+                json!({"type": "object", "properties": {
+                    "model": {"type": "string", "title": "Judge model", "description": "Any model: a plain id such as fable or opus goes to Anthropic with your saved Claude login, and provider/model goes to a provider you added. A frontier model judges best — it is deciding for you, on less context than you have, and the difference shows.", "default": ""},
+                    "after_minutes": {"type": "integer", "title": "Answer after minutes unanswered", "description": "How long a question waits for you first. 0 answers as soon as it is asked.", "minimum": 0, "maximum": 1440, "default": 10},
+                    "max_answers": {"type": "integer", "title": "Answers per colony", "description": "A colony that keeps asking is one to look at yourself, so the judge stops here and the watchdog flags it.", "minimum": 1, "maximum": 50, "default": 5},
+                    "free_text": {"type": "boolean", "title": "Answer questions that have no options", "description": "Off by default: a free-text box is where an automatic answer can do the most damage. With it off, those questions wait for you.", "default": false}
+                }}),
+            ),
+        ],
         _ => Vec::new(),
     }
 }

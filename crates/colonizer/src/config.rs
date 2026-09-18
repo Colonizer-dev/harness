@@ -133,6 +133,9 @@ pub struct ModulesConfig {
     pub memory: ModuleChoice,
     #[serde(default = "default_watchdog")]
     pub watchdog: ModuleChoice,
+    /// Absent in a modules.json written before autonomous mode existed, which reads as off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<ModuleChoice>,
 }
 
 fn default_memory() -> ModuleChoice {
@@ -154,6 +157,8 @@ impl Default for ModulesConfig {
             publish: ModuleChoice::new("github-pr"),
             memory: default_memory(),
             watchdog: default_watchdog(),
+            // Off until it is switched on: a judge answering for you is a decision, not a default.
+            autonomy: None,
         }
     }
 }
@@ -186,6 +191,7 @@ impl ModulesConfig {
             "publish" => Some(&self.publish),
             "memory" => Some(&self.memory),
             "watchdog" => Some(&self.watchdog),
+            "autonomy" => self.autonomy.as_ref(),
             _ => None,
         }
     }
@@ -200,6 +206,9 @@ impl ModulesConfig {
             "publish" => Some(&mut self.publish),
             "memory" => Some(&mut self.memory),
             "watchdog" => Some(&mut self.watchdog),
+            // Absent until it is configured, so the entry is created on first save rather than
+            // written into every modules.json that never asked for it.
+            "autonomy" => Some(self.autonomy.get_or_insert_with(|| ModuleChoice::new("off"))),
             _ => None,
         }
     }

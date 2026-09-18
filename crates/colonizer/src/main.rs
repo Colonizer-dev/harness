@@ -7,6 +7,7 @@
 //! credential is injected by microsandbox's host-side TLS proxy for the API host only, and model
 //! provider keys are added by the mothership's provider gateway.
 
+mod autonomy;
 mod claude_login;
 mod config;
 mod events;
@@ -722,6 +723,7 @@ async fn serve() -> Result<()> {
     let pr_watch = app.clone();
     tokio::spawn(async move { publish::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
+    tokio::spawn(autonomy::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
     tokio::spawn(version::run(app.clone()));
     tokio::spawn(gateway::flush_loop(app.clone()));
