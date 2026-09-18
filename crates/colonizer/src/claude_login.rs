@@ -163,11 +163,11 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
                 let Some(session) = guard.as_mut().filter(|s| s.id == id) else {
                     break Err("superseded".into());
                 };
-                if session.view.url.is_none() {
-                    if let Some(url) = find_sign_in_url(&text) {
-                        session.view.url = Some(url);
-                        session.view.state = "awaiting_code";
-                    }
+                if session.view.url.is_none()
+                    && let Some(url) = find_sign_in_url(&text)
+                {
+                    session.view.url = Some(url);
+                    session.view.state = "awaiting_code";
                 }
             }
             _ = &mut cancel => break Err("cancelled".into()),
@@ -242,7 +242,7 @@ fn strip_ansi(input: &str) -> String {
             '\u{1b}' => match chars.next() {
                 Some('[') => {
                     let mut params = String::new();
-                    while let Some(p) = chars.next() {
+                    for p in chars.by_ref() {
                         if ('\u{40}'..='\u{7e}').contains(&p) {
                             if p == 'C' {
                                 let n = params.parse::<usize>().unwrap_or(1).min(200);
@@ -254,7 +254,7 @@ fn strip_ansi(input: &str) -> String {
                     }
                 }
                 Some(']') => {
-                    while let Some(p) = chars.next() {
+                    for p in chars.by_ref() {
                         if p == '\u{7}' {
                             break;
                         }

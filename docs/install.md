@@ -157,7 +157,11 @@ Every setting is listed under [Configuration](https://github.com/Colonizer-dev/h
 
 ## Updating
 
-For a release, run the install command again. For a build from source:
+A running mothership can update itself — Settings offers the newer release, installs it and restarts into
+it without losing colonies, and `colonizer update` does the same from a terminal. That, and the version
+check behind it, is [docs/updates.md](updates.md).
+
+By hand: for a release, run the install command again. For a build from source:
 
 ```sh
 git pull

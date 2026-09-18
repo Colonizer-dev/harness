@@ -338,10 +338,10 @@ taildrop:
             return Ok(());
         }
         for node in self.nodes().await? {
-            if node["given_name"] == hostname {
-                if let Some(id) = as_u64(&node["id"]) {
-                    let _ = exec(self.headscale().args(["nodes", "delete", "--identifier", &id.to_string(), "--force"])).await;
-                }
+            if node["given_name"] == hostname
+                && let Some(id) = as_u64(&node["id"])
+            {
+                let _ = exec(self.headscale().args(["nodes", "delete", "--identifier", &id.to_string(), "--force"])).await;
             }
         }
         Ok(())
