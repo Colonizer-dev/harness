@@ -11,15 +11,32 @@
 # with one rename, so an install that stops halfway leaves either the whole old app or the whole new
 # one. Settings (~/.config/colonizer) and colonies (~/.local/share/colonizer) are never touched.
 #
+# Checksums travel with the release they check, so they catch a corrupted download but not a release
+# rewritten in place. When `gh` is installed the installer therefore also verifies SHA256SUMS against
+# the build attestation the release workflow signed with Sigstore and logged publicly — something a
+# rewritten release cannot produce — and a failed check aborts the install. When the check cannot
+# reach a verdict it is skipped with a note instead: no `gh`; a gh too old for `gh attestation
+# verify`; COLONIZER_RELEASE_URL pointing away from the official release; or a release published
+# before the workflow began signing them, which carries no attestation to find. Skips become fatal
+# under COLONIZER_REQUIRE_ATTESTATION=1.
+#
 # Anthropic's code is not in a release, because it is not ours to redistribute, so two things come from
 # Anthropic's own channels instead, each checked before it is used:
 # - the Claude Agent SDK the agent module runs, from the npm registry, against the checksum the release
 #   recorded from package-lock.json (fetch-at-install);
-# - on a Mac, the Linux build of Claude Code that colonies run, against Anthropic's manifest. A colony is
-#   a Linux microVM, so the Mac's own binary cannot run in it.
+# - on a Mac, the Linux build of Claude Code that colonies run: the build pinned by checksum in the
+#   release (claude-code.lock, which scripts/update-runtime-pins.mjs refreshes by pull request), not
+#   whatever Anthropic's `stable` channel points at that day. A colony is a Linux microVM, so the
+#   Mac's own binary cannot run in it.
 #
 #   COLONIZER_VERSION=v0.1.0   install that release instead of the latest
 #   COLONIZER_APP=<dir>        install the app there instead of ~/.local/share/colonizer/app (the symlink)
+#   COLONIZER_RELEASE_URL=<url>
+#                              fetch the app from <url>/<file> instead of the GitHub release; the
+#                              build attestation belongs to the official release, so it is skipped
+#   COLONIZER_REQUIRE_ATTESTATION=1
+#                              make a provenance check that comes back without a verdict a
+#                              failure, not a note
 #   --pull-image               also download the default colony image now (several gigabytes), so the
 #                              first colony boots instead of waiting on it
 #
@@ -29,6 +46,7 @@ set -eu
 main() {
   repo="Colonizer-dev/harness"
   docs="https://colonizer.dev/docs/install"
+  release_workflow="$repo/.github/workflows/release.yml"
   pull_image=0
   for arg in "$@"; do
     case "$arg" in
@@ -75,6 +93,7 @@ main() {
   expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
   [ -n "$expected" ] || fail "$archive is not listed in the release's SHA256SUMS"
   [ "$(sha256_of "$tmp/$archive")" = "$expected" ] || fail "checksum mismatch for $archive; nothing was installed"
+  verify_provenance "$tmp/SHA256SUMS"
 
   mkdir -p "$tmp/unpack"
   tar -xzf "$tmp/$archive" -C "$tmp/unpack"
@@ -85,7 +104,7 @@ main() {
     if [ -f "$record" ]; then fetch_at_install "$(dirname "$record")"; fi
   done
   if [ "$platform" = darwin-arm64 ]; then
-    guest_claude "$tmp/unpack/colonizer/bin/claude-guest" "$app/bin/claude-guest"
+    guest_claude "$tmp/unpack/colonizer/bin/claude-guest" "$app/bin/claude-guest" "$tmp/unpack/colonizer/claude-code.lock"
   fi
 
   # $app is a symlink to the directory this version lives in, so installing it is a single rename:
@@ -131,7 +150,11 @@ main() {
   say "installed Colonizer $installed to $app"
 
   if [ "$pull_image" = 1 ]; then
-    image=${COLONIZER_IMAGE:-node:24-bookworm}
+    # The image the release was tested with, pulled by digest so the bits cannot drift under it
+    # (images.lock rides in the app; the reference is <url>@sha256:<sha256>). A missing lock or row
+    # falls back to the bare tag: an install that is otherwise done beats a failed one.
+    pinned=$(awk '$1 !~ /^#/ && $6 == "node:24-bookworm" && $4 == "image" { print $6 "@sha256:" $5; exit }' "$app/images.lock" 2>/dev/null)
+    image=${COLONIZER_IMAGE:-${pinned:-node:24-bookworm}}
     say "pulling colony image $image"
     "$app/vendor/microsandbox/bin/msb" pull "$image"
   fi
@@ -191,6 +214,71 @@ relink() {
     { rm -f "$2.new"; ln -sfn "$1" "$2"; }
 }
 
+# The checksums say the archive matches SHA256SUMS, and SHA256SUMS comes from the same release as the
+# archive, so together they only rule out a corrupted download: whoever can rewrite the release assets
+# can rewrite both. The release workflow also signs SHA256SUMS itself with Sigstore and logs that in a
+# public transparency log, which asset access alone cannot forge, so verifying the one checksums file
+# puts every digest the check above compared against under the attestation — one gh round trip instead
+# of one per artifact.
+#
+# Plain sh cannot verify a Sigstore bundle, so this needs gh, and when the check cannot reach a
+# verdict it is skipped with a note and the checksum-verified install goes on: gh missing, a gh from
+# before `gh attestation verify` existed, a COLONIZER_RELEASE_URL download, which the official repo's
+# attestation says nothing about, or a release that carries no attestation at all — every release
+# published before this check existed, which gh answers with "no attestations found".
+# COLONIZER_REQUIRE_ATTESTATION=1 turns those skips into failures. A check that ran and found
+# something wrong is a different thing and is fatal whatever the variable says: gh answered, and its
+# answer is that these checksums are not the ones the workflow signed. The downloads only just
+# succeeded over this network, so any other gh failure here is read as that answer, not as the
+# network being down.
+#
+# "No attestations found" is a skip, not that failure: it means gh found no provenance to check, not
+# that the provenance is wrong — the state of every release published before this step existed. Nor
+# is it a state an attacker who swaps a release asset can reach on purpose. The lookup runs on the
+# file's digest in the public transparency log, so a swapped file digests differently and its lookup
+# legitimately finds nothing, landing in this same skip; that is harmless only because the checksum
+# check is mandatory and runs first, so a file that does not match the release's SHA256SUMS is
+# rejected before verify_provenance is ever called — nothing gets here except checksum-verified
+# files. Matching gh by wording is the fragile part: a future gh that rewords the message no longer
+# matches, the install fails again, and that is the right direction to break in — far rarer than
+# certainly failing every gh user today.
+verify_provenance() {
+  file=$1
+
+  if [ -n "${COLONIZER_RELEASE_URL:-}" ]; then
+    why="the download comes from COLONIZER_RELEASE_URL, not the $repo release"
+  elif ! command -v gh >/dev/null 2>&1; then
+    why="gh is not installed (the checksum check above still applies)"
+  elif ! gh_help=$(gh attestation verify --help 2>&1); then
+    why="this gh predates 'gh attestation verify'"
+  fi
+
+  if [ -z "${why:-}" ]; then
+    # --repo ties the signature to this repository; where the gh in use also knows --signer-workflow,
+    # pin the workflow, so anything else the repository can sign with does not count.
+    set -- gh attestation verify "$file" --repo "$repo"
+    case "$gh_help" in
+      *--signer-workflow*) set -- "$@" --signer-workflow "$release_workflow" ;;
+    esac
+    if out=$("$@" 2>&1); then
+      say "provenance verified: $(basename "$file") is what $release_workflow signed"
+      return
+    elif printf '%s\n' "$out" | grep -qi 'no attestations'; then
+      # An unattested release, not a wrong one — see the comment above the function for why this is
+      # not a downgrade an attacker can steer a tampered file into.
+      why="$(basename "$file") carries no build provenance; that is expected for releases published before the release workflow began signing, and would mean something was wrong on a current one"
+    else
+      printf '%s\n' "$out" >&2
+      fail "the build attestation over $(basename "$file") does not verify: gh checked, and it is wrong — these checksums are not what $release_workflow signed; nothing was installed"
+    fi
+  fi
+
+  if [ "${COLONIZER_REQUIRE_ATTESTATION:-0}" = 1 ]; then
+    fail "provenance could not be checked: $why — COLONIZER_REQUIRE_ATTESTATION=1 installs only attested bits; nothing was installed"
+  fi
+  say "provenance not checked: $why"
+}
+
 # Packages a module's release left out (scripts/record-fetch-at-install.mjs): each line of fetch-at-install
 # is `<path> <tarball url> <sha256>`, and the tarball's package/ directory becomes <module>/<path>.
 fetch_at_install() {
@@ -211,23 +299,31 @@ fetch_at_install() {
 }
 
 # The Linux build of Claude Code for the guest, as scripts/fetch-agent-binary.sh fetches it for a source
-# build: the `stable` channel, checked against the checksum in Anthropic's manifest. The copy from the
-# previous install is reused when it is already that build. plutil reads the manifest, so a prebuilt
-# install needs no Node.js.
+# build: the build pinned in the claude-code.lock that shipped inside this release, so the release and
+# not Anthropic's `stable` channel decides what a colony runs. The copy from the previous install is
+# reused when it is already that pinned build. The lock is plain columns, so this needs no jq — and
+# neither Node.js nor plutil, which the manifest it replaced needed one of.
 guest_claude() {
-  out=$1 previous=$2
-  cc="https://downloads.claude.ai/claude-code-releases"
-  cc_version=$(curl -fsSL --retry 3 "$cc/stable") || fail "could not read Claude Code's stable channel"
-  case "$cc_version" in [0-9]*) ;; *) fail "unexpected Claude Code version: $cc_version" ;; esac
-  fetch "$cc/$cc_version/manifest.json" "$tmp/claude-manifest.json"
-  cc_sha=$(plutil -extract "platforms.linux-arm64.checksum" raw -o - "$tmp/claude-manifest.json" 2>/dev/null) ||
-    fail "no linux-arm64 checksum in the Claude Code $cc_version manifest"
+  out=$1 previous=$2 lock=$3
+  [ -f "$lock" ] || fail "the release has no $lock; nothing was installed"
+  cc_version="" cc_sha="" cc_url=""
+  while read -r lock_name lock_version lock_plat lock_kind lock_sha lock_url; do
+    case "$lock_name" in ''|'#'*) continue ;; esac
+    [ "$lock_plat" = "linux-arm64" ] || continue
+    [ "$lock_kind" = "agent" ] || continue
+    # A row with too few columns matches here but pins no url; skip it so a
+    # well-formed row for the same platform further down still gets found.
+    [ -n "$lock_url" ] || continue
+    cc_version=$lock_version cc_sha=$lock_sha cc_url=$lock_url
+    break
+  done < "$lock"
+  [ -n "$cc_url" ] || fail "no linux-arm64 Claude Code build pinned in $lock"
   if [ -f "$previous" ] && [ "$(sha256_of "$previous")" = "$cc_sha" ]; then
     cp "$previous" "$out"
     say "Claude Code $cc_version for colonies is already here"
   else
     say "downloading Claude Code $cc_version for colonies (linux-arm64)"
-    fetch "$cc/$cc_version/linux-arm64/claude" "$out"
+    fetch "$cc_url" "$out"
     [ "$(sha256_of "$out")" = "$cc_sha" ] || fail "checksum mismatch for Claude Code $cc_version; nothing was installed"
   fi
   chmod 755 "$out"

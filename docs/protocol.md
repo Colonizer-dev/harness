@@ -197,13 +197,16 @@ Module `schema` is a JSON Schema subset (also used for `settings` in agent `modu
 {
   "type": "object",
   "properties": {
-    "image":  { "type": "string",  "title": "Image", "description": "glibc-based OCI image", "default": "node:24-bookworm" },
+    "image":  { "type": "string",  "title": "Image", "description": "glibc-based OCI image, pinned by digest", "default": "node:24-bookworm@sha256:6dac556d…" },
     "cpus":   { "type": "integer", "title": "vCPUs", "minimum": 1, "maximum": 64, "default": 4 },
     "model":  { "type": "string",  "title": "Model", "enum": ["", "opus", "sonnet", "haiku"], "default": "" },
     "draft":  { "type": "boolean", "title": "Open PRs as drafts", "default": false }
   }
 }
 ```
+
+Digests in these examples are cut short on purpose: the exact hex a release boots lives in
+`crates/colonizer/images.lock`, and quoting a full one here would only rot the next time a pin bumps.
 
 Supported property keys: `type` (`string` | `integer` | `number` | `boolean`), `title`, `description`,
 `default`, `enum` (renders a select), `minimum`, `maximum`. `settings` holds the current values;
@@ -308,6 +311,17 @@ runs it daily, stages the result with `VENDOR_KINDS=plugin scripts/fetch-vendor.
 stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request — or, while the repository
 doesn't let GitHub Actions open pull requests, keeps an issue open with the same description and a link to
 open it. It never merges.
+
+**Keeping the runtime pins current.** The same model covers the two runtime locks:
+`crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest —
+one pin serves both linux/amd64 and linux/arm64 colonies, and the lock is compiled into the mothership —
+and `vendor/claude-code.lock`, which pins the Linux Claude Code build colonies run by version and sha256.
+`scripts/update-runtime-pins.mjs` checks both upstreams, the registry's manifest API for the images and
+Anthropic's `stable` channel for Claude Code, and stages the newly pinned Claude Code build through
+`scripts/fetch-agent-binary.sh`, so an update that fails the checksum check a real install does never
+becomes a proposal. `.github/workflows/runtime-pin-updates.yml` runs it daily, pushes `runtime/pin-updates`,
+and opens a pull request — or keeps an issue open with a link, the way the vendored plugins do. It never
+merges: a pin bump changes what every release runs.
 
 **Skillsets are switches, all off by default.** Settings shows the `claude-code` module's `plugins`
 setting (schema `"format": "plugin-dirs"`) as one switch per plugin directory from `GET /api/plugins`,
@@ -458,14 +472,16 @@ it.
 
 Downloads the configured colony image (after the stack preset) into microsandbox's cache, so a launch
 boots instead of waiting on a registry. Settings calls `POST` when the sandbox module is saved, which
-is the moment a stack is chosen.
+is the moment a stack is chosen. The image is the preset's reference pinned by digest —
+`crates/colonizer/images.lock`, compiled into the mothership — so the cache ends up with the exact
+bytes the release was tested with. An image set by hand with no lock row boots as written.
 
 `POST` returns at once — a cold pull of `node:24-bookworm` measured 108 s, too long to hold a request
 open — and the download runs in the background. Calling it again while the same image is pulling
 returns the running pull rather than starting a second. `GET` returns the most recent status:
 
 ```json
-{"image": "python:3.13-bookworm", "state": "pulling", "started_at": "…", "finished_at": null, "error": null}
+{"image": "python:3.13-bookworm@sha256:933b46a0…", "state": "pulling", "started_at": "…", "finished_at": null, "error": null}
 ```
 
 `state` is `idle`, `cached` (already local, nothing done), `pulling`, `done` or `failed`.

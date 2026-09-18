@@ -52,7 +52,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | Kind | Providers (v1) | Responsibility |
 | --- | --- | --- |
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
-| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image and machine size; explicit settings override it |
+| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
@@ -160,6 +160,10 @@ vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified
 vendor/derpmap.yaml           DERP relay map snapshot (committed)
 modules/agents/claude-code/   runner + production node_modules
 web/                          built UI
+claude-code.lock              guest Claude Code pin: version + sha256 per platform, read at install
+images.lock                   each preset's colony image pinned by OCI digest (also compiled in)
 ```
 
-Nothing is downloaded at runtime.
+Two things arrive lazily rather than with the install: the colony image, pulled by digest the first
+time it is needed (`--pull-image` does it at install time), and the Headroom bundle when Headroom is
+switched on. Each is checked against a pin before use.

@@ -320,7 +320,8 @@ mod tests {
     #[test]
     fn the_preset_fills_in_what_was_never_set() {
         let merged = with_preset(&choice(json!({})), &crate::presets::defaults("python"));
-        assert_eq!(merged.settings["image"], "python:3.13-bookworm");
+        let image = merged.settings["image"].as_str().unwrap();
+        assert!(image.starts_with("python:3.13-bookworm@sha256:"), "{image} is not the pinned python tag");
         assert_eq!(merged.settings["memory"], "8G");
     }
 
