@@ -1,0 +1,128 @@
+# Watches the supply chain: the dependency vulnerability checks (RustSec's cargo audit for the Cargo
+# workspace, npm audit for each of the npm projects) and a CycloneDX SBOM for each of them, uploaded
+# as a build artifact so a release can be traced to the exact set of dependencies it was built from.
+#
+# The weekly schedule exists for the case where nothing here changes: a new advisory can turn a
+# previously-green tree red without a single commit, and only a scheduled run notices that.
+#
+# What it proves, and what it doesn't: "audit clean" means nothing known is flagged on the day the
+# job runs, against the advisory databases as they are then. An SBOM is a record of what went in,
+# not a guarantee that any of it is safe. These SBOMs cover the Cargo workspace and the npm
+# projects' lockfiles only — not what the app fetches at install or run time (Claude Code from
+# Anthropic's channels, the vendored plugins, the Headroom bundle's pip packages), which the repo
+# pins and checks in its own ways elsewhere.
+name: Supply chain
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Wednesdays 04:37 UTC: off-peak, and deliberately not a round time.
+    - cron: "37 4 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Two jobs, one per concern. Splitting them keeps the SBOM artifact coming even on a red
+  # vulnerability day — a release stays traceable while the fix lands — and each job compiles only
+  # the one cargo tool it needs. Both tools are installed from crates.io with --locked rather than
+  # through a third-party action: a supply-chain workflow that adds another party to trust would be
+  # its own finding. Each install builds from source and costs the job a few minutes; it isn't
+  # cached, which would trade that time for another pinned action to maintain.
+  vulnerabilities:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      # One root Cargo.lock covers every workspace member. Unmaintained-crate warnings are printed
+      # but do not fail the job (cargo audit's default); promoting them to a gate is a decision to
+      # make deliberately (--deny warnings), not one to slip in here.
+      - name: Audit the Cargo workspace
+        run: cargo audit
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # npm audit reads the lockfile; nothing needs installing first. All three npm projects
+      # commit their lockfile and declare a version, so each audit runs over exactly the tree
+      # that was reviewed.
+      - name: Audit web
+        run: cd web && npm audit --audit-level=high
+
+      - name: Audit the Claude Code module
+        run: cd modules/agents/claude-code && npm audit --audit-level=high
+
+      - name: Audit the telemetry service
+        run: cd services/telemetry && npm audit --audit-level=high
+
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
+      # --all matters: without it the SBOM records only top-level dependencies, not the tree.
+      - name: SBOM for the Cargo workspace
+        run: cargo cyclonedx --spec-version 1.5 --all --format json
+
+      # cargo cyclonedx writes one <package>.cdx.json per workspace member, next to each
+      # Cargo.toml — that is, inside the repo tree. Collect them into one directory for the
+      # artifact rather than leaving strays behind in the checkout.
+      - name: Collect the Rust SBOMs
+        run: |
+          mkdir sbom
+          mv crates/*/*.cdx.json sbom/
+
+      # Plain `npm sbom --package-lock-only` fails in web/: npm's tree validation trips over the
+      # bundled dependencies of @tailwindcss/oxide-wasm32-wasi (an optional wasm32 package) and
+      # calls them missing from the lockfile — which they legitimately are, because they ship
+      # inside its tarball. A real install sidesteps the bug and records more of what actually
+      # ships (the platform native binaries; 218 components against 212), and npm ci doubles as a
+      # check that the lockfile still matches package.json. --ignore-scripts: an audit never runs
+      # install hooks.
+      - name: SBOM for web
+        run: |
+          cd web
+          npm ci --ignore-scripts
+          npm sbom --sbom-format cyclonedx > ../sbom/web.cdx.json
+
+      - name: SBOM for the Claude Code module
+        run: cd modules/agents/claude-code && npm sbom --sbom-format cyclonedx --package-lock-only > ../../../sbom/claude-code.cdx.json
+
+      # Telemetry declares zero dependencies, so the lockfile-only recipe covers it completely —
+      # the SBOM is the service itself and nothing else — and web's install-first workaround for
+      # npm's bundled-dependency bug has nothing here to work around.
+      - name: SBOM for the telemetry service
+        run: cd services/telemetry && npm sbom --sbom-format cyclonedx --package-lock-only > ../../sbom/telemetry.cdx.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 7

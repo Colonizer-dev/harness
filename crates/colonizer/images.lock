@@ -1,0 +1,14 @@
+# The colony images, pinned by OCI digest so every colony built from a given release boots exactly the bytes
+# that release was tested with. The digest is the multi-arch OCI index digest, so one pin serves both
+# linux/amd64 and linux/arm64 colonies.
+#
+# Compiled into the mothership, so it lives in this crate and is published with it. Same columns as
+# vendor/vendor.lock: name, version, platform, kind, sha256, url. `name` is the preset id from src/presets.rs
+# (go, not golang — the repository name lives in the reference in the url column), platform is `any` because
+# the index covers both architectures, and `url` is the image reference the digest pins: a colony boots
+# `<url>@sha256:<sha256>`. scripts/update-runtime-pins.mjs proposes new digests by pull request, the way the
+# vendored plugins are updated.
+node      24-bookworm   any  image  6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0  node:24-bookworm
+python    3.13-bookworm any  image  933b46a028fd786c9c3d426ebabc237e29a15912231ea8de576e95f0e4f41a4c  python:3.13-bookworm
+rust      1-bookworm    any  image  9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa  rust:1-bookworm
+go        1-bookworm    any  image  648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b  golang:1-bookworm

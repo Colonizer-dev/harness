@@ -52,11 +52,11 @@ editable in Settings → Modules). A module kind has one active provider:
 | Kind | Providers (v1) | Responsibility |
 | --- | --- | --- |
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
-| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image and machine size; explicit settings override it |
+| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
-| `publish` | `github-pr` | Commit on the host, push, open the pull request |
+| `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 
@@ -89,7 +89,7 @@ stateDiagram-v2
   Interact --> Publish: autopilot, or "Create PR"
   Interact --> Stopped: microVM gone
   Stopped --> Boot: Resume, same worktree
-  Publish --> [*]: VM removed, then host commits and pushes
+  Publish --> [*]: VM removed, then the host publishes the branch
 ```
 
 0. **Queued** – a colony launched past the parallel limit (global, or the org's own) is created
@@ -109,9 +109,13 @@ stateDiagram-v2
    sends follow-ups, and opens terminals (`/v1/pty`) — all over the mesh.
 5. **Publish** – "Create PR", or autopilot (the `publish` module's `autopilot` setting, on by default)
    when a turn ends without an error or open question and the agent wrote or updated `pr.md` during
-   it: agentd shuts the runner down, the VM is removed, and the host commits (co-authored by Colonizer),
-   pushes the colony's own `colonizer/…` branch and opens the PR with the hardened publish step. It
-   refuses to push anything else, checked before the VM is removed. A turn that ends with an error
+   it: agentd shuts the runner down, the VM is removed, and the host publishes with the hardened
+   publish step — committing (co-authored by Colonizer) only what is uncommitted, pushing the colony's
+   own `colonizer/…` branch only when origin is behind it, and reusing a pull request that is already
+   open for the branch instead of opening a second one. It refuses to push anything else, checked
+   before the VM is removed. A publish that fails part-way leaves the colony `failed`, and it can be
+   published again from there — the kept worktree and the remote are enough, no new microVM — with the
+   remaining steps picked up where the attempt stopped. A turn that ends with an error
    (not an interrupt) holds autopilot and flags the colony (`autopilot_held`). The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
@@ -159,6 +163,10 @@ vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified
 vendor/derpmap.yaml           DERP relay map snapshot (committed)
 modules/agents/claude-code/   runner + production node_modules
 web/                          built UI
+claude-code.lock              guest Claude Code pin: version + sha256 per platform, read at install
+images.lock                   each preset's colony image pinned by OCI digest (also compiled in)
 ```
 
-Nothing is downloaded at runtime.
+Two things arrive lazily rather than with the install: the colony image, pulled by digest the first
+time it is needed (`--pull-image` does it at install time), and the Headroom bundle when Headroom is
+switched on. Each is checked against a pin before use.

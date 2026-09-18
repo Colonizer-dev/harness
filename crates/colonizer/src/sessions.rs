@@ -11,7 +11,10 @@ use crate::{
     modules::{schema_for, AgentModule},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
-    util::{random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
+    util::{
+        append_line, faults::{self, Op}, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic,
+        write_private,
+    },
     watchdog::Activity,
     ApiResult, App, Shared, CLAUDE_API_HOST,
 };
@@ -30,13 +33,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -61,6 +64,10 @@ pub enum SessionStatus {
     Idle,
     Publishing,
     PrOpened,
+    /// The pull request was merged; nothing left to watch.
+    Merged,
+    /// The pull request was closed without merging; GitHub lets it be reopened, so it is still watched.
+    Closed,
     NoChanges,
     Stopped,
     Failed,
@@ -71,6 +78,20 @@ impl SessionStatus {
     pub fn is_live(self) -> bool {
         matches!(self, Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle)
     }
+}
+
+/// How far the last publish got, persisted on the session so a retry continues from there instead of
+/// starting over (and so browsers can show the progress). The publish itself re-derives the truth from
+/// git and the remote; this is the durable record of what was confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishStage {
+    /// The worktree's changes are committed on the colony's branch.
+    Committed,
+    /// The branch is on origin.
+    Pushed,
+    /// The pull request is open.
+    PrOpened,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,6 +125,9 @@ pub struct Session {
     #[serde(default)]
     pub autopilot: bool,
     pub pr_url: Option<String>,
+    /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_stage: Option<PublishStage>,
     pub error: Option<String>,
     pub cost_usd: Option<f64>,
     /// Tokens per model from the last turn end, cumulative: `{model: {input_tokens, output_tokens, cache_read_tokens,
@@ -122,6 +146,10 @@ pub struct Session {
     /// Set when a colony finishes booting, and replaced on resume.
     #[serde(default)]
     pub boot_timing: Option<Value>,
+    /// The app directory this colony's mounts came from. An update keeps that
+    /// directory until no live colony still names it (`update::sweep_slots`).
+    #[serde(default)]
+    pub app_slot: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -241,7 +269,13 @@ impl App {
             session.updated_at = Utc::now();
             (session.clone(), result)
         };
-        self.persist_sessions().await;
+        if let Err(e) = self.persist_sessions().await {
+            // The change in memory is real, and the broadcast below tells the truth about it —
+            // hiding it would make the UI more wrong, not less. But the saved list now lags, so
+            // the gap is recorded loudly, in the app alert and in the colony's own log.
+            self.storage_failed("save the session list", &e).await;
+            self.session_log(id, "error", format!("could not save the session list: {e:#}")).await;
+        }
         let rt = self.runtimes.lock().await.get(id).cloned();
         if let Some(rt) = rt {
             let view = with_activity(self, session.clone()).await;
@@ -250,16 +284,10 @@ impl App {
         Some((session, result))
     }
 
-    async fn persist_sessions(&self) {
+    async fn persist_sessions(&self) -> Result<()> {
         let _guard = self.session_persist.lock().await;
-        let data = serde_json::to_vec_pretty(&*self.sessions.read().await);
-        if let Ok(data) = data {
-            let path = self.sessions_file();
-            let tmp = path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, data).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, path).await;
-            }
-        }
+        let data = serde_json::to_vec_pretty(&*self.sessions.read().await).context("could not serialize the session list")?;
+        write_atomic(&self.sessions_file(), &data).await
     }
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {
@@ -270,9 +298,16 @@ impl App {
     pub async fn session_log(&self, id: &str, level: &str, message: String) {
         let entry = json!({"type": "harness_log", "level": level, "message": message, "ts": Utc::now()});
         let rt = self.runtime(id).await;
-        {
+        let persisted = {
             let _guard = rt.file_lock.lock().await;
-            append_line(&rt.logs_path, &entry.to_string()).await;
+            append_line(&rt.logs_path, &entry.to_string()).await.err()
+        };
+        if let Some(e) = persisted {
+            // Recorded here, not by calling session_log again — that would recurse — and outside
+            // the guard, as in handle_agent_event. The frame still reaches every open browser
+            // below; the console and the app alert keep the gap.
+            eprintln!("sessions: could not append to {}: {e:#}", rt.logs_path.display());
+            self.storage_failed("append to the harness log", &e).await;
         }
         let mut logs = rt.logs.lock().await;
         logs.push_back(entry.clone());
@@ -284,12 +319,6 @@ impl App {
 
     fn logger(self: &Arc<Self>, id: &str) -> SessionLogger {
         SessionLogger { app: self.clone(), id: id.to_string() }
-    }
-}
-
-async fn append_line(path: &std::path::Path, line: &str) {
-    if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open(path).await {
-        let _ = f.write_all(format!("{line}\n").as_bytes()).await;
     }
 }
 
@@ -417,6 +446,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         agent: agent.id.clone(),
         autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app, &modules)),
         pr_url: None,
+        publish_stage: None,
         error: None,
         cost_usd: None,
         model_usage: None,
@@ -424,6 +454,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         attention: None,
         last_activity_at: None,
         boot_timing: None,
+        app_slot: None,
         created_at: now,
         updated_at: now,
     };
@@ -431,7 +462,26 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     tokio::fs::create_dir_all(dir.join("vm")).await?;
     tokio::fs::create_dir_all(dir.join("out")).await?;
     app.sessions.write().await.push(session.clone());
-    app.persist_sessions().await;
+    if let Err(e) = app.persist_sessions().await {
+        // Nothing has been reported as done yet — no boot, no log line, no reply — so the record
+        // comes back out rather than leaving a colony only memory has heard of, and the caller
+        // hears that the write never happened. The directories created above go with it; the
+        // removal is best effort, and a failure there is reported, not swallowed.
+        app.sessions.write().await.retain(|s| s.id != id);
+        let e = e.context("could not save the new colony; nothing was created");
+        app.storage_failed("save the session list", &e).await;
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                eprintln!(
+                    "sessions: could not remove the unused colony directory {}: {e}",
+                    dir.display()
+                )
+            }
+        }
+        return Err(e.into());
+    }
     app.runtime(&id).await;
     if queued {
         let waiting = existing.iter().filter(|s| s.status == SessionStatus::Queued).count();
@@ -478,14 +528,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let issue = match s.issue {
         Some(number) => {
             log.info(format!("fetching issue {}#{number}", s.repo)).await;
-            Some(github::fetch_issue(app, &s.repo, number).await?)
+            match github::fetch_issue(app, &s.repo, number).await {
+                Ok(issue) => Some(issue),
+                Err(e) => return Err(github::access_error(app, &s.repo, e).await),
+            }
         }
         None => None,
     };
     // A resumed colony keeps the base it started from; its branch already exists on top of it.
     let base = match s.base.clone().filter(|_| resume) {
         Some(base) => base,
-        None => github::default_branch(app, &s.repo).await?,
+        None => match github::default_branch(app, &s.repo).await {
+            Ok(base) => base,
+            Err(e) => return Err(github::access_error(app, &s.repo, e).await),
+        },
     };
     let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
     app.update_session(id, |x| {
@@ -606,6 +662,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // this is the second line of defence, not the first.
         env.push(("ECC_HOOKS_ENABLED".into(), "false".into()));
         log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
+    }
+    if let Some(assets) = app.cfg.assets.as_ref() {
+        // Remembered whether or not plugins are on: an update must not remove
+        // the directory any of this colony's mounts resolved through.
+        let slot = assets.display().to_string();
+        app.update_session(id, |x| x.app_slot = Some(slot)).await;
     }
 
     // Token savings (docs/protocol.md): what a switched-on setting needs inside the colony. When the
@@ -904,13 +966,27 @@ async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut commands: mps
 async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
     let Ok(event) = serde_json::from_str::<Value>(line) else { return };
     let Some(seq) = event["seq"].as_u64() else { return };
-    {
+    let persisted = {
         let _guard = rt.file_lock.lock().await;
         if seq <= rt.last_seq.load(Ordering::SeqCst) {
             return; // replayed after a reconnect
         }
-        append_line(&rt.events_path, line).await;
-        rt.last_seq.store(seq, Ordering::SeqCst);
+        match append_line(&rt.events_path, line).await {
+            Ok(()) => {
+                rt.last_seq.store(seq, Ordering::SeqCst);
+                None
+            }
+            Err(e) => Some(e),
+        }
+    };
+    if let Some(e) = persisted {
+        // The event still reaches every browser below, but the evidence on disk now has a gap, and
+        // a gap in the event log must not be silent. `last_seq` stays put, so if the reconnect's
+        // re-fetch of this seq arrives before anything else is appended, the append gets another
+        // chance — but once a later event succeeds, `last_seq` jumps past the lost one and the gap
+        // is permanent. This is a second chance, not a retry that is guaranteed to happen.
+        app.storage_failed("append to the colony's event log", &e).await;
+        app.session_log(id, "error", format!("could not append to {}: {e:#}", rt.events_path.display())).await;
     }
     rt.broadcast(Some(seq), line.to_string());
 
@@ -1116,7 +1192,13 @@ async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, event: Value) {
     };
     // Only a filed or matched finding counts toward the cap; a GitHub error should not use one up.
     if !entry.is_null() {
-        append_line(&record, &entry.to_string()).await;
+        let recorded = append_line(&record, &entry.to_string()).await;
+        if let Err(e) = recorded {
+            // The finding was still filed on GitHub (that happened above); what failed is the
+            // colony's own record of it, so say so instead of letting the gap pass silently.
+            app.storage_failed("append to the colony's findings log", &e).await;
+            app.session_log(&id, "error", format!("could not record the finding in {}: {e:#}", record.display())).await;
+        }
     }
     app.session_log(&id, level, message).await;
 }
@@ -1137,6 +1219,12 @@ async fn teardown_vm(app: &Shared, s: &Session) {
     }
 }
 
+/// Persists a publish checkpoint (and broadcasts it to browsers), so a retry — even after a harness
+/// restart — knows how far the last attempt got without re-deriving it.
+pub async fn record_publish_stage(app: &App, id: &str, stage: PublishStage) {
+    app.update_session(id, |x| x.publish_stage = Some(stage)).await;
+}
+
 pub async fn publish_session(app: Shared, id: String) {
     // Checked before claiming and tearing down, so a refused push leaves the colony running.
     let Some(current) = app.session(&id).await else { return };
@@ -1146,14 +1234,17 @@ pub async fn publish_session(app: Shared, id: String) {
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
-    let Some((s, claimed)) = app
+    // The claim captures whether a microVM was live, because the status it leaves behind is `publishing`.
+    let Some((s, (claimed, was_live))) = app
         .update_session(&id, |x| {
-            let allowed = (x.status.is_live() || x.status == SessionStatus::Stopped) && !x.cleaned_up && x.git_admin_dir.is_some();
+            let allowed = can_publish(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+            // Before the mutation: `publishing` itself is not a live status.
+            let was_live = allowed && x.status.is_live();
             if allowed {
                 x.status = SessionStatus::Publishing;
                 x.error = None;
             }
-            allowed
+            (allowed, was_live)
         })
         .await
     else {
@@ -1163,16 +1254,36 @@ pub async fn publish_session(app: Shared, id: String) {
         return;
     }
     let log = app.logger(&id);
-    log.info("publishing: stopping the agent and removing the microVM").await;
-    teardown_vm(&app, &s).await;
+    // A live status is not the only proof of a sandbox: `stop` marks the colony stopped before the
+    // removal it starts, and that removal swallows its errors, so a `stopped`/`failed` colony can
+    // still have a microVM. Wherever an agent link is still wired up for the colony, a publish
+    // removes the sandbox first, exactly as a stop would have; only a colony with no runtime at all
+    // — one that never got far enough to log, or one from before a harness restart — is known to
+    // have nothing to remove.
+    if was_live {
+        log.info("publishing: stopping the agent and removing the microVM").await;
+        teardown_vm(&app, &s).await;
+    } else if app.runtimes.lock().await.contains_key(&id) {
+        log.info("publishing: removing any microVM left behind for this colony").await;
+        teardown_vm(&app, &s).await;
+    } else {
+        // A retry from `failed`/`no_changes` with no runtime has no microVM: the worktree and bare
+        // repo on the host are all a publish needs, and claiming to have removed one would be a lie.
+        log.info("publishing the kept worktree (no microVM is running)").await;
+    }
     match github::publish(&app, &s, &log).await {
         Ok(github::Published::NoChanges) => {
-            app.update_session(&id, |x| x.status = SessionStatus::NoChanges).await;
+            app.update_session(&id, |x| {
+                x.status = SessionStatus::NoChanges;
+                x.publish_stage = None;
+            })
+            .await;
         }
         Ok(github::Published::PullRequest(url)) => {
             app.update_session(&id, |x| {
                 x.status = SessionStatus::PrOpened;
                 x.pr_url = Some(url);
+                x.publish_stage = Some(PublishStage::PrOpened);
             })
             .await;
         }
@@ -1194,6 +1305,10 @@ pub async fn recover(app: &Shared) {
     let sessions = app.sessions.read().await.clone();
     for s in sessions {
         if s.status == SessionStatus::Publishing {
+            // The kill may have landed between persisting `publishing` and the teardown inside it, so a
+            // microVM can still be running — and after a restart nothing would reap it: the runtimes map
+            // is empty, so no later publish removes it, and `watch_sandboxes` skips non-live statuses.
+            teardown_vm(app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Failed;
                 x.error = Some("the harness restarted while publishing; the worktree is intact, publish again".into());
@@ -1254,6 +1369,112 @@ pub async fn watch_sandboxes(app: Shared) {
                 x.error = Some("the microVM stopped (its max session length, or the host stopped it); press Resume to continue".into());
             })
             .await;
+        }
+    }
+}
+
+/// How often a colony's pull request is checked, at first and at most: this spends the user's GitHub API
+/// quota, so a freshly opened PR is noticed within a minute while one sitting for days costs an hour.
+const PR_POLL_FIRST: Duration = Duration::from_secs(60);
+const PR_POLL_MAX: Duration = Duration::from_secs(60 * 60);
+
+/// Colonies whose pull request still needs watching. `merged` is final; a closed PR can be reopened,
+/// so `closed` keeps being watched.
+fn pr_watched(status: SessionStatus, has_pr: bool) -> bool {
+    has_pr && matches!(status, SessionStatus::PrOpened | SessionStatus::Closed)
+}
+
+/// Whether a pull request is due for its next check.
+fn pr_due(last_checked: Instant, backoff: Duration, now: Instant) -> bool {
+    now.duration_since(last_checked) >= backoff
+}
+
+/// The next check interval: doubled after a check with no news, reset when the state actually changed.
+/// A failed `gh` call counts as no news, so a broken checkout backs off like an untouched PR.
+fn pr_backoff(current: Duration, changed: bool) -> Duration {
+    if changed {
+        PR_POLL_FIRST
+    } else {
+        (current * 2).min(PR_POLL_MAX)
+    }
+}
+
+/// Per-colony poll bookkeeping, in memory only: it never reaches `sessions.json` or the browsers.
+struct PrPoll {
+    last_checked: Instant,
+    backoff: Duration,
+    /// Set while `gh` keeps failing, so the reason is logged once per streak, not once per attempt.
+    failing: bool,
+}
+
+/// Watches the pull requests of `pr_opened` and `closed` colonies, so a merge or close elsewhere turns
+/// the colony's badge into `merged` or `closed` instead of leaving it green forever. The colony's own
+/// work is already published; this only reads.
+pub async fn watch_pull_requests(app: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut polling: HashMap<String, PrPoll> = HashMap::new();
+    loop {
+        tick.tick().await;
+        // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
+        // deadlock against update_session's write lock.
+        let sessions = app.sessions.read().await.clone();
+        // Forget colonies whose pull request no longer needs watching, so the map cannot grow unboundedly.
+        polling.retain(|id, _| sessions.iter().any(|s| &s.id == id && pr_watched(s.status, s.pr_url.is_some())));
+        for s in sessions.iter().filter(|s| pr_watched(s.status, s.pr_url.is_some())) {
+            let Some(url) = s.pr_url.clone() else { continue };
+            let poll = polling
+                .entry(s.id.clone())
+                .or_insert(PrPoll { last_checked: Instant::now(), backoff: PR_POLL_FIRST, failing: false });
+            let now = Instant::now();
+            if !pr_due(poll.last_checked, poll.backoff, now) {
+                continue;
+            }
+            poll.last_checked = now;
+            match github::pr_state(&app, &url).await {
+                Ok(state) => {
+                    poll.failing = false;
+                    let target = match state {
+                        github::PrState::Open => SessionStatus::PrOpened, // also picks a reopened PR back up
+                        github::PrState::Merged => SessionStatus::Merged,
+                        github::PrState::Closed => SessionStatus::Closed,
+                    };
+                    // Only a real transition is written: update_session persists and pushes to every
+                    // browser even when the closure changes nothing.
+                    let mut changed = false;
+                    if s.status != target {
+                        changed = app
+                            .update_session(&s.id, |x| {
+                                // Re-checked under the write lock: the colony may have been deleted or
+                                // moved on while `gh` was running.
+                                let apply = pr_watched(x.status, x.pr_url.is_some()) && x.status != target;
+                                if apply {
+                                    x.status = target;
+                                }
+                                apply
+                            })
+                            .await
+                            .is_some_and(|(_, changed)| changed);
+                    }
+                    if changed {
+                        let message = match target {
+                            SessionStatus::Merged => "the pull request was merged",
+                            SessionStatus::Closed => "the pull request was closed",
+                            _ => "the pull request was reopened",
+                        };
+                        app.session_log(&s.id, "info", message.into()).await;
+                    }
+                    poll.backoff = pr_backoff(poll.backoff, changed);
+                }
+                Err(e) => {
+                    // No news is no change: leave the colony's status alone and try again later.
+                    if !poll.failing {
+                        poll.failing = true;
+                        app.session_log(&s.id, "warn", format!("checking the pull request failed ({e:#}); will retry")).await;
+                    }
+                    poll.backoff = pr_backoff(poll.backoff, false);
+                }
+            }
         }
     }
 }
@@ -1415,8 +1636,7 @@ pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult
 
 pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
     let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    let publishable = (s.status.is_live() && s.status != SessionStatus::Starting) || s.status == SessionStatus::Stopped;
-    if !publishable || s.cleaned_up || s.git_admin_dir.is_none() {
+    if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
         return Err(client_error(StatusCode::CONFLICT, "this session can't be published right now"));
     }
     tokio::spawn(publish_session(app.clone(), id.clone()));
@@ -1428,42 +1648,122 @@ fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bo
     matches!(status, SessionStatus::Stopped | SessionStatus::Failed) && !cleaned_up && has_worktree
 }
 
-/// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1 again.
-fn rotate_events(dir: &std::path::Path) {
+/// What a refused resume says: the conditions `can_resume` checks, phrased for the user.
+const RESUME_CONFLICT: &str = "this colony can't be resumed: it has to be stopped and still have its worktree";
+
+/// Whether a colony can publish: it needs its worktree on disk, no publish already in flight, and a
+/// state a publish makes sense from. A failed or no-changes publish can be retried directly — the
+/// worktree, the committed branch and the remote are all still there, so no new microVM is booted.
+fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
+    matches!(
+        status,
+        SessionStatus::Running
+            | SessionStatus::WaitingForAnswer
+            | SessionStatus::Idle
+            | SessionStatus::Stopped
+            | SessionStatus::Failed
+            | SessionStatus::NoChanges
+    ) && !cleaned_up
+        && has_worktree
+}
+
+/// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1
+/// again. A failure here must stop the resume, not degrade it: agentd keeps its event store inside
+/// the microVM, so a resumed colony numbers from 1 regardless, and with the stale log still in
+/// place `Runtime::load` picks up the previous life's maximum and drops every new event until the
+/// colony has out-produced it.
+fn rotate_events(dir: &std::path::Path) -> std::io::Result<()> {
     let events = dir.join("events.jsonl");
     if !events.exists() {
-        return;
+        return Ok(());
     }
     for n in 1..1000 {
         let target = dir.join(format!("events-{n}.jsonl"));
         if !target.exists() {
-            let _ = std::fs::rename(&events, &target);
-            return;
+            // The error goes back to the caller, which refuses the resume rather than carry on; a
+            // rotation that silently failed would drop events instead of just replaying old ones.
+            faults::check(&events, Op::Rename)?;
+            return std::fs::rename(&events, &target);
         }
     }
+    // Unreachable in practice — getting here means a colony has been resumed a thousand times
+    // without one rotation being reported — but falling out silently would be a no-op that the
+    // caller reads as success, and a stale log left in place drops the resumed colony's events.
+    // So this is an error like any other failed rotation, and names the directory that filled up.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "every archive slot in {} is taken (events-1.jsonl through events-999.jsonl), so {} has nowhere to go",
+            dir.display(),
+            events.display()
+        ),
+    ))
 }
 
 pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
     let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
-        return Err(client_error(StatusCode::CONFLICT, "this colony can't be resumed: it has to be stopped and still have its worktree"));
+        return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
-    if let Some(rt) = app.runtimes.lock().await.remove(&id) {
-        rt.stop.send_replace(true);
-    }
-    rotate_events(&app.session_dir(&id));
-    let Some((s, ())) = app
+    let previous_status = s.status;
+    // Re-checked inside the write, exactly as the publish claim below it is: `failed` is both
+    // resumable and publishable now, so a resume landing just after a publish claimed the colony
+    // must be refused, not overwrite `publishing` with `starting` and boot an agent onto the
+    // worktree while the host is committing and pushing.
+    let Some((s, claimed)) = app
         .update_session(&id, |x| {
-            x.status = SessionStatus::Starting;
-            x.error = None;
-            x.attention = None;
-            x.mesh = None;
-            x.local_port = None;
+            let allowed = can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+            if allowed {
+                x.status = SessionStatus::Starting;
+                x.error = None;
+                x.attention = None;
+                x.mesh = None;
+                x.local_port = None;
+            }
+            allowed
         })
         .await
     else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
+    if !claimed {
+        return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
+    }
+    // The colony is ours: only now is the old agent link dropped and the event log rotated, so a
+    // refused resume leaves both as it found them.
+    let runtime = app.runtimes.lock().await.remove(&id);
+    if let Some(rt) = &runtime {
+        rt.stop.send_replace(true);
+    }
+    // Rotation must not fail silently (see `rotate_events`): with the stale log still in place the
+    // resumed colony's events are dropped as already seen. A colony reads as Stopped before
+    // `teardown_vm`'s shutdown POST has finished, so its link task can still be draining agentd's
+    // last events and appending under the runtime's `file_lock`; hold that lock across the rename so
+    // an in-flight append cannot straddle it and resurrect an `events.jsonl` holding the old life's
+    // seq. Nothing under the guard may itself take `file_lock` (`session_log` does), so the failure
+    // reporting stays outside it.
+    let dir = app.session_dir(&id);
+    let rotated = {
+        let _file_lock = match runtime.as_ref() {
+            Some(rt) => Some(rt.file_lock.lock().await),
+            None => None,
+        };
+        rotate_events(&dir)
+    };
+    if let Err(e) = rotated {
+        // The claim already moved this colony to `starting`, so unlike the pre-claim ordering there
+        // is something to roll back: put the status back, or the colony is left mid-resume and
+        // `can_resume` refuses the retry this error asks for.
+        app.update_session(&id, |x| x.status = previous_status).await;
+        let e = anyhow::Error::from(e);
+        let message = format!(
+            "could not move the old event log aside ({e}); the colony was not resumed — move {} aside yourself and try again",
+            dir.join("events.jsonl").display()
+        );
+        app.storage_failed("rotate the old event log", &e).await;
+        app.session_log(&id, "error", message.clone()).await;
+        return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
+    }
     app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
     tokio::spawn(boot(app.clone(), id, true));
     Ok(Json(s))
@@ -1544,7 +1844,24 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             return Err(e.context("could not remove the colony's worktree; nothing was deleted").into());
         }
     }
-    app.persist_sessions().await;
+    if let Err(e) = app.persist_sessions().await {
+        // The worktree may already be gone — it is removed before the list is saved — but the colony
+        // goes back in the list either way: nothing reports a colony forgotten while the save that
+        // forgets it did not happen, and the deletion can be retried once storage works again.
+        let cleaned = s.cleaned_up;
+        {
+            let mut sessions = app.sessions.write().await;
+            let at = at.min(sessions.len());
+            sessions.insert(at, s);
+        }
+        let e = e.context(if cleaned {
+            "could not save the session list; the colony is kept"
+        } else {
+            "could not save the session list; the colony is kept, but its worktree was already removed"
+        });
+        app.storage_failed("save the session list", &e).await;
+        return Err(e.into());
+    }
     app.runtimes.lock().await.remove(&id);
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
@@ -1628,10 +1945,23 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
     }
 }
 
+/// Whether a colony can still be sent a message, an answer or an interrupt.
+///
+/// The microVM has to be up: once a colony is publishing, stopped or finished
+/// there is no agent to receive it.
+fn accepts_commands(status: SessionStatus) -> bool {
+    status.is_live()
+}
+
 async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
     let Ok(command) = serde_json::from_str::<Value>(body) else { return };
     let Some(s) = app.session(id).await else { return };
-    if !s.status.is_live() {
+    if !accepts_commands(s.status) {
+        // Dropping it silently left the browser showing an answer on its way to an
+        // agent that is gone. Send the session back instead: a client whose view is
+        // stale corrects itself, and its card stops offering to answer.
+        let view = with_activity(app, s.clone()).await;
+        rt.broadcast(None, json!({"type": "session", "session": view}).to_string());
         return;
     }
     let forward = match command["type"].as_str() {
@@ -1732,9 +2062,22 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
 mod tests {
 
     #[test]
+    fn commands_only_reach_a_colony_whose_microvm_is_up() {
+        use SessionStatus::*;
+        for status in [Starting, Running, WaitingForAnswer, Idle] {
+            assert!(accepts_commands(status), "{status:?} should accept an answer");
+        }
+        // Publishing included: the microVM is already gone, and an answer sent then
+        // used to vanish while the card kept spinning.
+        for status in [Publishing, PrOpened, Merged, Closed, NoChanges, Stopped, Failed, Queued] {
+            assert!(!accepts_commands(status), "{status:?} must not accept an answer");
+        }
+    }
+
+    #[test]
     fn only_colonies_with_nothing_running_can_be_deleted() {
         use SessionStatus::*;
-        for status in [Queued, Stopped, Failed, NoChanges, PrOpened] {
+        for status in [Queued, Stopped, Failed, NoChanges, PrOpened, Merged, Closed] {
             assert!(deletable(status), "{status:?}");
         }
         for status in [Starting, Running, WaitingForAnswer, Idle, Publishing] {
@@ -1774,6 +2117,7 @@ mod tests {
             agent: String::new(),
             autopilot: false,
             pr_url: None,
+            publish_stage: None,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -1781,6 +2125,7 @@ mod tests {
             attention: None,
             last_activity_at: None,
             boot_timing: None,
+            app_slot: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1825,9 +2170,248 @@ mod tests {
             SessionStatus::Idle,
             SessionStatus::Publishing,
             SessionStatus::PrOpened,
+            SessionStatus::Merged,
+            SessionStatus::Closed,
             SessionStatus::NoChanges,
         ] {
             assert!(!can_resume(status, false, true), "{status:?}");
         }
+    }
+
+    #[test]
+    fn only_colonies_with_a_live_pr_are_watched_and_merged_is_never_polled() {
+        for (status, watched) in [
+            (SessionStatus::PrOpened, true),
+            (SessionStatus::Closed, true),
+            (SessionStatus::Merged, false),
+            (SessionStatus::Queued, false),
+            (SessionStatus::Starting, false),
+            (SessionStatus::Running, false),
+            (SessionStatus::Publishing, false),
+            (SessionStatus::NoChanges, false),
+            (SessionStatus::Stopped, false),
+            (SessionStatus::Failed, false),
+        ] {
+            assert_eq!(pr_watched(status, true), watched, "{status:?}");
+            // Without a pull request there is nothing to ask GitHub about.
+            assert!(!pr_watched(status, false), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn pull_request_checks_back_off_until_the_cap_and_reset_on_a_change() {
+        assert_eq!(pr_backoff(Duration::from_secs(60), false), Duration::from_secs(120));
+        assert_eq!(pr_backoff(Duration::from_secs(1920), false), Duration::from_secs(3600));
+        assert_eq!(pr_backoff(Duration::from_secs(3600), false), Duration::from_secs(3600), "capped at an hour");
+        assert_eq!(pr_backoff(Duration::from_secs(4000), false), Duration::from_secs(3600));
+        // Real news buys a fast next check again (e.g. a closed PR reopened).
+        assert_eq!(pr_backoff(Duration::from_secs(3600), true), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_pull_request_is_due_once_its_backoff_has_elapsed() {
+        let checked = Instant::now();
+        assert!(pr_due(checked - Duration::from_secs(60), Duration::from_secs(60), checked), "a backoff ago is due");
+        assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
+        assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
+        assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));
+    }
+
+    /// A publish is retried from the worktree, not from a microVM: `failed` and `no_changes` colonies
+    /// (including ones stranded by the old publish) must be publishable without a resume.
+    #[test]
+    fn failed_and_no_changes_colonies_can_publish_again_without_a_new_microvm() {
+        assert!(can_publish(SessionStatus::Failed, false, true));
+        assert!(can_publish(SessionStatus::NoChanges, false, true));
+    }
+
+    #[test]
+    fn only_a_colony_with_a_worktree_and_no_publish_in_flight_can_publish() {
+        use SessionStatus::*;
+        for status in [Running, WaitingForAnswer, Idle, Stopped, Failed, NoChanges] {
+            assert!(can_publish(status, false, true), "{status:?}");
+        }
+        // A colony still in the queue or booting has no worktree to publish, one that is publishing is
+        // already claimed, and a colony whose PR is open is done.
+        for status in [Queued, Starting, Publishing, PrOpened] {
+            assert!(!can_publish(status, false, true), "{status:?}");
+        }
+        for status in [Running, Stopped, Failed, NoChanges] {
+            assert!(!can_publish(status, true, true), "cleaned up: {status:?}");
+            assert!(!can_publish(status, false, false), "no worktree: {status:?}");
+        }
+    }
+
+    // -- storage failures -----------------------------------------------------------------------
+
+    use crate::tests::test_app;
+
+    /// A throwaway App with one colony in it, over a temp directory (as in memory.rs).
+    async fn app_with_colony(id: &str, status: SessionStatus) -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = test_app(&root);
+        let mut s = colony("acme", status);
+        s.id = id.to_string();
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        (app, root)
+    }
+
+    #[test]
+    fn a_failed_event_log_rotation_is_reported_not_swallowed() {
+        let dir = std::env::temp_dir().join(format!("colonizer-rotate-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
+        let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
+        assert!(rotate_events(&dir).is_err());
+        drop(_guard);
+        assert_eq!(std::fs::read_to_string(dir.join("events.jsonl")).unwrap(), "{\"seq\":1}\n", "the log is untouched");
+        rotate_events(&dir).unwrap();
+        assert!(!dir.join("events.jsonl").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("events-1.jsonl")).unwrap(), "{\"seq\":1}\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_log_rotation_refuses_the_resume_and_leaves_the_colony_stopped() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into())).await.unwrap();
+        std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
+        let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
+        let err = resume(State(app.clone()), Path("abc".to_string())).await.unwrap_err();
+        let body = err.1.to_string();
+        assert!(body.contains("the colony was not resumed"), "{body}");
+        assert!(body.contains("aside yourself and try again"), "{body}");
+        assert!(app.storage_alert.read().await.is_some(), "the failure is recorded, not swallowed");
+        assert_eq!(
+            app.session("abc").await.unwrap().status,
+            SessionStatus::Stopped,
+            "nothing about the colony changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap(),
+            "{\"seq\":7}\n",
+            "the old log is left where it was"
+        );
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(log.contains("could not move the old event log aside"), "{log}");
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_rotation_with_every_archive_slot_taken_is_an_error_and_leaves_the_log_in_place() {
+        let dir = std::env::temp_dir().join(format!("colonizer-rotate-full-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
+        for n in 1..1000 {
+            std::fs::write(dir.join(format!("events-{n}.jsonl")), "").unwrap();
+        }
+        let message = rotate_events(&dir).unwrap_err().to_string();
+        assert!(message.contains("every archive slot"), "{message}");
+        assert!(message.contains(&dir.display().to_string()), "the error names the directory that filled up: {message}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
+            "{\"seq\":1}\n",
+            "the log is left in place, so the resume stays refused instead of dropping events"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_resume_does_not_rotate_while_another_task_holds_the_runtime_s_file_lock() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into())).await.unwrap();
+        std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
+        // A runtime in the map, as a just-stopped colony still has while its link task drains.
+        let rt = app.runtime("abc").await;
+        // Stand in for an in-flight append: the lock another task would hold.
+        let append = rt.file_lock.lock().await;
+        let resumed = tokio::spawn(resume(State(app.clone()), Path("abc".to_string())));
+        // Purely cooperative, so there is no timing bet: each yield lets the resume advance to the
+        // lock it cannot take. With the lock held it can neither have finished nor have renamed.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert!(!resumed.is_finished(), "the resume waits for the runtime's file_lock");
+            assert!(
+                app.session_dir("abc").join("events.jsonl").exists(),
+                "no rotation while an append holds the lock"
+            );
+        }
+        drop(append);
+        if let Err(e) = resumed.await.unwrap() {
+            panic!("the resume failed once the lock freed up: {:#}", e.1);
+        }
+        assert!(
+            !app.session_dir("abc").join("events.jsonl").exists(),
+            "the rotation went ahead once the lock freed up"
+        );
+        assert_eq!(std::fs::read_to_string(app.session_dir("abc").join("events-1.jsonl")).unwrap(), "{\"seq\":7}\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_is_alerted_and_the_colony_log_shows_the_gap() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let _guard = faults::inject("sessions.json", Op::Write, || std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let (s, ()) = app.update_session("abc", |s| s.status = SessionStatus::Idle).await.unwrap();
+        assert_eq!(s.status, SessionStatus::Idle, "the in-memory change is kept and still broadcast");
+        let alert = app.storage_alert.read().await.clone().unwrap();
+        assert!(alert.message.contains("save the session list"), "{}", alert.message);
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(log.contains("could not save the session list"), "{log}");
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_harness_log_append_still_reaches_the_browser_and_alerts() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let rt = app.runtime("abc").await;
+        let _guard = faults::inject("harness.jsonl", Op::Append, || std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        app.session_log("abc", "error", "a message".into()).await;
+        assert!(app.storage_alert.read().await.is_some(), "the failure is recorded, not swallowed");
+        {
+            let logs = rt.logs.lock().await;
+            let last = logs.back().unwrap();
+            assert_eq!(last["type"], "harness_log");
+            assert_eq!(last["message"], "a message", "the frame still goes out to open browsers");
+        }
+        drop(_guard);
+        app.session_log("abc", "info", "recovered".into()).await;
+        assert!(app.session_dir("abc").join("harness.jsonl").exists(), "appends work again once the fault clears");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_append_does_not_advance_last_seq_and_the_lost_line_stays_lost() {
+        // (Injecting a fault only on the first append would promise a retry; in reality the next
+        // event succeeds and seq 1 is gone for good, which is what this pins.)
+        let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;
+        let rt = app.runtime("abc").await;
+        let _guard = faults::inject("events.jsonl", Op::Append, || std::io::Error::from_raw_os_error(5));
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":1,"type":"status","state":"working"}"#).await;
+        assert!(app.storage_alert.read().await.is_some(), "the gap in the event log is not silent");
+        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 0, "last_seq does not advance past a failed append");
+        assert!(!app.session_dir("abc").join("events.jsonl").exists(), "the line never landed");
+        assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::Running, "the in-memory state still advances");
+        drop(_guard);
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":2,"type":"status","state":"idle"}"#).await;
+        assert_eq!(rt.last_seq.load(Ordering::SeqCst), 2, "the next event succeeds and jumps past the lost one");
+        let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        assert_eq!(events, "{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n", "seq 1 stays lost");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_keeps_the_colony_listed_and_the_delete_reports_failure() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
+        let _guard = faults::inject("sessions.json", Op::Write, || std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let result = delete(State(app.clone()), Path("abc".to_string())).await;
+        assert!(result.unwrap_err().1.to_string().contains("the colony is kept"));
+        assert!(app.session("abc").await.is_some(), "the colony goes back in the list");
+        assert!(app.storage_alert.read().await.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

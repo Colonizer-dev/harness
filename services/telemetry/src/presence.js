@@ -7,8 +7,12 @@ export const CELL_KM = 25;
 /** A mothership counts as online for this long after its last heartbeat. Heartbeats come every 5 minutes. */
 export const ONLINE_SECONDS = 12 * 60;
 
-/** Rows older than this are deleted (worker.js prunes them): the service keeps no history. */
+/** Rows older than this are deleted by the prune, which rides a request to either route, at most once per
+ * 10 minutes per isolate (worker.js); reads already ignore anything past the online window. */
 export const RETAIN_SECONDS = 60 * 60;
+
+/** The prune rides on requests, so it runs at most this often per isolate: no point checking more. */
+export const PRUNE_EVERY_MS = 10 * 60 * 1000;
 
 /** Seconds a mothership should wait before its next heartbeat. */
 export const NEXT_IN_SECONDS = 5 * 60;

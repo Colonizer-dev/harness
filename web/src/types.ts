@@ -8,6 +8,8 @@ export type SessionStatus =
   | "idle"
   | "publishing"
   | "pr_opened"
+  | "merged"
+  | "closed"
   | "no_changes"
   | "stopped"
   | "failed";
@@ -33,11 +35,15 @@ export interface Session {
   branch: string;
   base: string | null;
   worktree: string;
+  /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
+  git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
   agent: string;
   autopilot: boolean;
   pr_url: string | null;
+  /** How far the last publish attempt got; absent when no publish has made progress. */
+  publish_stage?: "committed" | "pushed" | "pr_opened";
   error: string | null;
   /** Claude models only; routed models are counted in `model_usage` as tokens. */
   cost_usd: number | null;
@@ -79,8 +85,8 @@ export interface Issue {
 }
 
 export interface HarnessStatus {
-  github: { connected: boolean; login?: string; name?: string | null; source?: string; error?: string };
-  claude: { configured: boolean; source: string | null; kind: string | null };
+  github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
+  claude: { configured: boolean; source: string | null; kind: string | null; account?: string | null; account_note?: string | null; saved_at?: string | null; expires_at?: string | null; expires_estimated?: boolean };
   sandbox: {
     msb_version: string | null;
     image: string;
@@ -96,8 +102,23 @@ export interface HarnessStatus {
     state?: string;
     harness_ip?: string | null;
     nodes?: number;
+    /** A fact about the platform, not a fault: shown plainly, never as an error. */
+    detail?: string | null;
     error?: string | null;
   } | null;
+  /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */
+  storage?: StorageHealth;
+}
+
+/** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
+export interface StorageHealth {
+  ok: boolean;
+  /** The underlying write error, for showing verbatim. */
+  message?: string | null;
+  /** When the failure was recorded; same representation as a harness_log `ts`. */
+  ts?: string | null;
+  /** Failed writes since the mothership started. */
+  failures?: number | null;
 }
 
 export interface ModuleProviderInfo {
@@ -213,6 +234,36 @@ export interface HeadroomStatus {
   started_at: string | null;
   finished_at: string | null;
   error: string | null;
+}
+
+/** GET /api/version: what this mothership was built from. */
+export interface BuildInfo {
+  version: string;
+  commit: string | null;
+  dirty: boolean;
+  built_at: string;
+  release: string | null;
+}
+
+/** GET /api/update: the installed build, and the latest release if the check is on. */
+export interface UpdateStatus {
+  enabled: boolean;
+  blocked_by: string | null;
+  installed: BuildInfo;
+  latest: { version: string; url: string; notes: string; published_at: string | null } | null;
+  available: boolean;
+  last_checked: string | null;
+  error: string | null;
+  /// Whether this install can update itself, and why not if it cannot.
+  can_apply: { ok: boolean; reason: string | null };
+  apply: {
+    phase: "idle" | "installing" | "restarting" | "failed";
+    version: string | null;
+    started_at: string | null;
+    error: string | null;
+    log: string;
+    colonies: { id: string; repo: string; outcome: string }[];
+  };
 }
 
 /** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */

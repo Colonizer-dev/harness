@@ -138,6 +138,7 @@ export function ChatPanel({
       },
       submitting: state.submitting,
       canAnswer: connected && live,
+      blockedBy: !live ? "ended" : !connected ? "disconnected" : null,
     }),
     [stream, state.submitting, connected, live, toast],
   );
