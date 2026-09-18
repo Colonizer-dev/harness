@@ -4,7 +4,7 @@ use crate::{
     ApiResult, App, Shared, client_error,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger},
-    util::{env_nonempty, exec, exec_status, read_trimmed, truncate, valid_repo, write_secret},
+    util::{env_nonempty, exec, exec_status, fingerprint, read_trimmed, truncate, valid_repo, write_secret},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::process::Command;
 
@@ -82,7 +82,69 @@ impl App {
     }
 }
 
+/// One cached `gh api user` answer: which credential it was read with, when, and what it said.
+/// `Err` keeps the rendered failure. The credential itself is never stored, only its fingerprint,
+/// and neither reaches the browser — the status JSON carries only the fields `lookup` builds.
+pub struct ViewerStatus {
+    fingerprint: String,
+    looked_up_at: Instant,
+    user: Result<Value, String>,
+}
+
+/// A GitHub login and avatar essentially never change mid-session, so a good answer serves every
+/// poll for five minutes instead of one `gh api user` per 30 s poll per open tab.
+const VIEWER_SUCCESS_TTL: Duration = Duration::from_secs(5 * 60);
+/// A failure is kept only long enough to coalesce a burst of polls, so a transient GitHub or
+/// network blip clears within a poll or two instead of leaving the badge red for five minutes.
+const VIEWER_FAILURE_TTL: Duration = Duration::from_secs(60);
+
+/// The cache key when no explicit token is set and `gh` answers with its own CLI login: one entry
+/// serves every such poll. No real fingerprint collides with it — those always carry `sha256=`.
+const CLI_LOGIN_KEY: &str = "gh cli login";
+
+impl ViewerStatus {
+    /// Whether this entry may still answer for `fingerprint` at `now`. Because the key is derived
+    /// from the token, changing it — the set-token handler, or deleting the saved one — misses the
+    /// cache with no explicit invalidation.
+    fn fresh(&self, fingerprint: &str, now: Instant) -> bool {
+        let ttl = match self.user {
+            Ok(_) => VIEWER_SUCCESS_TTL,
+            Err(_) => VIEWER_FAILURE_TTL,
+        };
+        self.fingerprint == fingerprint && now.duration_since(self.looked_up_at) < ttl
+    }
+}
+
+/// The signed-in GitHub user, for the status poll, access messages and commit trailers. Cached and
+/// coalesced: the cache lock is held across the lookup, so concurrent status polls share one
+/// `gh api user` instead of stacking several — the same property `claude_login::account_status`
+/// gives the Anthropic profile lookup.
 pub async fn viewer(app: &App) -> Result<Value> {
+    let fingerprint = fingerprint(&app.github_token().unwrap_or_else(|| CLI_LOGIN_KEY.into()));
+    let mut cache = app.github_viewer.lock().await;
+    if let Some(cached) = cache.as_ref()
+        && cached.fresh(&fingerprint, Instant::now())
+    {
+        return cached.user.clone().map_err(|message| anyhow!(message));
+    }
+    let user = lookup(app).await;
+    *cache = Some(match &user {
+        Ok(v) => ViewerStatus {
+            fingerprint,
+            looked_up_at: Instant::now(),
+            user: Ok(v.clone()),
+        },
+        Err(e) => ViewerStatus {
+            fingerprint,
+            looked_up_at: Instant::now(),
+            user: Err(format!("{e:#}")),
+        },
+    });
+    user
+}
+
+/// The uncached lookup, bounded to twenty seconds so a slow GitHub cannot hold the status poll.
+async fn lookup(app: &App) -> Result<Value> {
     let out = tokio::time::timeout(Duration::from_secs(20), exec(&mut app.gh(["api", "user"])))
         .await
         .context("GitHub API timed out")??;
@@ -90,6 +152,8 @@ pub async fn viewer(app: &App) -> Result<Value> {
     Ok(json!({"login": v["login"], "id": v["id"], "name": v["name"], "avatar_url": v["avatar_url"]}))
 }
 
+/// Computed fresh per poll: a cheap file/env read, and the viewer cache is keyed on the same
+/// token, so the named source and the cached answer cannot disagree.
 pub fn token_source(app: &App) -> &'static str {
     if read_trimmed(&app.github_token_file()).is_some() {
         "saved token"
@@ -1323,5 +1387,69 @@ mod tests {
     #[test]
     fn ls_remote_parsing_of_an_absent_branch_is_none() {
         assert_eq!(parse_ls_remote("", "colonizer/issue-7-ab12cd34"), None);
+    }
+
+    // ----- viewer cache -----
+
+    /// Ages a cache entry by construction: `looked_up_at` is set back by `age`, so no test waits on
+    /// a real clock.
+    fn cached(fingerprint: &str, age: Duration, user: Result<Value, String>) -> ViewerStatus {
+        ViewerStatus {
+            fingerprint: fingerprint.to_string(),
+            looked_up_at: Instant::now() - age,
+            user,
+        }
+    }
+
+    #[test]
+    fn a_cached_success_answers_within_its_ttl_but_a_different_fingerprint_misses_it() {
+        let key = "len=10:sha256=aaaa";
+        let fresh = cached(
+            key,
+            VIEWER_SUCCESS_TTL - Duration::from_secs(1),
+            Ok(json!({"login": "octocat"})),
+        );
+        assert!(fresh.fresh(key, Instant::now()));
+        // At the boundary the answer is re-fetched: a cached value is never served stale.
+        assert!(!cached(key, VIEWER_SUCCESS_TTL, Ok(json!({}))).fresh(key, Instant::now()));
+        // The token changed, so the key did too: the cached answer must not be served.
+        assert!(!fresh.fresh("len=12:sha256=bbbb", Instant::now()));
+    }
+
+    #[test]
+    fn a_cached_failure_expires_sooner_than_a_cached_success_of_the_same_age() {
+        let age = Duration::from_secs(2 * 60);
+        assert!(
+            cached("k", age, Ok(json!({}))).fresh("k", Instant::now()),
+            "a success is good for five minutes"
+        );
+        assert!(
+            !cached("k", age, Err("GitHub API timed out".into())).fresh("k", Instant::now()),
+            "a failure clears after its minute"
+        );
+        assert!(
+            cached(
+                "k",
+                VIEWER_FAILURE_TTL - Duration::from_secs(1),
+                Err("GitHub API timed out".into())
+            )
+            .fresh("k", Instant::now()),
+            "a failure is kept within its minute, so a burst of polls shares one miss"
+        );
+    }
+
+    /// A fresh entry answers the poll without running `gh` at all — here `gh` is absent, so a cache
+    /// miss would error instead of returning the seeded login. The entry is keyed the way `viewer`
+    /// keys it, from whatever credential the app currently has.
+    #[tokio::test]
+    async fn the_viewer_answers_from_a_fresh_cache_entry_without_running_gh() {
+        let root = std::env::temp_dir().join(format!("colonizer-viewer-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let seeded = json!({"login": "cached-user", "id": 7, "name": "Cached", "avatar_url": "https://example/c.png"});
+        let key = fingerprint(&app.github_token().unwrap_or_else(|| CLI_LOGIN_KEY.into()));
+        *app.github_viewer.lock().await = Some(cached(&key, Duration::from_secs(1), Ok(seeded)));
+        let user = viewer(&app).await.unwrap();
+        assert_eq!(user["login"], "cached-user");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
