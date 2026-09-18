@@ -67,7 +67,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use tower_http::services::{ServeDir, ServeFile};
-use util::{env_nonempty, exec, is_elf, is_plain_name, read_trimmed};
+use util::{env_nonempty, exec_within, is_elf, is_plain_name, read_trimmed};
 
 pub const CLAUDE_API_HOST: &str = "api.anthropic.com";
 
@@ -115,6 +115,14 @@ pub struct App {
     /// The last Anthropic profile lookup for the Claude credential, cached so the status poll does not
     /// hammer Anthropic. Keyed on a fingerprint of the token; the token itself is never stored.
     pub claude_account: Mutex<Option<claude_login::AccountStatus>>,
+    /// The last `gh api user` answer for the GitHub credential, cached so the status poll does not
+    /// hammer GitHub. Keyed on a fingerprint of the token; the token itself is never stored.
+    pub github_viewer: Mutex<Option<github::ViewerStatus>>,
+    /// The Claude binaries found this run, keyed on whether the guest's ELF requirement was asked,
+    /// so the status poll does not walk PATH and probe every candidate on every poll. Successes
+    /// only: Settings re-renders the red "missing" row from every poll, so a binary installed while
+    /// the harness runs must be picked up without a restart.
+    pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
@@ -240,29 +248,62 @@ impl App {
     }
 }
 
+/// A version probe is a local binary answering in milliseconds when healthy; 5s is orders of
+/// magnitude above that, keeps the status handler's probes inside the 30s poll interval, and turns
+/// a wedged binary into a skipped candidate instead of a caller that hangs forever.
+const PROBE_LIMIT: Duration = Duration::from_secs(5);
+
+/// The cap on the whole candidate walk, not just its probes. A walk that finds nothing repeats on
+/// every 30s status poll (failures are not memoised), and N wedged candidates cost N ×
+/// `PROBE_LIMIT`; 10s keeps even that inside a single poll.
+const CLAUDE_WALK_LIMIT: Duration = Duration::from_secs(10);
+
 /// The Claude Code binary mounted read-only into a colony. A colony is a Linux microVM, so this has
 /// to be a Linux build: on a Mac the host's own is Mach-O and `scripts/install.sh` fetches one
 /// beside the app instead.
-pub async fn resolve_guest_claude_bin(cfg: &Settings) -> Result<PathBuf> {
-    if let Ok(guest) = cfg.asset("bin/claude-guest") {
+pub async fn resolve_guest_claude_bin(app: &App) -> Result<PathBuf> {
+    if let Ok(guest) = app.cfg.asset("bin/claude-guest") {
         return Ok(guest);
     }
-    find_claude_bin(cfg, true)
+    memoised_claude_bin(app, true, find_claude_bin(&app.cfg, true))
         .await
         .context("no Linux Claude Code binary found for the guest; run scripts/install.sh or set COLONIZER_CLAUDE_BIN")
 }
 
 /// The Claude Code binary the mothership runs itself, for `claude setup-token`. Never the guest's:
 /// on a Mac that one is a Linux ELF, and the host cannot execute it.
-pub async fn resolve_host_claude_bin(cfg: &Settings) -> Result<PathBuf> {
-    find_claude_bin(cfg, false)
+pub async fn resolve_host_claude_bin(app: &App) -> Result<PathBuf> {
+    memoised_claude_bin(app, false, find_claude_bin(&app.cfg, false))
         .await
         .context("no native Claude Code binary found; install Claude Code or set COLONIZER_CLAUDE_BIN")
+}
+
+/// The PATH walk behind the resolvers, memoised per `elf_only` on the app. The lock is held across
+/// the lookup so concurrent polls share one walk instead of stacking several; a failure is not
+/// kept, so the next poll looks again and finds a binary installed in the meantime.
+async fn memoised_claude_bin(app: &App, elf_only: bool, lookup: impl Future<Output = Result<PathBuf>>) -> Result<PathBuf> {
+    let mut memo = app.claude_bins.lock().await;
+    if let Some(found) = memo.get(&elf_only) {
+        return Ok(found.clone());
+    }
+    match lookup.await {
+        Ok(bin) => {
+            memo.insert(elf_only, bin.clone());
+            Ok(bin)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Walks the usual install locations and returns the first one that answers `--version`. `elf_only`
 /// is the guest's requirement; for the host, being able to run it at all is the test.
 async fn find_claude_bin(cfg: &Settings, elf_only: bool) -> Result<PathBuf> {
+    walk_claude_candidates(&claude_bin_candidates(cfg), elf_only).await
+}
+
+/// Every place a Claude Code binary is looked for, most specific first: the configured override,
+/// then PATH, then the usual home installs.
+fn claude_bin_candidates(cfg: &Settings) -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = &cfg.claude_bin {
@@ -276,20 +317,34 @@ async fn find_claude_bin(cfg: &Settings, elf_only: bool) -> Result<PathBuf> {
         home.join(".local/bin/claude"),
         home.join(".claude/local/claude"),
     ]);
-    for candidate in candidates {
-        let Ok(real) = std::fs::canonicalize(&candidate) else {
-            continue;
-        };
-        if elf_only && !is_elf(&real) {
-            continue;
+    candidates
+}
+
+/// Probes the candidates in order and returns the first that answers `--version`. Each probe is
+/// bounded by `PROBE_LIMIT`, so only the overall walk limit keeps a PATH full of wedged candidates
+/// from costing minutes — and the two outcomes read differently, because an operator who sees a
+/// timeout looks for the wedged binary, not for a missing install.
+async fn walk_claude_candidates(candidates: &[PathBuf], elf_only: bool) -> Result<PathBuf> {
+    let walk = async {
+        for candidate in candidates {
+            let Ok(real) = std::fs::canonicalize(candidate) else {
+                continue;
+            };
+            if elf_only && !is_elf(&real) {
+                continue;
+            }
+            if let Ok(version) = exec_within(PROBE_LIMIT, Command::new(&real).arg("--version")).await
+                && version.contains("Claude Code")
+            {
+                return Ok(real);
+            }
         }
-        if let Ok(version) = exec(Command::new(&real).arg("--version")).await
-            && version.contains("Claude Code")
-        {
-            return Ok(real);
-        }
+        Err(anyhow!("no Claude Code binary found"))
+    };
+    match tokio::time::timeout(CLAUDE_WALK_LIMIT, walk).await {
+        Ok(found) => found,
+        Err(_) => bail!("the search for a Claude Code binary timed out after {CLAUDE_WALK_LIMIT:?}"),
     }
-    bail!("no Claude Code binary found")
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +380,12 @@ fn storage_status(alert: Option<StorageAlert>) -> Value {
     }
 }
 
+/// An overall bound on the mesh branch of `/api/status`, not just its individual subprocesses:
+/// `Mesh::status` waits on `Mesh`'s internal `running` lock, which `ensure_started` can hold across
+/// calls that are themselves unbounded, so without this a wedged `headscale` during a boot parks
+/// the status poll forever behind a mutex.
+const MESH_STATUS_LIMIT: Duration = Duration::from_secs(15);
+
 /// The `mesh` key of `/api/status`. `live` is awaited only when the mesh is enabled and its
 /// binaries are vendored: the running mesh's own status, or the reason none could be built.
 async fn mesh_status(modules: &ModulesConfig, assets: Option<&FsPath>, live: impl Future<Output = Result<Value>>) -> Value {
@@ -337,7 +398,10 @@ async fn mesh_status(modules: &ModulesConfig, assets: Option<&FsPath>, live: imp
         json!({"enabled": true, "provider": "headscale", "state": "unavailable",
                "detail": "colonies use a loopback port on this platform", "error": Value::Null})
     } else {
-        match live.await {
+        let live = tokio::time::timeout(MESH_STATUS_LIMIT, live)
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("mesh status timed out after {MESH_STATUS_LIMIT:?}")));
+        match live {
             Ok(status) => status,
             Err(e) => json!({"enabled": true, "provider": "headscale", "state": "error", "error": format!("{e:#}")}),
         }
@@ -350,8 +414,8 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let cred = app.claude_cred();
     let (user, msb_version, claude_bin, claude) = tokio::join!(
         github::viewer(&app),
-        exec(&mut msb),
-        resolve_guest_claude_bin(&app.cfg),
+        exec_within(PROBE_LIMIT, &mut msb),
+        resolve_guest_claude_bin(&app),
         claude_login::claude_status(&app, cred.as_ref()),
     );
     let modules = app.modules.read().await.clone();
@@ -742,6 +806,8 @@ async fn serve() -> Result<()> {
         repo_owners: RwLock::new(BTreeSet::new()),
         orgs_refreshed: Mutex::new(None),
         claude_account: Mutex::new(None),
+        github_viewer: Mutex::new(None),
+        claude_bins: Mutex::new(HashMap::new()),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
@@ -942,6 +1008,8 @@ pub(crate) mod tests {
             memory: memory::MemoryStore::new(root.join("memory")),
             // Added on main while this branch was open; kept in step with the real constructor.
             claude_account: Mutex::new(None),
+            github_viewer: Mutex::new(None),
+            claude_bins: Mutex::new(HashMap::new()),
             usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),
             updater: update::Updater::new(),
@@ -1256,6 +1324,134 @@ pub(crate) mod tests {
         let value = mesh_status(&ModulesConfig::default(), Some(&assets), async move { broken }).await;
         assert_eq!(value["state"], "error", "{value}");
         assert_eq!(value["error"], "headscale refused to start", "{value}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A mesh branch that never resolves must not take `/api/status` with it either: the bound here
+    /// covers the wait on `Mesh`'s `running` lock, which a boot can hold across calls nothing else
+    /// bounds. Paused time fires the 15s branch limit without waiting for it; a regression to an
+    /// unbounded await would hang this test instead of passing it.
+    #[tokio::test(start_paused = true)]
+    async fn a_mesh_branch_that_never_resolves_is_reported_as_an_error_when_the_branch_limit_fires() {
+        let root = temp_root();
+        let assets = root.join("assets");
+        for rel in [
+            "vendor/headscale",
+            "vendor/tailscale/tailscale",
+            "vendor/tailscale/tailscaled",
+        ] {
+            let path = assets.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+        }
+        let started = std::time::Instant::now();
+        let value = mesh_status(&ModulesConfig::default(), Some(&assets), std::future::pending()).await;
+        assert_eq!(value["enabled"], true, "{value}");
+        assert_eq!(value["provider"], "headscale", "{value}");
+        assert_eq!(value["state"], "error", "{value}");
+        let message = value["error"].as_str().unwrap_or_default();
+        assert!(message.contains("timed out"), "{value}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the branch answered in {:?}; the pending future was waited out",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A probe that never returns must not take `/api/status` with it: the handler still answers,
+    /// with the probe reported as absent. Paused time fires the 5s probe limit without waiting for
+    /// it; a regression to an unbounded exec would hang this test instead of passing it.
+    #[tokio::test(start_paused = true)]
+    async fn the_status_handler_still_answers_when_the_msb_probe_never_returns() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root();
+        let mut app = test_app(&root);
+        let wedged = root.join("wedged-msb");
+        std::fs::write(&wedged, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&wedged, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Arc::get_mut(&mut app).unwrap().cfg.msb = wedged.display().to_string();
+        let started = std::time::Instant::now();
+        let Json(payload) = status(State(app)).await;
+        assert!(
+            payload["sandbox"]["msb_version"].is_null(),
+            "the wedged probe is reported as absent, not hung: {payload}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the handler answered in {:?}; the probe was waited out",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The memo serves a second lookup for the same `elf_only` key without looking again, and keeps
+    /// the guest's and the host's answers apart. The lookup is stubbed: only the memo is on trial.
+    #[tokio::test]
+    async fn a_found_claude_bin_is_memoised_under_its_own_elf_only_key() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let guest = PathBuf::from("/opt/claude-guest/claude");
+        let found = memoised_claude_bin(&app, true, async { Ok(guest.clone()) }).await.unwrap();
+        assert_eq!(found, guest);
+        let again = memoised_claude_bin(&app, true, async { panic!("the memo must serve the second call") })
+            .await
+            .unwrap();
+        assert_eq!(again, guest);
+        let host = PathBuf::from("/usr/local/bin/claude");
+        let other = memoised_claude_bin(&app, false, async { Ok(host.clone()) }).await.unwrap();
+        assert_eq!(other, host, "the host lookup has its own key");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A failed lookup must not be kept: Settings re-renders the red "missing" row from every 30 s
+    /// poll, so a Claude Code installed while the harness runs has to be found without a restart.
+    #[tokio::test]
+    async fn a_failed_claude_bin_lookup_is_not_memoised_so_a_later_install_is_found() {
+        let root = temp_root();
+        let app = test_app(&root);
+        assert!(memoised_claude_bin(&app, true, async { bail!("nothing yet") }).await.is_err());
+        let installed = PathBuf::from("/usr/local/bin/claude");
+        let found = memoised_claude_bin(&app, true, async { Ok(installed.clone()) })
+            .await
+            .unwrap();
+        assert_eq!(found, installed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A walk whose candidates all wedge must give up on the overall limit and say so, not grind
+    /// through every candidate at `PROBE_LIMIT` apiece. Paused time fires the 10s walk limit
+    /// without waiting for it; each probe burns its whole 5s, so the probe file can only ever show
+    /// the first three of the five candidates — a walk with no limit would leave all five.
+    #[tokio::test(start_paused = true)]
+    async fn a_walk_over_candidates_that_all_wedge_times_out_rather_than_probing_every_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root();
+        let probed = root.join("probed");
+        let candidates: Vec<PathBuf> = (0..5)
+            .map(|i| {
+                let path = root.join(format!("wedged-{i}"));
+                std::fs::write(&path, format!("#!/bin/sh\necho x >> {}\nexec sleep 60\n", probed.display())).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                path
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let err = walk_claude_candidates(&candidates, false).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("timed out"), "the walk names its cause: {message}");
+        assert!(!message.contains("no Claude Code binary found"), "{message}");
+        let reached = std::fs::read_to_string(&probed).unwrap_or_default().lines().count();
+        assert!(
+            reached < candidates.len(),
+            "{reached} of {} candidates probed; the walk ground through every one",
+            candidates.len()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the walk answered in {:?}; the wedged probes were waited out",
+            started.elapsed()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
