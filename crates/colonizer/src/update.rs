@@ -264,6 +264,77 @@ fn exec(_binary: &Path, _args: &[std::ffi::OsString]) -> std::io::Error {
     std::io::Error::other("updating in place needs a Unix process")
 }
 
+/* --------------------------------------------------------------------- cli */
+
+/// `colonizer update` — a thin client of a running mothership.
+///
+/// The work belongs to the mothership: it knows what is installed, which
+/// colonies are publishing, and how to restart itself. This asks it to start,
+/// then follows the progress it already reports, so the command and the button
+/// in Settings cannot drift apart.
+pub async fn command() -> Result<()> {
+    let bind = util::env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into());
+    let base = format!("http://{bind}");
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?;
+
+    let status: Value = client
+        .get(format!("{base}/api/update"))
+        .send()
+        .await
+        .with_context(|| format!("no mothership answering on {bind}; start `colonizer` first"))?
+        .json()
+        .await?;
+
+    let installed = status["installed"]["version"].as_str().unwrap_or("this build").to_string();
+    let Some(latest) = status["latest"]["version"].as_str().map(str::to_string) else {
+        // No answer is not the same as no update, and must never be reported as
+        // one: the check may be off, or simply not have run yet.
+        if let Some(blocked) = status["blocked_by"].as_str() {
+            bail!("the update check is kept off by {blocked}, so there is nothing to compare {installed} against");
+        }
+        if !status["enabled"].as_bool().unwrap_or(false) {
+            bail!("the update check is switched off, so this mothership does not know what the newest release is");
+        }
+        bail!("this mothership has not reached the release feed yet; try again shortly");
+    };
+    if !status["available"].as_bool().unwrap_or(false) {
+        println!("{installed} is the newest release.");
+        return Ok(());
+    }
+    if let Some(reason) = status["can_apply"]["reason"].as_str() {
+        bail!("{latest} is out, but it cannot be installed from here: {reason}");
+    }
+    println!("updating from {installed} to {latest}");
+
+    let started = client.post(format!("{base}/api/update/apply")).send().await?;
+    if !started.status().is_success() {
+        let body = started.text().await.unwrap_or_default();
+        bail!("{}", util::truncate(body.trim(), 500));
+    }
+
+    // The mothership replaces itself when it is done, so the connection drops
+    // rather than reporting success. A drop after `restarting` is the success.
+    let mut last = String::new();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let Ok(response) = client.get(format!("{base}/api/update")).send().await else {
+            println!("the mothership is restarting into {latest}");
+            return Ok(());
+        };
+        let status: Value = response.json().await?;
+        let phase = status["apply"]["phase"].as_str().unwrap_or("idle").to_string();
+        if phase != last {
+            println!("  {phase}");
+            last = phase.clone();
+        }
+        match phase.as_str() {
+            "failed" => bail!("{}", status["apply"]["error"].as_str().unwrap_or("the update failed")),
+            "idle" => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ routes */
 
 /// `POST /api/update/apply` — install the latest release and restart into it.
