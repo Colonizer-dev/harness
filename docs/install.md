@@ -39,7 +39,7 @@ The script is `scripts/install-release.sh`, published with each release as `inst
 
 The checksums catch a corrupted download, not a rewritten release: whoever can replace the archive can
 replace its checksums too. So the installer also verifies `SHA256SUMS` itself against the release's
-build-provenance attestation — the release workflow signs the checksum file with Sigstore and logs the
+build-provenance attestation: the release workflow signs the checksum file with Sigstore and logs the
 signature in a public transparency log, which access to the release's assets alone cannot produce. That
 second check needs `gh`, and when it cannot reach a verdict it is skipped with a note rather than
 failing: no `gh` installed, a `gh` too old to have `gh attestation verify`, `COLONIZER_RELEASE_URL`
@@ -54,7 +54,7 @@ gh attestation verify colonizer-linux-x86_64.tar.gz --repo Colonizer-dev/harness
 ```
 
 `darwin-arm64` is the other platform. Releases are created as a draft and published only once every
-asset is attached — the only order that works under GitHub's immutable releases, which freeze the assets
+asset is attached, the only order that works under GitHub's immutable releases, which freeze the assets
 and the tag the moment a release is published. Turning immutability on is itself a repository setting
 (Settings → Releases), not something a workflow can do.
 
@@ -63,7 +63,7 @@ things from Anthropic's own channels and checks each one:
 
 - the Claude Agent SDK, from the npm registry, against the checksum the release recorded from
   `package-lock.json`;
-- on a Mac, the Linux build of Claude Code that colonies run — the build pinned by version and checksum
+- on a Mac, the Linux build of Claude Code that colonies run, the build pinned by version and checksum
   in the release's `claude-code.lock`, not whatever Anthropic's `stable` channel points at that day
   ([On a Mac](#on-a-mac)).
 
@@ -78,8 +78,8 @@ curl -fsSL https://colonizer.dev/install.sh | sh -s -- --pull-image
 ```
 
 Two more variables change where the app comes from and how strictly it is checked:
-`COLONIZER_RELEASE_URL` fetches the app from `<url>/<file>` instead of the GitHub release — the build
-attestation belongs to the official release, so it is skipped on that path — and
+`COLONIZER_RELEASE_URL` fetches the app from `<url>/<file>` instead of the GitHub release. The build
+attestation belongs to the official release, so it is skipped on that path, and
 `COLONIZER_REQUIRE_ATTESTATION=1` makes a provenance check that comes back without a verdict a failure
 instead of a note.
 
@@ -133,7 +133,7 @@ A colony has been taken end to end on Apple Silicon, from install to an open pul
 The bundled private mesh comes with a Mac install too. That path is new: the build has been exercised
 from Linux, but it has not yet been taken end to end on Apple hardware. Headscale ships a
 `darwin-arm64` binary, just as it does for Linux. Tailscale publishes no macOS `tailscaled` anywhere
-— its macOS release is a GUI app plus a system extension, with no command-line pair to extract — so
+(its macOS release is a GUI app plus a system extension, with no command-line pair to extract), so
 a build from source compiles
 `tailscale` and `tailscaled` itself. The source is the same v1.102.4 tag the Linux binaries come
 from, pinned and sha256-verified, and the build runs inside a `golang:1-alpine` microVM, the way
@@ -141,14 +141,14 @@ from, pinned and sha256-verified, and the build runs inside a `golang:1-alpine` 
 cache under `target/`, on the first install only; a re-run finds the stamp and does nothing. A
 release install instead gets the binaries in the tarball and builds nothing. The host's `tailscaled`
 runs with userspace networking and a SOCKS5 listener, so a Mac needs no TUN device, no root and no
-special entitlements — Go's linker signs the binaries ad hoc, which is all Apple Silicon requires.
+special entitlements: Go's linker signs the binaries ad hoc, which is all Apple Silicon requires.
 If the three mesh binaries are absent, colonies fall back to a loopback port, as before.
 
 ## Where things live
 
 | What | Where | Change it with |
 | :--- | :--- | :--- |
-| The app | `~/.local/share/colonizer/app` for a release — a symlink to the directory the installed version lives in, so an upgrade is one rename; `./dist` for a build from source, or that same place after `--install` | `COLONIZER_APP` for a release |
+| The app | `~/.local/share/colonizer/app` for a release, a symlink to the directory the installed version lives in, so an upgrade is one rename; `./dist` for a build from source, or that same place after `--install` | `COLONIZER_APP` for a release |
 | Settings, org settings, providers, and the GitHub, Claude and provider credentials | `~/.config/colonizer` | `COLONIZER_CONFIG_DIR` |
 | Colonies and their worktrees, shared memory, your own plugins, the Headroom bundle | `~/.local/share/colonizer` | `COLONIZER_DATA_DIR` |
 | The web UI | `127.0.0.1:7878` | `COLONIZER_BIND` |
@@ -157,7 +157,7 @@ Every setting is listed under [Configuration](https://github.com/Colonizer-dev/h
 
 ## Updating
 
-A running mothership can update itself — Settings offers the newer release, installs it and restarts into
+A running mothership can update itself: Settings offers the newer release, installs it and restarts into
 it without losing colonies, and `colonizer update` does the same from a terminal. That, and the version
 check behind it, is [docs/updates.md](updates.md).
 

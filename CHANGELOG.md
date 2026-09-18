@@ -9,8 +9,8 @@ request, so the reasoning behind a line is one click away. Dates are the day the
 release was published.
 
 Colonizer is `0.x`: the shape of things still moves, and a minor version can
-change behaviour. Anything that would cost work — a colony, a worktree, a
-setting — is called out under **Take care** rather than left for you to find.
+change behaviour. Anything that would cost work (a colony, a worktree, a
+setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
@@ -26,7 +26,7 @@ setting — is called out under **Take care** rather than left for you to find.
   keep their microVMs and reconnect, and the pane says what happened to each
   one. ([#112])
 - `colonizer version` says what a binary is, and `colonizer update` applies a
-  newer release from a terminal against a running mothership — the same two
+  newer release from a terminal against a running mothership, the same two
   routes the Settings button uses. `colonizer --help` lists both. ([#131])
 - Shared memory can live in [mem0] instead of files on disk. ([#97])
 - `scripts/colony-report.mjs` prints how colonies went, out of what they already
@@ -39,7 +39,7 @@ setting — is called out under **Take care** rather than left for you to find.
 - The colony list is ordered by what it wants from you, shows the queue, and
   keeps following a pull request after it opens. ([#82])
 - An install now lives behind a symlink, so an install interrupted half-way
-  leaves either the whole old app or the whole new one — never neither. ([#104])
+  leaves either the whole old app or the whole new one, never neither. ([#104])
 - A colony that cannot be resumed says why, instead of quoting `gh` at you.
   ([#111])
 
@@ -50,7 +50,7 @@ setting — is called out under **Take care** rather than left for you to find.
   sessions.json written by an older version loads with what it has. ([#127])
 - One damaged record no longer throws away every colony in the list. Startup
   keeps the good records, copies the original file aside as
-  `sessions.json.corrupt-<timestamp>` — the original stays put — and the alert
+  `sessions.json.corrupt-<timestamp>` (the original stays put) and the alert
   says how many loaded, how many were damaged and where the copy is. ([#127])
 
 ### Take care
@@ -60,14 +60,14 @@ setting — is called out under **Take care** rather than left for you to find.
   An installer run by hand still replaces it immediately, which is safe when
   nothing is running and not when something is. ([#112])
 
-## [v0.1.4] — 2026-09-17
+## [v0.1.4] - 2026-09-17
 
 ### Changed
 
 - The colony chat streams smoothly: even text, fade-ins and eased scrolling,
   instead of arriving in jerks. ([#80])
 
-## [v0.1.3] — 2026-09-17
+## [v0.1.3] - 2026-09-17
 
 ### Added
 
@@ -78,17 +78,17 @@ setting — is called out under **Take care** rather than left for you to find.
 ### Changed
 
 - "Settler" now means what it does today, subagents included, and the README
-  stops claiming nothing is downloaded at runtime — the Claude Agent SDK and,
+  stops claiming nothing is downloaded at runtime: the Claude Agent SDK and,
   on a Mac, the Linux build of Claude Code, are fetched at install time from
   Anthropic's own channels. ([#78])
 
-## [v0.1.2] — 2026-09-17
+## [v0.1.2] - 2026-09-17
 
 ### Changed
 
 - The published crates carry a banner and a README of their own. ([#77])
 
-## [v0.1.1] — 2026-09-17
+## [v0.1.1] - 2026-09-17
 
 ### Added
 
@@ -97,7 +97,7 @@ setting — is called out under **Take care** rather than left for you to find.
 - The one-command install is documented now that there is a release to install.
   ([#75])
 
-## [v0.1.0] — 2026-09-17
+## [v0.1.0] - 2026-09-17
 
 The first release: prebuilt for Linux x86_64 with KVM, and for Apple Silicon
 Macs. ([#74])
@@ -105,7 +105,7 @@ Macs. ([#74])
 ### Colonies
 
 - A GitHub issue becomes a pull request. The agent works in a disposable KVM
-  microVM on a fresh git worktree, and the **host** — never the VM — commits,
+  microVM on a fresh git worktree, and the **host**, never the VM, commits,
   pushes and opens the pull request, automatically when the agent finishes.
 - Questions arrive as multiple-choice cards with an "Other…" answer, never a
   wall of text, and every step is described in plain language with the exact
@@ -137,7 +137,7 @@ Macs. ([#74])
 
 ### The machine
 
-- Sandbox presets — Node, Python, Rust, Go — instead of typing an image tag, and
+- Sandbox presets (Node, Python, Rust, Go) instead of typing an image tag, and
   the colony image downloads when the stack is chosen rather than during your
   first colony.
 - Where a launch spends its time is recorded per phase.
