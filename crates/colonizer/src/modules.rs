@@ -265,20 +265,20 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
         if !ok {
             return Err(format!("setting `{key}` has the wrong type"));
         }
-        if let Some(options) = spec["enum"].as_array() {
-            if !options.contains(value) {
-                return Err(format!("setting `{key}` must be one of the listed options"));
-            }
+        if let Some(options) = spec["enum"].as_array()
+            && !options.contains(value)
+        {
+            return Err(format!("setting `{key}` must be one of the listed options"));
         }
-        if let Some(n) = value.as_f64() {
-            if spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max) {
-                return Err(format!("setting `{key}` is out of range"));
-            }
+        if let Some(n) = value.as_f64()
+            && (spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max))
+        {
+            return Err(format!("setting `{key}` is out of range"));
         }
-        if let Some(s) = value.as_str() {
-            if s.len() > 500 || s.contains('\n') {
-                return Err(format!("setting `{key}` is too long"));
-            }
+        if let Some(s) = value.as_str()
+            && (s.len() > 500 || s.contains('\n'))
+        {
+            return Err(format!("setting `{key}` is too long"));
         }
         out.insert(key.clone(), value.clone());
     }
