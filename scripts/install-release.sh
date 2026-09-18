@@ -114,7 +114,17 @@ main() {
     parked=
     rm -rf "$app.old"
   fi
-  case "$previous" in "$name-a" | "$name-b") rm -rf "${dir:?}/$previous" ;; esac
+  # Colonies mount vendored plugins straight out of the slot the mothership was
+  # started from (sessions.rs resolves its assets through current_exe, which
+  # canonicalises the symlink away), so removing it under a running colony takes
+  # its plugins with it. An update applied by a running mothership sets
+  # COLONIZER_KEEP_PREVIOUS=1 and cleans the slot up itself, once nothing is
+  # using it. A person running the installer by hand keeps today's behaviour.
+  if [ "${COLONIZER_KEEP_PREVIOUS:-0}" = 1 ]; then
+    case "$previous" in "$name-a" | "$name-b") say "keeping the previous version at $dir/$previous" ;; esac
+  else
+    case "$previous" in "$name-a" | "$name-b") rm -rf "${dir:?}/$previous" ;; esac
+  fi
 
   mkdir -p "$HOME/.local/bin"
   relink "$app/bin/colonizer" "$HOME/.local/bin/colonizer"

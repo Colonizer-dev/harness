@@ -61,6 +61,7 @@ export interface Api {
   telemetry(): Promise<TelemetryStatus>;
   update(): Promise<UpdateStatus>;
   setUpdateCheck(enabled: boolean): Promise<UpdateStatus>;
+  applyUpdate(): Promise<{ started: boolean }>;
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
@@ -154,6 +155,7 @@ export const httpApi: Api = {
   telemetry: () => request("/api/telemetry"),
   update: () => request("/api/update"),
   setUpdateCheck: (enabled) => put("/api/update", { enabled }),
+  applyUpdate: () => post("/api/update/apply"),
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
   repos: () => request("/api/repos"),
   issues: (repo) => {

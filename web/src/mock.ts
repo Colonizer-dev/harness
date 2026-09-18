@@ -801,6 +801,8 @@ let mockUpdate: UpdateStatus = {
   available: true,
   last_checked: "2026-09-17T18:00:00Z",
   error: null,
+  can_apply: { ok: true, reason: null },
+  apply: { phase: "idle", version: null, started_at: null, error: null, log: "", colonies: [] },
 };
 
 let mockTelemetry: TelemetryStatus = {
@@ -1284,6 +1286,27 @@ export function createMockApi(): Api {
       return clone(mockPull);
     },
     sandboxPullStatus: async () => clone(mockPull),
+    applyUpdate: async () => {
+      await sleep(200);
+      const live = [...sessions.values()].map((s) => s.session).filter((s) => isLive(s.status));
+      if (live.some((s) => s.status === "publishing")) throw new ApiError("a colony is publishing", 409);
+      mockUpdate = {
+        ...mockUpdate,
+        apply: {
+          phase: "installing",
+          version: mockUpdate.latest?.version ?? null,
+          started_at: new Date().toISOString(),
+          error: null,
+          log: "",
+          colonies: live.map((s) => ({ id: s.id, repo: s.repo, outcome: "reconnected after the restart" })),
+        },
+      };
+      // The real one replaces the process here; the mock just reports it did.
+      setTimeout(() => {
+        mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "restarting", log: "==> installed Colonizer" } };
+      }, 2500);
+      return { started: true };
+    },
     headroom: async () => {
       if (mockHeadroom.state === "downloading" && mockHeadroom.started_at) {
         const total = 231_330_241;
