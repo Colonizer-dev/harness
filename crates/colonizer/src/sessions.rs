@@ -902,7 +902,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         mounts.push(Mount {
             // The guest's own build when the host's is not a Linux one (a Mac builds Mach-O for the
             // mesh it runs itself); otherwise the single vendored copy serves both sides.
-            source: app.cfg.asset("vendor/tailscale-guest").or_else(|_| app.cfg.asset("vendor/tailscale"))?,
+            source: app
+                .cfg
+                .asset("vendor/tailscale-guest")
+                .or_else(|_| app.cfg.asset("vendor/tailscale"))?,
             target: "/opt/colonizer/tailscale".into(),
             read_only: true,
         });
