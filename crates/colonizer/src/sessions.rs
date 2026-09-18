@@ -30,13 +30,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -61,6 +61,10 @@ pub enum SessionStatus {
     Idle,
     Publishing,
     PrOpened,
+    /// The pull request was merged; nothing left to watch.
+    Merged,
+    /// The pull request was closed without merging; GitHub lets it be reopened, so it is still watched.
+    Closed,
     NoChanges,
     Stopped,
     Failed,
@@ -1258,6 +1262,112 @@ pub async fn watch_sandboxes(app: Shared) {
     }
 }
 
+/// How often a colony's pull request is checked, at first and at most: this spends the user's GitHub API
+/// quota, so a freshly opened PR is noticed within a minute while one sitting for days costs an hour.
+const PR_POLL_FIRST: Duration = Duration::from_secs(60);
+const PR_POLL_MAX: Duration = Duration::from_secs(60 * 60);
+
+/// Colonies whose pull request still needs watching. `merged` is final; a closed PR can be reopened,
+/// so `closed` keeps being watched.
+fn pr_watched(status: SessionStatus, has_pr: bool) -> bool {
+    has_pr && matches!(status, SessionStatus::PrOpened | SessionStatus::Closed)
+}
+
+/// Whether a pull request is due for its next check.
+fn pr_due(last_checked: Instant, backoff: Duration, now: Instant) -> bool {
+    now.duration_since(last_checked) >= backoff
+}
+
+/// The next check interval: doubled after a check with no news, reset when the state actually changed.
+/// A failed `gh` call counts as no news, so a broken checkout backs off like an untouched PR.
+fn pr_backoff(current: Duration, changed: bool) -> Duration {
+    if changed {
+        PR_POLL_FIRST
+    } else {
+        (current * 2).min(PR_POLL_MAX)
+    }
+}
+
+/// Per-colony poll bookkeeping, in memory only: it never reaches `sessions.json` or the browsers.
+struct PrPoll {
+    last_checked: Instant,
+    backoff: Duration,
+    /// Set while `gh` keeps failing, so the reason is logged once per streak, not once per attempt.
+    failing: bool,
+}
+
+/// Watches the pull requests of `pr_opened` and `closed` colonies, so a merge or close elsewhere turns
+/// the colony's badge into `merged` or `closed` instead of leaving it green forever. The colony's own
+/// work is already published; this only reads.
+pub async fn watch_pull_requests(app: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut polling: HashMap<String, PrPoll> = HashMap::new();
+    loop {
+        tick.tick().await;
+        // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
+        // deadlock against update_session's write lock.
+        let sessions = app.sessions.read().await.clone();
+        // Forget colonies whose pull request no longer needs watching, so the map cannot grow unboundedly.
+        polling.retain(|id, _| sessions.iter().any(|s| &s.id == id && pr_watched(s.status, s.pr_url.is_some())));
+        for s in sessions.iter().filter(|s| pr_watched(s.status, s.pr_url.is_some())) {
+            let Some(url) = s.pr_url.clone() else { continue };
+            let poll = polling
+                .entry(s.id.clone())
+                .or_insert(PrPoll { last_checked: Instant::now(), backoff: PR_POLL_FIRST, failing: false });
+            let now = Instant::now();
+            if !pr_due(poll.last_checked, poll.backoff, now) {
+                continue;
+            }
+            poll.last_checked = now;
+            match github::pr_state(&app, &url).await {
+                Ok(state) => {
+                    poll.failing = false;
+                    let target = match state {
+                        github::PrState::Open => SessionStatus::PrOpened, // also picks a reopened PR back up
+                        github::PrState::Merged => SessionStatus::Merged,
+                        github::PrState::Closed => SessionStatus::Closed,
+                    };
+                    // Only a real transition is written: update_session persists and pushes to every
+                    // browser even when the closure changes nothing.
+                    let mut changed = false;
+                    if s.status != target {
+                        changed = app
+                            .update_session(&s.id, |x| {
+                                // Re-checked under the write lock: the colony may have been deleted or
+                                // moved on while `gh` was running.
+                                let apply = pr_watched(x.status, x.pr_url.is_some()) && x.status != target;
+                                if apply {
+                                    x.status = target;
+                                }
+                                apply
+                            })
+                            .await
+                            .is_some_and(|(_, changed)| changed);
+                    }
+                    if changed {
+                        let message = match target {
+                            SessionStatus::Merged => "the pull request was merged",
+                            SessionStatus::Closed => "the pull request was closed",
+                            _ => "the pull request was reopened",
+                        };
+                        app.session_log(&s.id, "info", message.into()).await;
+                    }
+                    poll.backoff = pr_backoff(poll.backoff, changed);
+                }
+                Err(e) => {
+                    // No news is no change: leave the colony's status alone and try again later.
+                    if !poll.failing {
+                        poll.failing = true;
+                        app.session_log(&s.id, "warn", format!("checking the pull request failed ({e:#}); will retry")).await;
+                    }
+                    poll.backoff = pr_backoff(poll.backoff, false);
+                }
+            }
+        }
+    }
+}
+
 /// Starts queued colonies as slots free up, oldest first. A colony whose org is at its own limit doesn't
 /// hold up the ones behind it.
 pub async fn run_queue(app: Shared) {
@@ -1734,7 +1844,7 @@ mod tests {
     #[test]
     fn only_colonies_with_nothing_running_can_be_deleted() {
         use SessionStatus::*;
-        for status in [Queued, Stopped, Failed, NoChanges, PrOpened] {
+        for status in [Queued, Stopped, Failed, NoChanges, PrOpened, Merged, Closed] {
             assert!(deletable(status), "{status:?}");
         }
         for status in [Starting, Running, WaitingForAnswer, Idle, Publishing] {
@@ -1825,9 +1935,50 @@ mod tests {
             SessionStatus::Idle,
             SessionStatus::Publishing,
             SessionStatus::PrOpened,
+            SessionStatus::Merged,
+            SessionStatus::Closed,
             SessionStatus::NoChanges,
         ] {
             assert!(!can_resume(status, false, true), "{status:?}");
         }
+    }
+
+    #[test]
+    fn only_colonies_with_a_live_pr_are_watched_and_merged_is_never_polled() {
+        for (status, watched) in [
+            (SessionStatus::PrOpened, true),
+            (SessionStatus::Closed, true),
+            (SessionStatus::Merged, false),
+            (SessionStatus::Queued, false),
+            (SessionStatus::Starting, false),
+            (SessionStatus::Running, false),
+            (SessionStatus::Publishing, false),
+            (SessionStatus::NoChanges, false),
+            (SessionStatus::Stopped, false),
+            (SessionStatus::Failed, false),
+        ] {
+            assert_eq!(pr_watched(status, true), watched, "{status:?}");
+            // Without a pull request there is nothing to ask GitHub about.
+            assert!(!pr_watched(status, false), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn pull_request_checks_back_off_until_the_cap_and_reset_on_a_change() {
+        assert_eq!(pr_backoff(Duration::from_secs(60), false), Duration::from_secs(120));
+        assert_eq!(pr_backoff(Duration::from_secs(1920), false), Duration::from_secs(3600));
+        assert_eq!(pr_backoff(Duration::from_secs(3600), false), Duration::from_secs(3600), "capped at an hour");
+        assert_eq!(pr_backoff(Duration::from_secs(4000), false), Duration::from_secs(3600));
+        // Real news buys a fast next check again (e.g. a closed PR reopened).
+        assert_eq!(pr_backoff(Duration::from_secs(3600), true), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_pull_request_is_due_once_its_backoff_has_elapsed() {
+        let checked = Instant::now();
+        assert!(pr_due(checked - Duration::from_secs(60), Duration::from_secs(60), checked), "a backoff ago is due");
+        assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
+        assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
+        assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));
     }
 }
