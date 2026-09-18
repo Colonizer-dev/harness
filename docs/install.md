@@ -70,6 +70,10 @@ Two options:
 - `--install` copies the app to `~/.local/share/colonizer/app` and links `~/.local/bin/colonizer`, so
   `colonizer` runs from anywhere. It is implemented but hasn't been run end to end yet.
 
+The crates are on crates.io (`colonizer-harness`, `colonizer-agentd`), but `cargo install` builds only
+the `colonizer` binary, without the app assets it needs beside it. The installer or a build from
+source is the way in.
+
 ## First run
 
 In **Settings**, connect GitHub (your `gh` login is picked up automatically) and press **Log in with
