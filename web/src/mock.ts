@@ -26,6 +26,7 @@ import type {
   SessionStatus,
   TelemetryStatus,
   UpdateStatus,
+  UsageStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -828,6 +829,32 @@ let mockTelemetry: TelemetryStatus = {
   heartbeat: { install_id: null, version: "0.1.3", platform: "darwin-arm64", colonies: 1 },
 };
 
+// The usage batch: reporting is on by default, so `enabled` arrives already resolved to true — the
+// "never answered" distinction lives only in usage.json and is not exposed over the API. This build
+// has no sender; the batch is only collected and shown.
+let mockUsage: UsageStatus = {
+  enabled: true,
+  blocked_by: null,
+  payload_version: 1,
+  batch: {
+    payload_version: 1,
+    usage_id: "0f8a6c1e-4d2b-4a9e-9c3f-5b7d1e2a6c48",
+    harness_version: "0.1.3",
+    platform: "darwin-arm64",
+    colonies: { parallel_now: "1", terminal: { pr_opened: "2-3", no_changes: "0", stopped: "1", failed: "0" } },
+    sandbox: { preset: "node", image_changed_from_default: false },
+    autopilot: { enabled: true, held: "0" },
+    settings_set: ["agent.model", "sandbox.preset"],
+    boot_ms: [
+      { phase: "issue", bucket: "<1s" },
+      { phase: "vm-boot", bucket: "5-15s" },
+      { phase: "agentd", bucket: "1-2s" },
+    ],
+    providers: "1",
+    error_kinds: { vm_stopped: "1" },
+  },
+};
+
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
   const demo = new MockSession({
@@ -1392,6 +1419,18 @@ export function createMockApi(): Api {
         heartbeat: { ...mockTelemetry.heartbeat, install_id },
       };
       return clone(mockTelemetry);
+    },
+    usage: async () => clone(mockUsage),
+    setUsage: async (enabled) => {
+      await sleep(250);
+      if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);
+      mockUsage = {
+        ...mockUsage,
+        enabled,
+        // Switching on creates the id; switching off forgets it, so the next period cannot be joined to this one.
+        batch: { ...mockUsage.batch, usage_id: enabled ? (mockUsage.batch.usage_id ?? crypto.randomUUID()) : null },
+      };
+      return clone(mockUsage);
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
