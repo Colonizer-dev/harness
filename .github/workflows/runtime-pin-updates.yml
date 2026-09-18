@@ -1,0 +1,88 @@
+# Proposes new pins for the colony images (crates/colonizer/images.lock) and the guest Claude Code
+# build (vendor/claude-code.lock) when their upstreams move, with the exact digest-to-digest or
+# version-to-version change in the description. It never merges anything, and that is the point: a
+# pin bump is a change to what every release runs — images.lock is compiled into the mothership
+# binary itself — so a person reads the diff and merges every bump by hand.
+#
+# The update lands on the runtime/pin-updates branch. The workflow then opens a pull request, or,
+# while the repository doesn't allow GitHub Actions to create pull requests (Settings → Actions →
+# General), keeps an issue open with the same description and a link to open the pull request.
+name: Runtime pin updates
+
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: runtime-pin-updates
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BRANCH: runtime/pin-updates
+      TITLE: Update runtime pins
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Check upstreams
+        id: check
+        run: node scripts/update-runtime-pins.mjs --write --summary "$RUNNER_TEMP/summary.md"
+
+      # The Claude Code rows get the check a real install does: fetch-agent-binary.sh downloads the
+      # newly pinned build and verifies it against the new checksum, so an update that fails that
+      # never becomes a proposal. The image digests were already checked by the script itself — it
+      # fetches a proposed index by digest and refuses one without linux/amd64 and linux/arm64.
+      - name: Stage the new Claude Code pin
+        if: steps.check.outputs.changed == 'true'
+        run: sh scripts/fetch-agent-binary.sh
+
+      - name: Propose
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add crates/colonizer/images.lock vendor/claude-code.lock
+          git commit -m "$TITLE" -m "$(cat "$RUNNER_TEMP/summary.md")"
+          git push --force origin "$BRANCH"
+
+          existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body-file "$RUNNER_TEMP/summary.md"
+            echo "Updated pull request #$existing"
+            exit 0
+          fi
+          if gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" --title "$TITLE" --body-file "$RUNNER_TEMP/summary.md"; then
+            exit 0
+          fi
+
+          echo "Could not open a pull request; keeping an issue open instead."
+          compare="${{ github.server_url }}/${{ github.repository }}/compare/${{ github.event.repository.default_branch }}...$BRANCH?expand=1"
+          {
+            echo "The update is on [\`$BRANCH\`]($compare): **[open the pull request]($compare)**."
+            echo
+            echo "_This repository doesn't let GitHub Actions open pull requests (Settings → Actions → General), so this issue stands in for one._"
+            echo
+            cat "$RUNNER_TEMP/summary.md"
+          } > "$RUNNER_TEMP/issue.md"
+          issue=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -1)
+          if [ -n "$issue" ]; then
+            gh issue edit "$issue" --body-file "$RUNNER_TEMP/issue.md"
+            echo "Updated issue #$issue"
+          else
+            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md"
+          fi

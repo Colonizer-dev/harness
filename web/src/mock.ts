@@ -393,13 +393,13 @@ class MockSession {
     if (s.status === "starting") {
       this.log(`Creating worktree ${s.branch} from origin/${s.base ?? "main"}`);
       await sleep(700);
-      this.log(`Booting microVM ${s.sandbox} (node:24-bookworm, 4 vCPU, 8G)`);
+      this.log(`Booting microVM ${s.sandbox} (node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0, 4 vCPU, 8G)`);
       await sleep(900);
       this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
       this.patch({ status: "running" });
     } else {
       this.log(`Worktree ${s.branch} created from origin/${s.base ?? "main"}`);
-      this.log(`microVM ${s.sandbox} booted (node:24-bookworm, 4 vCPU, 8G)`);
+      this.log(`microVM ${s.sandbox} booted (node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0, 4 vCPU, 8G)`);
       this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
     }
     this.emit({ type: "status", state: "working" });
@@ -775,13 +775,15 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
   };
 }
 
+// The same digest pins the real backend boots (crates/colonizer/images.lock), so the mock
+// shows references in exactly the shape the app produces.
 const MOCK_PRESET_IMAGES: Record<string, string> = {
-  node: "node:24-bookworm",
-  python: "python:3.13-bookworm",
-  rust: "rust:1-bookworm",
-  go: "golang:1-bookworm",
+  node: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0",
+  python: "python:3.13-bookworm@sha256:933b46a028fd786c9c3d426ebabc237e29a15912231ea8de576e95f0e4f41a4c",
+  rust: "rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa",
+  go: "golang:1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b",
 };
-const mockPulled = new Set<string>(["node:24-bookworm"]);
+const mockPulled = new Set<string>(["node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0"]);
 let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finished_at: null, error: null };
 // Headroom's bundle: a few seconds of download progress, then installed.
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
@@ -1108,11 +1110,11 @@ export function createMockApi(): Api {
       provider: "microsandbox",
       providers: [{ id: "microsandbox", name: "microsandbox", description: "Rootless libkrun microVMs" }],
       enabled: true,
-      settings: { image: "node:24-bookworm", cpus: 4, memory: "8G" },
+      settings: { image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G" },
       schema: {
         type: "object",
         properties: {
-          image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm" },
+          image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0" },
           cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
           memory: { type: "string", title: "Memory", default: "8G" },
           max_parallel: { type: "integer", title: "Parallel colonies", minimum: 1, maximum: 16, default: 3 },
@@ -1262,7 +1264,7 @@ export function createMockApi(): Api {
       later(() => ({
         github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
         claude,
-        sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+        sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
         mesh: {
           enabled: true,
           provider: "headscale",
@@ -1286,7 +1288,7 @@ export function createMockApi(): Api {
     sandboxPull: async () => {
       const sandbox = modules.find((m) => m.kind === "sandbox");
       const preset = String(sandbox?.settings?.preset ?? "node");
-      const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm");
+      const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0");
       if (mockPulled.has(image)) {
         mockPull = { image, state: "cached", started_at: null, finished_at: null, error: null };
         return clone(mockPull);
