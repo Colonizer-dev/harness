@@ -789,6 +789,15 @@ let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finishe
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
 // The live map: not asked yet, so the prompt shows.
+/** `?mesh=unavailable` models a Mac; `?mesh=error` models a mesh that actually failed. */
+const mockMeshParam = () => {
+  try {
+    return new URLSearchParams(location.search).get("mesh");
+  } catch {
+    return null;
+  }
+};
+
 const MOCK_LATEST = {
   version: "v0.1.4",
   url: "https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4",
@@ -1265,14 +1274,36 @@ export function createMockApi(): Api {
         github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
         claude,
         sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
-        mesh: {
-          enabled: true,
-          provider: "headscale",
-          state: "running",
-          harness_ip: "100.64.0.1",
-          nodes: [...sessions.values()].filter((s) => isLive(s.session.status)).length + 1,
-          error: null,
-        },
+        // ?mesh=unavailable models a Mac, which vendors no tailscaled: by design, and
+        // not a fault. It used to paint the runtime red (#128), and the mock could not
+        // show that because it only ever reported a healthy mesh.
+        mesh: mockMeshParam() === "error"
+          ? {
+              enabled: true,
+              provider: "headscale",
+              state: "error",
+              harness_ip: null,
+              nodes: 0,
+              error: "headscale did not start: address already in use",
+            }
+          : mockMeshParam() === "unavailable"
+          ? {
+              enabled: true,
+              provider: "headscale",
+              state: "unavailable",
+              harness_ip: null,
+              nodes: 0,
+              detail: "colonies use a loopback port on this platform",
+              error: null,
+            }
+          : {
+              enabled: true,
+              provider: "headscale",
+              state: "running",
+              harness_ip: "100.64.0.1",
+              nodes: [...sessions.values()].filter((s) => isLive(s.session.status)).length + 1,
+              error: null,
+            },
       })),
     modules: () => later(() => modules),
     saveModule: async (kind, body) => {

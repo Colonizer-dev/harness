@@ -14,22 +14,7 @@ import {
   IconSettings,
   IconX,
 } from "./icons";
-import {
-  AttentionBadge,
-  Badge,
-  Button,
-  Spinner,
-  StatusBadge,
-  Switch,
-  cx,
-  inputClass,
-  occupiesSlot,
-  orgOf,
-  sameOrg,
-  store,
-  stored,
-  timeAgo,
-} from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, Switch, cx, inputClass, meshBroken, occupiesSlot, orgOf, sameOrg, store, stored, timeAgo } from "./ui";
 
 export type MainView = "colonies" | "memory";
 
@@ -416,7 +401,7 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
     { label: "microVMs", state: status.sandbox.msb_version ? "ok" : "bad" },
     {
       label: mesh?.enabled ? `Mesh${mesh.nodes != null ? ` · ${mesh.nodes}` : ""}` : "Mesh off",
-      state: !mesh || !mesh.enabled ? "off" : mesh.error || mesh.state === "error" ? "bad" : "ok",
+      state: !mesh || !mesh.enabled ? "off" : meshBroken(mesh) ? "bad" : "ok",
     },
   ];
   // Only a mothership that reports storage health gets the dot; older ones (no `storage`) show nothing new.

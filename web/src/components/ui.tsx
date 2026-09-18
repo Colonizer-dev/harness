@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import type { Attention, ModelOption, Session, SessionStatus } from "../types";
+import type { Attention, HarnessStatus, ModelOption, Session, SessionStatus } from "../types";
 import { IconAlert, IconInfo } from "./icons";
 
 export function cx(...classes: (string | false | null | undefined)[]): string {
@@ -83,6 +83,18 @@ export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; 
 /** Sessions whose microVM is up. */
 export function isLive(status: SessionStatus): boolean {
   return SESSION_STATUS[status]?.live ?? false;
+}
+
+/** Whether the mesh is actually broken, as opposed to unavailable on this platform.
+ *
+ *  A Mac vendors no `tailscaled`, so the mothership reports `state: "unavailable"` and colonies use a
+ *  loopback port (#32). That is by design and must not read as a fault — it used to, because every
+ *  reader tested `mesh.error` and the payload put the explanation there. Kept in one place so the
+ *  sidebar dot, the Settings nav and the Runtime row cannot disagree. */
+export function meshBroken(mesh: HarnessStatus["mesh"]): boolean {
+  if (!mesh || !mesh.enabled) return false;
+  if (mesh.state === "unavailable") return false;
+  return mesh.state === "error" || Boolean(mesh.error);
 }
 
 /** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone.
