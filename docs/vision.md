@@ -45,6 +45,8 @@ Use the metaphor lightly in the product; plain words win whenever clarity is at 
 6. **Trust, then verify.** Colony output is untrusted data until the mothership has sanitized and
    published it, and a human has reviewed the pull request.
 
+These are the design, and where the code does not reach them yet, [audit.md](audit.md) says so.
+
 ## Horizon
 
 - **More settlers:** other coding agents behind the same runner protocol.
