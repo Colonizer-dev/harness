@@ -394,6 +394,40 @@ It runs inside the colony and never on the mothership: repository content is att
 the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
 reported and treated as no findings — a broken scanner must not be able to halt every colony.
 
+### `GET /api/version`
+
+What this mothership was built from, stamped in at build time by `crates/colonizer/build.rs`:
+
+```json
+{"version":"v0.1.4","commit":"1367191…","dirty":false,"built_at":"2026-09-17T17:21:32Z","release":"v0.1.4"}
+```
+
+`version` is `git describe --tags --always --dirty`, so a build after a tag reads `v0.1.4-12-gabc1234`.
+`release` is the last release tag the build contains, which is what an update is compared against. A
+build from a source package with no git history reports the crate version and no commit. `built_at`
+honours `SOURCE_DATE_EPOCH`, so a release can still be built reproducibly.
+
+### `GET /api/update` and `PUT /api/update`
+
+Whether a newer release exists. **On by default**; `PUT {"enabled": false}` turns it off, and
+`COLONIZER_UPDATE_CHECK=0` keeps it off from the environment (reported as `blocked_by`).
+
+The check asks GitHub for the latest release of `Colonizer-dev/harness` a minute after start and every
+six hours after that, and only while it is on: switched off, the mothership makes no request for it,
+and forgets the last answer so no banner lingers. Drafts and prereleases are ignored. The request
+carries a user agent and nothing about the install — the live map is separate, and off until switched
+on (`telemetry.md`). `COLONIZER_RELEASES_URL` points the check elsewhere, for a fork or a test.
+
+```json
+{"enabled":true,"blocked_by":null,"installed":{…},"latest":{"version":"v0.1.5","url":"…","notes":"…","published_at":"…"},
+ "available":true,"last_checked":"…","error":null}
+```
+
+`available` is true only when `latest` parses as a release newer than `installed.release`. A build
+whose version cannot be placed is never told it is behind.
+
+Applying an update is not implemented: the UI says to re-run the installer. See #45.
+
 ### `POST /api/sandbox/pull` and `GET /api/sandbox/pull`
 
 Downloads the configured colony image (after the stack preset) into microsandbox's cache, so a launch

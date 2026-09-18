@@ -217,6 +217,26 @@ export interface HeadroomStatus {
   error: string | null;
 }
 
+/** GET /api/version: what this mothership was built from. */
+export interface BuildInfo {
+  version: string;
+  commit: string | null;
+  dirty: boolean;
+  built_at: string;
+  release: string | null;
+}
+
+/** GET /api/update: the installed build, and the latest release if the check is on. */
+export interface UpdateStatus {
+  enabled: boolean;
+  blocked_by: string | null;
+  installed: BuildInfo;
+  latest: { version: string; url: string; notes: string; published_at: string | null } | null;
+  available: boolean;
+  last_checked: string | null;
+  error: string | null;
+}
+
 /** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */
 export interface TelemetryStatus {
   /** null until the user has answered. */
