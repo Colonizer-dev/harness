@@ -205,7 +205,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go, each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code, with subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code, with the orchestrator or its subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
@@ -216,6 +216,14 @@ watchdog. Model providers (DeepSeek, a server on your LAN or tailnet, any Anthro
 are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
 keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
 Claude when a provider is down or busy.
+
+One thing worth knowing before you point a provider at a model setting: the orchestrator model does
+nearly all of the work. The subagent setting only carries traffic when a colony delegates to a
+subagent, and colonies rarely do — four recent colonies of 413 to 2 095 events spawned 0, 0, 0 and 1
+between them — and the background setting carries only small auxiliary calls. A provider wired to just
+those two is configured correctly and will still look idle. To put real traffic on your own hardware,
+point the orchestrator model at it. The full breakdown is in the
+[Claude Code module](modules/agents/claude-code/README.md).
 
 ---
 

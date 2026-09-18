@@ -850,7 +850,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 }
 
 /// Maps agent settings to runner env vars via each schema property's `env` key.
-fn agent_env(agent: &AgentModule, choice: &crate::config::ModuleChoice) -> Map<String, Value> {
+pub(crate) fn agent_env(agent: &AgentModule, choice: &crate::config::ModuleChoice) -> Map<String, Value> {
     let mut env = Map::new();
     if let Some(properties) = agent.schema["properties"].as_object() {
         for (key, spec) in properties {

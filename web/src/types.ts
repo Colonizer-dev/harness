@@ -190,7 +190,38 @@ export interface ModelProvider extends ProviderLimits {
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
+  /**
+   * Cumulative tallies since the Mothership first kept them; survive a restart. Optional: a
+   * Mothership from before it kept tally sends neither this nor `used_by`.
+   */
+  usage?: ProviderUsage;
+  /** The model settings currently routed here; empty means none are, so it stays idle. */
+  used_by?: ModelSetting[];
 }
+
+/** Cumulative per-provider tallies, kept across restarts. */
+export interface ProviderUsage {
+  /** Requests dispatched upstream; a gateway-refused request does not count. */
+  requests: number;
+  /**
+   * Requests with no usable response: a gateway fallback error (queue timeout, unreachable,
+   * timeout), an upstream status >= 400, or an openai-wire body that failed or never finished.
+   * A failure part-way through a streamed body is not counted. A subset of `requests`.
+   */
+  failures: number;
+  /**
+   * Failures the Mothership answered with a fallback response, which the colony's router will
+   * retry on Claude. A prediction, not an observation. A subset of `failures`.
+   */
+  fallbacks: number;
+  /** Cumulative wall-clock time, including streaming the response body. */
+  duration_ms: number;
+  /** When the last request was dispatched; null if never. */
+  last_request_at: string | null;
+}
+
+/** The model settings whose resolved value can route to a provider. */
+export type ModelSetting = "model" | "subagent_model" | "background_model";
 
 export interface SaveProviderRequest {
   name: string;
@@ -460,6 +491,7 @@ export type AgentEventBody =
       result: string | null;
       cost_usd: number | null;
       duration_ms: number | null;
+      /** Colony-cumulative totals as of this turn, not this turn's own usage (docs/protocol.md §4). */
       model_usage?: Record<string, ModelTokens>;
     }
   | { type: "log"; level: LogLevel; message: string };

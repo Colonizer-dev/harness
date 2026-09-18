@@ -16,9 +16,9 @@ lines on stdout, diagnostics on stderr.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `COLONIZER_CLAUDE_BIN` | `/opt/claude/bin/claude` | Native Claude Code binary |
-| `COLONIZER_MODEL` | Claude Code default | Orchestrator model: alias, ID or `<provider>/<model>` |
-| `COLONIZER_SUBAGENT_MODEL` | orchestrator model | Default subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`) |
-| `COLONIZER_BACKGROUND_MODEL` | Claude Code default | Background model (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
+| `COLONIZER_MODEL` | Claude Code default | Orchestrator model (carries nearly all the traffic): alias, ID or `<provider>/<model>` |
+| `COLONIZER_SUBAGENT_MODEL` | orchestrator model | Default subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`); used only when the agent delegates to one |
+| `COLONIZER_BACKGROUND_MODEL` | Claude Code default | Background model for small auxiliary calls (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1) |
 | `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
 | `COLONIZER_EFFORT` | model default | `low`, `medium`, `high`, `xhigh` or `max` |
@@ -28,6 +28,14 @@ Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a micros
 the VM).
 
 ## Model routing
+
+`COLONIZER_MODEL` is the orchestrator's model, and the orchestrator does nearly all of the work in a
+colony, so this setting carries almost all of the traffic. `COLONIZER_SUBAGENT_MODEL` only applies
+when the agent delegates to a subagent, and colonies rarely do: four recent colonies of 413 to 2 095
+events spawned 0, 0, 0 and 1 between them. `COLONIZER_BACKGROUND_MODEL` carries Claude Code's small
+auxiliary calls. A provider reachable only through the subagent and background settings is configured
+correctly and will still see almost nothing; to put real traffic on your own hardware, point
+`COLONIZER_MODEL` at it.
 
 When a route or a `<provider>/<model>` model is configured, `router.mjs` listens on `127.0.0.1` and
 Claude Code's `ANTHROPIC_BASE_URL` points at it. A request whose `model` starts with a route prefix
