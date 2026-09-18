@@ -4,17 +4,11 @@
 //! The pull-request watcher lives here too: once a colony's work is published, what happens to
 //! that pull request is the last thing the colony's badge still reflects.
 
-use crate::{
-    client_error, github,
-    util::truncate,
-    ApiResult, App, Shared,
-};
+use crate::{ApiResult, App, Shared, client_error, github, util::truncate};
 use axum::{
-    extract::{
-        Path, State,
-    },
-    http::StatusCode,
     Json,
+    extract::{Path, State},
+    http::StatusCode,
 };
 use std::{
     collections::HashMap,
@@ -151,12 +145,18 @@ pub async fn watch_pull_requests(app: Shared) {
         // deadlock against update_session's write lock.
         let sessions = app.sessions.read().await.clone();
         // Forget colonies whose pull request no longer needs watching, so the map cannot grow unboundedly.
-        polling.retain(|id, _| sessions.iter().any(|s| &s.id == id && pr_watched(s.status, s.pr_url.is_some())));
+        polling.retain(|id, _| {
+            sessions
+                .iter()
+                .any(|s| &s.id == id && pr_watched(s.status, s.pr_url.is_some()))
+        });
         for s in sessions.iter().filter(|s| pr_watched(s.status, s.pr_url.is_some())) {
             let Some(url) = s.pr_url.clone() else { continue };
-            let poll = polling
-                .entry(s.id.clone())
-                .or_insert(PrPoll { last_checked: Instant::now(), backoff: PR_POLL_FIRST, failing: false });
+            let poll = polling.entry(s.id.clone()).or_insert(PrPoll {
+                last_checked: Instant::now(),
+                backoff: PR_POLL_FIRST,
+                failing: false,
+            });
             let now = Instant::now();
             if !pr_due(poll.last_checked, poll.backoff, now) {
                 continue;
@@ -201,7 +201,8 @@ pub async fn watch_pull_requests(app: Shared) {
                     // No news is no change: leave the colony's status alone and try again later.
                     if !poll.failing {
                         poll.failing = true;
-                        app.session_log(&s.id, "warn", format!("checking the pull request failed ({e:#}); will retry")).await;
+                        app.session_log(&s.id, "warn", format!("checking the pull request failed ({e:#}); will retry"))
+                            .await;
                     }
                     poll.backoff = pr_backoff(poll.backoff, false);
                 }
@@ -211,9 +212,15 @@ pub async fn watch_pull_requests(app: Shared) {
 }
 
 pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
-        return Err(client_error(StatusCode::CONFLICT, "this session can't be published right now"));
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this session can't be published right now",
+        ));
     }
     tokio::spawn(publish_session(app.clone(), id.clone()));
     Ok(Json(s))
@@ -263,7 +270,11 @@ mod tests {
     fn pull_request_checks_back_off_until_the_cap_and_reset_on_a_change() {
         assert_eq!(pr_backoff(Duration::from_secs(60), false), Duration::from_secs(120));
         assert_eq!(pr_backoff(Duration::from_secs(1920), false), Duration::from_secs(3600));
-        assert_eq!(pr_backoff(Duration::from_secs(3600), false), Duration::from_secs(3600), "capped at an hour");
+        assert_eq!(
+            pr_backoff(Duration::from_secs(3600), false),
+            Duration::from_secs(3600),
+            "capped at an hour"
+        );
         assert_eq!(pr_backoff(Duration::from_secs(4000), false), Duration::from_secs(3600));
         // Real news buys a fast next check again (e.g. a closed PR reopened).
         assert_eq!(pr_backoff(Duration::from_secs(3600), true), Duration::from_secs(60));
@@ -272,7 +283,10 @@ mod tests {
     #[test]
     fn a_pull_request_is_due_once_its_backoff_has_elapsed() {
         let checked = Instant::now();
-        assert!(pr_due(checked - Duration::from_secs(60), Duration::from_secs(60), checked), "a backoff ago is due");
+        assert!(
+            pr_due(checked - Duration::from_secs(60), Duration::from_secs(60), checked),
+            "a backoff ago is due"
+        );
         assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));

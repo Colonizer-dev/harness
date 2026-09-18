@@ -28,16 +28,17 @@ use std::{
     process::Stdio,
 };
 
-use anyhow::{bail, Context, Result};
-use axum::{extract::State, http::StatusCode, Json};
+use anyhow::{Context, Result, bail};
+use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{process::Command, sync::Mutex};
 
 use crate::{
+    Shared,
     sessions::{Session, SessionStatus},
-    util, Shared,
+    util,
 };
 
 /// How long the installer gets before it is given up on. A slow connection
@@ -174,7 +175,9 @@ pub fn sweep_slots(assets: Option<&Path>, live_slots: &[PathBuf]) -> Vec<PathBuf
     let Some(current) = assets else { return Vec::new() };
     let Some(app) = app_link() else { return Vec::new() };
     let Some(dir) = app.parent() else { return Vec::new() };
-    let Some(stem) = app.file_name().and_then(|n| n.to_str()) else { return Vec::new() };
+    let Some(stem) = app.file_name().and_then(|n| n.to_str()) else {
+        return Vec::new();
+    };
 
     let mut removed = Vec::new();
     for slot in ["a", "b"] {
@@ -184,7 +187,12 @@ pub fn sweep_slots(assets: Option<&Path>, live_slots: &[PathBuf]) -> Vec<PathBuf
         }
         let same = |other: &Path| {
             // Compare resolved paths: `current` is canonical, the candidate is not.
-            candidate.canonicalize().ok().zip(other.canonicalize().ok()).map(|(a, b)| a == b).unwrap_or(false)
+            candidate
+                .canonicalize()
+                .ok()
+                .zip(other.canonicalize().ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false)
         };
         if same(current) || live_slots.iter().any(|used| same(used)) {
             continue;
@@ -216,7 +224,12 @@ async fn install(app: &Shared, version: &str) -> Result<String> {
 
     let output = tokio::time::timeout(INSTALL_TIMEOUT, command.output())
         .await
-        .map_err(|_| anyhow::anyhow!("the installer did not finish within {} minutes", INSTALL_TIMEOUT.as_secs() / 60))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the installer did not finish within {} minutes",
+                INSTALL_TIMEOUT.as_secs() / 60
+            )
+        })?
         .with_context(|| format!("running {}", script.display()))?;
 
     let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -275,7 +288,9 @@ fn exec(_binary: &Path, _args: &[std::ffi::OsString]) -> std::io::Error {
 pub async fn command() -> Result<()> {
     let bind = util::env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into());
     let base = format!("http://{bind}");
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
 
     let status: Value = client
         .get(format!("{base}/api/update"))
@@ -347,7 +362,10 @@ pub async fn apply(State(app): State<Shared>) -> crate::ApiResult<Value> {
 
     let status = app.updates.latest_release().await;
     let Some(version) = status else {
-        return Err(crate::client_error(StatusCode::CONFLICT, "there is no newer release to install"));
+        return Err(crate::client_error(
+            StatusCode::CONFLICT,
+            "there is no newer release to install",
+        ));
     };
 
     let sessions = app.sessions.read().await.clone();
@@ -356,14 +374,20 @@ pub async fn apply(State(app): State<Shared>) -> crate::ApiResult<Value> {
         let names: Vec<String> = busy.iter().map(|s| format!("{} ({})", s.repo, s.id)).collect();
         return Err(crate::client_error(
             StatusCode::CONFLICT,
-            &format!("a colony is publishing: {}. Updating now would leave its pull request unopened.", names.join(", ")),
+            &format!(
+                "a colony is publishing: {}. Updating now would leave its pull request unopened.",
+                names.join(", ")
+            ),
         ));
     }
 
     {
         let mut progress = app.updater.progress.lock().await;
         if progress.phase == Phase::Installing || progress.phase == Phase::Restarting {
-            return Err(crate::client_error(StatusCode::CONFLICT, "an update is already being applied"));
+            return Err(crate::client_error(
+                StatusCode::CONFLICT,
+                "an update is already being applied",
+            ));
         }
         *progress = Progress {
             phase: Phase::Installing,

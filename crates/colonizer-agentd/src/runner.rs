@@ -62,7 +62,11 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (running_tx, running) = watch::channel(false);
     let (kill_tx, kill_rx) = oneshot::channel();
-    let runner = Arc::new(Runner { commands, running, kill: Mutex::new(Some(kill_tx)) });
+    let runner = Arc::new(Runner {
+        commands,
+        running,
+        kill: Mutex::new(Some(kill_tx)),
+    });
 
     let Some((program, args)) = config.agent.command.split_first() else {
         store.append(status_event("error", Some("agent.command is empty".into())));
@@ -87,8 +91,7 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
     };
     running_tx.send_replace(true);
 
-    let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
-    else {
+    let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
         unreachable!("runner stdio is piped");
     };
     tokio::spawn(feed_stdin(stdin, command_rx));
@@ -179,5 +182,9 @@ async fn for_each_line(reader: impl AsyncRead + Unpin, mut f: impl FnMut(&str)) 
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { s.to_string() } else { s.chars().take(max).collect::<String>() + "…" }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "…"
+    }
 }

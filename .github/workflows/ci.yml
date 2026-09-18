@@ -2,9 +2,8 @@
 # tests, the live map's receiver's tests, and the web UI's build and tests. Each piece is its own job
 # so a red run names what broke.
 #
-# No `cargo fmt --check` yet: the crates were written before rustfmt's current style, and letting
-# rustfmt reformat the whole tree is a dedicated change, not a drive-by. The clippy gate (with
-# -D warnings) keeps new code honest in the meantime.
+# `cargo fmt --all --check` gates the tree, which was formatted in one pass against the `rustfmt.toml`
+# at the repository root (width 130 — the style the tree was already written in).
 #
 # Node 24 is what every other workflow pins and what the colony image (node:24-bookworm) runs;
 # engines floors at 20, and CI checks the newest runtime people actually run.
@@ -34,7 +33,7 @@ jobs:
 
       # Same toolchain the release builds use: stable, minimal profile.
       - name: Rust
-        run: rustup toolchain install stable --profile minimal && rustup default stable
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
 
       # Test and clippy share this cache; the target dir makes the second run of a branch cheap.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -54,6 +53,10 @@ jobs:
 
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Last, so a formatting nit never hides a failing test or a real lint.
+      - name: Format
+        run: cargo fmt --all --check
 
   runner:
     runs-on: ubuntu-24.04

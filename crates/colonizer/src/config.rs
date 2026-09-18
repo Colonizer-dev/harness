@@ -1,7 +1,7 @@
 //! Process settings (environment) and module selection (persisted JSON in the config dir).
 
 use crate::util::env_nonempty;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -113,7 +113,11 @@ fn enabled_by_default() -> bool {
 
 impl ModuleChoice {
     fn new(provider: &str) -> Self {
-        Self { provider: provider.into(), enabled: true, settings: Map::new() }
+        Self {
+            provider: provider.into(),
+            enabled: true,
+            settings: Map::new(),
+        }
     }
 }
 
@@ -156,7 +160,10 @@ impl Default for ModulesConfig {
 
 impl ModulesConfig {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -224,7 +231,10 @@ pub fn with_preset(choice: &ModuleChoice, preset_defaults: &Value) -> ModuleChoi
 }
 
 pub fn setting_str(choice: &ModuleChoice, schema: &Value, key: &str) -> String {
-    setting(choice, schema, key).and_then(Value::as_str).unwrap_or_default().to_string()
+    setting(choice, schema, key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn setting_u64(choice: &ModuleChoice, schema: &Value, key: &str) -> u64 {
@@ -260,7 +270,9 @@ impl FileConfig {
     /// Read where it is used rather than cached at startup, so editing the file doesn't need a restart.
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("colonizer.toml");
-        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
         toml::from_str(&text).unwrap_or_else(|e| {
             eprintln!("{}: {e}; using defaults", path.display());
             Self::default()
@@ -293,10 +305,16 @@ mod tests {
         assert!(FileConfig::load(&dir).publish.co_author, "no file means defaults");
 
         std::fs::write(dir.join("colonizer.toml"), "[publish]\nco_author = false\n").unwrap();
-        assert!(!FileConfig::load(&dir).publish.co_author, "the file is read from config_dir/colonizer.toml");
+        assert!(
+            !FileConfig::load(&dir).publish.co_author,
+            "the file is read from config_dir/colonizer.toml"
+        );
 
         std::fs::write(dir.join("colonizer.toml"), "[publish\nco_author = ").unwrap();
-        assert!(FileConfig::load(&dir).publish.co_author, "a broken file falls back rather than failing a publish");
+        assert!(
+            FileConfig::load(&dir).publish.co_author,
+            "a broken file falls back rather than failing a publish"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -325,7 +343,10 @@ mod tests {
     fn the_preset_fills_in_what_was_never_set() {
         let merged = with_preset(&choice(json!({})), &crate::presets::defaults("python"));
         let image = merged.settings["image"].as_str().unwrap();
-        assert!(image.starts_with("python:3.13-bookworm@sha256:"), "{image} is not the pinned python tag");
+        assert!(
+            image.starts_with("python:3.13-bookworm@sha256:"),
+            "{image} is not the pinned python tag"
+        );
         assert_eq!(merged.settings["memory"], "8G");
     }
 
