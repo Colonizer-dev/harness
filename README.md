@@ -232,7 +232,8 @@ Stated here rather than buried.
   API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
   wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
 - **Memory search is plain text matching**, not semantic search.
-- **No CI yet**, and nothing is published to crates.io or npm.
+- **Nothing is published to npm.** CI runs the test suites on every pull request and the crates go to
+  crates.io on a version tag, but there are no npm packages: the release installer is the way in.
 
 ---
 
@@ -246,7 +247,7 @@ Stated here rather than buried.
 | Shared memory with review ([#3](https://github.com/Colonizer-dev/harness/issues/3)) | `SHIPPING` |
 | Watchdog for stalled colonies ([#4](https://github.com/Colonizer-dev/harness/issues/4)) | `SHIPPING` |
 | Provider gateway: private-network models, queues, long timeouts, health, Claude fallback ([#5](https://github.com/Colonizer-dev/harness/issues/5)) | `SHIPPING` |
-| CI running the Rust, runner and UI test suites | `PLANNED` |
+| CI running the Rust, runner and telemetry test suites, plus a UI build | `SHIPPING` |
 | Local Claude Code plugins mounted read-only into colonies, with ECC's skills and agents vendored ([#6](https://github.com/Colonizer-dev/harness/issues/6)) | `SHIPPING` |
 | Skillsets switched on and off in Settings, globally and per org ([#46](https://github.com/Colonizer-dev/harness/issues/46)) | `SHIPPING` |
 | superpowers vendored, with its bootstrap in the system prompt instead of a hook ([#44](https://github.com/Colonizer-dev/harness/issues/44)) | `SHIPPING` |
@@ -309,13 +310,19 @@ co_author = true
 
 ## Development
 
+The runner command below installs its own dependencies; run `npm ci` in `web` before its dev server.
+The telemetry receiver has none.
+
 ```sh
 cargo test --workspace                          # mothership and agentd
-(cd modules/agents/claude-code && node --test test/)
+(cd modules/agents/claude-code && npm ci && node --test)
 (cd services/telemetry && node --test)          # the live map's receiver
 (cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
 ```
+
+[CI](.github/workflows/ci.yml) runs these suites on every pull request, together with `cargo fmt` and
+`cargo clippy` and a production build of the UI.
 
 Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their owners' trademarks. See [NOTICE](NOTICE).
 

@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// One named span of a colony launch, in the order it happened.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,7 +36,11 @@ pub struct Phases {
 impl Phases {
     pub fn new() -> Self {
         let now = Instant::now();
-        Self { started: now, open: now, phases: Vec::new() }
+        Self {
+            started: now,
+            open: now,
+            phases: Vec::new(),
+        }
     }
 
     /// Closes the open phase under `name` and starts the next one.
@@ -45,7 +49,10 @@ impl Phases {
     /// finding, and a missing row would look like the phase never ran.
     pub fn mark(&mut self, name: &str) {
         let now = Instant::now();
-        self.phases.push(Phase { name: name.to_string(), ms: now.duration_since(self.open).as_millis() as u64 });
+        self.phases.push(Phase {
+            name: name.to_string(),
+            ms: now.duration_since(self.open).as_millis() as u64,
+        });
         self.open = now;
     }
 
@@ -64,7 +71,11 @@ impl Phases {
     /// One line, ordered, so a support question can be answered by pasting a log
     /// rather than by asking someone to reproduce it.
     pub fn summary(&self) -> String {
-        let parts: Vec<String> = self.phases.iter().map(|p| format!("{} {}", p.name, p.ms)).collect();
+        let parts: Vec<String> = self
+            .phases
+            .iter()
+            .map(|p| format!("{} {}", p.name, p.ms))
+            .collect();
         format!("boot {} ms: {}", self.total_ms(), parts.join(", "))
     }
 
@@ -94,14 +105,22 @@ mod tests {
         assert_eq!(names, ["clone", "image", "vm-boot"]);
         // Phases are consecutive spans, so they can never exceed the total.
         let sum: u64 = p.phases().iter().map(|x| x.ms).sum();
-        assert!(sum <= p.total_ms(), "phases {sum} ms exceed total {} ms", p.total_ms());
+        assert!(
+            sum <= p.total_ms(),
+            "phases {sum} ms exceed total {} ms",
+            p.total_ms()
+        );
     }
 
     #[test]
     fn a_zero_length_phase_is_still_recorded() {
         let mut p = Phases::new();
         p.mark("skipped");
-        assert_eq!(p.phases().len(), 1, "a phase that did nothing must still appear");
+        assert_eq!(
+            p.phases().len(),
+            1,
+            "a phase that did nothing must still appear"
+        );
     }
 
     #[test]

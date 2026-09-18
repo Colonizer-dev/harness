@@ -5,14 +5,18 @@
 //! its own state directory, its own socket, and `--no-logs-no-support`.
 
 use crate::util::{exec, write_private};
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
-use tokio::{net::TcpStream, process::{Child, Command}, sync::Mutex};
+use tokio::{
+    net::TcpStream,
+    process::{Child, Command},
+    sync::Mutex,
+};
 
 pub const COLONIZER_HOSTNAME: &str = "colonizer";
 const COLONIZER_USER: &str = "harness";
@@ -54,7 +58,9 @@ pub struct Node {
 /// binaries do. Tailscale publishes no macOS `tailscaled` to vendor, so on a Mac this is false and
 /// colonies are reached on a loopback port instead.
 pub fn binaries_present(assets: &Path) -> bool {
-    [MESH_HEADSCALE, MESH_TAILSCALE, MESH_TAILSCALED].iter().all(|rel| assets.join(rel).exists())
+    [MESH_HEADSCALE, MESH_TAILSCALE, MESH_TAILSCALED]
+        .iter()
+        .all(|rel| assets.join(rel).exists())
 }
 
 const MESH_HEADSCALE: &str = "vendor/headscale";
@@ -112,15 +118,23 @@ impl Mesh {
     pub async fn ensure_started(&self) -> Result<()> {
         let mut running = self.running.lock().await;
         if let Some(r) = running.as_mut() {
-            let alive = matches!(r.headscale.try_wait(), Ok(None)) && matches!(r.tailscaled.try_wait(), Ok(None));
+            let alive = matches!(r.headscale.try_wait(), Ok(None))
+                && matches!(r.tailscaled.try_wait(), Ok(None));
             if alive {
                 return Ok(());
             }
             *running = None;
         }
-        for bin in [&self.headscale_bin, &self.tailscale_bin, &self.tailscaled_bin] {
+        for bin in [
+            &self.headscale_bin,
+            &self.tailscale_bin,
+            &self.tailscaled_bin,
+        ] {
             if !bin.exists() {
-                bail!("mesh binary {} is missing (run scripts/install.sh)", bin.display());
+                bail!(
+                    "mesh binary {} is missing (run scripts/install.sh)",
+                    bin.display()
+                );
             }
         }
         std::fs::create_dir_all(self.state_dir.join("headscale"))?;
@@ -128,14 +142,20 @@ impl Mesh {
         create_private_dir(&self.runtime_dir)?;
         for socket in [self.headscale_socket(), self.tailscaled_socket()] {
             if socket.as_os_str().len() >= 100 {
-                bail!("socket path {} is too long for a unix socket", socket.display());
+                bail!(
+                    "socket path {} is too long for a unix socket",
+                    socket.display()
+                );
             }
         }
         self.write_headscale_files()?;
 
         let _ = std::fs::remove_file(self.headscale_socket());
         kill_stale(&self.runtime_dir.join("headscale.pid"), &self.headscale_bin);
-        kill_stale(&self.runtime_dir.join("tailscaled.pid"), &self.tailscaled_bin);
+        kill_stale(
+            &self.runtime_dir.join("tailscaled.pid"),
+            &self.tailscaled_bin,
+        );
         let headscale = Command::new(&self.headscale_bin)
             .arg("serve")
             .arg("-c")
@@ -147,9 +167,13 @@ impl Mesh {
             .spawn()
             .context("failed to start headscale")?;
         write_pid(&self.runtime_dir.join("headscale.pid"), headscale.id());
-        wait_for(Duration::from_secs(30), || async { exec(self.headscale().args(["users", "list", "-o", "json"])).await.is_ok() })
-            .await
-            .context("headscale did not become ready (see mesh/headscale.log)")?;
+        wait_for(Duration::from_secs(30), || async {
+            exec(self.headscale().args(["users", "list", "-o", "json"]))
+                .await
+                .is_ok()
+        })
+        .await
+        .context("headscale did not become ready (see mesh/headscale.log)")?;
         let harness_user = self.ensure_user(COLONIZER_USER).await?;
         let vms_user = self.ensure_user(VMS_USER).await?;
 
@@ -174,9 +198,11 @@ impl Mesh {
             .spawn()
             .context("failed to start the harness tailscaled")?;
         write_pid(&self.runtime_dir.join("tailscaled.pid"), tailscaled.id());
-        wait_for(Duration::from_secs(20), || async { self.backend_state().await.is_ok() })
-            .await
-            .context("harness tailscaled did not start (see mesh/tailscaled.log)")?;
+        wait_for(Duration::from_secs(20), || async {
+            self.backend_state().await.is_ok()
+        })
+        .await
+        .context("harness tailscaled did not start (see mesh/tailscaled.log)")?;
 
         if self.backend_state().await? != "Running" {
             let key = self.create_key(harness_user).await?;
@@ -185,16 +211,27 @@ impl Mesh {
             let result = exec(
                 self.tailscale()
                     .arg("up")
-                    .arg(format!("--login-server=http://127.0.0.1:{}", self.ports.control))
+                    .arg(format!(
+                        "--login-server=http://127.0.0.1:{}",
+                        self.ports.control
+                    ))
                     .arg(format!("--auth-key=file:{}", key_file.display()))
                     .arg(format!("--hostname={COLONIZER_HOSTNAME}"))
-                    .args(["--accept-dns=false", "--accept-routes=false", "--timeout=60s"]),
+                    .args([
+                        "--accept-dns=false",
+                        "--accept-routes=false",
+                        "--timeout=60s",
+                    ]),
             )
             .await;
             let _ = std::fs::remove_file(&key_file);
             result.context("harness node could not join the mesh")?;
         }
-        *running = Some(Running { headscale, tailscaled, vms_user });
+        *running = Some(Running {
+            headscale,
+            tailscaled,
+            vms_user,
+        });
         Ok(())
     }
 
@@ -203,7 +240,10 @@ impl Mesh {
         let q = |p: PathBuf| serde_json::to_string(&p.display().to_string()).unwrap_or_default();
         let control = self.ports.control;
         let derp = if self.derp_map.exists() {
-            format!("  urls: []\n  paths:\n    - {}\n  auto_update_enabled: false\n  update_frequency: 24h\n", q(self.derp_map.clone()))
+            format!(
+                "  urls: []\n  paths:\n    - {}\n  auto_update_enabled: false\n  update_frequency: 24h\n",
+                q(self.derp_map.clone())
+            )
         } else {
             // Older app bundles without a DERP map: fall back to fetching Tailscale's public map.
             "  urls:\n    - https://controlplane.tailscale.com/derpmap/default\n  paths: []\n  auto_update_enabled: true\n  update_frequency: 3h\n".to_string()
@@ -273,7 +313,10 @@ taildrop:
     async fn backend_state(&self) -> Result<String> {
         let out = exec(self.tailscale().args(["status", "--json"])).await?;
         let status: Value = serde_json::from_str(&out)?;
-        Ok(status["BackendState"].as_str().unwrap_or_default().to_string())
+        Ok(status["BackendState"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
     }
 
     async fn ensure_user(&self, name: &str) -> Result<u64> {
@@ -281,21 +324,41 @@ taildrop:
             return Ok(id);
         }
         exec(self.headscale().args(["users", "create", name])).await?;
-        self.find_user(name).await?.context("headscale user was not created")
+        self.find_user(name)
+            .await?
+            .context("headscale user was not created")
     }
 
     async fn find_user(&self, name: &str) -> Result<Option<u64>> {
         let out = exec(self.headscale().args(["users", "list", "-o", "json"])).await?;
         let users: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
-        Ok(users.as_array().into_iter().flatten().find(|u| u["name"] == name).and_then(|u| as_u64(&u["id"])))
+        Ok(users
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|u| u["name"] == name)
+            .and_then(|u| as_u64(&u["id"])))
     }
 
     async fn create_key(&self, user: u64) -> Result<String> {
         let mut cmd = self.headscale();
-        cmd.args(["preauthkeys", "create", "--user", &user.to_string(), "--expiration", "30m", "-o", "json"]);
+        cmd.args([
+            "preauthkeys",
+            "create",
+            "--user",
+            &user.to_string(),
+            "--expiration",
+            "30m",
+            "-o",
+            "json",
+        ]);
         let out = exec(&mut cmd).await?;
-        let key: Value = serde_json::from_str(&out).context("unexpected headscale preauthkeys output")?;
-        key["key"].as_str().map(String::from).context("headscale returned no key")
+        let key: Value =
+            serde_json::from_str(&out).context("unexpected headscale preauthkeys output")?;
+        key["key"]
+            .as_str()
+            .map(String::from)
+            .context("headscale returned no key")
     }
 
     /// A single-use key for one microVM. Deliberately not ephemeral: headscale deletes an ephemeral node
@@ -304,28 +367,52 @@ taildrop:
     /// Colony nodes are deleted explicitly when the colony is torn down.
     pub async fn mint_vm_key(&self) -> Result<String> {
         self.ensure_started().await?;
-        let user = self.running.lock().await.as_ref().map(|r| r.vms_user).context("mesh is not running")?;
+        let user = self
+            .running
+            .lock()
+            .await
+            .as_ref()
+            .map(|r| r.vms_user)
+            .context("mesh is not running")?;
         self.create_key(user).await
     }
 
     async fn nodes(&self) -> Result<Vec<Value>> {
         let out = exec(self.headscale().args(["nodes", "list", "-o", "json"])).await?;
-        Ok(serde_json::from_str::<Value>(&out).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default())
+        Ok(serde_json::from_str::<Value>(&out)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default())
     }
 
     pub async fn wait_online(&self, hostname: &str, timeout: Duration) -> Result<Node> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if let Some(node) = self.nodes().await?.into_iter().find(|n| n["given_name"] == hostname && n["online"] == true) {
+            if let Some(node) = self
+                .nodes()
+                .await?
+                .into_iter()
+                .find(|n| n["given_name"] == hostname && n["online"] == true)
+            {
                 let ip = node["ip_addresses"]
                     .as_array()
-                    .and_then(|ips| ips.iter().filter_map(Value::as_str).find(|ip| ip.contains('.')))
+                    .and_then(|ips| {
+                        ips.iter()
+                            .filter_map(Value::as_str)
+                            .find(|ip| ip.contains('.'))
+                    })
                     .context("mesh node has no IPv4 address")?
                     .to_string();
-                return Ok(Node { id: as_u64(&node["id"]).unwrap_or_default(), ip });
+                return Ok(Node {
+                    id: as_u64(&node["id"]).unwrap_or_default(),
+                    ip,
+                });
             }
             if tokio::time::Instant::now() > deadline {
-                bail!("microVM did not join the mesh within {}s", timeout.as_secs());
+                bail!(
+                    "microVM did not join the mesh within {}s",
+                    timeout.as_secs()
+                );
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -336,17 +423,28 @@ taildrop:
             return Ok(());
         }
         for node in self.nodes().await? {
-            if node["given_name"] == hostname {
-                if let Some(id) = as_u64(&node["id"]) {
-                    let _ = exec(self.headscale().args(["nodes", "delete", "--identifier", &id.to_string(), "--force"])).await;
-                }
+            if node["given_name"] == hostname
+                && let Some(id) = as_u64(&node["id"])
+            {
+                let _ = exec(self.headscale().args([
+                    "nodes",
+                    "delete",
+                    "--identifier",
+                    &id.to_string(),
+                    "--force",
+                ]))
+                .await;
             }
         }
         Ok(())
     }
 
     /// Opens a TCP connection to a VM through the harness node's SOCKS5 proxy.
-    pub async fn dial(&self, ip: &str, port: u16) -> Result<tokio_socks::tcp::Socks5Stream<TcpStream>> {
+    pub async fn dial(
+        &self,
+        ip: &str,
+        port: u16,
+    ) -> Result<tokio_socks::tcp::Socks5Stream<TcpStream>> {
         tokio_socks::tcp::Socks5Stream::connect(("127.0.0.1", self.ports.socks), (ip, port))
             .await
             .with_context(|| format!("mesh connection to {ip}:{port} failed"))
@@ -355,13 +453,16 @@ taildrop:
     /// Network rules that let a VM send WireGuard UDP straight to the harness node, so traffic
     /// stays on the machine instead of going through a public DERP relay. Only this port is opened.
     pub async fn direct_path_rules(&self) -> Vec<String> {
-        let out = exec(Command::new("ip").args(["-4", "-o", "addr", "show", "scope", "global"])).await.unwrap_or_default();
+        let out = exec(Command::new("ip").args(["-4", "-o", "addr", "show", "scope", "global"]))
+            .await
+            .unwrap_or_default();
         out.lines()
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 let iface = *fields.get(1)?;
                 let ip = fields.get(3)?.split('/').next()?;
-                (!iface.starts_with("tailscale")).then(|| format!("allow@{ip}:udp:{}", self.ports.udp))
+                (!iface.starts_with("tailscale"))
+                    .then(|| format!("allow@{ip}:udp:{}", self.ports.udp))
             })
             .collect()
     }
@@ -381,11 +482,19 @@ taildrop:
             return json!({"enabled": true, "provider": "headscale", "state": "stopped", "harness_ip": null, "nodes": 0});
         }
         let state = self.backend_state().await.ok().map(|s| s.to_lowercase());
-        let harness_ip = exec(self.tailscale().args(["ip", "-4"])).await.ok().map(|ip| ip.trim().to_string());
+        let harness_ip = exec(self.tailscale().args(["ip", "-4"]))
+            .await
+            .ok()
+            .map(|ip| ip.trim().to_string());
         let colonies = self
             .nodes()
             .await
-            .map(|nodes| nodes.iter().filter(|n| n["user"]["name"] == VMS_USER && n["online"] == true).count())
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter(|n| n["user"]["name"] == VMS_USER && n["online"] == true)
+                    .count()
+            })
             .unwrap_or(0);
         json!({
             "enabled": true,
@@ -407,12 +516,17 @@ fn write_pid(path: &Path, pid: Option<u32>) {
 /// The executable behind a pid: `/proc` where there is one, `ps` otherwise. Not `cfg`-gated on purpose —
 /// one code path means the fallback macOS depends on is exercised on Linux too.
 fn exe_path(pid: u32) -> Option<std::path::PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok().or_else(|| exe_path_via_ps(pid))
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .or_else(|| exe_path_via_ps(pid))
 }
 
 /// macOS has no `/proc`, and its `ps` reports the executable's full path.
 fn exe_path_via_ps(pid: u32) -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "comm="]).output().ok()?;
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
     let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if path.is_empty() {
         return None;
@@ -432,14 +546,24 @@ fn alive(pid: u32) -> bool {
 
 /// Kills a leftover process from a previous harness run, but only if it is the bundled binary.
 fn kill_stale(pid_file: &Path, bin: &Path) {
-    let Some(pid) = std::fs::read_to_string(pid_file).ok().and_then(|p| p.trim().parse::<u32>().ok()) else { return };
+    let Some(pid) = std::fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|p| p.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
     let expected = std::fs::canonicalize(bin).unwrap_or_else(|_| bin.to_path_buf());
     let matches = exe_path(pid).is_some_and(|exe| {
-        let exe = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
+        let exe = exe
+            .to_string_lossy()
+            .trim_end_matches(" (deleted)")
+            .to_string();
         Path::new(&exe) == expected
     });
     if matches {
-        let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
         for _ in 0..30 {
             if !alive(pid) {
                 break;
@@ -451,7 +575,9 @@ fn kill_stale(pid_file: &Path, bin: &Path) {
 }
 
 fn as_u64(value: &Value) -> Option<u64> {
-    value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
 }
 
 fn create_private_dir(dir: &Path) -> Result<()> {
@@ -462,7 +588,10 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 }
 
 fn log_file(path: &Path) -> Result<std::fs::File> {
-    Ok(std::fs::OpenOptions::new().create(true).append(true).open(path)?)
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?)
 }
 
 async fn wait_for<F, Fut>(timeout: Duration, mut check: F) -> Result<()>
@@ -490,7 +619,11 @@ mod tests {
     fn a_pid_can_be_identified_and_checked_without_proc() {
         let me = std::process::id();
         let via_ps = exe_path_via_ps(me).expect("ps knows about this process");
-        let name = via_ps.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = via_ps
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         assert!(name.starts_with("colonizer"), "ps reported {via_ps:?}");
 
         assert!(alive(me));

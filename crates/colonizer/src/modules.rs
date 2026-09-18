@@ -2,20 +2,28 @@
 //! Settings → Modules API.
 
 use crate::{
-    client_error,
+    ApiResult, Shared, client_error,
     config::{ModuleChoice, ModulesConfig},
-    ApiResult, Shared,
 };
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 8] = ["source", "sandbox", "mesh", "agent", "interfaces", "publish", "memory", "watchdog"];
+pub const KINDS: [&str; 8] = [
+    "source",
+    "sandbox",
+    "mesh",
+    "agent",
+    "interfaces",
+    "publish",
+    "memory",
+    "watchdog",
+];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
 #[derive(Clone, Debug)]
@@ -34,20 +42,35 @@ impl AgentModule {
     pub fn vm_command(&self) -> Vec<String> {
         self.entry
             .iter()
-            .map(|arg| if self.dir.join(arg).exists() { format!("/opt/colonizer/agent/{arg}") } else { arg.clone() })
+            .map(|arg| {
+                if self.dir.join(arg).exists() {
+                    format!("/opt/colonizer/agent/{arg}")
+                } else {
+                    arg.clone()
+                }
+            })
             .collect()
     }
 }
 
 pub fn discover_agents(assets: Option<&FsPath>) -> Vec<AgentModule> {
-    let Some(root) = assets else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(root.join("modules/agents")) else { return Vec::new() };
+    let Some(root) = assets else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("modules/agents")) else {
+        return Vec::new();
+    };
     let mut modules: Vec<AgentModule> = entries
         .flatten()
         .filter_map(|entry| {
             let dir = entry.path();
-            let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("module.json")).ok()?).ok()?;
-            let entry_cmd: Vec<String> = manifest["entry"].as_array()?.iter().filter_map(|a| a.as_str().map(String::from)).collect();
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("module.json")).ok()?).ok()?;
+            let entry_cmd: Vec<String> = manifest["entry"]
+                .as_array()?
+                .iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect();
             if entry_cmd.is_empty() {
                 return None;
             }
@@ -56,9 +79,13 @@ pub fn discover_agents(assets: Option<&FsPath>) -> Vec<AgentModule> {
             Some(AgentModule {
                 id: manifest["id"].as_str()?.to_string(),
                 name: manifest["name"].as_str().unwrap_or_default().to_string(),
-                description: manifest["description"].as_str().unwrap_or_default().to_string(),
+                description: manifest["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 entry: entry_cmd,
-                needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+                needs_claude: binaries.contains("\"claude\"")
+                    || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
                 schema: normalize_schema(&manifest["settings"]),
                 dir,
             })
@@ -94,7 +121,12 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         schema,
     };
     match kind {
-        "source" => vec![p("github", "GitHub", "Issues from repositories your GitHub account can access", json!({"type":"object","properties":{}}))],
+        "source" => vec![p(
+            "github",
+            "GitHub",
+            "Issues from repositories your GitHub account can access",
+            json!({"type":"object","properties":{}}),
+        )],
         "sandbox" => vec![p(
             "microsandbox",
             "microsandbox",
@@ -124,9 +156,17 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "socks_port": {"type": "integer", "title": "Harness SOCKS5 port (loopback)", "minimum": 1024, "maximum": 65535, "default": 41744}
                 }}),
             ),
-            p("none", "Loopback port", "No mesh: reach each VM through a published loopback port", json!({"type":"object","properties":{}})),
+            p(
+                "none",
+                "Loopback port",
+                "No mesh: reach each VM through a published loopback port",
+                json!({"type":"object","properties":{}}),
+            ),
         ],
-        "agent" => agents.iter().map(|a| p(&a.id, &a.name, &a.description, a.schema.clone())).collect(),
+        "agent" => agents
+            .iter()
+            .map(|a| p(&a.id, &a.name, &a.description, a.schema.clone()))
+            .collect(),
         "interfaces" => vec![p(
             "default",
             "Session panels",
@@ -195,7 +235,12 @@ fn describe_kind(kind: &str, choice: &ModuleChoice, agents: &[AgentModule]) -> V
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     let modules = app.modules.read().await;
-    Json(KINDS.iter().filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app.agents))).collect())
+    Json(
+        KINDS
+            .iter()
+            .filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app.agents)))
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -218,17 +263,29 @@ pub async fn update(
 ) -> ApiResult<Value> {
     let providers = providers(&kind, &app.agents);
     let Some(provider) = providers.iter().find(|p| p.id == req.provider) else {
-        return Err(client_error(StatusCode::BAD_REQUEST, "unknown module kind or provider"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "unknown module kind or provider",
+        ));
     };
     if matches!(kind.as_str(), "source" | "sandbox" | "agent" | "publish") && !req.enabled {
-        return Err(client_error(StatusCode::BAD_REQUEST, "this module kind is required and can't be disabled"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "this module kind is required and can't be disabled",
+        ));
     }
     let settings = validate_settings(&provider.schema, &req.settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
 
     let mut modules = app.modules.write().await;
-    let choice = modules.get_mut(&kind).ok_or_else(|| client_error(StatusCode::NOT_FOUND, "unknown module kind"))?;
-    *choice = ModuleChoice { provider: req.provider, enabled: req.enabled, settings };
+    let choice = modules
+        .get_mut(&kind)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "unknown module kind"))?;
+    *choice = ModuleChoice {
+        provider: req.provider,
+        enabled: req.enabled,
+        settings,
+    };
     let described = describe_kind(&kind, choice, &app.agents);
     save_modules(&app.modules_file(), &modules)?;
     Ok(Json(described))
@@ -239,11 +296,18 @@ fn save_modules(path: &FsPath, modules: &ModulesConfig) -> anyhow::Result<()> {
 }
 
 /// Keeps only known keys and checks types, enums and ranges.
-fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+fn validate_settings(
+    schema: &Value,
+    input: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
     let mut out = Map::new();
-    let Some(properties) = schema["properties"].as_object() else { return Ok(out) };
+    let Some(properties) = schema["properties"].as_object() else {
+        return Ok(out);
+    };
     for (key, value) in input {
-        let Some(spec) = properties.get(key) else { continue };
+        let Some(spec) = properties.get(key) else {
+            continue;
+        };
         let ok = match spec["type"].as_str() {
             Some("string") => value.is_string(),
             Some("integer") => value.is_i64() || value.is_u64(),
@@ -254,20 +318,21 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
         if !ok {
             return Err(format!("setting `{key}` has the wrong type"));
         }
-        if let Some(options) = spec["enum"].as_array() {
-            if !options.contains(value) {
-                return Err(format!("setting `{key}` must be one of the listed options"));
-            }
+        if let Some(options) = spec["enum"].as_array()
+            && !options.contains(value)
+        {
+            return Err(format!("setting `{key}` must be one of the listed options"));
         }
-        if let Some(n) = value.as_f64() {
-            if spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max) {
-                return Err(format!("setting `{key}` is out of range"));
-            }
+        if let Some(n) = value.as_f64()
+            && (spec["minimum"].as_f64().is_some_and(|min| n < min)
+                || spec["maximum"].as_f64().is_some_and(|max| n > max))
+        {
+            return Err(format!("setting `{key}` is out of range"));
         }
-        if let Some(s) = value.as_str() {
-            if s.len() > 500 || s.contains('\n') {
-                return Err(format!("setting `{key}` is too long"));
-            }
+        if let Some(s) = value.as_str()
+            && (s.len() > 500 || s.contains('\n'))
+        {
+            return Err(format!("setting `{key}` is too long"));
         }
         out.insert(key.clone(), value.clone());
     }
@@ -296,7 +361,10 @@ mod tests {
 
     #[test]
     fn schemas_are_normalized() {
-        assert!(normalize_schema(&json!({"model": {"type": "string"}}))["properties"]["model"].is_object());
+        assert!(
+            normalize_schema(&json!({"model": {"type": "string"}}))["properties"]["model"]
+                .is_object()
+        );
         assert!(normalize_schema(&Value::Null)["properties"].is_object());
     }
 }

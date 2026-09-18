@@ -3,12 +3,11 @@
 //! resulting long-lived OAuth token is saved on the host and never sent to the browser.
 
 use crate::{
-    client_error, resolve_host_claude_bin,
+    ApiResult, Shared, client_error, resolve_host_claude_bin,
     util::{shell_quote, truncate, write_secret},
-    ApiResult, Shared,
 };
 use anyhow::Context;
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{
     process::Stdio,
@@ -18,7 +17,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
 };
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -33,7 +32,11 @@ pub struct LoginView {
 
 impl LoginView {
     fn new(state: &'static str) -> Self {
-        Self { state, url: None, message: None }
+        Self {
+            state,
+            url: None,
+            message: None,
+        }
     }
 }
 
@@ -53,13 +56,20 @@ pub struct LoginManager {
 
 pub async fn status(State(app): State<Shared>) -> Json<LoginView> {
     let session = app.login.session.lock().await;
-    Json(session.as_ref().map_or_else(|| LoginView::new("idle"), |s| s.view.clone()))
+    Json(
+        session
+            .as_ref()
+            .map_or_else(|| LoginView::new("idle"), |s| s.view.clone()),
+    )
 }
 
 pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
     let bin = resolve_host_claude_bin(&app.cfg).await?;
     // A very wide terminal keeps the sign-in URL and the token on single lines.
-    let script = format!("stty cols 4000 rows 60; exec {} setup-token", shell_quote(&bin.display().to_string()));
+    let script = format!(
+        "stty cols 4000 rows 60; exec {} setup-token",
+        shell_quote(&bin.display().to_string())
+    );
     // util-linux and BSD `script` disagree on everything but the name: the command is `-c CMD FILE`
     // there and `FILE CMD...` here, and unbuffered output is `-f` there and `-F` here.
     let mut cmd = Command::new("script");
@@ -82,14 +92,24 @@ pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
             cmd.env_remove(key);
         }
     }
-    let mut child = cmd.spawn().context("failed to start `script` (util-linux) for claude setup-token")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to start `script` (util-linux) for claude setup-token")?;
     let stdin = child.stdin.take();
-    let stdout = child.stdout.take().context("no output from claude setup-token")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("no output from claude setup-token")?;
 
     let id = app.login.seq.fetch_add(1, Ordering::SeqCst);
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let view = LoginView::new("starting");
-    *app.login.session.lock().await = Some(Session { id, view: view.clone(), stdin, _cancel: cancel_tx });
+    *app.login.session.lock().await = Some(Session {
+        id,
+        view: view.clone(),
+        stdin,
+        _cancel: cancel_tx,
+    });
     tokio::spawn(drive(app.clone(), id, child, stdout, cancel_rx));
     Ok(Json(view))
 }
@@ -99,17 +119,28 @@ pub struct CodeBody {
     code: String,
 }
 
-pub async fn submit_code(State(app): State<Shared>, Json(body): Json<CodeBody>) -> ApiResult<LoginView> {
+pub async fn submit_code(
+    State(app): State<Shared>,
+    Json(body): Json<CodeBody>,
+) -> ApiResult<LoginView> {
     let code = body.code.trim();
     // Printable ASCII only, so the code can't smuggle extra keystrokes into the terminal.
     if code.is_empty() || code.len() > 2000 || !code.chars().all(|c| c.is_ascii_graphic()) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "that doesn't look like a sign-in code"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "that doesn't look like a sign-in code",
+        ));
     }
     let mut guard = app.login.session.lock().await;
     let session = guard
         .as_mut()
         .filter(|s| s.view.state == "awaiting_code")
-        .ok_or_else(|| client_error(StatusCode::CONFLICT, "no Claude sign-in is waiting for a code"))?;
+        .ok_or_else(|| {
+            client_error(
+                StatusCode::CONFLICT,
+                "no Claude sign-in is waiting for a code",
+            )
+        })?;
     let stdin = session
         .stdin
         .as_mut()
@@ -130,7 +161,13 @@ pub async fn cancel(State(app): State<Shared>) -> Json<LoginView> {
     Json(LoginView::new("idle"))
 }
 
-async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, mut cancel: oneshot::Receiver<()>) {
+async fn drive(
+    app: Shared,
+    id: u64,
+    mut child: Child,
+    mut stdout: ChildStdout,
+    mut cancel: oneshot::Receiver<()>,
+) {
     let mut raw = Vec::new();
     let mut buf = [0u8; 8192];
     let deadline = tokio::time::sleep(LOGIN_TIMEOUT);
@@ -154,12 +191,11 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
                 let Some(session) = guard.as_mut().filter(|s| s.id == id) else {
                     break Err("superseded".into());
                 };
-                if session.view.url.is_none() {
-                    if let Some(url) = find_sign_in_url(&text) {
+                if session.view.url.is_none()
+                    && let Some(url) = find_sign_in_url(&text) {
                         session.view.url = Some(url);
                         session.view.state = "awaiting_code";
                     }
-                }
             }
             _ = &mut cancel => break Err("cancelled".into()),
             _ = &mut deadline => break Err("timed out waiting for the Claude sign-in".into()),
@@ -169,7 +205,9 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
     kill_tree(&mut child).await;
 
     let mut guard = app.login.session.lock().await;
-    let Some(session) = guard.as_mut().filter(|s| s.id == id) else { return };
+    let Some(session) = guard.as_mut().filter(|s| s.id == id) else {
+        return;
+    };
     session.stdin = None;
     session.view = match outcome {
         Ok(token) => match write_secret(&app.claude_token_file(), &token) {
@@ -178,9 +216,17 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
                 url: None,
                 message: Some("Connected your Claude subscription".into()),
             },
-            Err(e) => LoginView { state: "error", url: None, message: Some(format!("could not save the token: {e:#}")) },
+            Err(e) => LoginView {
+                state: "error",
+                url: None,
+                message: Some(format!("could not save the token: {e:#}")),
+            },
         },
-        Err(message) => LoginView { state: "error", url: None, message: Some(redact(&message)) },
+        Err(message) => LoginView {
+            state: "error",
+            url: None,
+            message: Some(redact(&message)),
+        },
     };
 }
 
@@ -204,7 +250,12 @@ async fn kill_tree(child: &mut Child) {
 
 /// Every descendant of `pid`. `/proc` is Linux-only; `ps` tells the same story on macOS too.
 fn collect_descendants(pid: u32, out: &mut Vec<u32>) {
-    let Ok(output) = std::process::Command::new("ps").args(["-Ao", "pid=,ppid="]).output() else { return };
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-Ao", "pid=,ppid="])
+        .output()
+    else {
+        return;
+    };
     let text = String::from_utf8_lossy(&output.stdout);
     let pairs: Vec<(u32, u32)> = text
         .lines()
@@ -233,7 +284,7 @@ fn strip_ansi(input: &str) -> String {
             '\u{1b}' => match chars.next() {
                 Some('[') => {
                     let mut params = String::new();
-                    while let Some(p) = chars.next() {
+                    for p in chars.by_ref() {
                         if ('\u{40}'..='\u{7e}').contains(&p) {
                             if p == 'C' {
                                 let n = params.parse::<usize>().unwrap_or(1).min(200);
@@ -333,18 +384,32 @@ mod tests {
 
     #[test]
     fn url_is_not_reported_until_complete() {
-        assert_eq!(find_sign_in_url("https://claude.com/cai/oauth/authorize?code=tr"), None);
+        assert_eq!(
+            find_sign_in_url("https://claude.com/cai/oauth/authorize?code=tr"),
+            None
+        );
     }
 
     #[test]
     fn token_is_only_accepted_once_fully_printed() {
         let token = format!("sk-ant-oat01-{}", "A1_b-".repeat(20));
-        assert_eq!(find_token(&strip_ansi(&format!("Your OAuth token:\n\u{1b}[1m{token}\u{1b}[22m\n"))), Some(token.clone()));
-        assert_eq!(find_token(&format!("Your OAuth token:\n{}", &token[..50])), None);
+        assert_eq!(
+            find_token(&strip_ansi(&format!(
+                "Your OAuth token:\n\u{1b}[1m{token}\u{1b}[22m\n"
+            ))),
+            Some(token.clone())
+        );
+        assert_eq!(
+            find_token(&format!("Your OAuth token:\n{}", &token[..50])),
+            None
+        );
     }
 
     #[test]
     fn redacts_tokens_in_messages() {
-        assert_eq!(redact("failed near sk-ant-oat01-secret"), "failed near sk-ant-…");
+        assert_eq!(
+            redact("failed near sk-ant-oat01-secret"),
+            "failed near sk-ant-…"
+        );
     }
 }

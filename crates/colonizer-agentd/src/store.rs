@@ -40,8 +40,16 @@ impl EventStore {
     pub fn open(dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("events.jsonl");
-        let last_seq = read_events(&path, 0, u64::MAX).iter().map(|e| e.seq).max().unwrap_or(0);
-        let mut file = OpenOptions::new().create(true).read(true).append(true).open(&path)?;
+        let last_seq = read_events(&path, 0, u64::MAX)
+            .iter()
+            .map(|e| e.seq)
+            .max()
+            .unwrap_or(0);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&path)?;
         // A crash can leave a torn final line; start the next event on a fresh line.
         if file.metadata()?.len() > 0 {
             let mut last = [0u8; 1];
@@ -54,7 +62,11 @@ impl EventStore {
         let (live, _) = broadcast::channel(1024);
         Ok(Self {
             path,
-            inner: Mutex::new(Inner { file, last_seq, agent_state: "starting".into() }),
+            inner: Mutex::new(Inner {
+                file,
+                last_seq,
+                agent_state: "starting".into(),
+            }),
             live,
         })
     }
@@ -68,10 +80,10 @@ impl EventStore {
             "ts".into(),
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         );
-        if event.get("type").and_then(Value::as_str) == Some("status") {
-            if let Some(state) = event.get("state").and_then(Value::as_str) {
-                inner.agent_state = state.to_string();
-            }
+        if event.get("type").and_then(Value::as_str) == Some("status")
+            && let Some(state) = event.get("state").and_then(Value::as_str)
+        {
+            inner.agent_state = state.to_string();
         }
         let line = Value::Object(event).to_string();
         if let Err(e) = writeln!(inner.file, "{line}") {
@@ -101,12 +113,16 @@ impl EventStore {
             return Vec::new();
         }
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || read_events(&path, after, upto)).await.unwrap_or_default()
+        tokio::task::spawn_blocking(move || read_events(&path, after, upto))
+            .await
+            .unwrap_or_default()
     }
 }
 
 fn read_events(path: &Path, after: u64, upto: u64) -> Vec<Stored> {
-    let Ok(file) = File::open(path) else { return Vec::new() };
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
     BufReader::new(file)
         .split(b'\n')
         .map_while(Result::ok)

@@ -5,46 +5,45 @@
 //! browser; browser commands are forwarded to the agent.
 
 use crate::{
-    client_error,
-    config::{setting, setting_str, setting_u64, ModulesConfig},
+    ApiResult, App, CLAUDE_API_HOST, Shared, client_error,
+    config::{ModulesConfig, setting, setting_str, setting_u64},
     findings, github, memory,
-    modules::{schema_for, AgentModule},
+    modules::{AgentModule, schema_for},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     util::{random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
     watchdog::Activity,
-    ApiResult, App, Shared, CLAUDE_API_HOST,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
+    Json,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::Response,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{broadcast, mpsc, watch, Mutex},
+    sync::{Mutex, broadcast, mpsc, watch},
 };
 use tokio_tungstenite::{
-    tungstenite::{self, client::IntoClientRequest},
     WebSocketStream,
+    tungstenite::{self, client::IntoClientRequest},
 };
 
 const AGENTD_PORT: u16 = 7070;
@@ -69,7 +68,10 @@ pub enum SessionStatus {
 impl SessionStatus {
     /// A microVM is expected to be running.
     pub fn is_live(self) -> bool {
-        matches!(self, Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle)
+        matches!(
+            self,
+            Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle
+        )
     }
 }
 
@@ -157,11 +159,19 @@ impl Runtime {
         let logs_path = dir.join("harness.jsonl");
         let last_seq = std::fs::read_to_string(&events_path)
             .ok()
-            .and_then(|content| content.lines().rev().find_map(|l| serde_json::from_str::<Value>(l).ok()?["seq"].as_u64()))
+            .and_then(|content| {
+                content
+                    .lines()
+                    .rev()
+                    .find_map(|l| serde_json::from_str::<Value>(l).ok()?["seq"].as_u64())
+            })
             .unwrap_or(0);
         let logs: VecDeque<Value> = std::fs::read_to_string(&logs_path)
             .map(|content| {
-                let all: Vec<Value> = content.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+                let all: Vec<Value> = content
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
                 all.into_iter().rev().take(MAX_LOGS).rev().collect()
             })
             .unwrap_or_default();
@@ -216,7 +226,9 @@ impl SessionLogger {
         self.app.session_log(&self.id, "info", message.into()).await
     }
     pub async fn error(&self, message: impl Into<String>) {
-        self.app.session_log(&self.id, "error", message.into()).await
+        self.app
+            .session_log(&self.id, "error", message.into())
+            .await
     }
 }
 
@@ -230,10 +242,19 @@ impl App {
     }
 
     pub async fn session(&self, id: &str) -> Option<Session> {
-        self.sessions.read().await.iter().find(|s| s.id == id).cloned()
+        self.sessions
+            .read()
+            .await
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
     }
 
-    pub async fn update_session<R>(&self, id: &str, f: impl FnOnce(&mut Session) -> R) -> Option<(Session, R)> {
+    pub async fn update_session<R>(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut Session) -> R,
+    ) -> Option<(Session, R)> {
         let (session, result) = {
             let mut sessions = self.sessions.write().await;
             let session = sessions.iter_mut().find(|s| s.id == id)?;
@@ -245,7 +266,10 @@ impl App {
         let rt = self.runtimes.lock().await.get(id).cloned();
         if let Some(rt) = rt {
             let view = with_activity(self, session.clone()).await;
-            rt.broadcast(None, json!({"type": "session", "session": view}).to_string());
+            rt.broadcast(
+                None,
+                json!({"type": "session", "session": view}).to_string(),
+            );
         }
         Some((session, result))
     }
@@ -264,11 +288,15 @@ impl App {
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {
         let mut runtimes = self.runtimes.lock().await;
-        runtimes.entry(id.to_string()).or_insert_with(|| Arc::new(Runtime::load(&self.session_dir(id)))).clone()
+        runtimes
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Runtime::load(&self.session_dir(id))))
+            .clone()
     }
 
     pub async fn session_log(&self, id: &str, level: &str, message: String) {
-        let entry = json!({"type": "harness_log", "level": level, "message": message, "ts": Utc::now()});
+        let entry =
+            json!({"type": "harness_log", "level": level, "message": message, "ts": Utc::now()});
         let rt = self.runtime(id).await;
         {
             let _guard = rt.file_lock.lock().await;
@@ -283,12 +311,20 @@ impl App {
     }
 
     fn logger(self: &Arc<Self>, id: &str) -> SessionLogger {
-        SessionLogger { app: self.clone(), id: id.to_string() }
+        SessionLogger {
+            app: self.clone(),
+            id: id.to_string(),
+        }
     }
 }
 
 async fn append_line(path: &std::path::Path, line: &str) {
-    if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open(path).await {
+    if let Ok(mut f) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+    {
         let _ = f.write_all(format!("{line}\n").as_bytes()).await;
     }
 }
@@ -314,7 +350,9 @@ pub struct NewSession {
 /// Whether colonies may file validated findings as issues. On unless switched off in Settings.
 fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, &app.agents);
-    setting(&modules.publish, &schema, "file_findings").and_then(Value::as_bool).unwrap_or(true)
+    setting(&modules.publish, &schema, "file_findings")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// The container image a colony boots: the stack preset's, unless modules.json names one.
@@ -327,7 +365,9 @@ fn colony_image(app: &App, modules: &ModulesConfig) -> String {
 
 fn autopilot_default(app: &App, modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, &app.agents);
-    setting(&modules.publish, &schema, "autopilot").and_then(Value::as_bool).unwrap_or(false)
+    setting(&modules.publish, &schema, "autopilot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, PartialEq)]
@@ -339,7 +379,12 @@ enum Autopilot {
 }
 
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
-fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
+fn autopilot_step(
+    errored: bool,
+    interrupted: bool,
+    open_question: bool,
+    pr_written: bool,
+) -> Autopilot {
     if open_question {
         Autopilot::Wait("a question is open")
     } else if interrupted {
@@ -361,7 +406,14 @@ fn has_room(sessions: &[Session], org: &str, max_parallel: usize, org_limit: Opt
         return false;
     }
     match org_limit {
-        Some(limit) => (sessions.iter().filter(busy).filter(|s| s.org == org).count() as u64) < limit,
+        Some(limit) => {
+            (sessions
+                .iter()
+                .filter(busy)
+                .filter(|s| s.org == org)
+                .count() as u64)
+                < limit
+        }
         None => true,
     }
 }
@@ -369,16 +421,27 @@ fn has_room(sessions: &[Session], org: &str, max_parallel: usize, org_limit: Opt
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid repository name",
+        ));
     }
     let modules = app.modules.read().await.clone();
     let agent = app
         .agents
         .iter()
         .find(|a| a.id == modules.agent.provider)
-        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "the selected agent module is not installed"))?;
+        .ok_or_else(|| {
+            client_error(
+                StatusCode::BAD_REQUEST,
+                "the selected agent module is not installed",
+            )
+        })?;
     if agent.needs_claude && app.claude_cred().is_none() {
-        return Err(client_error(StatusCode::BAD_REQUEST, "log in with Claude in Settings first"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "log in with Claude in Settings first",
+        ));
     }
     if let Err(e) = app.cfg.asset("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
@@ -387,7 +450,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     let existing = app.sessions.read().await.clone();
-    let queued = !has_room(&existing, owner, max_parallel, orgs::org_max_parallel(&app.org_settings(owner)));
+    let queued = !has_room(
+        &existing,
+        owner,
+        max_parallel,
+        orgs::org_max_parallel(&app.org_settings(owner)),
+    );
 
     let id = short_id();
     let slug = match req.issue {
@@ -406,16 +474,30 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         issue: req.issue,
         issue_title: title,
         instructions: truncate(req.instructions.trim(), 20_000),
-        status: if queued { SessionStatus::Queued } else { SessionStatus::Starting },
+        status: if queued {
+            SessionStatus::Queued
+        } else {
+            SessionStatus::Starting
+        },
         branch: format!("colonizer/{slug}"),
         base: None,
-        worktree: app.cfg.data_dir.join("worktrees").join(owner).join(name).join(&slug).display().to_string(),
+        worktree: app
+            .cfg
+            .data_dir
+            .join("worktrees")
+            .join(owner)
+            .join(name)
+            .join(&slug)
+            .display()
+            .to_string(),
         git_admin_dir: None,
         sandbox: format!("colonizer-{id}"),
         mesh: None,
         local_port: None,
         agent: agent.id.clone(),
-        autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app, &modules)),
+        autopilot: req
+            .autopilot
+            .unwrap_or_else(|| autopilot_default(&app, &modules)),
         pr_url: None,
         error: None,
         cost_usd: None,
@@ -434,9 +516,21 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     app.persist_sessions().await;
     app.runtime(&id).await;
     if queued {
-        let waiting = existing.iter().filter(|s| s.status == SessionStatus::Queued).count();
-        let ahead = if waiting == 0 { String::new() } else { format!(", behind {waiting} already waiting") };
-        app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}")).await;
+        let waiting = existing
+            .iter()
+            .filter(|s| s.status == SessionStatus::Queued)
+            .count();
+        let ahead = if waiting == 0 {
+            String::new()
+        } else {
+            format!(", behind {waiting} already waiting")
+        };
+        app.session_log(
+            &id,
+            "info",
+            format!("queued: the parallel limit is {max_parallel}{ahead}"),
+        )
+        .await;
     } else {
         tokio::spawn(boot(app.clone(), id, false));
     }
@@ -446,11 +540,14 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
 async fn boot(app: Shared, id: String, resume: bool) {
     if let Err(e) = boot_inner(&app, &id, resume).await {
         let message = format!("{e:#}");
-        let Some(s) = app.session(&id).await else { return };
+        let Some(s) = app.session(&id).await else {
+            return;
+        };
         if s.status != SessionStatus::Starting {
             return; // stopped by the user while starting; the stop handler cleaned up
         }
-        app.session_log(&id, "error", format!("session failed to start: {message}")).await;
+        app.session_log(&id, "error", format!("session failed to start: {message}"))
+            .await;
         teardown_vm(&app, &s).await;
         app.update_session(&id, |s| {
             s.status = SessionStatus::Failed;
@@ -473,11 +570,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
     let modules = app.modules.read().await.clone();
-    let agent = app.agents.iter().find(|a| a.id == s.agent).cloned().context("agent module is not installed")?;
+    let agent = app
+        .agents
+        .iter()
+        .find(|a| a.id == s.agent)
+        .cloned()
+        .context("agent module is not installed")?;
 
     let issue = match s.issue {
         Some(number) => {
-            log.info(format!("fetching issue {}#{number}", s.repo)).await;
+            log.info(format!("fetching issue {}#{number}", s.repo))
+                .await;
             Some(github::fetch_issue(app, &s.repo, number).await?)
         }
         None => None,
@@ -487,7 +590,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         Some(base) => base,
         None => github::default_branch(app, &s.repo).await?,
     };
-    let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
+    let title = issue
+        .as_ref()
+        .and_then(|i| i["title"].as_str())
+        .map(String::from);
     app.update_session(id, |x| {
         if let Some(title) = title {
             x.issue_title = title;
@@ -503,16 +609,29 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let wt = PathBuf::from(&s.worktree);
     let admin = if resume {
         // The worktree and branch outlive the microVM, so a resumed colony picks them up as they are.
-        log.info(format!("resuming on the kept worktree, branch {}", s.branch)).await;
-        PathBuf::from(s.git_admin_dir.as_deref().context("this colony has no worktree to resume")?)
+        log.info(format!(
+            "resuming on the kept worktree, branch {}",
+            s.branch
+        ))
+        .await;
+        PathBuf::from(
+            s.git_admin_dir
+                .as_deref()
+                .context("this colony has no worktree to resume")?,
+        )
     } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
         github::sync_repo(app, &s.repo, &bare, &log).await?;
-        log.info(format!("creating worktree on branch {} from origin/{base}", s.branch)).await;
+        log.info(format!(
+            "creating worktree on branch {} from origin/{base}",
+            s.branch
+        ))
+        .await;
         github::create_worktree(app, &bare, &wt, &s.branch, &base).await?
     };
-    app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string())).await;
+    app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string()))
+        .await;
     let s = ensure_starting(app, id).await?;
 
     timing.mark("git");
@@ -528,10 +647,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
     let routing = providers::colony_routes(app, &gateway_token);
     if !routing.routes.is_empty() {
-        runner_env.insert("COLONIZER_MODEL_ROUTES".into(), Value::String(serde_json::to_string(&routing.routes)?));
+        runner_env.insert(
+            "COLONIZER_MODEL_ROUTES".into(),
+            Value::String(serde_json::to_string(&routing.routes)?),
+        );
     }
     let used = routing.used(&runner_env);
-    let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe(app, p))).await;
+    let probes =
+        futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe(app, p))).await;
     for (provider, health) in used.iter().zip(probes) {
         if health["reachable"] != true {
             let then = match &provider.fallback_model {
@@ -539,7 +662,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 None => "its requests will fail until it is back (set a fallback model to use Claude instead)".into(),
             };
             let error = health["error"].as_str().unwrap_or("unknown error");
-            app.session_log(id, "warn", format!("model provider {} is unreachable ({error}); {then}", provider.id)).await;
+            app.session_log(
+                id,
+                "warn",
+                format!(
+                    "model provider {} is unreachable ({error}); {then}",
+                    provider.id
+                ),
+            )
+            .await;
         }
     }
     timing.mark("providers");
@@ -549,17 +680,32 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
-        runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
+        runner_env.insert(
+            "COLONIZER_MEMORY_DIR".into(),
+            Value::String("/colonizer/memory".into()),
+        );
     }
     // What the colony can and cannot run is part of the agent's brief (runner.mjs).
-    runner_env.insert("COLONIZER_IMAGE".into(), Value::String(colony_image(app, &modules)));
+    runner_env.insert(
+        "COLONIZER_IMAGE".into(),
+        Value::String(colony_image(app, &modules)),
+    );
 
     // The private mesh needs the vendored tailscale, which has no macOS build yet. Without it a colony
     // is reached on a loopback port rather than failing to boot.
     let mesh_on = modules.mesh_enabled()
-        && app.cfg.assets.as_deref().is_some_and(crate::mesh::binaries_present);
+        && app
+            .cfg
+            .assets
+            .as_deref()
+            .is_some_and(crate::mesh::binaries_present);
     if modules.mesh_enabled() && !mesh_on {
-        app.session_log(id, "warn", "the private mesh is unavailable on this platform; using a loopback port".into()).await;
+        app.session_log(
+            id,
+            "warn",
+            "the private mesh is unavailable on this platform; using a loopback port".into(),
+        )
+        .await;
     }
     let mut env: Vec<(String, String)> = vec![
         ("IS_SANDBOX".into(), "1".into()),
@@ -572,12 +718,36 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ("GIT_CONFIG_VALUE_0".into(), "*".into()),
     ];
     let mut mounts = vec![
-        Mount { source: wt.clone(), target: "/workspace".into(), read_only: false },
-        Mount { source: bare.clone(), target: bare.display().to_string(), read_only: true },
-        Mount { source: vm_dir.clone(), target: "/colonizer".into(), read_only: true },
-        Mount { source: out_dir, target: "/harness/out".into(), read_only: false },
-        Mount { source: app.cfg.asset("bin/colonizer-agentd")?, target: "/opt/colonizer/bin/colonizer-agentd".into(), read_only: true },
-        Mount { source: agent.dir.clone(), target: "/opt/colonizer/agent".into(), read_only: true },
+        Mount {
+            source: wt.clone(),
+            target: "/workspace".into(),
+            read_only: false,
+        },
+        Mount {
+            source: bare.clone(),
+            target: bare.display().to_string(),
+            read_only: true,
+        },
+        Mount {
+            source: vm_dir.clone(),
+            target: "/colonizer".into(),
+            read_only: true,
+        },
+        Mount {
+            source: out_dir,
+            target: "/harness/out".into(),
+            read_only: false,
+        },
+        Mount {
+            source: app.cfg.asset("bin/colonizer-agentd")?,
+            target: "/opt/colonizer/bin/colonizer-agentd".into(),
+            read_only: true,
+        },
+        Mount {
+            source: agent.dir.clone(),
+            target: "/opt/colonizer/agent".into(),
+            read_only: true,
+        },
     ];
     // Claude Code plugin directories, mounted read-only from the mothership.
     //
@@ -588,7 +758,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     //
     // A setting names a directory, never a path: it is resolved under the
     // mothership's plugins folder, so it cannot reach an arbitrary host path.
-    let plugin_names = crate::plugins::parse_list(runner_env.get("COLONIZER_PLUGIN_DIRS").and_then(Value::as_str).unwrap_or_default());
+    let plugin_names = crate::plugins::parse_list(
+        runner_env
+            .get("COLONIZER_PLUGIN_DIRS")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         for name in &plugin_names {
@@ -596,25 +771,42 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
             let target = format!("/opt/colonizer/plugins/{name}");
-            mounts.push(Mount { source, target: target.clone(), read_only: true });
+            mounts.push(Mount {
+                source,
+                target: target.clone(),
+                read_only: true,
+            });
             targets.push(target);
         }
         // The runner only ever sees in-VM paths, never the mothership's.
-        runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
+        runner_env.insert(
+            "COLONIZER_PLUGIN_DIRS".into(),
+            Value::String(targets.join(",")),
+        );
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its
         // own flag is checked only after a hook process has already spawned, so
         // this is the second line of defence, not the first.
         env.push(("ECC_HOOKS_ENABLED".into(), "false".into()));
-        log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
+        log.info(format!(
+            "loading {} plugin director{}",
+            targets.len(),
+            if targets.len() == 1 { "y" } else { "ies" }
+        ))
+        .await;
     }
 
     // Token savings (docs/protocol.md): what a switched-on setting needs inside the colony. When the
     // install lacks it, the setting is off for this colony and the log says why: saving tokens is never
     // the reason a colony doesn't start.
-    let switched_on = |env: &Map<String, Value>, key: &str| env.get(key).and_then(Value::as_str) == Some("true");
+    let switched_on =
+        |env: &Map<String, Value>, key: &str| env.get(key).and_then(Value::as_str) == Some("true");
     if switched_on(&runner_env, "COLONIZER_RTK") {
         match app.cfg.asset("bin/rtk") {
-            Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/bin/rtk".into(), read_only: true }),
+            Ok(source) => mounts.push(Mount {
+                source,
+                target: "/opt/colonizer/bin/rtk".into(),
+                read_only: true,
+            }),
             Err(_) => {
                 runner_env.remove("COLONIZER_RTK");
                 log.info("compact command output is switched on, but rtk isn't installed (scripts/install.sh builds it); running without it").await;
@@ -623,7 +815,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     if switched_on(&runner_env, "COLONIZER_HEADROOM") {
         match crate::headroom::installed(app) {
-            Some(source) => mounts.push(Mount { source, target: "/opt/colonizer/headroom".into(), read_only: true }),
+            Some(source) => mounts.push(Mount {
+                source,
+                target: "/opt/colonizer/headroom".into(),
+                read_only: true,
+            }),
             None => {
                 runner_env.remove("COLONIZER_HEADROOM");
                 log.info("Headroom is switched on, but its bundle isn't downloaded yet (Settings → Agent starts the download); running without it").await;
@@ -631,8 +827,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
     }
     if switched_on(&runner_env, "COLONIZER_CAVEMAN") {
-        match app.cfg.asset("vendor/caveman/SKILL.md").and_then(|_| app.cfg.asset("vendor/caveman")) {
-            Ok(source) => mounts.push(Mount { source, target: "/opt/colonizer/caveman".into(), read_only: true }),
+        match app
+            .cfg
+            .asset("vendor/caveman/SKILL.md")
+            .and_then(|_| app.cfg.asset("vendor/caveman"))
+        {
+            Ok(source) => mounts.push(Mount {
+                source,
+                target: "/opt/colonizer/caveman".into(),
+                read_only: true,
+            }),
             Err(_) => {
                 runner_env.remove("COLONIZER_CAVEMAN");
                 log.info("terse replies are switched on, but caveman's ruleset isn't installed (scripts/install.sh stages it); running without it").await;
@@ -650,22 +854,43 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
         "initial_prompt": prompt,
     });
-    std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
+    std::fs::write(
+        vm_dir.join("session.json"),
+        serde_json::to_vec_pretty(&session_json)?,
+    )?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
     if memory_on {
-        for (scope, key) in [("global", String::new()), ("org", s.org.clone()), ("repo", s.repo.clone())] {
+        for (scope, key) in [
+            ("global", String::new()),
+            ("org", s.org.clone()),
+            ("repo", s.repo.clone()),
+        ] {
             // Mount points must exist inside the read-only /colonizer mount.
             std::fs::create_dir_all(vm_dir.join("memory").join(scope))?;
             let source = app.memory.ensure_scope(scope, &key)?;
-            mounts.push(Mount { source, target: format!("/colonizer/memory/{scope}"), read_only: true });
+            mounts.push(Mount {
+                source,
+                target: format!("/colonizer/memory/{scope}"),
+                read_only: true,
+            });
         }
     }
     let mut secrets = Vec::new();
     if agent.needs_claude {
-        let cred = app.claude_cred().context("log in with Claude in Settings first")?;
-        mounts.push(Mount { source: resolve_guest_claude_bin(&app.cfg).await?, target: "/opt/claude/bin/claude".into(), read_only: true });
-        secrets.push(Secret { env: cred.env.into(), value: cred.value, hosts: vec![CLAUDE_API_HOST.into()] });
+        let cred = app
+            .claude_cred()
+            .context("log in with Claude in Settings first")?;
+        mounts.push(Mount {
+            source: resolve_guest_claude_bin(&app.cfg).await?,
+            target: "/opt/claude/bin/claude".into(),
+            read_only: true,
+        });
+        secrets.push(Secret {
+            env: cred.env.into(),
+            value: cred.value,
+            hosts: vec![CLAUDE_API_HOST.into()],
+        });
     }
     let mut net_profiles = vec!["public".to_string()];
     let mut net_rules = Vec::new();
@@ -675,15 +900,30 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         log.info("starting the private mesh").await;
         mesh.ensure_started().await?;
         mesh.delete_nodes_named(&s.sandbox).await?;
-        write_private(&vm_dir.join("mesh-authkey"), mesh.mint_vm_key().await?.as_bytes())?;
-        mounts.push(Mount { source: app.cfg.asset("vendor/tailscale")?, target: "/opt/colonizer/tailscale".into(), read_only: true });
+        write_private(
+            &vm_dir.join("mesh-authkey"),
+            mesh.mint_vm_key().await?.as_bytes(),
+        )?;
+        mounts.push(Mount {
+            source: app.cfg.asset("vendor/tailscale")?,
+            target: "/opt/colonizer/tailscale".into(),
+            read_only: true,
+        });
         env.push(("COLONIZER_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
         env.push(("COLONIZER_MESH_HOSTNAME".into(), s.sandbox.clone()));
         net_profiles.push("host".into());
         net_rules = mesh.direct_path_rules().await;
-        app.update_session(id, |x| x.mesh = Some(MeshInfo { name: s.sandbox.clone(), ip: None })).await;
+        app.update_session(id, |x| {
+            x.mesh = Some(MeshInfo {
+                name: s.sandbox.clone(),
+                ip: None,
+            })
+        })
+        .await;
     } else {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
@@ -697,7 +937,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The chosen stack fills in image and machine size; anything set explicitly
     // in modules.json still wins. See crates/colonizer/src/presets.rs.
     let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
-    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
+    let sandbox_settings =
+        crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
@@ -726,15 +967,27 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // timing, which #15 could not separate without an extra call on every
     // launch. The cache check is that call, and it is already paid for here.
     if !sandbox::is_cached(&app.cfg.msb, &spec.image).await {
-        log.info(format!("pulling {} — this happens once per image, and can take a while", spec.image)).await;
+        log.info(format!(
+            "pulling {} — this happens once per image, and can take a while",
+            spec.image
+        ))
+        .await;
         if let Err(e) = sandbox::pull(&app.cfg.msb, &spec.image).await {
             // Not fatal: `msb run` will try the pull again and report properly.
-            log.info(format!("pre-pull of {} did not finish ({e:#}); the boot will pull it", spec.image)).await;
+            log.info(format!(
+                "pre-pull of {} did not finish ({e:#}); the boot will pull it",
+                spec.image
+            ))
+            .await;
         }
     }
     timing.mark("image-pull");
 
-    log.info(format!("booting microVM {} ({}, {} vCPU, {})", spec.name, spec.image, spec.cpus, spec.memory)).await;
+    log.info(format!(
+        "booting microVM {} ({}, {} vCPU, {})",
+        spec.name, spec.image, spec.cpus, spec.memory
+    ))
+    .await;
     sandbox::boot(&app.cfg.msb, &spec).await?;
     // The pull is its own phase above, so this is the VM itself — unless the
     // pre-pull failed, in which case `msb run` pulls and this absorbs it.
@@ -742,11 +995,23 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let s = ensure_starting(app, id).await?;
 
     if mesh_on {
-        log.info("waiting for the microVM to join the private mesh").await;
-        let node = app.mesh().await?.wait_online(&s.sandbox, Duration::from_secs(120)).await?;
+        log.info("waiting for the microVM to join the private mesh")
+            .await;
+        let node = app
+            .mesh()
+            .await?
+            .wait_online(&s.sandbox, Duration::from_secs(120))
+            .await?;
         let _ = std::fs::remove_file(vm_dir.join("mesh-authkey"));
-        log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
-        app.update_session(id, |x| x.mesh = Some(MeshInfo { name: x.sandbox.clone(), ip: Some(node.ip.clone()) })).await;
+        log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip))
+            .await;
+        app.update_session(id, |x| {
+            x.mesh = Some(MeshInfo {
+                name: x.sandbox.clone(),
+                ip: Some(node.ip.clone()),
+            })
+        })
+        .await;
     }
 
     timing.mark("mesh-join");
@@ -756,7 +1021,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     loop {
         match agentd_http(app, &s, "GET", "/v1/health").await {
             Ok((200, _)) => break,
-            _ if tokio::time::Instant::now() > deadline => bail!("the agent daemon in the microVM did not become ready"),
+            _ if tokio::time::Instant::now() > deadline => {
+                bail!("the agent daemon in the microVM did not become ready")
+            }
             _ => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
@@ -765,7 +1032,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     log.info(timing.summary()).await;
     let breakdown = timing.to_json();
-    app.update_session(id, |x| x.boot_timing = Some(breakdown)).await;
+    app.update_session(id, |x| x.boot_timing = Some(breakdown))
+        .await;
 
     ensure_starting(app, id).await?;
     start_link(app, id).await;
@@ -777,7 +1045,11 @@ fn agent_env(agent: &AgentModule, choice: &crate::config::ModuleChoice) -> Map<S
     let mut env = Map::new();
     if let Some(properties) = agent.schema["properties"].as_object() {
         for (key, spec) in properties {
-            let (Some(var), Some(value)) = (spec["env"].as_str(), setting(choice, &agent.schema, key)) else { continue };
+            let (Some(var), Some(value)) =
+                (spec["env"].as_str(), setting(choice, &agent.schema, key))
+            else {
+                continue;
+            };
             let value = match value {
                 Value::String(s) => s.clone(),
                 Value::Null => continue,
@@ -789,7 +1061,10 @@ fn agent_env(agent: &AgentModule, choice: &crate::config::ModuleChoice) -> Map<S
         }
     }
     if agent.needs_claude {
-        env.insert("COLONIZER_CLAUDE_BIN".into(), Value::String("/opt/claude/bin/claude".into()));
+        env.insert(
+            "COLONIZER_CLAUDE_BIN".into(),
+            Value::String("/opt/claude/bin/claude".into()),
+        );
     }
     env
 }
@@ -819,12 +1094,19 @@ exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --toke
 async fn start_link(app: &Shared, id: &str) {
     let rt = app.runtime(id).await;
     rt.stop.send_replace(false);
-    let Some(commands) = rt.commands_rx.lock().await.take() else { return };
+    let Some(commands) = rt.commands_rx.lock().await.take() else {
+        return;
+    };
     tokio::spawn(agent_link(app.clone(), id.to_string(), rt, commands));
 }
 
 /// Stays connected to agentd's event stream while the session is live, reconnecting with `since`.
-async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut commands: mpsc::UnboundedReceiver<Value>) {
+async fn agent_link(
+    app: Shared,
+    id: String,
+    rt: Arc<Runtime>,
+    mut commands: mpsc::UnboundedReceiver<Value>,
+) {
     let mut stop = rt.stop.subscribe();
     let mut backoff = Duration::from_secs(1);
     let mut connected_before = false;
@@ -833,20 +1115,27 @@ async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut commands: mps
         if *stop.borrow() {
             return;
         }
-        let Some(s) = app.session(&id).await else { return };
+        let Some(s) = app.session(&id).await else {
+            return;
+        };
         if !s.status.is_live() {
             return;
         }
         let since = rt.last_seq.load(Ordering::SeqCst);
         match agentd_ws(&app, &s, &format!("/v1/events?since={since}")).await {
             Ok(ws) => {
-                let message = if connected_before { "reconnected to the agent" } else { "connected to the agent" };
+                let message = if connected_before {
+                    "reconnected to the agent"
+                } else {
+                    "connected to the agent"
+                };
                 app.session_log(&id, "info", message.into()).await;
                 connected_before = true;
                 warned = false;
                 backoff = Duration::from_secs(1);
                 if s.status == SessionStatus::Starting {
-                    app.update_session(&id, |x| x.status = SessionStatus::Running).await;
+                    app.update_session(&id, |x| x.status = SessionStatus::Running)
+                        .await;
                 }
                 let (mut sink, mut stream) = ws.split();
                 loop {
@@ -873,7 +1162,12 @@ async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut commands: mps
             }
             Err(e) => {
                 if backoff >= Duration::from_secs(8) && !warned {
-                    app.session_log(&id, "error", format!("can't reach the agent, retrying: {e:#}")).await;
+                    app.session_log(
+                        &id,
+                        "error",
+                        format!("can't reach the agent, retrying: {e:#}"),
+                    )
+                    .await;
                     warned = true;
                 }
             }
@@ -887,8 +1181,12 @@ async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut commands: mps
 }
 
 async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
-    let Ok(event) = serde_json::from_str::<Value>(line) else { return };
-    let Some(seq) = event["seq"].as_u64() else { return };
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    let Some(seq) = event["seq"].as_u64() else {
+        return;
+    };
     {
         let _guard = rt.file_lock.lock().await;
         if seq <= rt.last_seq.load(Ordering::SeqCst) {
@@ -901,7 +1199,10 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
 
     // Progress for the watchdog: anything but status changes and the echo of its own nudges.
     let kind = event["type"].as_str().unwrap_or_default();
-    let watchdog_echo = kind == "user_message" && event["id"].as_str().is_some_and(|i| i.starts_with("watchdog-"));
+    let watchdog_echo = kind == "user_message"
+        && event["id"]
+            .as_str()
+            .is_some_and(|i| i.starts_with("watchdog-"));
     if kind != "status" && !watchdog_echo {
         {
             let mut activity = rt.activity.lock().await;
@@ -924,19 +1225,26 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
                 _ => return,
             };
             let error = match state {
-                "error" | "exited" => Some(format!("agent {state}{}", event["detail"].as_str().map(|d| format!(": {d}")).unwrap_or_default())),
+                "error" | "exited" => Some(format!(
+                    "agent {state}{}",
+                    event["detail"]
+                        .as_str()
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default()
+                )),
                 _ => None,
             };
-            if let Some(current) = app.session(id).await {
-                if current.status.is_live() && (current.status != next || error.is_some()) {
-                    app.update_session(id, |x| {
-                        x.status = next;
-                        if error.is_some() {
-                            x.error = error;
-                        }
-                    })
-                    .await;
-                }
+            if let Some(current) = app.session(id).await
+                && current.status.is_live()
+                && (current.status != next || error.is_some())
+            {
+                app.update_session(id, |x| {
+                    x.status = next;
+                    if error.is_some() {
+                        x.error = error;
+                    }
+                })
+                .await;
             }
         }
         Some("question") => {
@@ -950,20 +1258,26 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
         Some("memory_proposal") => memory_proposal(app, id, &event).await,
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         Some("finding") => {
-            tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
+            tokio::spawn(file_finding(
+                app.clone(),
+                id.to_string(),
+                rt.clone(),
+                event.clone(),
+            ));
         }
         Some("turn_end") => {
             let cost = event["cost_usd"].as_f64();
             let usage = event.get("model_usage").filter(|u| u.is_object()).cloned();
-            if let Some((s, ())) = app.update_session(id, |x| {
-                if cost.is_some() {
-                    x.cost_usd = cost;
-                }
-                if usage.is_some() {
-                    x.model_usage = usage;
-                }
-            })
-            .await
+            if let Some((s, ())) = app
+                .update_session(id, |x| {
+                    if cost.is_some() {
+                        x.cost_usd = cost;
+                    }
+                    if usage.is_some() {
+                        x.model_usage = usage;
+                    }
+                })
+                .await
             {
                 let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
                 let pr_written = {
@@ -981,7 +1295,14 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
                             app.session_log(id, "info", "autopilot: the agent finished and wrote its PR description, publishing".into()).await;
                             tokio::spawn(publish_session(app.clone(), id.to_string()));
                         }
-                        Autopilot::Wait(reason) => app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}")).await,
+                        Autopilot::Wait(reason) => {
+                            app.session_log(
+                                id,
+                                "info",
+                                format!("autopilot: not publishing yet, {reason}"),
+                            )
+                            .await
+                        }
                         Autopilot::Hold(reason) => {
                             app.session_log(id, "warn", format!("autopilot: not publishing, {reason}; press Create PR when the work is ready")).await;
                             app.update_session(id, |x| {
@@ -999,10 +1320,17 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
 
 /// A colony proposed a shared-memory note: queue it for review (or store it when review is off).
 async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
-    let Some(s) = app.session(id).await else { return };
+    let Some(s) = app.session(id).await else {
+        return;
+    };
     let modules = app.modules.read().await.clone();
     if !orgs::effective_memory_enabled(&modules, &app.org_settings(&s.org)) {
-        app.session_log(id, "info", "ignored a memory proposal: shared memory is off for this org".into()).await;
+        app.session_log(
+            id,
+            "info",
+            "ignored a memory proposal: shared memory is off for this org".into(),
+        )
+        .await;
         return;
     }
     let scope = event["scope"].as_str().unwrap_or("repo");
@@ -1011,21 +1339,31 @@ async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
         "repo" => s.repo.clone(),
         _ => String::new(),
     };
-    let tags: Vec<String> =
-        event["tags"].as_array().map(|tags| tags.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+    let tags: Vec<String> = event["tags"]
+        .as_array()
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     let source = json!({"session_id": s.id, "repo": s.repo});
     let title = event["title"].as_str().unwrap_or_default();
     let content = event["content"].as_str().unwrap_or_default();
     let note = match memory::draft(scope, &key, title, content, &tags, source) {
         Ok(note) => note,
         Err(e) => {
-            app.session_log(id, "error", format!("rejected a memory proposal: {e:#}")).await;
+            app.session_log(id, "error", format!("rejected a memory proposal: {e:#}"))
+                .await;
             return;
         }
     };
     let title = note.title.clone();
     let stored = if orgs::memory_requires_review(&modules) {
-        app.memory.add_proposal(note).await.map(|proposal| json!(proposal))
+        app.memory
+            .add_proposal(note)
+            .await
+            .map(|proposal| json!(proposal))
     } else {
         app.memory.add_note(note).await.map(|note| {
             let mut value = json!(note);
@@ -1038,15 +1376,29 @@ async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
             let waiting = proposal["status"] == "pending";
             let message = format!(
                 "memory: the agent proposed \"{title}\" for {scope} memory{}",
-                if waiting { ", waiting for your review" } else { " (review is off, so it is live)" }
+                if waiting {
+                    ", waiting for your review"
+                } else {
+                    " (review is off, so it is live)"
+                }
             );
             app.session_log(id, "info", message).await;
             let rt = app.runtimes.lock().await.get(id).cloned();
             if let Some(rt) = rt {
-                rt.broadcast(None, json!({"type": "memory_proposed", "proposal": proposal}).to_string());
+                rt.broadcast(
+                    None,
+                    json!({"type": "memory_proposed", "proposal": proposal}).to_string(),
+                );
             }
         }
-        Err(e) => app.session_log(id, "error", format!("could not store a memory proposal: {e:#}")).await,
+        Err(e) => {
+            app.session_log(
+                id,
+                "error",
+                format!("could not store a memory proposal: {e:#}"),
+            )
+            .await
+        }
     }
 }
 
@@ -1054,16 +1406,24 @@ async fn memory_proposal(app: &Shared, id: &str, event: &Value) {
 /// colony's repository, unless findings are off, the colony has hit its cap, or an open issue
 /// already has the same title. Every outcome is recorded and logged; none reaches the agent.
 async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, event: Value) {
-    let Some(s) = app.session(&id).await else { return };
+    let Some(s) = app.session(&id).await else {
+        return;
+    };
     let modules = app.modules.read().await.clone();
     if !findings_enabled(&app, &modules) {
-        app.session_log(&id, "info", "ignored a finding: filing findings is switched off in Settings".into()).await;
+        app.session_log(
+            &id,
+            "info",
+            "ignored a finding: filing findings is switched off in Settings".into(),
+        )
+        .await;
         return;
     }
     let finding = match findings::parse(&event) {
         Ok(finding) => finding,
         Err(e) => {
-            app.session_log(&id, "warn", format!("did not file a finding: {e:#}")).await;
+            app.session_log(&id, "warn", format!("did not file a finding: {e:#}"))
+                .await;
             return;
         }
     };
@@ -1081,15 +1441,24 @@ async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, event: Value) {
     }
     let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md")).await;
     let (level, message, entry) = match &outcome {
-        Ok(findings::Filed::Issue(url)) => {
-            ("info", format!("filed finding \"{}\" as {url}", finding.title), json!({"title": finding.title, "issue": url}))
-        }
+        Ok(findings::Filed::Issue(url)) => (
+            "info",
+            format!("filed finding \"{}\" as {url}", finding.title),
+            json!({"title": finding.title, "issue": url}),
+        ),
         Ok(findings::Filed::Duplicate(url)) => (
             "info",
-            format!("did not file \"{}\": {url} is already open with that title", finding.title),
+            format!(
+                "did not file \"{}\": {url} is already open with that title",
+                finding.title
+            ),
             json!({"title": finding.title, "duplicate_of": url}),
         ),
-        Err(e) => ("error", format!("could not file finding \"{}\": {e:#}", finding.title), Value::Null),
+        Err(e) => (
+            "error",
+            format!("could not file finding \"{}\": {e:#}", finding.title),
+            Value::Null,
+        ),
     };
     // Only a filed or matched finding counts toward the cap; a GitHub error should not use one up.
     if !entry.is_null() {
@@ -1104,28 +1473,39 @@ async fn teardown_vm(app: &Shared, s: &Session) {
         rt.stop.send_replace(true);
     }
     if s.mesh.as_ref().is_some_and(|m| m.ip.is_some()) || s.local_port.is_some() {
-        let _ = tokio::time::timeout(Duration::from_secs(15), agentd_http(app, s, "POST", "/v1/shutdown")).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(15),
+            agentd_http(app, s, "POST", "/v1/shutdown"),
+        )
+        .await;
     }
     sandbox::remove(&app.cfg.msb, &s.sandbox).await;
-    if s.mesh.is_some() {
-        if let Ok(mesh) = app.mesh().await {
-            let _ = mesh.delete_nodes_named(&s.sandbox).await;
-        }
+    if s.mesh.is_some()
+        && let Ok(mesh) = app.mesh().await
+    {
+        let _ = mesh.delete_nodes_named(&s.sandbox).await;
     }
 }
 
 pub async fn publish_session(app: Shared, id: String) {
     // Checked before claiming and tearing down, so a refused push leaves the colony running.
-    let Some(current) = app.session(&id).await else { return };
-    if let Err(e) = github::check_publish_branch(&current.branch, current.base.as_deref().unwrap_or_default()) {
+    let Some(current) = app.session(&id).await else {
+        return;
+    };
+    if let Err(e) =
+        github::check_publish_branch(&current.branch, current.base.as_deref().unwrap_or_default())
+    {
         let message = format!("{e:#}");
-        app.session_log(&id, "error", format!("not publishing: {message}")).await;
+        app.session_log(&id, "error", format!("not publishing: {message}"))
+            .await;
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
     let Some((s, claimed)) = app
         .update_session(&id, |x| {
-            let allowed = (x.status.is_live() || x.status == SessionStatus::Stopped) && !x.cleaned_up && x.git_admin_dir.is_some();
+            let allowed = (x.status.is_live() || x.status == SessionStatus::Stopped)
+                && !x.cleaned_up
+                && x.git_admin_dir.is_some();
             if allowed {
                 x.status = SessionStatus::Publishing;
                 x.error = None;
@@ -1140,11 +1520,13 @@ pub async fn publish_session(app: Shared, id: String) {
         return;
     }
     let log = app.logger(&id);
-    log.info("publishing: stopping the agent and removing the microVM").await;
+    log.info("publishing: stopping the agent and removing the microVM")
+        .await;
     teardown_vm(&app, &s).await;
     match github::publish(&app, &s, &log).await {
         Ok(github::Published::NoChanges) => {
-            app.update_session(&id, |x| x.status = SessionStatus::NoChanges).await;
+            app.update_session(&id, |x| x.status = SessionStatus::NoChanges)
+                .await;
         }
         Ok(github::Published::PullRequest(url)) => {
             app.update_session(&id, |x| {
@@ -1173,7 +1555,10 @@ pub async fn recover(app: &Shared) {
         if s.status == SessionStatus::Publishing {
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Failed;
-                x.error = Some("the harness restarted while publishing; the worktree is intact, publish again".into());
+                x.error = Some(
+                    "the harness restarted while publishing; the worktree is intact, publish again"
+                        .into(),
+                );
             })
             .await;
             continue;
@@ -1187,13 +1572,19 @@ pub async fn recover(app: &Shared) {
                 match app.mesh().await {
                     Ok(mesh) => {
                         if let Err(e) = mesh.ensure_started().await {
-                            app.session_log(&s.id, "error", format!("mesh failed to start: {e:#}")).await;
+                            app.session_log(&s.id, "error", format!("mesh failed to start: {e:#}"))
+                                .await;
                         }
                     }
                     Err(e) => app.session_log(&s.id, "error", format!("{e:#}")).await,
                 }
             }
-            app.session_log(&s.id, "info", "harness restarted: reconnecting to the running microVM".into()).await;
+            app.session_log(
+                &s.id,
+                "info",
+                "harness restarted: reconnecting to the running microVM".into(),
+            )
+            .await;
             start_link(app, &s.id).await;
         } else {
             teardown_vm(app, &s).await;
@@ -1216,15 +1607,25 @@ pub async fn watch_sandboxes(app: Shared) {
     loop {
         tick.tick().await;
         // A failed `msb ls` says nothing about the colonies, so leave them alone until it answers again.
-        let Ok(running) = sandbox::running(&app.cfg.msb).await else { continue };
+        let Ok(running) = sandbox::running(&app.cfg.msb).await else {
+            continue;
+        };
         // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
         // deadlock against update_session's write lock.
         let sessions = app.sessions.read().await.clone();
         for s in sessions {
-            if !s.status.is_live() || s.status == SessionStatus::Starting || running.contains(&s.sandbox) {
+            if !s.status.is_live()
+                || s.status == SessionStatus::Starting
+                || running.contains(&s.sandbox)
+            {
                 continue;
             }
-            app.session_log(&s.id, "error", "the microVM stopped; the worktree is kept, so this colony can be resumed".into()).await;
+            app.session_log(
+                &s.id,
+                "error",
+                "the microVM stopped; the worktree is kept, so this colony can be resumed".into(),
+            )
+            .await;
             teardown_vm(&app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Stopped;
@@ -1252,11 +1653,21 @@ async fn start_queued(app: &Shared) {
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
         let sessions = app.sessions.read().await.clone();
-        let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
+        let mut waiting: Vec<&Session> = sessions
+            .iter()
+            .filter(|s| s.status == SessionStatus::Queued)
+            .collect();
         waiting.sort_by_key(|s| s.created_at);
         let Some(next) = waiting
             .into_iter()
-            .find(|s| has_room(&sessions, &s.org, max_parallel, orgs::org_max_parallel(&app.org_settings(&s.org))))
+            .find(|s| {
+                has_room(
+                    &sessions,
+                    &s.org,
+                    max_parallel,
+                    orgs::org_max_parallel(&app.org_settings(&s.org)),
+                )
+            })
             .cloned()
         else {
             return;
@@ -1275,7 +1686,8 @@ async fn start_queued(app: &Shared) {
         if !claimed {
             return;
         }
-        app.session_log(&next.id, "info", "a slot came free; starting".into()).await;
+        app.session_log(&next.id, "info", "a slot came free; starting".into())
+            .await;
         tokio::spawn(boot(app.clone(), next.id.clone(), false));
     }
 }
@@ -1293,7 +1705,9 @@ async fn dial_agentd(app: &App, s: &Session) -> Result<Box<dyn Io>> {
         return Ok(Box::new(stream));
     }
     if let Some(port) = s.local_port {
-        return Ok(Box::new(tokio::net::TcpStream::connect(("127.0.0.1", port)).await?));
+        return Ok(Box::new(
+            tokio::net::TcpStream::connect(("127.0.0.1", port)).await?,
+        ));
     }
     bail!("the microVM's address is not known yet")
 }
@@ -1325,7 +1739,11 @@ async fn agentd_http(app: &App, s: &Session, method: &str, path: &str) -> Result
             }
         };
         let text = String::from_utf8_lossy(&response[..head_end]).into_owned();
-        let status = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).context("malformed agentd response")?;
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .context("malformed agentd response")?;
         let length = content_length(&text);
         let mut body = response.split_off(head_end);
         match length {
@@ -1346,18 +1764,25 @@ async fn agentd_http(app: &App, s: &Session, method: &str, path: &str) -> Result
         }
         anyhow::Ok((status, String::from_utf8_lossy(&body).into_owned()))
     };
-    tokio::time::timeout(Duration::from_secs(10), request).await.context("agentd request timed out")?
+    tokio::time::timeout(Duration::from_secs(10), request)
+        .await
+        .context("agentd request timed out")?
 }
 
 /// The offset just past the blank line that ends the response headers.
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|at| at + 4)
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|at| at + 4)
 }
 
 /// `Content-Length` from a response head, if it declares one.
 fn content_length(head: &str) -> Option<usize> {
     head.lines()
-        .find_map(|line| line.split_once(':').filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length")))
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        })
         .and_then(|(_, value)| value.trim().parse().ok())
 }
 
@@ -1365,10 +1790,15 @@ async fn agentd_ws(app: &App, s: &Session, path: &str) -> Result<WebSocketStream
     let token = agentd_token(app, &s.id)?;
     let stream = dial_agentd(app, s).await?;
     let mut request = format!("ws://agentd{path}").into_client_request()?;
-    request.headers_mut().insert("Authorization", format!("Bearer {token}").parse()?);
-    let (ws, _) = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::client_async(request, stream))
-        .await
-        .context("agentd websocket handshake timed out")??;
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse()?);
+    let (ws, _) = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio_tungstenite::client_async(request, stream),
+    )
+    .await
+    .context("agentd websocket handshake timed out")??;
     Ok(ws)
 }
 
@@ -1386,15 +1816,25 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Session>> {
 }
 
 pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let session = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let session = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     Ok(Json(with_activity(&app, session).await))
 }
 
 pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    let publishable = (s.status.is_live() && s.status != SessionStatus::Starting) || s.status == SessionStatus::Stopped;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let publishable = (s.status.is_live() && s.status != SessionStatus::Starting)
+        || s.status == SessionStatus::Stopped;
     if !publishable || s.cleaned_up || s.git_admin_dir.is_none() {
-        return Err(client_error(StatusCode::CONFLICT, "this session can't be published right now"));
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this session can't be published right now",
+        ));
     }
     tokio::spawn(publish_session(app.clone(), id.clone()));
     Ok(Json(s))
@@ -1421,9 +1861,15 @@ fn rotate_events(dir: &std::path::Path) {
 }
 
 pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
-        return Err(client_error(StatusCode::CONFLICT, "this colony can't be resumed: it has to be stopped and still have its worktree"));
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this colony can't be resumed: it has to be stopped and still have its worktree",
+        ));
     }
     if let Some(rt) = app.runtimes.lock().await.remove(&id) {
         rt.stop.send_replace(true);
@@ -1441,7 +1887,12 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
-    app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
+    app.session_log(
+        &id,
+        "info",
+        "resuming: booting a fresh microVM on the kept worktree".into(),
+    )
+    .await;
     tokio::spawn(boot(app.clone(), id, true));
     Ok(Json(s))
 }
@@ -1461,19 +1912,28 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     };
     // A queued colony never started, so there is no microVM to remove.
     if was == SessionStatus::Queued {
-        app.session_log(&id, "info", "left the queue before it started".into()).await;
+        app.session_log(&id, "info", "left the queue before it started".into())
+            .await;
         return Ok(Json(app.session(&id).await.unwrap_or(s)));
     }
     if !was.is_live() {
         return Err(client_error(StatusCode::CONFLICT, "session is not running"));
     }
-    app.session_log(&id, "info", "stopping: removing the microVM (the worktree is kept)".into()).await;
+    app.session_log(
+        &id,
+        "info",
+        "stopping: removing the microVM (the worktree is kept)".into(),
+    )
+    .await;
     teardown_vm(&app, &s).await;
     Ok(Json(app.session(&id).await.unwrap_or(s)))
 }
 
 pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if s.status.is_live() || s.status == SessionStatus::Publishing {
         return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
     }
@@ -1501,7 +1961,10 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // Out of the list before any file is touched, so neither the queue nor Resume can start it meanwhile.
     let (at, s) = {
         let mut sessions = app.sessions.write().await;
-        let at = sessions.iter().position(|s| s.id == id).ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+        let at = sessions
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
         if !deletable(sessions[at].status) {
             return Err(client_error(StatusCode::CONFLICT, "stop the colony first"));
         }
@@ -1518,7 +1981,9 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             let mut sessions = app.sessions.write().await;
             let at = at.min(sessions.len());
             sessions.insert(at, s);
-            return Err(e.context("could not remove the colony's worktree; nothing was deleted").into());
+            return Err(e
+                .context("could not remove the colony's worktree; nothing was deleted")
+                .into());
         }
     }
     app.persist_sessions().await;
@@ -1543,7 +2008,9 @@ pub async fn events_ws(
     Query(query): Query<SinceQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
-    app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    app.session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let rt = app.runtime(&id).await;
     Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), socket)))
 }
@@ -1553,9 +2020,17 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
     let mut subscription = rt.events.subscribe();
     let text = |s: String| Message::Text(s.into());
 
-    let Some(session) = app.session(&id).await else { return };
+    let Some(session) = app.session(&id).await else {
+        return;
+    };
     let session = with_activity(&app, session).await;
-    if tx.send(text(json!({"type": "session", "session": session}).to_string())).await.is_err() {
+    if tx
+        .send(text(
+            json!({"type": "session", "session": session}).to_string(),
+        ))
+        .await
+        .is_err()
+    {
         return;
     }
     let logs: Vec<Value> = rt.logs.lock().await.iter().cloned().collect();
@@ -1568,7 +2043,12 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
     if let Ok(file) = tokio::fs::File::open(&rt.events_path).await {
         let mut lines = BufReader::new(file).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let Some(seq) = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["seq"].as_u64()) else { continue };
+            let Some(seq) = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|v| v["seq"].as_u64())
+            else {
+                continue;
+            };
             if seq > since {
                 if tx.send(text(line)).await.is_err() {
                     return;
@@ -1606,8 +2086,12 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
 }
 
 async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
-    let Ok(command) = serde_json::from_str::<Value>(body) else { return };
-    let Some(s) = app.session(id).await else { return };
+    let Ok(command) = serde_json::from_str::<Value>(body) else {
+        return;
+    };
+    let Some(s) = app.session(id).await else {
+        return;
+    };
     if !s.status.is_live() {
         return;
     }
@@ -1620,7 +2104,12 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
             json!({"type": "user_message", "id": format!("u-{}", short_id()), "text": text})
         }
         Some("answer") => {
-            let (Some(question_id), true) = (command["question_id"].as_str(), command["answers"].is_object()) else { return };
+            let (Some(question_id), true) = (
+                command["question_id"].as_str(),
+                command["answers"].is_object(),
+            ) else {
+                return;
+            };
             json!({
                 "type": "answer",
                 "question_id": question_id,
@@ -1649,7 +2138,10 @@ pub async fn terminal_ws(
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
-    let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let cols = query.cols.unwrap_or(80).clamp(10, 500);
     let rows = query.rows.unwrap_or(24).clamp(5, 300);
     Ok(ws.on_upgrade(move |socket| terminal_socket(app, s, cols, rows, socket)))
@@ -1657,12 +2149,20 @@ pub async fn terminal_ws(
 
 async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut socket: WebSocket) {
     let not_ready = match s.status {
-        SessionStatus::Starting => Some("the colony is still starting; the terminal opens once its microVM is ready"),
+        SessionStatus::Starting => {
+            Some("the colony is still starting; the terminal opens once its microVM is ready")
+        }
         status if !status.is_live() => Some("the colony's microVM isn't running"),
         _ => None,
     };
     if let Some(message) = not_ready {
-        let _ = socket.send(Message::Text(json!({"type": "error", "message": message}).to_string().into())).await;
+        let _ = socket
+            .send(Message::Text(
+                json!({"type": "error", "message": message})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
         let _ = socket.send(Message::Close(None)).await;
         return;
     }
@@ -1724,12 +2224,30 @@ mod tests {
     #[test]
     fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
         // (errored, interrupted, open_question, pr_written)
-        assert_eq!(autopilot_step(false, false, false, true), Autopilot::Publish);
-        assert!(matches!(autopilot_step(false, false, false, false), Autopilot::Wait(_)));
-        assert!(matches!(autopilot_step(false, false, true, true), Autopilot::Wait(_)));
-        assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
-        assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
-        assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+        assert_eq!(
+            autopilot_step(false, false, false, true),
+            Autopilot::Publish
+        );
+        assert!(matches!(
+            autopilot_step(false, false, false, false),
+            Autopilot::Wait(_)
+        ));
+        assert!(matches!(
+            autopilot_step(false, false, true, true),
+            Autopilot::Wait(_)
+        ));
+        assert!(matches!(
+            autopilot_step(true, true, false, true),
+            Autopilot::Wait(_)
+        ));
+        assert!(matches!(
+            autopilot_step(true, false, false, true),
+            Autopilot::Hold(_)
+        ));
+        assert!(matches!(
+            autopilot_step(true, false, false, false),
+            Autopilot::Hold(_)
+        ));
     }
 
     fn colony(org: &str, status: SessionStatus) -> Session {
@@ -1770,7 +2288,10 @@ mod tests {
             colony("acme", SessionStatus::Idle),
             colony("acme", SessionStatus::Publishing),
         ];
-        assert!(!has_room(&running, "acme", 3, None), "publishing still holds its slot");
+        assert!(
+            !has_room(&running, "acme", 3, None),
+            "publishing still holds its slot"
+        );
         assert!(has_room(&running, "acme", 4, None));
 
         // Queued and finished colonies are not occupying anything.
@@ -1781,20 +2302,38 @@ mod tests {
             colony("acme", SessionStatus::Stopped),
             colony("acme", SessionStatus::Failed),
         ];
-        assert!(has_room(&waiting, "acme", 1, None), "a queue of five holds no slots");
+        assert!(
+            has_room(&waiting, "acme", 1, None),
+            "a queue of five holds no slots"
+        );
 
         // An org limit applies on top of the global one, and only to that org.
-        let mixed = vec![colony("acme", SessionStatus::Running), colony("other", SessionStatus::Running)];
-        assert!(!has_room(&mixed, "acme", 5, Some(1)), "acme is at its own limit");
-        assert!(has_room(&mixed, "third", 5, Some(1)), "another org still has room");
+        let mixed = vec![
+            colony("acme", SessionStatus::Running),
+            colony("other", SessionStatus::Running),
+        ];
+        assert!(
+            !has_room(&mixed, "acme", 5, Some(1)),
+            "acme is at its own limit"
+        );
+        assert!(
+            has_room(&mixed, "third", 5, Some(1)),
+            "another org still has room"
+        );
     }
 
     #[test]
     fn only_a_stopped_colony_that_still_has_its_worktree_can_be_resumed() {
         assert!(can_resume(SessionStatus::Stopped, false, true));
         assert!(can_resume(SessionStatus::Failed, false, true));
-        assert!(!can_resume(SessionStatus::Stopped, true, true), "cleaned up");
-        assert!(!can_resume(SessionStatus::Stopped, false, false), "no worktree");
+        assert!(
+            !can_resume(SessionStatus::Stopped, true, true),
+            "cleaned up"
+        );
+        assert!(
+            !can_resume(SessionStatus::Stopped, false, false),
+            "no worktree"
+        );
         for status in [
             SessionStatus::Starting,
             SessionStatus::Running,

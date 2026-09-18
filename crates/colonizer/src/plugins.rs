@@ -4,10 +4,10 @@
 //! scripts/fetch-vendor.sh. Boot and the Settings list both resolve through this module, so what the
 //! toggles show is what a colony will mount.
 
-use crate::{config::Settings, util::is_plain_name, Shared};
-use anyhow::{bail, Result};
-use axum::{extract::State, Json};
-use serde_json::{json, Value};
+use crate::{Shared, config::Settings, util::is_plain_name};
+use anyhow::{Result, bail};
+use axum::{Json, extract::State};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -16,7 +16,11 @@ use std::{
 /// The comma-separated `plugins` setting as names, in order, without blanks or repeats.
 pub fn parse_list(value: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for name in value.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+    for name in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
         if !names.iter().any(|n| n == name) {
             names.push(name.to_string());
         }
@@ -37,7 +41,10 @@ fn vendored_root(cfg: &Settings) -> Option<PathBuf> {
 pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
     let root = local_root(cfg);
     if !is_plain_name(name) {
-        bail!("plugin directory {name:?} must be a plain name under {}", root.display());
+        bail!(
+            "plugin directory {name:?} must be a plain name under {}",
+            root.display()
+        );
     }
     let local = root.join(name);
     if local.is_dir() {
@@ -45,20 +52,32 @@ pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
     }
     match vendored_root(cfg).map(|vendored| vendored.join(name)) {
         Some(vendored) if vendored.is_dir() => Ok(vendored),
-        _ => bail!("plugin directory {name:?} is not in {} or among the app's vendored plugins", root.display()),
+        _ => bail!(
+            "plugin directory {name:?} is not in {} or among the app's vendored plugins",
+            root.display()
+        ),
     }
 }
 
 /// Entries directly under `dir` that `keep` accepts; 0 when the directory is absent.
 fn count(dir: &Path, keep: impl Fn(&Path) -> bool) -> usize {
-    std::fs::read_dir(dir).map(|entries| entries.flatten().filter(|entry| keep(&entry.path())).count()).unwrap_or(0)
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| keep(&entry.path()))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// What a switch in Settings needs to say about one plugin directory. The counts are the context cost
 /// of switching it on: Claude Code discovers `skills/<name>/SKILL.md`, `agents/*.md` and `commands/*.md`.
 fn describe(name: &str, dir: &Path, source: &str, shadows_vendored: bool) -> Value {
-    let manifest: Value =
-        std::fs::read(dir.join(".claude-plugin/plugin.json")).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default();
+    let manifest: Value = std::fs::read(dir.join(".claude-plugin/plugin.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default();
     let markdown = |path: &Path| path.is_file() && path.extension().is_some_and(|ext| ext == "md");
     json!({
         "name": name,
@@ -74,7 +93,9 @@ fn describe(name: &str, dir: &Path, source: &str, shadows_vendored: bool) -> Val
 
 /// Plain-named subdirectories of `root`, by name.
 fn directories(root: &Path) -> BTreeMap<String, PathBuf> {
-    let Ok(entries) = std::fs::read_dir(root) else { return BTreeMap::new() };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return BTreeMap::new();
+    };
     entries
         .flatten()
         .filter(|entry| entry.path().is_dir())
@@ -86,8 +107,13 @@ fn directories(root: &Path) -> BTreeMap<String, PathBuf> {
 /// Every plugin directory a colony could load, one entry per name, sorted.
 pub fn available(cfg: &Settings) -> Value {
     let root = local_root(cfg);
-    let vendored = vendored_root(cfg).map(|dir| directories(&dir)).unwrap_or_default();
-    let mut plugins: BTreeMap<String, Value> = vendored.iter().map(|(name, dir)| (name.clone(), describe(name, dir, "vendored", false))).collect();
+    let vendored = vendored_root(cfg)
+        .map(|dir| directories(&dir))
+        .unwrap_or_default();
+    let mut plugins: BTreeMap<String, Value> = vendored
+        .iter()
+        .map(|(name, dir)| (name.clone(), describe(name, dir, "vendored", false)))
+        .collect();
     for (name, dir) in directories(&root) {
         let shadows = vendored.contains_key(&name);
         plugins.insert(name.clone(), describe(&name, &dir, "local", shadows));
@@ -105,7 +131,11 @@ mod tests {
 
     fn plugin(dir: &Path, version: &str, skills: &[&str], agents: &[&str]) {
         std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
-        std::fs::write(dir.join(".claude-plugin/plugin.json"), json!({"name": "x", "version": version, "description": "d"}).to_string()).unwrap();
+        std::fs::write(
+            dir.join(".claude-plugin/plugin.json"),
+            json!({"name": "x", "version": version, "description": "d"}).to_string(),
+        )
+        .unwrap();
         for skill in skills {
             std::fs::create_dir_all(dir.join("skills").join(skill)).unwrap();
             std::fs::write(dir.join("skills").join(skill).join("SKILL.md"), "---\n").unwrap();
@@ -136,7 +166,10 @@ mod tests {
     /// A data directory and an app directory, as a real install lays them out. Returns the temp root to
     /// remove afterwards.
     fn install() -> (PathBuf, Settings) {
-        let root = std::env::temp_dir().join(format!("colonizer-plugins-test-{}", crate::util::short_id()));
+        let root = std::env::temp_dir().join(format!(
+            "colonizer-plugins-test-{}",
+            crate::util::short_id()
+        ));
         let app = root.join("app");
         std::fs::create_dir_all(app.join("plugins")).unwrap();
         let cfg = settings(&root, Some(app));
@@ -146,7 +179,10 @@ mod tests {
 
     #[test]
     fn plugin_lists_parse_in_order_without_blanks_or_repeats() {
-        assert_eq!(parse_list(" ecc, ,superpowers,ecc,google-skills "), ["ecc", "superpowers", "google-skills"]);
+        assert_eq!(
+            parse_list(" ecc, ,superpowers,ecc,google-skills "),
+            ["ecc", "superpowers", "google-skills"]
+        );
         assert!(parse_list("").is_empty());
     }
 
@@ -172,10 +208,30 @@ mod tests {
     fn the_listing_merges_both_places_and_counts_what_claude_code_loads() {
         let (root, cfg) = install();
         let app_plugins = cfg.assets.clone().unwrap().join("plugins");
-        plugin(&app_plugins.join("ecc"), "2.2.1", &["tdd", "debugging"], &["planner"]);
-        plugin(&app_plugins.join("superpowers"), "6.3.0", &["brainstorming"], &[]);
-        plugin(&cfg.data_dir.join("plugins/superpowers"), "6.4.0-local", &[], &[]);
-        plugin(&cfg.data_dir.join("plugins/team-skills"), "1.0.0", &["house-style"], &[]);
+        plugin(
+            &app_plugins.join("ecc"),
+            "2.2.1",
+            &["tdd", "debugging"],
+            &["planner"],
+        );
+        plugin(
+            &app_plugins.join("superpowers"),
+            "6.3.0",
+            &["brainstorming"],
+            &[],
+        );
+        plugin(
+            &cfg.data_dir.join("plugins/superpowers"),
+            "6.4.0-local",
+            &[],
+            &[],
+        );
+        plugin(
+            &cfg.data_dir.join("plugins/team-skills"),
+            "1.0.0",
+            &["house-style"],
+            &[],
+        );
         std::fs::write(cfg.data_dir.join("plugins/stray-file"), "").unwrap();
 
         let listing = available(&cfg);
@@ -183,7 +239,13 @@ mod tests {
         let summary: Vec<(String, String, bool, u64, u64)> = plugins
             .iter()
             .map(|p| {
-                (p["name"].as_str().unwrap().into(), p["source"].as_str().unwrap().into(), p["shadows_vendored"].as_bool().unwrap(), p["skills"].as_u64().unwrap(), p["agents"].as_u64().unwrap())
+                (
+                    p["name"].as_str().unwrap().into(),
+                    p["source"].as_str().unwrap().into(),
+                    p["shadows_vendored"].as_bool().unwrap(),
+                    p["skills"].as_u64().unwrap(),
+                    p["agents"].as_u64().unwrap(),
+                )
             })
             .collect();
         assert_eq!(
@@ -201,8 +263,14 @@ mod tests {
 
     #[test]
     fn a_missing_app_or_plugins_folder_lists_nothing() {
-        let root = std::env::temp_dir().join(format!("colonizer-plugins-test-{}", crate::util::short_id()));
+        let root = std::env::temp_dir().join(format!(
+            "colonizer-plugins-test-{}",
+            crate::util::short_id()
+        ));
         assert_eq!(available(&settings(&root, None))["plugins"], json!([]));
-        assert_eq!(available(&settings(&root, Some(root.join("no-such-app"))))["plugins"], json!([]));
+        assert_eq!(
+            available(&settings(&root, Some(root.join("no-such-app"))))["plugins"],
+            json!([])
+        );
     }
 }

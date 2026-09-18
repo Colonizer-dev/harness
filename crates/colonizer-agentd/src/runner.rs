@@ -52,9 +52,12 @@ impl Runner {
 
     async fn wait_exit(&self, limit: Duration) -> bool {
         let mut running = self.running.clone();
-        tokio::time::timeout(limit, async move { running.wait_for(|r| !*r).await.is_ok() })
-            .await
-            .unwrap_or(false)
+        tokio::time::timeout(
+            limit,
+            async move { running.wait_for(|r| !*r).await.is_ok() },
+        )
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -62,7 +65,11 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (running_tx, running) = watch::channel(false);
     let (kill_tx, kill_rx) = oneshot::channel();
-    let runner = Arc::new(Runner { commands, running, kill: Mutex::new(Some(kill_tx)) });
+    let runner = Arc::new(Runner {
+        commands,
+        running,
+        kill: Mutex::new(Some(kill_tx)),
+    });
 
     let Some((program, args)) = config.agent.command.split_first() else {
         store.append(status_event("error", Some("agent.command is empty".into())));
@@ -80,29 +87,41 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
-            store.append(log_event("error", format!("cannot start agent runner `{program}`: {e}")));
-            store.append(status_event("error", Some(format!("cannot start agent runner: {e}"))));
+            store.append(log_event(
+                "error",
+                format!("cannot start agent runner `{program}`: {e}"),
+            ));
+            store.append(status_event(
+                "error",
+                Some(format!("cannot start agent runner: {e}")),
+            ));
             return runner;
         }
     };
     running_tx.send_replace(true);
 
-    let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    let (Some(stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         unreachable!("runner stdio is piped");
     };
     tokio::spawn(feed_stdin(stdin, command_rx));
     let stdout_task = tokio::spawn({
         let store = store.clone();
-        for_each_line(stdout, move |line| match serde_json::from_str::<Value>(line) {
-            Ok(Value::Object(event)) if event.get("type").is_some_and(Value::is_string) => {
-                store.append(event);
-            }
-            _ => {
-                store.append(log_event(
-                    "warn",
-                    format!("agent runner wrote a non-event line: {}", truncate(line, MAX_INVALID_LINE)),
-                ));
+        for_each_line(stdout, move |line| {
+            match serde_json::from_str::<Value>(line) {
+                Ok(Value::Object(event)) if event.get("type").is_some_and(Value::is_string) => {
+                    store.append(event);
+                }
+                _ => {
+                    store.append(log_event(
+                        "warn",
+                        format!(
+                            "agent runner wrote a non-event line: {}",
+                            truncate(line, MAX_INVALID_LINE)
+                        ),
+                    ));
+                }
             }
         })
     });
@@ -113,7 +132,11 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
         })
     });
 
-    if let Some(prompt) = config.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+    if let Some(prompt) = config
+        .initial_prompt
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
         runner.send(&json!({"type": "user_message", "id": "initial", "text": prompt}));
     }
 
@@ -179,5 +202,9 @@ async fn for_each_line(reader: impl AsyncRead + Unpin, mut f: impl FnMut(&str)) 
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { s.to_string() } else { s.chars().take(max).collect::<String>() + "…" }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "…"
+    }
 }

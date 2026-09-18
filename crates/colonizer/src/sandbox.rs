@@ -40,22 +40,32 @@ pub struct BootSpec {
 /// Boots a detached microVM running `spec.command` as its main process.
 pub async fn boot(msb: &str, spec: &BootSpec) -> Result<()> {
     let mut cmd = Command::new(msb);
-    cmd.args(["run", "--detach", "--replace", "--quiet", "--name", spec.name.as_str()])
-        .arg("--cpus")
-        .arg(spec.cpus.to_string())
-        .args(["--memory", spec.memory.as_str()])
-        .args(["--root-disk", spec.root_disk.as_str()])
-        .args(["--max-duration", spec.max_duration.as_str()])
-        .args(["--workdir", spec.workdir.as_str()]);
+    cmd.args([
+        "run",
+        "--detach",
+        "--replace",
+        "--quiet",
+        "--name",
+        spec.name.as_str(),
+    ])
+    .arg("--cpus")
+    .arg(spec.cpus.to_string())
+    .args(["--memory", spec.memory.as_str()])
+    .args(["--root-disk", spec.root_disk.as_str()])
+    .args(["--max-duration", spec.max_duration.as_str()])
+    .args(["--workdir", spec.workdir.as_str()]);
     for mount in &spec.mounts {
-        cmd.arg("-v").arg(mount_spec(&mount.source, &mount.target, mount.read_only)?);
+        cmd.arg("-v")
+            .arg(mount_spec(&mount.source, &mount.target, mount.read_only)?);
     }
     for (key, value) in &spec.env {
         cmd.arg("-e").arg(format!("{key}={value}"));
     }
     for secret in &spec.secrets {
         // The value stays in msb's host process; the guest env only holds a placeholder.
-        cmd.arg("--secret").arg(format!("{}@{}", secret.env, secret.hosts.join(","))).env(&secret.env, &secret.value);
+        cmd.arg("--secret")
+            .arg(format!("{}@{}", secret.env, secret.hosts.join(",")))
+            .env(&secret.env, &secret.value);
     }
     if !spec.net_profiles.is_empty() {
         cmd.arg("--net").arg(spec.net_profiles.join(","));
@@ -67,7 +77,9 @@ pub async fn boot(msb: &str, spec: &BootSpec) -> Result<()> {
         cmd.arg("-p").arg(format!("127.0.0.1:{host}:{guest}"));
     }
     cmd.arg(&spec.image).arg("--").args(&spec.command);
-    exec(&mut cmd).await.with_context(|| format!("microVM {} failed to boot", spec.name))?;
+    exec(&mut cmd)
+        .await
+        .with_context(|| format!("microVM {} failed to boot", spec.name))?;
     Ok(())
 }
 
@@ -77,7 +89,11 @@ pub async fn remove(msb: &str, name: &str) {
 
 pub async fn running(msb: &str) -> Result<HashSet<String>> {
     let out = exec(Command::new(msb).args(["ls", "--running", "--quiet"])).await?;
-    Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 /// Images already in the local cache, as `msb image list` reports them.
@@ -176,7 +192,10 @@ pub async fn pull_configured(State(app): State<crate::Shared>) -> crate::ApiResu
     let modules = app.modules.read().await.clone();
     let image = configured_image(&app, &modules);
     if image.is_empty() {
-        return Err(crate::client_error(axum::http::StatusCode::BAD_REQUEST, "no colony image is configured"));
+        return Err(crate::client_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "no colony image is configured",
+        ));
     }
 
     {
@@ -188,7 +207,12 @@ pub async fn pull_configured(State(app): State<crate::Shared>) -> crate::ApiResu
 
     if is_cached(&app.cfg.msb, &image).await {
         let mut status = app.pull.lock().await;
-        *status = PullStatus { image, state: PullState::Cached, generation: status.generation, ..Default::default() };
+        *status = PullStatus {
+            image,
+            state: PullState::Cached,
+            generation: status.generation,
+            ..Default::default()
+        };
         return Ok(axum::Json(status.clone()));
     }
 
@@ -240,10 +264,22 @@ mod tests {
         // web/src/types.ts spells these out as a string union. A rename here
         // without that file following would leave Settings stuck on a state it
         // does not recognise, with no compile error on either side.
-        let spelled: Vec<String> = [PullState::Idle, PullState::Cached, PullState::Pulling, PullState::Done, PullState::Failed]
-            .iter()
-            .map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_string())
-            .collect();
+        let spelled: Vec<String> = [
+            PullState::Idle,
+            PullState::Cached,
+            PullState::Pulling,
+            PullState::Done,
+            PullState::Failed,
+        ]
+        .iter()
+        .map(|s| {
+            serde_json::to_value(s)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
         assert_eq!(spelled, ["idle", "cached", "pulling", "done", "failed"]);
     }
 
@@ -251,7 +287,11 @@ mod tests {
     fn the_generation_guard_is_not_part_of_the_api() {
         // It exists so a slow pull cannot overwrite a newer one's status; it is
         // bookkeeping, and the UI has no use for it.
-        let v = serde_json::to_value(PullStatus { generation: 7, ..Default::default() }).unwrap();
+        let v = serde_json::to_value(PullStatus {
+            generation: 7,
+            ..Default::default()
+        })
+        .unwrap();
         assert!(v.get("generation").is_none(), "{v}");
         assert_eq!(v["state"], "idle");
     }
@@ -262,7 +302,10 @@ mod tests {
 
     #[test]
     fn an_exact_reference_matches() {
-        assert!(matches_cache("node:24-bookworm", &cache(&["node:24-bookworm"])));
+        assert!(matches_cache(
+            "node:24-bookworm",
+            &cache(&["node:24-bookworm"])
+        ));
     }
 
     #[test]

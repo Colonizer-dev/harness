@@ -1,6 +1,6 @@
 //! Small process, file and string helpers shared across the harness.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
@@ -37,7 +37,11 @@ pub async fn exec(cmd: &mut Command) -> Result<String> {
         .await
         .with_context(|| format!("failed to start `{desc}`"))?;
     if !out.status.success() {
-        bail!("`{desc}` failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "`{desc}` failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -56,7 +60,10 @@ pub async fn exec_status(cmd: &mut Command) -> Result<bool> {
 }
 
 pub fn read_trimmed(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Writes a secret with 0600 permissions, tightening the parent directory to 0700.
@@ -71,7 +78,12 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
 /// Writes a file with 0600 permissions without touching the parent directory's mode.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
     f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     f.write_all(bytes)?;
     Ok(())
@@ -95,7 +107,8 @@ pub fn valid_repo(repo: &str) -> bool {
             && p.len() <= 100
             && *p != "."
             && *p != ".."
-            && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
     })
 }
 
@@ -106,7 +119,10 @@ pub fn shell_quote(s: &str) -> String {
 pub fn is_elf(path: &Path) -> bool {
     use std::io::Read;
     let mut magic = [0u8; 4];
-    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && magic == *b"\x7fELF"
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && magic == *b"\x7fELF"
 }
 
 /// microsandbox mount specs are `SRC:DST[:OPTS]`, so paths must not contain separators.
@@ -115,7 +131,11 @@ pub fn mount_spec(src: &Path, dst: &str, read_only: bool) -> Result<String> {
     if s.contains(':') || s.contains(',') {
         bail!("cannot mount {s}: path contains ':' or ','");
     }
-    Ok(if read_only { format!("{s}:{dst}:ro") } else { format!("{s}:{dst}") })
+    Ok(if read_only {
+        format!("{s}:{dst}:ro")
+    } else {
+        format!("{s}:{dst}")
+    })
 }
 
 pub fn short_id() -> String {
@@ -124,7 +144,27 @@ pub fn short_id() -> String {
 
 /// 244 bits of randomness, hex encoded.
 pub fn random_token() -> String {
-    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// A single path segment with no separators, no traversal and no leading dot.
+///
+/// Used where a setting names something the harness will resolve under a
+/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
+/// reach the rest of the host's filesystem.
+pub fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains(':')
+        && !name.contains(',')
+        && !name.contains('\0')
 }
 
 #[cfg(test)]
@@ -169,23 +209,10 @@ mod tests {
 
     #[test]
     fn mount_specs_reject_separators() {
-        assert_eq!(mount_spec(Path::new("/a/b"), "/c", true).unwrap(), "/a/b:/c:ro");
+        assert_eq!(
+            mount_spec(Path::new("/a/b"), "/c", true).unwrap(),
+            "/a/b:/c:ro"
+        );
         assert!(mount_spec(Path::new("/a:b"), "/c", false).is_err());
     }
-}
-
-/// A single path segment with no separators, no traversal and no leading dot.
-///
-/// Used where a setting names something the harness will resolve under a
-/// directory it owns: a name that is allowed to contain `/` or `..` is a way to
-/// reach the rest of the host's filesystem.
-pub fn is_plain_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains("..")
-        && !name.contains(':')
-        && !name.contains(',')
-        && !name.contains('\0')
 }

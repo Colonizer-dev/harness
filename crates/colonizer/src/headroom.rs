@@ -4,8 +4,8 @@
 //! headroom.lock beside this crate's Cargo.toml, and published by .github/workflows/headroom-bundle.yml.
 //! Colonies mount the unpacked bundle read-only at /opt/colonizer/headroom, whatever stack they use.
 
-use crate::{util::exec, App, Shared};
-use anyhow::{bail, Context, Result};
+use crate::{App, Shared, util::exec};
+use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::{
@@ -36,15 +36,19 @@ fn pin_for(lock: &str, arch: &str) -> Option<Pin> {
         "aarch64" => "linux-aarch64",
         _ => return None,
     };
-    lock.lines().filter(|line| !line.trim_start().starts_with('#')).find_map(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        match fields.as_slice() {
-            ["headroom", release, p, "bundle", sha256, url] if *p == platform => {
-                Some(Pin { release: release.to_string(), sha256: sha256.to_string(), url: url.to_string() })
+    lock.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            match fields.as_slice() {
+                ["headroom", release, p, "bundle", sha256, url] if *p == platform => Some(Pin {
+                    release: release.to_string(),
+                    sha256: sha256.to_string(),
+                    url: url.to_string(),
+                }),
+                _ => None,
             }
-            _ => None,
-        }
-    })
+        })
 }
 
 fn root(app: &App) -> PathBuf {
@@ -93,14 +97,28 @@ pub struct Status {
 /// What Settings shows: the running download if there is one, otherwise what is on disk.
 async fn current(app: &App) -> Status {
     let status = app.headroom.lock().await.clone();
-    if matches!(status.state, State::Downloading | State::Unpacking | State::Failed) {
+    if matches!(
+        status.state,
+        State::Downloading | State::Unpacking | State::Failed
+    ) {
         return status;
     }
     let Some(pin) = pin() else {
-        return Status { state: State::Unavailable, ..status };
+        return Status {
+            state: State::Unavailable,
+            ..status
+        };
     };
-    let state = if installed(app).is_some() { State::Installed } else { State::Idle };
-    Status { release: Some(pin.release), state, ..status }
+    let state = if installed(app).is_some() {
+        State::Installed
+    } else {
+        State::Idle
+    };
+    Status {
+        release: Some(pin.release),
+        state,
+        ..status
+    }
 }
 
 /// `GET /api/headroom`
@@ -110,12 +128,17 @@ pub async fn status(axum::extract::State(app): axum::extract::State<Shared>) -> 
 
 /// `POST /api/headroom/download` — start downloading the pinned bundle, or report that it is already
 /// there or already coming. Returns at once; `GET /api/headroom` follows the download.
-pub async fn download(axum::extract::State(app): axum::extract::State<Shared>) -> crate::ApiResult<Status> {
+pub async fn download(
+    axum::extract::State(app): axum::extract::State<Shared>,
+) -> crate::ApiResult<Status> {
     let status = current(&app).await;
     let pin = match status.state {
         State::Installed | State::Downloading | State::Unpacking => return Ok(axum::Json(status)),
         State::Unavailable => {
-            return Err(crate::client_error(axum::http::StatusCode::CONFLICT, "no Headroom bundle is published for this machine's architecture"))
+            return Err(crate::client_error(
+                axum::http::StatusCode::CONFLICT,
+                "no Headroom bundle is published for this machine's architecture",
+            ));
         }
         State::Idle | State::Failed => pin().expect("current() returned a pinned state"),
     };
@@ -172,14 +195,23 @@ async fn fetch(app: &Shared, pin: &Pin, generation: u64) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(&unpack).await;
     tokio::fs::create_dir_all(&unpack).await?;
     let unpacked = async {
-        exec(Command::new("tar").arg("-xzf").arg(&part).arg("-C").arg(&unpack)).await?;
+        exec(
+            Command::new("tar")
+                .arg("-xzf")
+                .arg(&part)
+                .arg("-C")
+                .arg(&unpack),
+        )
+        .await?;
         let bundle = unpack.join("headroom");
         if !bundle.join("python/bin/python3").is_file() {
             bail!("the archive has no headroom/python/bin/python3");
         }
         let dest = root.join(&pin.release);
         let _ = tokio::fs::remove_dir_all(&dest).await;
-        tokio::fs::rename(&bundle, &dest).await.context("moving the unpacked bundle into place")?;
+        tokio::fs::rename(&bundle, &dest)
+            .await
+            .context("moving the unpacked bundle into place")?;
         Ok(())
     }
     .await;
@@ -191,7 +223,9 @@ async fn fetch(app: &Shared, pin: &Pin, generation: u64) -> Result<()> {
 async fn download_verified(app: &Shared, pin: &Pin, generation: u64, part: &Path) -> Result<()> {
     // GitHub release downloads redirect to object storage, so redirects are followed here (the provider
     // gateway's client deliberately does not).
-    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).build()?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()?;
     let response = client.get(&pin.url).send().await?.error_for_status()?;
     {
         let mut status = app.headroom.lock().await;
@@ -224,7 +258,11 @@ async fn download_verified(app: &Shared, pin: &Pin, generation: u64, part: &Path
 
     let got = hex(digest.finish().as_ref());
     if got != pin.sha256 {
-        bail!("checksum mismatch for Headroom {}: expected {}, got {got}", pin.release, pin.sha256);
+        bail!(
+            "checksum mismatch for Headroom {}: expected {}, got {got}",
+            pin.release,
+            pin.sha256
+        );
     }
     Ok(())
 }
@@ -244,32 +282,67 @@ headroom     0.37.0-1  linux-aarch64 bundle  2222  https://example.com/headroom-
     fn each_architecture_gets_its_own_bundle() {
         assert_eq!(pin_for(LOCK_SAMPLE, "x86_64").unwrap().sha256, "1111");
         let arm = pin_for(LOCK_SAMPLE, "aarch64").unwrap();
-        assert_eq!((arm.release.as_str(), arm.sha256.as_str()), ("0.37.0-1", "2222"));
+        assert_eq!(
+            (arm.release.as_str(), arm.sha256.as_str()),
+            ("0.37.0-1", "2222")
+        );
         assert!(arm.url.ends_with("linux-aarch64.tar.gz"));
         assert_eq!(pin_for(LOCK_SAMPLE, "riscv64"), None);
-        assert_eq!(pin_for("ecc 2.2.1 any plugin aaaa https://x", "x86_64"), None);
+        assert_eq!(
+            pin_for("ecc 2.2.1 any plugin aaaa https://x", "x86_64"),
+            None
+        );
     }
 
     #[test]
     fn the_real_lock_pins_both_architectures() {
         for arch in ["x86_64", "aarch64"] {
-            let pin = pin_for(LOCK, arch).unwrap_or_else(|| panic!("headroom.lock pins no Headroom bundle for {arch}"));
-            assert_eq!(pin.sha256.len(), 64, "{arch}: sha256 must be 64 hex characters");
-            assert!(pin.url.starts_with("https://github.com/Colonizer-dev/harness/releases/download/headroom-"), "{arch}: {}", pin.url);
+            let pin = pin_for(LOCK, arch)
+                .unwrap_or_else(|| panic!("headroom.lock pins no Headroom bundle for {arch}"));
+            assert_eq!(
+                pin.sha256.len(),
+                64,
+                "{arch}: sha256 must be 64 hex characters"
+            );
+            assert!(
+                pin.url.starts_with(
+                    "https://github.com/Colonizer-dev/harness/releases/download/headroom-"
+                ),
+                "{arch}: {}",
+                pin.url
+            );
         }
     }
 
     #[test]
     fn a_bundle_counts_as_installed_only_once_its_python_is_there() {
-        let root = std::env::temp_dir().join(format!("colonizer-headroom-test-{}", crate::util::short_id()));
-        let pin = Pin { release: "0.37.0-1".into(), sha256: "x".into(), url: "x".into() };
+        let root = std::env::temp_dir().join(format!(
+            "colonizer-headroom-test-{}",
+            crate::util::short_id()
+        ));
+        let pin = Pin {
+            release: "0.37.0-1".into(),
+            sha256: "x".into(),
+            url: "x".into(),
+        };
         assert_eq!(installed_in(&root, &pin), None);
         std::fs::create_dir_all(root.join("0.37.0-1/python/bin")).unwrap();
-        assert_eq!(installed_in(&root, &pin), None, "an empty directory is not a bundle");
+        assert_eq!(
+            installed_in(&root, &pin),
+            None,
+            "an empty directory is not a bundle"
+        );
         std::fs::write(root.join("0.37.0-1/python/bin/python3"), "").unwrap();
         assert_eq!(installed_in(&root, &pin), Some(root.join("0.37.0-1")));
-        let other = Pin { release: "0.38.0-1".into(), ..pin };
-        assert_eq!(installed_in(&root, &other), None, "a new pin needs its own download");
+        let other = Pin {
+            release: "0.38.0-1".into(),
+            ..pin
+        };
+        assert_eq!(
+            installed_in(&root, &other),
+            None,
+            "a new pin needs its own download"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,7 +1,7 @@
 //! Process settings (environment) and module selection (persisted JSON in the config dir).
 
 use crate::util::env_nonempty;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -45,7 +45,10 @@ impl Settings {
             runtime_dir,
             msb: env_nonempty("COLONIZER_MSB").unwrap_or_else(|| {
                 // Vendored with the app, then a host install, then whatever is on PATH.
-                match assets.as_ref().map(|dir| dir.join("vendor/microsandbox/bin/msb")) {
+                match assets
+                    .as_ref()
+                    .map(|dir| dir.join("vendor/microsandbox/bin/msb"))
+                {
                     Some(path) if path.exists() => path.display().to_string(),
                     _ if local_msb.exists() => local_msb.display().to_string(),
                     _ => "msb".into(),
@@ -53,7 +56,8 @@ impl Settings {
             }),
             assets,
             claude_bin: env_nonempty("COLONIZER_CLAUDE_BIN"),
-            gateway_bind: env_nonempty("COLONIZER_GATEWAY_BIND").unwrap_or_else(|| "127.0.0.1:41750".into()),
+            gateway_bind: env_nonempty("COLONIZER_GATEWAY_BIND")
+                .unwrap_or_else(|| "127.0.0.1:41750".into()),
             allowed_hosts: env_nonempty("COLONIZER_ALLOWED_HOSTS")
                 .unwrap_or_default()
                 .split(',')
@@ -63,7 +67,9 @@ impl Settings {
         };
         let data = settings.data_dir.display().to_string();
         if data.contains(':') || data.contains(',') {
-            bail!("COLONIZER_DATA_DIR must not contain ':' or ',' (it is used in microVM mount specs)");
+            bail!(
+                "COLONIZER_DATA_DIR must not contain ':' or ',' (it is used in microVM mount specs)"
+            );
         }
         Ok(settings)
     }
@@ -75,7 +81,10 @@ impl Settings {
             .context("app assets not found: run scripts/install.sh (or set COLONIZER_HOME)")?;
         let path = root.join(relative);
         if !path.exists() {
-            bail!("missing bundled asset {} (run scripts/install.sh)", path.display());
+            bail!(
+                "missing bundled asset {} (run scripts/install.sh)",
+                path.display()
+            );
         }
         Ok(path)
     }
@@ -113,7 +122,11 @@ fn enabled_by_default() -> bool {
 
 impl ModuleChoice {
     fn new(provider: &str) -> Self {
-        Self { provider: provider.into(), enabled: true, settings: Map::new() }
+        Self {
+            provider: provider.into(),
+            enabled: true,
+            settings: Map::new(),
+        }
     }
 }
 
@@ -156,7 +169,10 @@ impl Default for ModulesConfig {
 
 impl ModulesConfig {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -204,7 +220,10 @@ impl ModulesConfig {
 
 /// Reads a setting, falling back to the schema default.
 pub fn setting<'a>(choice: &'a ModuleChoice, schema: &'a Value, key: &str) -> Option<&'a Value> {
-    choice.settings.get(key).or_else(|| schema["properties"][key].get("default"))
+    choice
+        .settings
+        .get(key)
+        .or_else(|| schema["properties"][key].get("default"))
 }
 
 /// A [`ModuleChoice`] with a preset's defaults filled in underneath what the
@@ -217,18 +236,26 @@ pub fn with_preset(choice: &ModuleChoice, preset_defaults: &Value) -> ModuleChoi
     let mut merged = choice.clone();
     if let Some(defaults) = preset_defaults.as_object() {
         for (key, value) in defaults {
-            merged.settings.entry(key.clone()).or_insert_with(|| value.clone());
+            merged
+                .settings
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
         }
     }
     merged
 }
 
 pub fn setting_str(choice: &ModuleChoice, schema: &Value, key: &str) -> String {
-    setting(choice, schema, key).and_then(Value::as_str).unwrap_or_default().to_string()
+    setting(choice, schema, key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn setting_u64(choice: &ModuleChoice, schema: &Value, key: &str) -> u64 {
-    setting(choice, schema, key).and_then(Value::as_u64).unwrap_or_default()
+    setting(choice, schema, key)
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
 }
 
 /// `colonizer.toml`: hand-edited settings with no place in the UI. Colonizer never writes this file, so
@@ -256,7 +283,9 @@ impl FileConfig {
     /// Read where it is used rather than cached at startup, so editing the file doesn't need a restart.
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("colonizer.toml");
-        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
         toml::from_str(&text).unwrap_or_else(|e| {
             eprintln!("{}: {e}; using defaults", path.display());
             Self::default()
@@ -279,20 +308,34 @@ mod tests {
         assert!(parse("[publish]\n").publish.co_author);
         assert!(!parse("[publish]\nco_author = false\n").publish.co_author);
         // A key we don't know is not a reason to refuse the file.
-        assert!(parse("[publish]\nco_author = true\nsomething_else = 3\n").publish.co_author);
+        assert!(
+            parse("[publish]\nco_author = true\nsomething_else = 3\n")
+                .publish
+                .co_author
+        );
     }
 
     #[test]
     fn load_reads_colonizer_toml_from_the_config_dir() {
-        let dir = std::env::temp_dir().join(format!("colonizer-config-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("colonizer-config-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(FileConfig::load(&dir).publish.co_author, "no file means defaults");
+        assert!(
+            FileConfig::load(&dir).publish.co_author,
+            "no file means defaults"
+        );
 
         std::fs::write(dir.join("colonizer.toml"), "[publish]\nco_author = false\n").unwrap();
-        assert!(!FileConfig::load(&dir).publish.co_author, "the file is read from config_dir/colonizer.toml");
+        assert!(
+            !FileConfig::load(&dir).publish.co_author,
+            "the file is read from config_dir/colonizer.toml"
+        );
 
         std::fs::write(dir.join("colonizer.toml"), "[publish\nco_author = ").unwrap();
-        assert!(FileConfig::load(&dir).publish.co_author, "a broken file falls back rather than failing a publish");
+        assert!(
+            FileConfig::load(&dir).publish.co_author,
+            "a broken file falls back rather than failing a publish"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -328,13 +371,19 @@ mod tests {
     fn custom_leaves_the_choice_untouched() {
         let c = choice(json!({"image": "debian:bookworm"}));
         let merged = with_preset(&c, &crate::presets::defaults(crate::presets::CUSTOM));
-        assert_eq!(merged.settings, c.settings, "custom must not inject anything");
+        assert_eq!(
+            merged.settings, c.settings,
+            "custom must not inject anything"
+        );
     }
 
     #[test]
     fn setting_falls_back_from_choice_to_schema() {
         let schema = json!({"properties": {"memory": {"default": "8G"}}});
-        assert_eq!(setting_str(&choice(json!({"memory": "16G"})), &schema, "memory"), "16G");
+        assert_eq!(
+            setting_str(&choice(json!({"memory": "16G"})), &schema, "memory"),
+            "16G"
+        );
         assert_eq!(setting_str(&choice(json!({})), &schema, "memory"), "8G");
     }
 }

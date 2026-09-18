@@ -3,12 +3,12 @@
 //! about 25 km across, that lights up while colonies run. It is off until the user switches it on; the web
 //! UI asks once. `Heartbeat` below is everything that is sent. The receiving end is services/telemetry.
 
-use crate::{util, Shared};
-use anyhow::{bail, Context, Result};
-use axum::{extract::State, http::StatusCode, Json};
+use crate::{Shared, util};
+use anyhow::{Context, Result, bail};
+use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -41,14 +41,18 @@ pub struct Choice {
 
 impl Choice {
     fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        util::write_private(path, &serde_json::to_vec_pretty(self)?).with_context(|| format!("writing {}", path.display()))
+        util::write_private(path, &serde_json::to_vec_pretty(self)?)
+            .with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -77,18 +81,28 @@ fn platform_for(os: &str, arch: &str) -> &'static str {
 
 /// `DO_NOT_TRACK` (https://consoledonottrack.com) or `COLONIZER_TELEMETRY=off` keep the live map off whatever
 /// Settings says, for machines where nobody should have to remember to answer.
-fn blocked_by(do_not_track: Option<&str>, colonizer_telemetry: Option<&str>) -> Option<&'static str> {
+fn blocked_by(
+    do_not_track: Option<&str>,
+    colonizer_telemetry: Option<&str>,
+) -> Option<&'static str> {
     if do_not_track.is_some_and(|v| !matches!(v.trim(), "" | "0" | "false")) {
         return Some("DO_NOT_TRACK");
     }
-    if colonizer_telemetry.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no")) {
+    if colonizer_telemetry.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    }) {
         return Some("COLONIZER_TELEMETRY");
     }
     None
 }
 
 fn interval_from(next_in: Option<u64>) -> Duration {
-    next_in.map_or(DEFAULT_INTERVAL, |s| Duration::from_secs(s).clamp(MIN_INTERVAL, MAX_INTERVAL))
+    next_in.map_or(DEFAULT_INTERVAL, |s| {
+        Duration::from_secs(s).clamp(MIN_INTERVAL, MAX_INTERVAL)
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -110,8 +124,12 @@ pub struct Telemetry {
 
 impl Telemetry {
     pub fn new(config_dir: &Path) -> Result<Self> {
-        let blocked = blocked_by(std::env::var("DO_NOT_TRACK").ok().as_deref(), std::env::var("COLONIZER_TELEMETRY").ok().as_deref());
-        let endpoint = util::env_nonempty("COLONIZER_TELEMETRY_URL").unwrap_or_else(|| DEFAULT_ENDPOINT.into());
+        let blocked = blocked_by(
+            std::env::var("DO_NOT_TRACK").ok().as_deref(),
+            std::env::var("COLONIZER_TELEMETRY").ok().as_deref(),
+        );
+        let endpoint = util::env_nonempty("COLONIZER_TELEMETRY_URL")
+            .unwrap_or_else(|| DEFAULT_ENDPOINT.into());
         Self::with(config_dir.join("telemetry.json"), endpoint, blocked)
     }
 
@@ -138,7 +156,11 @@ impl Telemetry {
             return None;
         }
         let choice = self.choice.lock().await;
-        if choice.enabled == Some(true) { choice.install_id.clone() } else { None }
+        if choice.enabled == Some(true) {
+            choice.install_id.clone()
+        } else {
+            None
+        }
     }
 
     /// Switches the live map on or off and saves the answer. Switching off takes the mothership off the map
@@ -149,7 +171,11 @@ impl Telemetry {
         }
         let forgotten = {
             let mut choice = self.choice.lock().await;
-            let forgotten = if enabled { None } else { choice.install_id.take() };
+            let forgotten = if enabled {
+                None
+            } else {
+                choice.install_id.take()
+            };
             if enabled && choice.install_id.is_none() {
                 choice.install_id = Some(uuid::Uuid::new_v4().to_string());
             }
@@ -157,23 +183,31 @@ impl Telemetry {
             choice.save(&self.path)?;
             forgotten
         };
-        if let Some(id) = forgotten {
-            if let Err(e) = self.send_off(&id).await {
-                // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
-                // deleted within the hour.
-                self.report.lock().await.last_error = Some(format!("{e:#}"));
-            }
+        if let Some(id) = forgotten
+            && let Err(e) = self.send_off(&id).await
+        {
+            // The service forgets it anyway once its heartbeats stop: off the map within 12 minutes,
+            // deleted within the hour.
+            self.report.lock().await.last_error = Some(format!("{e:#}"));
         }
         self.wake.notify_one();
         Ok(())
     }
 
     async fn post(&self, body: &Value) -> Result<Value> {
-        let response = self.client.post(format!("{}/v1/heartbeat", self.endpoint)).json(body).send().await?;
+        let response = self
+            .client
+            .post(format!("{}/v1/heartbeat", self.endpoint))
+            .json(body)
+            .send()
+            .await?;
         let status = response.status();
         let reply: Value = response.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
-            bail!("the telemetry service answered {status}: {}", reply["error"].as_str().unwrap_or("no reason given"));
+            bail!(
+                "the telemetry service answered {status}: {}",
+                reply["error"].as_str().unwrap_or("no reason given")
+            );
         }
         Ok(reply)
     }
@@ -185,7 +219,9 @@ impl Telemetry {
     }
 
     async fn send_off(&self, install_id: &str) -> Result<()> {
-        self.post(&json!({"install_id": install_id, "online": false})).await.map(drop)
+        self.post(&json!({"install_id": install_id, "online": false}))
+            .await
+            .map(drop)
     }
 
     /// On shutdown: off the map now rather than when the heartbeats time out. The id is kept, so the next start
@@ -198,7 +234,13 @@ impl Telemetry {
 }
 
 async fn live_colonies(app: &Shared) -> usize {
-    app.sessions.read().await.iter().filter(|s| s.status.is_live()).count().min(MAX_COLONIES)
+    app.sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status.is_live())
+        .count()
+        .min(MAX_COLONIES)
 }
 
 /// The heartbeat loop: every interval while the live map is on, within a minute when the colony count changes,
@@ -213,15 +255,24 @@ pub async fn run(app: Shared) {
             None => last = None,
             Some(id) => {
                 let colonies = live_colonies(&app).await;
-                let due = last.is_none_or(|(at, sent)| at.elapsed() >= interval || sent != colonies);
+                let due =
+                    last.is_none_or(|(at, sent)| at.elapsed() >= interval || sent != colonies);
                 if due {
-                    let beat = Heartbeat { install_id: &id, version: env!("CARGO_PKG_VERSION"), platform: platform(), colonies };
+                    let beat = Heartbeat {
+                        install_id: &id,
+                        version: env!("CARGO_PKG_VERSION"),
+                        platform: platform(),
+                        colonies,
+                    };
                     let result = telemetry.send(&beat).await;
                     let mut report = telemetry.report.lock().await;
                     match result {
                         Ok(next) => {
                             interval = next;
-                            *report = Report { last_sent_at: Some(Utc::now()), last_error: None };
+                            *report = Report {
+                                last_sent_at: Some(Utc::now()),
+                                last_error: None,
+                            };
                         }
                         Err(e) => report.last_error = Some(format!("{e:#}")),
                     }
@@ -268,9 +319,15 @@ pub struct SetRequest {
 }
 
 /// `PUT /api/telemetry` — `{"enabled": true|false}`
-pub async fn put(State(app): State<Shared>, Json(body): Json<SetRequest>) -> crate::ApiResult<Value> {
+pub async fn put(
+    State(app): State<Shared>,
+    Json(body): Json<SetRequest>,
+) -> crate::ApiResult<Value> {
     if app.telemetry.blocked.is_some() {
-        return Err(crate::client_error(StatusCode::CONFLICT, "the live map is kept off by the mothership's environment"));
+        return Err(crate::client_error(
+            StatusCode::CONFLICT,
+            "the live map is kept off by the mothership's environment",
+        ));
     }
     app.telemetry.set(body.enabled).await?;
     Ok(Json(view(&app).await))
@@ -279,7 +336,7 @@ pub async fn put(State(app): State<Shared>, Json(body): Json<SetRequest>) -> cra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::post, Router};
+    use axum::{Router, routing::post};
     use std::sync::Arc;
 
     #[test]
@@ -292,9 +349,19 @@ mod tests {
 
     #[test]
     fn a_heartbeat_is_exactly_four_fields() {
-        let beat = Heartbeat { install_id: "0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b", version: "0.1.3", platform: "darwin-arm64", colonies: 2 };
+        let beat = Heartbeat {
+            install_id: "0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b",
+            version: "0.1.3",
+            platform: "darwin-arm64",
+            colonies: 2,
+        };
         let value = serde_json::to_value(&beat).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["colonies", "install_id", "platform", "version"]);
     }
@@ -321,13 +388,17 @@ mod tests {
 
     #[test]
     fn a_missing_or_broken_file_means_not_asked_yet() {
-        let dir = std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
         let path = dir.join("telemetry.json");
         assert_eq!(Choice::load(&path), Choice::default());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(Choice::load(&path).enabled, None);
-        let saved = Choice { enabled: Some(true), install_id: Some("x".into()) };
+        let saved = Choice {
+            enabled: Some(true),
+            install_id: Some("x".into()),
+        };
         saved.save(&path).unwrap();
         assert_eq!(Choice::load(&path), saved);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -356,35 +427,68 @@ mod tests {
     #[tokio::test]
     async fn switching_on_and_off_takes_the_mothership_off_the_map_and_forgets_its_id() {
         let (url, received) = receiver().await;
-        let dir = std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
         let path = dir.join("telemetry.json");
         let telemetry = Telemetry::with(path.clone(), url, None).unwrap();
-        assert_eq!(telemetry.active_id().await, None, "off until the user answers");
+        assert_eq!(
+            telemetry.active_id().await,
+            None,
+            "off until the user answers"
+        );
 
         telemetry.set(true).await.unwrap();
         let id = telemetry.active_id().await.expect("an id once switched on");
         assert!(uuid::Uuid::parse_str(&id).is_ok_and(|u| u.get_version_num() == 4));
-        let beat = Heartbeat { install_id: &id, version: "0.1.3", platform: "darwin-arm64", colonies: 1 };
-        assert_eq!(telemetry.send(&beat).await.unwrap(), Duration::from_secs(300));
+        let beat = Heartbeat {
+            install_id: &id,
+            version: "0.1.3",
+            platform: "darwin-arm64",
+            colonies: 1,
+        };
+        assert_eq!(
+            telemetry.send(&beat).await.unwrap(),
+            Duration::from_secs(300)
+        );
 
         telemetry.set(false).await.unwrap();
         assert_eq!(telemetry.active_id().await, None);
-        assert_eq!(Choice::load(&path), Choice { enabled: Some(false), install_id: None });
+        assert_eq!(
+            Choice::load(&path),
+            Choice {
+                enabled: Some(false),
+                install_id: None
+            }
+        );
         let bodies = received.lock().await.clone();
-        assert_eq!(bodies[0], json!({"install_id": id, "version": "0.1.3", "platform": "darwin-arm64", "colonies": 1}));
+        assert_eq!(
+            bodies[0],
+            json!({"install_id": id, "version": "0.1.3", "platform": "darwin-arm64", "colonies": 1})
+        );
         assert_eq!(bodies[1], json!({"install_id": id, "online": false}));
 
         telemetry.set(true).await.unwrap();
-        assert_ne!(telemetry.active_id().await.unwrap(), id, "a new period on the map gets a new id");
+        assert_ne!(
+            telemetry.active_id().await.unwrap(),
+            id,
+            "a new period on the map gets a new id"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn the_environment_overrides_the_saved_answer() {
-        let dir = std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("colonizer-telemetry-{}", uuid::Uuid::new_v4()));
         let path = dir.join("telemetry.json");
-        Choice { enabled: Some(true), install_id: Some(uuid::Uuid::new_v4().to_string()) }.save(&path).unwrap();
-        let telemetry = Telemetry::with(path, "http://127.0.0.1:9".into(), Some("DO_NOT_TRACK")).unwrap();
+        Choice {
+            enabled: Some(true),
+            install_id: Some(uuid::Uuid::new_v4().to_string()),
+        }
+        .save(&path)
+        .unwrap();
+        let telemetry =
+            Telemetry::with(path, "http://127.0.0.1:9".into(), Some("DO_NOT_TRACK")).unwrap();
         assert_eq!(telemetry.active_id().await, None);
         assert!(telemetry.set(true).await.is_err());
         std::fs::remove_dir_all(&dir).unwrap();

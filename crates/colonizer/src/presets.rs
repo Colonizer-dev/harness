@@ -10,7 +10,7 @@
 //! Presets only supply defaults. Anything set explicitly in `modules.json`
 //! still wins, so an existing configuration keeps the image it had.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A named bundle of image and machine size.
 pub struct Preset {
@@ -27,18 +27,46 @@ pub struct Preset {
 /// `node` reproduces the previous defaults exactly, so an install that never
 /// touches this setting boots the same colony it booted before.
 pub const PRESETS: &[Preset] = &[
-    Preset { id: "node", image: "node:24-bookworm", cpus: 4, memory: "8G", root_disk: "16G" },
-    Preset { id: "python", image: "python:3.13-bookworm", cpus: 4, memory: "8G", root_disk: "16G" },
+    Preset {
+        id: "node",
+        image: "node:24-bookworm",
+        cpus: 4,
+        memory: "8G",
+        root_disk: "16G",
+    },
+    Preset {
+        id: "python",
+        image: "python:3.13-bookworm",
+        cpus: 4,
+        memory: "8G",
+        root_disk: "16G",
+    },
     // Rust builds are memory and disk hungry in a way the others are not.
-    Preset { id: "rust", image: "rust:1-bookworm", cpus: 6, memory: "12G", root_disk: "32G" },
-    Preset { id: "go", image: "golang:1-bookworm", cpus: 4, memory: "8G", root_disk: "16G" },
+    Preset {
+        id: "rust",
+        image: "rust:1-bookworm",
+        cpus: 6,
+        memory: "12G",
+        root_disk: "32G",
+    },
+    Preset {
+        id: "go",
+        image: "golang:1-bookworm",
+        cpus: 4,
+        memory: "8G",
+        root_disk: "16G",
+    },
 ];
 
 pub const CUSTOM: &str = "custom";
 
 /// The preset ids offered in Settings, in order, with `custom` last.
 pub fn ids() -> Vec<&'static str> {
-    PRESETS.iter().map(|p| p.id).chain(std::iter::once(CUSTOM)).collect()
+    PRESETS
+        .iter()
+        .map(|p| p.id)
+        .chain(std::iter::once(CUSTOM))
+        .collect()
 }
 
 pub fn find(id: &str) -> Option<&'static Preset> {
@@ -94,7 +122,9 @@ mod tests {
         // know that has failed at its job.
         for p in PRESETS {
             assert!(
-                p.image.contains("bookworm") || p.image.contains("trixie") || p.image.contains("slim"),
+                p.image.contains("bookworm")
+                    || p.image.contains("trixie")
+                    || p.image.contains("slim"),
                 "preset {} uses {}, which is not obviously a glibc image",
                 p.id,
                 p.image
@@ -116,8 +146,18 @@ mod tests {
     fn every_preset_has_a_sane_machine() {
         for p in PRESETS {
             assert!(p.cpus >= 1, "{} has no vCPUs", p.id);
-            assert!(p.memory.ends_with('G'), "{} memory {} is not a size", p.id, p.memory);
-            assert!(p.root_disk.ends_with('G'), "{} root disk {} is not a size", p.id, p.root_disk);
+            assert!(
+                p.memory.ends_with('G'),
+                "{} memory {} is not a size",
+                p.id,
+                p.memory
+            );
+            assert!(
+                p.root_disk.ends_with('G'),
+                "{} root disk {} is not a size",
+                p.id,
+                p.root_disk
+            );
         }
     }
 }

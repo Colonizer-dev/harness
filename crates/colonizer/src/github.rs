@@ -1,19 +1,18 @@
 //! GitHub source and publish modules: repositories, issues, worktrees and pull requests.
 
 use crate::{
-    client_error,
+    ApiResult, App, Shared, client_error,
     sessions::{Session, SessionLogger},
     util::{env_nonempty, exec, exec_status, read_trimmed, truncate, valid_repo, write_secret},
-    ApiResult, App, Shared,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
@@ -39,7 +38,9 @@ impl App {
         S: AsRef<std::ffi::OsStr>,
     {
         let mut c = Command::new("gh");
-        c.args(args).env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1");
+        c.args(args)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("NO_COLOR", "1");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
@@ -50,12 +51,18 @@ impl App {
     pub fn git_plain(&self) -> Command {
         let mut c = Command::new("git");
         c.args([
-            "-c", "credential.helper=",
-            "-c", "credential.helper=!gh auth git-credential",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "core.fsmonitor=false",
-            "-c", "gc.auto=0",
-            "-c", "maintenance.auto=false",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!gh auth git-credential",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
         ])
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GH_PROMPT_DISABLED", "1");
@@ -97,8 +104,13 @@ pub fn token_source(app: &App) -> &'static str {
 pub async fn fetch_issue(app: &App, repo: &str, number: u64) -> Result<Value> {
     let number = number.to_string();
     let out = exec(&mut app.gh([
-        "issue", "view", number.as_str(), "-R", repo,
-        "--json", "number,title,body,labels,comments,url,author",
+        "issue",
+        "view",
+        number.as_str(),
+        "-R",
+        repo,
+        "--json",
+        "number,title,body,labels,comments,url,author",
     ]))
     .await?;
     Ok(serde_json::from_str(&out)?)
@@ -106,26 +118,53 @@ pub async fn fetch_issue(app: &App, repo: &str, number: u64) -> Result<Value> {
 
 pub async fn default_branch(app: &App, repo: &str) -> Result<String> {
     let path = format!("repos/{repo}");
-    Ok(exec(&mut app.gh(["api", path.as_str(), "--jq", ".default_branch"])).await?.trim().to_string())
+    Ok(
+        exec(&mut app.gh(["api", path.as_str(), "--jq", ".default_branch"]))
+            .await?
+            .trim()
+            .to_string(),
+    )
 }
 
 pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger) -> Result<()> {
     if !bare.join("HEAD").exists() {
         let url = format!("https://github.com/{repo}.git");
-        log.info(format!("cloning {url} (first session for this repository)")).await;
+        log.info(format!("cloning {url} (first session for this repository)"))
+            .await;
         if let Some(parent) = bare.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        exec(app.git_plain().args(["clone", "--bare", "--quiet"]).arg(&url).arg(bare)).await?;
-        exec(app.git(bare).args(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"])).await?;
+        exec(
+            app.git_plain()
+                .args(["clone", "--bare", "--quiet"])
+                .arg(&url)
+                .arg(bare),
+        )
+        .await?;
+        exec(app.git(bare).args([
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ]))
+        .await?;
     }
     log.info("fetching origin").await;
-    exec(app.git(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    exec(
+        app.git(bare)
+            .args(["fetch", "--quiet", "--prune", "origin"]),
+    )
+    .await?;
     Ok(())
 }
 
 /// Creates the worktree and returns its git admin dir (inside the bare repo).
-pub async fn create_worktree(app: &App, bare: &FsPath, wt: &FsPath, branch: &str, base: &str) -> Result<PathBuf> {
+pub async fn create_worktree(
+    app: &App,
+    bare: &FsPath,
+    wt: &FsPath,
+    branch: &str,
+    base: &str,
+) -> Result<PathBuf> {
     if let Some(parent) = wt.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -150,7 +189,12 @@ pub async fn remove_worktree(app: &App, s: &Session) -> Result<()> {
         if let Some(admin) = &s.git_admin_dir {
             restore_gitfile(&wt, FsPath::new(admin))?;
         }
-        let _ = exec(app.git(&bare).args(["worktree", "remove", "--force"]).arg(&wt)).await;
+        let _ = exec(
+            app.git(&bare)
+                .args(["worktree", "remove", "--force"])
+                .arg(&wt),
+        )
+        .await;
         if wt.exists() {
             tokio::fs::remove_dir_all(&wt).await?;
         }
@@ -169,14 +213,25 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
     let mut p = String::new();
     match (s.issue, issue) {
         (Some(number), Some(_)) => {
-            let _ = writeln!(p, "You are resolving GitHub issue #{number} in the repository {}.\n", s.repo);
+            let _ = writeln!(
+                p,
+                "You are resolving GitHub issue #{number} in the repository {}.\n",
+                s.repo
+            );
         }
         _ => {
-            let _ = writeln!(p, "You are working in the repository {} in an interactive session with its maintainer.\n", s.repo);
+            let _ = writeln!(
+                p,
+                "You are working in the repository {} in an interactive session with its maintainer.\n",
+                s.repo
+            );
         }
     }
     let branch = if resumed {
-        format!("`{}`, which already carries this colony's earlier work on top of `origin/{base}`", s.branch)
+        format!(
+            "`{}`, which already carries this colony's earlier work on top of `origin/{base}`",
+            s.branch
+        )
     } else {
         format!("`{}`, freshly created from `origin/{base}`", s.branch)
     };
@@ -196,7 +251,12 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
     if let Some(issue) = issue {
         let labels = issue["labels"]
             .as_array()
-            .map(|ls| ls.iter().map(|l| text(&l["name"])).collect::<Vec<_>>().join(", "))
+            .map(|ls| {
+                ls.iter()
+                    .map(|l| text(&l["name"]))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
         let _ = writeln!(p, "<issue>");
         let _ = writeln!(p, "Title: {}", text(&issue["title"]));
@@ -206,7 +266,15 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
             let _ = writeln!(p, "Labels: {labels}");
         }
         let body = text(&issue["body"]);
-        let _ = writeln!(p, "\n{}\n", if body.is_empty() { "(no description)" } else { &body });
+        let _ = writeln!(
+            p,
+            "\n{}\n",
+            if body.is_empty() {
+                "(no description)"
+            } else {
+                &body
+            }
+        );
         for comment in issue["comments"].as_array().into_iter().flatten() {
             let _ = writeln!(
                 p,
@@ -230,7 +298,11 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
         );
     }
     if !s.instructions.trim().is_empty() {
-        let _ = writeln!(p, "Additional instructions from the maintainer who started this session:\n{}\n", s.instructions.trim());
+        let _ = writeln!(
+            p,
+            "Additional instructions from the maintainer who started this session:\n{}\n",
+            s.instructions.trim()
+        );
     }
     if !s.autopilot || s.issue.is_none() {
         let _ = writeln!(
@@ -283,7 +355,9 @@ fn commit_trailer(issue: Option<u64>, session_id: &str, co_author: bool) -> Stri
 
 /// A colony only ever publishes its own `colonizer/` branch, never the base branch.
 pub fn check_publish_branch(branch: &str, base: &str) -> Result<()> {
-    let own = branch.strip_prefix("colonizer/").is_some_and(|rest| !rest.is_empty());
+    let own = branch
+        .strip_prefix("colonizer/")
+        .is_some_and(|rest| !rest.is_empty());
     if !own || branch.eq_ignore_ascii_case(base) {
         bail!("refusing to push `{branch}`: colonies only publish their own colonizer/ branch");
     }
@@ -292,14 +366,20 @@ pub fn check_publish_branch(branch: &str, base: &str) -> Result<()> {
 
 /// Identifies the current `pr.md` (a non-empty regular file), so autopilot can tell whether a turn wrote it.
 pub fn pr_description_mark(out: &FsPath) -> Option<(std::time::SystemTime, u64)> {
-    let meta = std::fs::symlink_metadata(out.join("pr.md")).ok().filter(|m| m.is_file() && m.len() > 0)?;
+    let meta = std::fs::symlink_metadata(out.join("pr.md"))
+        .ok()
+        .filter(|m| m.is_file() && m.len() > 0)?;
     Some((meta.modified().ok()?, meta.len()))
 }
 
 /// Commits the worktree on the host, pushes the branch and opens the pull request.
 /// The microVM must already be gone: everything it left behind is treated as untrusted data.
 pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Published> {
-    let admin = PathBuf::from(s.git_admin_dir.as_deref().context("session has no worktree yet")?);
+    let admin = PathBuf::from(
+        s.git_admin_dir
+            .as_deref()
+            .context("session has no worktree yet")?,
+    );
     let base = s.base.clone().context("session has no base branch")?;
     check_publish_branch(&s.branch, &base)?;
     let wt = PathBuf::from(&s.worktree);
@@ -308,7 +388,8 @@ pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Publ
 
     restore_gitfile(&wt, &admin)?;
     for removed in strip_nested_git(&wt)? {
-        log.info(format!("removed nested git metadata {}", removed.display())).await;
+        log.info(format!("removed nested git metadata {}", removed.display()))
+            .await;
     }
     let wt_git = || {
         let mut c = app.git(&admin);
@@ -317,21 +398,29 @@ pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Publ
     };
     exec(wt_git().args(["add", "-A"])).await?;
     if exec_status(wt_git().args(["diff", "--cached", "--quiet"])).await? {
-        log.info("the agent left no changes in the worktree; nothing to publish").await;
+        log.info("the agent left no changes in the worktree; nothing to publish")
+            .await;
         return Ok(Published::NoChanges);
     }
 
     let (title, body) = read_pr_description(&session_dir.join("out"), s);
     let viewer = viewer(app).await?;
     let login = viewer["login"].as_str().unwrap_or("colonizer");
-    let name = viewer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
+    let name = viewer["name"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(login);
     let email = format!("{}+{login}@users.noreply.github.com", viewer["id"]);
-    let co_author = crate::config::FileConfig::load(&app.cfg.config_dir).publish.co_author;
+    let co_author = crate::config::FileConfig::load(&app.cfg.config_dir)
+        .publish
+        .co_author;
     let trailer = commit_trailer(s.issue, &s.id, co_author);
     exec(
         wt_git()
-            .arg("-c").arg(format!("user.name={name}"))
-            .arg("-c").arg(format!("user.email={email}"))
+            .arg("-c")
+            .arg(format!("user.name={name}"))
+            .arg("-c")
+            .arg(format!("user.email={email}"))
             .args(["commit", "--quiet", "--no-verify", "-m"])
             .arg(&title)
             .arg("-m")
@@ -339,32 +428,65 @@ pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Publ
     )
     .await?;
     let sha = exec(wt_git().args(["rev-parse", "--short", "HEAD"])).await?;
-    log.info(format!("committed {} as {name} <{email}>", sha.trim())).await;
+    log.info(format!("committed {} as {name} <{email}>", sha.trim()))
+        .await;
 
-    log.info(format!("pushing {} to github.com/{}", s.branch, s.repo)).await;
+    log.info(format!("pushing {} to github.com/{}", s.branch, s.repo))
+        .await;
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", s.branch);
-    exec(app.git(&bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
+    exec(
+        app.git(&bare)
+            .args(["push", "--quiet", "origin"])
+            .arg(&refspec),
+    )
+    .await?;
 
     let body_path = session_dir.join("pr-body.md");
     tokio::fs::write(&body_path, compose_pr_body(&body, s.issue)).await?;
-    let draft = app.modules.read().await.publish.settings.get("draft").and_then(Value::as_bool).unwrap_or(false);
+    let draft = app
+        .modules
+        .read()
+        .await
+        .publish
+        .settings
+        .get("draft")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut create = app.gh([
-        "pr", "create", "-R", s.repo.as_str(), "--base", base.as_str(),
-        "--head", s.branch.as_str(), "--title", title.as_str(), "--body-file",
+        "pr",
+        "create",
+        "-R",
+        s.repo.as_str(),
+        "--base",
+        base.as_str(),
+        "--head",
+        s.branch.as_str(),
+        "--title",
+        title.as_str(),
+        "--body-file",
     ]);
     create.arg(&body_path);
     if draft {
         create.arg("--draft");
     }
     let pr = exec(&mut create).await?;
-    let url = pr.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(pr.trim()).to_string();
+    let url = pr
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("https://"))
+        .unwrap_or(pr.trim())
+        .to_string();
     log.info(format!("opened pull request {url}")).await;
     Ok(Published::PullRequest(url))
 }
 
 fn read_gitdir(wt: &FsPath) -> Result<PathBuf> {
     let content = std::fs::read_to_string(wt.join(".git")).context("worktree has no .git file")?;
-    let dir = content.trim().strip_prefix("gitdir:").context("unexpected .git file in worktree")?.trim();
+    let dir = content
+        .trim()
+        .strip_prefix("gitdir:")
+        .context("unexpected .git file in worktree")?
+        .trim();
     Ok(PathBuf::from(dir))
 }
 
@@ -378,7 +500,11 @@ fn restore_gitfile(wt: &FsPath, admin: &FsPath) -> Result<()> {
         Ok(_) => std::fs::remove_file(&path)?,
         Err(_) => {}
     }
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&path)?;
     writeln!(f, "gitdir: {}", admin.display())?;
     Ok(())
 }
@@ -424,11 +550,18 @@ fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
     let (title, body) = match content.as_deref().map(str::trim) {
         Some(text) if !text.is_empty() => {
             let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
-            (first.trim().trim_start_matches('#').trim().to_string(), rest.trim().to_string())
+            (
+                first.trim().trim_start_matches('#').trim().to_string(),
+                rest.trim().to_string(),
+            )
         }
         _ => (default_title.clone(), String::new()),
     };
-    let title = if title.is_empty() { default_title } else { truncate(&title, 200) };
+    let title = if title.is_empty() {
+        default_title
+    } else {
+        truncate(&title, 200)
+    };
     (title, body)
 }
 
@@ -438,7 +571,9 @@ fn strip_agent_attribution(body: &str) -> String {
     let mut lines: Vec<&str> = body.trim_end().lines().collect();
     while let Some(line) = lines.last() {
         let trimmed = line.trim();
-        let words = trimmed.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).to_lowercase();
+        let words = trimmed
+            .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_lowercase();
         let signature = trimmed.is_empty()
             || trimmed == "---"
             || words.starts_with("co-authored-by:")
@@ -457,7 +592,10 @@ fn compose_pr_body(body: &str, issue: Option<u64>) -> String {
     if let Some(number) = issue {
         let lower = out.to_lowercase();
         let reference = format!("#{number}");
-        if !["closes", "fixes", "resolves"].iter().any(|k| lower.contains(&format!("{k} {reference}"))) {
+        if !["closes", "fixes", "resolves"]
+            .iter()
+            .any(|k| lower.contains(&format!("{k} {reference}")))
+        {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
@@ -480,10 +618,16 @@ pub struct TokenBody {
 pub async fn set_token(State(app): State<Shared>, Json(body): Json<TokenBody>) -> ApiResult<Value> {
     let token = body.token.trim();
     if token.is_empty() || token.contains(char::is_whitespace) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "empty or malformed token"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "empty or malformed token",
+        ));
     }
     let login = exec(
-        Command::new("gh").args(["api", "user", "--jq", ".login"]).env("GH_TOKEN", token).env("GH_PROMPT_DISABLED", "1"),
+        Command::new("gh")
+            .args(["api", "user", "--jq", ".login"])
+            .env("GH_TOKEN", token)
+            .env("GH_PROMPT_DISABLED", "1"),
     )
     .await
     .map_err(|_| client_error(StatusCode::BAD_REQUEST, "GitHub rejected this token"))?;
@@ -502,8 +646,13 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
         "--jq", ".[] | {full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}",
     ]))
     .await?;
-    let repos: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let owners = repos.iter().filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
+    let repos: Vec<Value> = out
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let owners = repos
+        .iter()
+        .filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
     app.repo_owners.write().await.extend(owners);
     Ok(Json(repos))
 }
@@ -511,11 +660,31 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
 /// Adds the signed-in user and every GitHub org they belong to to the known owners, so org workspaces
 /// show orgs whose repositories haven't been listed yet. Refreshes at most every five minutes.
 pub async fn refresh_orgs(app: &App) {
-    if app.orgs_refreshed.lock().await.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300)) {
+    if app
+        .orgs_refreshed
+        .lock()
+        .await
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300))
+    {
         return;
     }
-    let Ok(orgs) = exec(&mut app.gh(["api", "--paginate", "/user/orgs?per_page=100", "--jq", ".[].login"])).await else { return };
-    let mut owners: Vec<String> = orgs.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+    let Ok(orgs) = exec(&mut app.gh([
+        "api",
+        "--paginate",
+        "/user/orgs?per_page=100",
+        "--jq",
+        ".[].login",
+    ]))
+    .await
+    else {
+        return;
+    };
+    let mut owners: Vec<String> = orgs
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
     if let Ok(login) = exec(&mut app.gh(["api", "user", "--jq", ".login"])).await {
         owners.push(login.trim().to_string());
     }
@@ -523,14 +692,28 @@ pub async fn refresh_orgs(app: &App) {
     *app.orgs_refreshed.lock().await = Some(std::time::Instant::now());
 }
 
-pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
+pub async fn list_issues(
+    State(app): State<Shared>,
+    Path((owner, name)): Path<(String, String)>,
+) -> ApiResult<Value> {
     let repo = format!("{owner}/{name}");
     if !valid_repo(&repo) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid repository name",
+        ));
     }
     let out = exec(&mut app.gh([
-        "issue", "list", "-R", repo.as_str(), "--state", "open", "--limit", "200",
-        "--json", "number,title,body,labels,author,updatedAt,url",
+        "issue",
+        "list",
+        "-R",
+        repo.as_str(),
+        "--state",
+        "open",
+        "--limit",
+        "200",
+        "--json",
+        "number,title,body,labels,author,updatedAt,url",
     ]))
     .await?;
     Ok(Json(serde_json::from_str(&out)?))
@@ -544,7 +727,13 @@ mod tests {
     #[test]
     fn publishes_only_the_colonys_own_branch() {
         assert!(check_publish_branch("colonizer/issue-5-4a4ff109", "main").is_ok());
-        for branch in ["main", "master", "colonizer/", "feature/x", "Colonizer-dev/main"] {
+        for branch in [
+            "main",
+            "master",
+            "colonizer/",
+            "feature/x",
+            "Colonizer-dev/main",
+        ] {
             assert!(check_publish_branch(branch, "main").is_err(), "{branch}");
         }
         assert!(check_publish_branch("colonizer/release", "Colonizer/Release").is_err());
@@ -582,11 +771,19 @@ mod tests {
 
     #[test]
     fn colonizer_signs_the_commit_unless_the_config_says_otherwise() {
-        assert_eq!(commit_trailer(Some(5), "ab12cd34", true), format!("Refs #5\n\n{COLONIZER_CO_AUTHOR}"));
+        assert_eq!(
+            commit_trailer(Some(5), "ab12cd34", true),
+            format!("Refs #5\n\n{COLONIZER_CO_AUTHOR}")
+        );
         assert_eq!(commit_trailer(Some(5), "ab12cd34", false), "Refs #5");
-        assert_eq!(commit_trailer(None, "ab12cd34", false), "Colonizer session ab12cd34");
+        assert_eq!(
+            commit_trailer(None, "ab12cd34", false),
+            "Colonizer session ab12cd34"
+        );
         // The reference keeps its own paragraph, so git still reads the trailer from the last one.
-        assert!(commit_trailer(None, "ab12cd34", true).ends_with(&format!("\n\n{COLONIZER_CO_AUTHOR}")));
+        assert!(
+            commit_trailer(None, "ab12cd34", true).ends_with(&format!("\n\n{COLONIZER_CO_AUTHOR}"))
+        );
     }
 
     #[test]

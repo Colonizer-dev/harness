@@ -81,7 +81,9 @@ pub async fn serve(mut socket: WebSocket, workspace: PathBuf, cols: u16, rows: u
         let exited = exited.clone();
         move || {
             let code = match child.wait() {
-                Ok(status) => status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+                Ok(status) => status
+                    .code()
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
                 Err(_) => -1,
             };
             exited.store(true, Ordering::SeqCst);
@@ -101,11 +103,10 @@ pub async fn serve(mut socket: WebSocket, workspace: PathBuf, cols: u16, rows: u
                     let _ = input_tx.send(data.to_vec());
                 }
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(control) = serde_json::from_str::<Control>(&text) {
-                        if control.kind == "resize" && control.cols > 0 && control.rows > 0 {
+                    if let Ok(control) = serde_json::from_str::<Control>(&text)
+                        && control.kind == "resize" && control.cols > 0 && control.rows > 0 {
                             resize(&master, control.cols.min(1000), control.rows.min(1000));
                         }
-                    }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break true,
                 Some(Ok(_)) => {}
@@ -144,13 +145,22 @@ fn exit_frame(code: i32) -> Message {
 }
 
 fn winsize(cols: u16, rows: u16) -> libc::winsize {
-    libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 }
+    libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    }
 }
 
 fn resize(master: &OwnedFd, cols: u16, rows: u16) {
     let size = winsize(cols, rows);
     unsafe {
-        libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &size as *const libc::winsize);
+        libc::ioctl(
+            master.as_raw_fd(),
+            libc::TIOCSWINSZ as _,
+            &size as *const libc::winsize,
+        );
     }
 }
 
@@ -176,8 +186,15 @@ fn open_shell(workspace: &Path, cols: u16, rows: u16) -> io::Result<(OwnedFd, Ch
         }
     }
 
-    let shell = ["/bin/bash", "/bin/sh"].into_iter().find(|p| Path::new(p).exists()).unwrap_or("/bin/sh");
-    let cwd = if workspace.is_dir() { workspace } else { Path::new("/") };
+    let shell = ["/bin/bash", "/bin/sh"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap_or("/bin/sh");
+    let cwd = if workspace.is_dir() {
+        workspace
+    } else {
+        Path::new("/")
+    };
     let mut command = Command::new(shell);
     command
         .arg("-l")
