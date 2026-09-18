@@ -181,6 +181,24 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 The external audit of v0.1.3 checked these boundaries against the code; its findings and the
 release checkpoints are in [audit.md](audit.md).
 
+## Testing
+
+`cargo test --workspace` is the gate every change passes, and none of it needs KVM, network or
+credentials. The deepest layer in it is agentd's (`crates/colonizer-agentd/tests/`): it boots the
+real binary as a host process on loopback against a stub agent runner and asserts the documented
+behaviour (docs/protocol.md §2–§3) — the bearer-token wall, the initial prompt, events stamped with a
+gap-free `seq` and an RFC 3339 `ts`, `user_message` and `answer` frames reaching the runner's stdin,
+replay from `since`, the PTY roundtrip, and clean shutdown. `cargo test -p colonizer-agentd --test
+smoke` runs just the single boot-path pass of those.
+
+What it does not cover is the colony around agentd: the `msb run` boot itself, the session directory
+the mothership writes (plugin mounts, `boot.sh`, the mesh key), subagent model resolution and cost
+accounting — everything that needs a real microVM and a real model. `scripts/build-agentd.sh --smoke`
+runs agentd's boot checks inside a real microVM on a machine with `/dev/kvm`, and CI's `colony-smoke`
+job runs that on a self-hosted KVM runner — skipped until the repository has one (set the
+`COLONIZER_KVM_RUNNER` repository variable when it does), so the boot path stays covered by unit
+tests only until then.
+
 ## Packaging
 
 `scripts/install.sh` produces a self-contained app directory (`COLONIZER_HOME`, default

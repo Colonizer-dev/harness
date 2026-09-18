@@ -114,6 +114,11 @@ whole question card instead.
 {"type":"log","level":"info|warn|error","message":"…"}
 ```
 
+Every event above, with its exact fields, is also machine-readable: `docs/agent-events.schema.json`
+is the JSON Schema for the runner→agentd contract, `crates/colonizer/src/protocol.rs` deserialises
+the events the harness acts on into an `AgentEvent` enum, and the runner's contract test asserts its
+output matches the committed fixture (`modules/agents/claude-code/test/fixtures/events.jsonl`).
+
 Rules:
 
 - Any event a **subagent** produced carries `"agent": {"id":"toolu_…","name":"code-reviewer","description":"…"}`,
