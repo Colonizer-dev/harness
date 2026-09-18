@@ -77,6 +77,20 @@ impl SessionStatus {
     }
 }
 
+/// How far the last publish got, persisted on the session so a retry continues from there instead of
+/// starting over (and so browsers can show the progress). The publish itself re-derives the truth from
+/// git and the remote; this is the durable record of what was confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishStage {
+    /// The worktree's changes are committed on the colony's branch.
+    Committed,
+    /// The branch is on origin.
+    Pushed,
+    /// The pull request is open.
+    PrOpened,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshInfo {
     pub name: String,
@@ -108,6 +122,9 @@ pub struct Session {
     #[serde(default)]
     pub autopilot: bool,
     pub pr_url: Option<String>,
+    /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_stage: Option<PublishStage>,
     pub error: Option<String>,
     pub cost_usd: Option<f64>,
     /// Tokens per model from the last turn end, cumulative: `{model: {input_tokens, output_tokens, cache_read_tokens,
@@ -425,6 +442,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         agent: agent.id.clone(),
         autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app, &modules)),
         pr_url: None,
+        publish_stage: None,
         error: None,
         cost_usd: None,
         model_usage: None,
@@ -1158,6 +1176,12 @@ async fn teardown_vm(app: &Shared, s: &Session) {
     }
 }
 
+/// Persists a publish checkpoint (and broadcasts it to browsers), so a retry — even after a harness
+/// restart — knows how far the last attempt got without re-deriving it.
+pub async fn record_publish_stage(app: &App, id: &str, stage: PublishStage) {
+    app.update_session(id, |x| x.publish_stage = Some(stage)).await;
+}
+
 pub async fn publish_session(app: Shared, id: String) {
     // Checked before claiming and tearing down, so a refused push leaves the colony running.
     let Some(current) = app.session(&id).await else { return };
@@ -1167,14 +1191,17 @@ pub async fn publish_session(app: Shared, id: String) {
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
-    let Some((s, claimed)) = app
+    // The claim captures whether a microVM was live, because the status it leaves behind is `publishing`.
+    let Some((s, (claimed, was_live))) = app
         .update_session(&id, |x| {
-            let allowed = (x.status.is_live() || x.status == SessionStatus::Stopped) && !x.cleaned_up && x.git_admin_dir.is_some();
+            let allowed = can_publish(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+            // Before the mutation: `publishing` itself is not a live status.
+            let was_live = allowed && x.status.is_live();
             if allowed {
                 x.status = SessionStatus::Publishing;
                 x.error = None;
             }
-            allowed
+            (allowed, was_live)
         })
         .await
     else {
@@ -1184,16 +1211,36 @@ pub async fn publish_session(app: Shared, id: String) {
         return;
     }
     let log = app.logger(&id);
-    log.info("publishing: stopping the agent and removing the microVM").await;
-    teardown_vm(&app, &s).await;
+    // A live status is not the only proof of a sandbox: `stop` marks the colony stopped before the
+    // removal it starts, and that removal swallows its errors, so a `stopped`/`failed` colony can
+    // still have a microVM. Wherever an agent link is still wired up for the colony, a publish
+    // removes the sandbox first, exactly as a stop would have; only a colony with no runtime at all
+    // — one that never got far enough to log, or one from before a harness restart — is known to
+    // have nothing to remove.
+    if was_live {
+        log.info("publishing: stopping the agent and removing the microVM").await;
+        teardown_vm(&app, &s).await;
+    } else if app.runtimes.lock().await.contains_key(&id) {
+        log.info("publishing: removing any microVM left behind for this colony").await;
+        teardown_vm(&app, &s).await;
+    } else {
+        // A retry from `failed`/`no_changes` with no runtime has no microVM: the worktree and bare
+        // repo on the host are all a publish needs, and claiming to have removed one would be a lie.
+        log.info("publishing the kept worktree (no microVM is running)").await;
+    }
     match github::publish(&app, &s, &log).await {
         Ok(github::Published::NoChanges) => {
-            app.update_session(&id, |x| x.status = SessionStatus::NoChanges).await;
+            app.update_session(&id, |x| {
+                x.status = SessionStatus::NoChanges;
+                x.publish_stage = None;
+            })
+            .await;
         }
         Ok(github::Published::PullRequest(url)) => {
             app.update_session(&id, |x| {
                 x.status = SessionStatus::PrOpened;
                 x.pr_url = Some(url);
+                x.publish_stage = Some(PublishStage::PrOpened);
             })
             .await;
         }
@@ -1215,6 +1262,10 @@ pub async fn recover(app: &Shared) {
     let sessions = app.sessions.read().await.clone();
     for s in sessions {
         if s.status == SessionStatus::Publishing {
+            // The kill may have landed between persisting `publishing` and the teardown inside it, so a
+            // microVM can still be running — and after a restart nothing would reap it: the runtimes map
+            // is empty, so no later publish removes it, and `watch_sandboxes` skips non-live statuses.
+            teardown_vm(app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Failed;
                 x.error = Some("the harness restarted while publishing; the worktree is intact, publish again".into());
@@ -1542,8 +1593,7 @@ pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult
 
 pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
     let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    let publishable = (s.status.is_live() && s.status != SessionStatus::Starting) || s.status == SessionStatus::Stopped;
-    if !publishable || s.cleaned_up || s.git_admin_dir.is_none() {
+    if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
         return Err(client_error(StatusCode::CONFLICT, "this session can't be published right now"));
     }
     tokio::spawn(publish_session(app.clone(), id.clone()));
@@ -1553,6 +1603,25 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
 /// A colony can be resumed while its worktree is still on disk and no microVM is running for it.
 fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     matches!(status, SessionStatus::Stopped | SessionStatus::Failed) && !cleaned_up && has_worktree
+}
+
+/// What a refused resume says: the conditions `can_resume` checks, phrased for the user.
+const RESUME_CONFLICT: &str = "this colony can't be resumed: it has to be stopped and still have its worktree";
+
+/// Whether a colony can publish: it needs its worktree on disk, no publish already in flight, and a
+/// state a publish makes sense from. A failed or no-changes publish can be retried directly — the
+/// worktree, the committed branch and the remote are all still there, so no new microVM is booted.
+fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
+    matches!(
+        status,
+        SessionStatus::Running
+            | SessionStatus::WaitingForAnswer
+            | SessionStatus::Idle
+            | SessionStatus::Stopped
+            | SessionStatus::Failed
+            | SessionStatus::NoChanges
+    ) && !cleaned_up
+        && has_worktree
 }
 
 /// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1 again.
@@ -1573,24 +1642,37 @@ fn rotate_events(dir: &std::path::Path) {
 pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
     let s = app.session(&id).await.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
-        return Err(client_error(StatusCode::CONFLICT, "this colony can't be resumed: it has to be stopped and still have its worktree"));
+        return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
-    if let Some(rt) = app.runtimes.lock().await.remove(&id) {
-        rt.stop.send_replace(true);
-    }
-    rotate_events(&app.session_dir(&id));
-    let Some((s, ())) = app
+    // Re-checked inside the write, exactly as the publish claim below it is: `failed` is both
+    // resumable and publishable now, so a resume landing just after a publish claimed the colony
+    // must be refused, not overwrite `publishing` with `starting` and boot an agent onto the
+    // worktree while the host is committing and pushing.
+    let Some((s, claimed)) = app
         .update_session(&id, |x| {
-            x.status = SessionStatus::Starting;
-            x.error = None;
-            x.attention = None;
-            x.mesh = None;
-            x.local_port = None;
+            let allowed = can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+            if allowed {
+                x.status = SessionStatus::Starting;
+                x.error = None;
+                x.attention = None;
+                x.mesh = None;
+                x.local_port = None;
+            }
+            allowed
         })
         .await
     else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
+    if !claimed {
+        return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
+    }
+    // The colony is ours: only now is the old agent link dropped and the event log rotated, so a
+    // refused resume leaves both as it found them.
+    if let Some(rt) = app.runtimes.lock().await.remove(&id) {
+        rt.stop.send_replace(true);
+    }
+    rotate_events(&app.session_dir(&id));
     app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into()).await;
     tokio::spawn(boot(app.clone(), id, true));
     Ok(Json(s))
@@ -1901,6 +1983,7 @@ mod tests {
             agent: String::new(),
             autopilot: false,
             pr_url: None,
+            publish_stage: None,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -1998,5 +2081,30 @@ mod tests {
         assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));
+    }
+
+    /// A publish is retried from the worktree, not from a microVM: `failed` and `no_changes` colonies
+    /// (including ones stranded by the old publish) must be publishable without a resume.
+    #[test]
+    fn failed_and_no_changes_colonies_can_publish_again_without_a_new_microvm() {
+        assert!(can_publish(SessionStatus::Failed, false, true));
+        assert!(can_publish(SessionStatus::NoChanges, false, true));
+    }
+
+    #[test]
+    fn only_a_colony_with_a_worktree_and_no_publish_in_flight_can_publish() {
+        use SessionStatus::*;
+        for status in [Running, WaitingForAnswer, Idle, Stopped, Failed, NoChanges] {
+            assert!(can_publish(status, false, true), "{status:?}");
+        }
+        // A colony still in the queue or booting has no worktree to publish, one that is publishing is
+        // already claimed, and a colony whose PR is open is done.
+        for status in [Queued, Starting, Publishing, PrOpened] {
+            assert!(!can_publish(status, false, true), "{status:?}");
+        }
+        for status in [Running, Stopped, Failed, NoChanges] {
+            assert!(!can_publish(status, true, true), "cleaned up: {status:?}");
+            assert!(!can_publish(status, false, false), "no worktree: {status:?}");
+        }
     }
 }
