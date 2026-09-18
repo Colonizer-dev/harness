@@ -42,6 +42,8 @@ setting) is called out under **Take care** rather than left for you to find.
   leaves either the whole old app or the whole new one, never neither. ([#104])
 - A colony that cannot be resumed says why, instead of quoting `gh` at you.
   ([#111])
+- The colony chat follows new content at the pace it is written, sitting
+  level with the bottom instead of a line or two behind. ([#120])
 
 ### Fixed
 
@@ -175,6 +177,7 @@ Macs. ([#74])
 [#110]: https://github.com/Colonizer-dev/harness/pull/110
 [#111]: https://github.com/Colonizer-dev/harness/pull/111
 [#112]: https://github.com/Colonizer-dev/harness/pull/112
+[#120]: https://github.com/Colonizer-dev/harness/issues/120
 [#127]: https://github.com/Colonizer-dev/harness/issues/127
 [#131]: https://github.com/Colonizer-dev/harness/pull/131
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
