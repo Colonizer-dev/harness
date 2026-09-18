@@ -30,6 +30,56 @@ pub enum Wire {
     Openai,
 }
 
+/// The token counts of one routed response, in Anthropic's terms, so both wires account on one scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+impl Usage {
+    /// Anthropic's shape, the one colonies and session records speak.
+    pub fn json(&self) -> Value {
+        json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_tokens,
+            "cache_creation_input_tokens": self.cache_write_tokens,
+        })
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+}
+
+/// Dollars per million tokens, so the gateway can turn routed usage into spend and hold a colony to its
+/// budget. A rate left at `0` prices that kind of token at nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pricing {
+    #[serde(default)]
+    pub input_per_mtok: f64,
+    #[serde(default)]
+    pub output_per_mtok: f64,
+    #[serde(default)]
+    pub cache_read_per_mtok: f64,
+    #[serde(default)]
+    pub cache_write_per_mtok: f64,
+}
+
+impl Pricing {
+    /// What one response costs at these rates. The rates are per million tokens.
+    pub fn cost_usd(&self, usage: Usage) -> f64 {
+        (usage.input_tokens as f64 * self.input_per_mtok
+            + usage.output_tokens as f64 * self.output_per_mtok
+            + usage.cache_read_tokens as f64 * self.cache_read_per_mtok
+            + usage.cache_write_tokens as f64 * self.cache_write_per_mtok)
+            / 1_000_000.0
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
@@ -55,6 +105,10 @@ pub struct Provider {
     /// Anthropic model used when the provider is unreachable, times out or its queue is full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
+    /// Dollars per million tokens on this endpoint. Unset (or all `0`) means routed requests still count
+    /// their tokens but cost, and spend, nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<Pricing>,
 }
 
 impl Provider {
@@ -64,6 +118,12 @@ impl Provider {
 
     pub fn queue_timeout_secs(&self) -> u64 {
         self.queue_timeout_secs.unwrap_or_else(|| self.timeout_secs())
+    }
+
+    /// What one routed response costs here: $0 when the provider has no pricing configured, whose tokens
+    /// are still counted.
+    pub fn cost_usd(&self, usage: Usage) -> f64 {
+        self.pricing.map_or(0.0, |pricing| pricing.cost_usd(usage))
     }
 }
 
@@ -231,6 +291,7 @@ fn describe(app: &App, provider: &Provider) -> Value {
         "queue_timeout_secs": provider.queue_timeout_secs,
         "context_tokens": provider.context_tokens,
         "fallback_model": provider.fallback_model,
+        "pricing": provider.pricing,
         "in_flight": in_flight,
         "queued": queued,
     })
@@ -266,6 +327,11 @@ pub struct PutProvider {
     context_tokens: Option<u64>,
     #[serde(default)]
     fallback_model: Option<String>,
+    /// Omitted keeps the saved pricing, like the key: a Settings save from a web build that predates the
+    /// field must not quietly stop a budget from counting. All-`0` rates are how a caller clears it,
+    /// which also is exactly what "no pricing" means, so nothing becomes unreachable.
+    #[serde(default)]
+    pricing: Option<Pricing>,
 }
 
 fn default_auth() -> String {
@@ -274,6 +340,11 @@ fn default_auth() -> String {
 
 fn in_range(value: Option<u64>, min: u64, max: u64) -> bool {
     value.is_none_or(|v| (min..=max).contains(&v))
+}
+
+/// A price is a dollar amount per million tokens: finite, never negative.
+fn valid_price(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
 }
 
 pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<PutProvider>) -> ApiResult<Value> {
@@ -312,6 +383,13 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if !in_range(req.context_tokens, 1024, 2_000_000) {
         return Err(bad("context window must be 1,024-2,000,000 tokens"));
     }
+    let pricing_ok = req
+        .pricing
+        .as_ref()
+        .is_none_or(|p| [p.input_per_mtok, p.output_per_mtok, p.cache_read_per_mtok, p.cache_write_per_mtok].iter().all(|rate| valid_price(*rate)));
+    if !pricing_ok {
+        return Err(bad("pricing rates must be dollar amounts per million tokens, zero or more"));
+    }
     let fallback_model = req.fallback_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
     if fallback_model.as_deref().is_some_and(|m| !valid_model(m) || m.contains('/')) {
         return Err(bad("fallback model must be a Claude model such as sonnet or claude-sonnet-5"));
@@ -324,6 +402,13 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         Some(key) => write_secret(&app.provider_key_file(&id), key)?,
         None => {}
     }
+
+    // Omitted keeps the saved pricing: a Settings save from a web build that predates the field must not
+    // quietly stop a budget from counting. An all-`0` object clears it in effect, so nothing is unreachable.
+    let pricing = match req.pricing {
+        Some(pricing) => Some(pricing),
+        None => app.providers().into_iter().find(|p| p.id == id).and_then(|p| p.pricing),
+    };
 
     let provider = Provider {
         id: id.clone(),
@@ -338,6 +423,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         queue_timeout_secs: req.queue_timeout_secs,
         context_tokens: req.context_tokens,
         fallback_model,
+        pricing,
     };
     let mut providers = app.providers();
     match providers.iter_mut().find(|p| p.id == id) {
@@ -395,7 +481,52 @@ mod tests {
             queue_timeout_secs: None,
             context_tokens: None,
             fallback_model: None,
+            pricing: None,
         }
+    }
+
+    #[test]
+    fn routed_tokens_are_priced_per_million_and_unpriced_providers_cost_nothing() {
+        let usage = Usage { input_tokens: 1_000_000, output_tokens: 500_000, cache_read_tokens: 2_000_000, cache_write_tokens: 0 };
+        let pricing = Pricing { input_per_mtok: 3.0, output_per_mtok: 15.0, cache_read_per_mtok: 0.3, cache_write_per_mtok: 3.75 };
+        let cost = pricing.cost_usd(usage);
+        assert!((cost - (3.0 + 7.5 + 0.6)).abs() < 1e-9, "3 in + 0.5 out at 15 + 2 cache read at 0.3, got {cost}");
+        // Cached reads are priced separately from fresh input: the same million tokens twice, once each way.
+        let fresh = Usage { input_tokens: 1_000_000, ..Default::default() };
+        let cached = Usage { cache_read_tokens: 1_000_000, ..Default::default() };
+        let one_rate = Pricing { input_per_mtok: 1.0, cache_read_per_mtok: 0.1, ..Default::default() };
+        assert!((one_rate.cost_usd(fresh) - 1.0).abs() < 1e-9);
+        assert!((one_rate.cost_usd(cached) - 0.1).abs() < 1e-9, "{:?}", one_rate.cost_usd(cached));
+
+        let unpriced = provider("local");
+        assert_eq!(unpriced.cost_usd(usage), 0.0, "no pricing configured: tokens counted, dollars none");
+        assert_eq!(Usage::default().total_tokens(), 0);
+        assert_eq!(usage.total_tokens(), 3_500_000);
+    }
+
+    /// providers.json on disk predates `pricing`, and a Settings save from an older web build omits it.
+    /// Either one must leave the provider priced as it was, not silently free.
+    #[test]
+    fn a_provider_saved_before_pricing_deserialises_without_it() {
+        let saved = r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key"}"#;
+        let provider: Provider = serde_json::from_str(saved).unwrap();
+        assert_eq!(provider.pricing, None);
+
+        let priced: Provider = serde_json::from_str(
+            r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","pricing":{"input_per_mtok":0.27,"output_per_mtok":1.1}}"#,
+        )
+        .unwrap();
+        assert_eq!(priced.pricing, Some(Pricing { input_per_mtok: 0.27, output_per_mtok: 1.1, ..Default::default() }));
+        assert_eq!(priced.cost_usd(Usage { input_tokens: 1_000_000, ..Default::default() }), 0.27);
+    }
+
+    #[test]
+    fn prices_must_be_amounts_never_negatives_or_infinities() {
+        assert!(valid_price(0.0), "a zero rate prices that token kind at nothing");
+        assert!(valid_price(3.0));
+        assert!(!valid_price(-0.01));
+        assert!(!valid_price(f64::NAN));
+        assert!(!valid_price(f64::INFINITY));
     }
 
     #[test]

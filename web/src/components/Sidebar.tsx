@@ -474,7 +474,9 @@ function SessionList({
                   <span className="rounded-md bg-panel-3 px-1.5 text-[11px] font-medium leading-[18px] text-muted">{orgOf(session)}</span>
                 )}
                 <span>{timeAgo(session.updated_at)}</span>
-                {session.cost_usd != null && <span>· ${session.cost_usd.toFixed(2)}</span>}
+                {(session.cost_usd != null || (session.routed_cost_usd ?? 0) > 0) && (
+                  <span>· ${((session.cost_usd ?? 0) + (session.routed_cost_usd ?? 0)).toFixed(2)}</span>
+                )}
                 {session.cleaned_up && <span>· cleaned up</span>}
                 <AttentionBadge attention={session.attention} />
               </div>

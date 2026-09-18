@@ -9,6 +9,7 @@
 //! parameters (`temperature`, `top_p`, `stop_sequences`) that OpenAI's reasoning models refuse unless left
 //! at their defaults, so anything not mapped here is dropped rather than forwarded.
 
+use crate::providers::Usage;
 use axum::{body::Bytes, http::StatusCode};
 use futures_util::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
@@ -217,15 +218,15 @@ fn stop_reason(finish_reason: &str) -> &'static str {
 }
 
 /// OpenAI counts cached prompt tokens inside `prompt_tokens`; Anthropic reports them separately.
-fn usage(usage: &Value) -> Value {
+fn usage_of(usage: &Value) -> Usage {
     let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
     let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(prompt);
-    json!({
-        "input_tokens": prompt - cached,
-        "output_tokens": usage["completion_tokens"].as_u64().unwrap_or(0),
-        "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": 0,
-    })
+    Usage {
+        input_tokens: prompt - cached,
+        output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: cached,
+        cache_write_tokens: 0,
+    }
 }
 
 /// A tool call's `arguments` string as the object Anthropic's `input` must be.
@@ -240,8 +241,9 @@ fn arguments(raw: &Value) -> Result<Value, String> {
     }
 }
 
-/// A non-streaming Chat Completions response as an Anthropic message.
-pub fn translate_response(body: &[u8], info: &RequestInfo) -> Result<Value, String> {
+/// A non-streaming Chat Completions response as an Anthropic message, with the usage it reported teed out
+/// for the gateway's spend accounting.
+pub fn translate_response(body: &[u8], info: &RequestInfo) -> Result<(Value, Usage), String> {
     let response: Value = serde_json::from_slice(body).map_err(|_| "provider response is not JSON".to_string())?;
     let choice = response["choices"].get(0).ok_or("provider response has no choices")?;
     let message = &choice["message"];
@@ -259,16 +261,20 @@ pub fn translate_response(body: &[u8], info: &RequestInfo) -> Result<Value, Stri
             "input": arguments(&call["function"]["arguments"])?,
         }));
     }
-    Ok(json!({
-        "id": response["id"].as_str().unwrap_or("msg_openai"),
-        "type": "message",
-        "role": "assistant",
-        "model": response["model"].as_str().unwrap_or(&info.model),
-        "content": content,
-        "stop_reason": stop_reason(choice["finish_reason"].as_str().unwrap_or_default()),
-        "stop_sequence": null,
-        "usage": usage(&response["usage"]),
-    }))
+    let counted = usage_of(&response["usage"]);
+    Ok((
+        json!({
+            "id": response["id"].as_str().unwrap_or("msg_openai"),
+            "type": "message",
+            "role": "assistant",
+            "model": response["model"].as_str().unwrap_or(&info.model),
+            "content": content,
+            "stop_reason": stop_reason(choice["finish_reason"].as_str().unwrap_or_default()),
+            "stop_sequence": null,
+            "usage": counted.json(),
+        }),
+        counted,
+    ))
 }
 
 /// An OpenAI error response as the status, Anthropic error type and message the gateway should answer
@@ -320,7 +326,7 @@ pub struct StreamTranslator {
     tool: Option<(u64, usize)>,
     seen_tools: HashSet<u64>,
     stop_reason: Option<&'static str>,
-    usage: Value,
+    usage: Usage,
 }
 
 impl StreamTranslator {
@@ -336,12 +342,17 @@ impl StreamTranslator {
             tool: None,
             seen_tools: HashSet::new(),
             stop_reason: None,
-            usage: usage(&Value::Null),
+            usage: Usage::default(),
         }
     }
 
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// The stream's token totals, complete once it is finished.
+    pub fn usage(&self) -> Usage {
+        self.usage
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
@@ -442,7 +453,7 @@ impl StreamTranslator {
             }
         }
         if chunk["usage"].is_object() {
-            self.usage = usage(&chunk["usage"]);
+            self.usage = usage_of(&chunk["usage"]);
         }
     }
 
@@ -460,7 +471,7 @@ impl StreamTranslator {
             "stop_reason": null,
             "stop_sequence": null,
             // OpenAI only reports usage in the last chunk; the totals go out with `message_delta`.
-            "usage": usage(&Value::Null),
+            "usage": Usage::default().json(),
         });
         event(out, "message_start", json!({"type": "message_start", "message": message}));
     }
@@ -524,7 +535,7 @@ impl StreamTranslator {
         };
         self.start(&Value::Null, out);
         self.close_blocks(out);
-        let delta = json!({"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": null}, "usage": self.usage});
+        let delta = json!({"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": null}, "usage": self.usage.json()});
         event(out, "message_delta", delta);
         event(out, "message_stop", json!({"type": "message_stop"}));
         self.finished = true;
@@ -542,16 +553,19 @@ impl StreamTranslator {
 /// Wraps an upstream Chat Completions body so it streams Anthropic events. A chunk that translates to
 /// nothing (the role-only first chunk, an empty delta, a comment) still yields an empty `Bytes`, which
 /// `stream_body` counts as activity: a provider that keeps talking is not mistaken for a silent one.
+/// `on_usage` runs once the translation is complete, with the usage the upstream reported, so the
+/// gateway can price the response without reading these bytes a second time.
 pub fn translate_stream(
     upstream: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
     model: String,
+    on_usage: impl FnOnce(Usage) + Send + 'static,
 ) -> impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static {
-    let state = (Box::pin(upstream), StreamTranslator::new(model), false);
-    futures_util::stream::unfold(state, |(mut upstream, mut translator, done)| async move {
+    let state = (Box::pin(upstream), StreamTranslator::new(model), false, Some(on_usage));
+    futures_util::stream::unfold(state, |(mut upstream, mut translator, done, mut on_usage)| async move {
         if done {
             return None;
         }
-        let (out, done) = match upstream.next().await {
+        let (out, finished) = match upstream.next().await {
             Some(Ok(chunk)) => {
                 let out = translator.push(&chunk);
                 (out, translator.is_finished())
@@ -559,7 +573,13 @@ pub fn translate_stream(
             Some(Err(e)) => (translator.fail(&format!("provider stream failed: {}", e.without_url())), true),
             None => (translator.finish(), true),
         };
-        Some((Ok(Bytes::from(out)), (upstream, translator, done)))
+        // The usage is complete exactly when the translation is, so this is where it leaves the stream.
+        if finished
+            && let Some(on_usage) = on_usage.take()
+        {
+            on_usage(translator.usage());
+        }
+        Some((Ok(Bytes::from(out)), (upstream, translator, finished, on_usage)))
     })
 }
 
@@ -761,6 +781,35 @@ mod tests {
         assert_eq!(bytewise, whole);
     }
 
+    /// The gateway prices a stream without re-parsing it: the usage the translator already extracted is
+    /// handed over exactly once the translation completes, whatever the chunk layout.
+    #[tokio::test]
+    async fn a_finished_stream_hands_its_usage_to_the_gateway() {
+        let body = sse(&[
+            chunk(json!({"role": "assistant", "content": ""}), Value::Null),
+            chunk(json!({}), json!("stop")),
+            json!({"id": "c", "model": "gpt-5.5", "choices": [], "usage": {"prompt_tokens": 30, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 12}}}),
+        ]);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = seen.clone();
+        // A first chunk cut mid-line, so the tee cannot depend on chunk boundaries either.
+        let (head, rest) = body.split_at(17);
+        let chunks: Vec<reqwest::Result<Bytes>> = vec![Ok(Bytes::from(head.to_vec())), Ok(Bytes::from(rest.to_vec()))];
+        let stream = translate_stream(futures_util::stream::iter(chunks), "gpt-5.5".into(), move |usage| {
+            *sink.lock().unwrap() = Some(usage);
+        });
+        tokio::pin!(stream);
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            out.extend_from_slice(&item.expect("the stream translates"));
+        }
+        assert!(std::str::from_utf8(&out).unwrap().contains("event: message_stop"), "the stream translated");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(Usage { input_tokens: 18, output_tokens: 4, cache_read_tokens: 12, cache_write_tokens: 0 })
+        );
+    }
+
     #[test]
     fn parallel_tool_calls_get_their_own_content_blocks() {
         let call = |index: u64, head: Option<(&str, &str)>, arguments: &str| {
@@ -857,7 +906,7 @@ mod tests {
             })
             .to_string()
         };
-        let message = translate_response(response("{\"command\":\"pwd\"}").as_bytes(), &info).unwrap();
+        let (message, usage) = translate_response(response("{\"command\":\"pwd\"}").as_bytes(), &info).unwrap();
         assert_eq!(
             message,
             json!({
@@ -871,6 +920,7 @@ mod tests {
                 "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
             })
         );
+        assert_eq!(usage, Usage { input_tokens: 10, output_tokens: 5, ..Default::default() }, "the usage is teed out for pricing");
         assert!(translate_response(response("{\"command\":").as_bytes(), &info).is_err());
         assert!(translate_response(response("[1]").as_bytes(), &info).is_err());
         assert!(translate_response(b"<html>", &info).is_err());

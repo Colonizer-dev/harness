@@ -11,6 +11,8 @@ type FieldKey =
   | "subagent_model"
   | "background_model"
   | "max_parallel"
+  | "budget_usd"
+  | "host_disk"
   | "memory_enabled"
   | "watchdog_enabled"
   | "stall_minutes"
@@ -21,10 +23,12 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "boolean";
+  kind: "model" | "number" | "size" | "boolean";
   min?: number;
   max?: number;
   unit?: string;
+  /** A number field that takes fractions, like a dollar amount. */
+  decimal?: boolean;
 }
 
 const FIELDS: FieldSpec[] = [
@@ -32,6 +36,8 @@ const FIELDS: FieldSpec[] = [
   { key: "subagent_model", group: "Models", label: "Subagents", hint: "Agents the orchestrator starts for side tasks", kind: "model" },
   { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
+  { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
+  { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
   { key: "watchdog_enabled", group: "Watchdog", label: "Watchdog", hint: "Nudge colonies that stop making progress", kind: "boolean" },
   { key: "stall_minutes", group: "Watchdog", label: "Stalled after", hint: "Minutes without agent activity", kind: "number", min: 1, max: 1440, unit: "min" },
@@ -49,6 +55,11 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       return settings.agent?.[key];
     case "max_parallel":
       return settings.max_parallel;
+    case "budget_usd":
+      return settings.budget_usd;
+    case "host_disk":
+      // `""` and `"0"` both mean unlimited on the server; show the canonical spelling.
+      return settings.host_disk === "" ? "0" : settings.host_disk;
     case "memory_enabled":
       return settings.memory?.enabled;
     case "watchdog_enabled":
@@ -78,6 +89,10 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
       return setting("agent", key);
     case "max_parallel":
       return setting("sandbox", "max_parallel");
+    case "budget_usd":
+      return setting("sandbox", "budget_usd");
+    case "host_disk":
+      return setting("sandbox", "host_disk");
     case "memory_enabled":
       return toggle("memory");
     case "watchdog_enabled":
@@ -91,6 +106,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
 function describe(spec: FieldSpec, value: Value): string {
   if (value === undefined || value === null) return "global default";
   if (typeof value === "boolean") return value ? "on" : "off";
+  // 0 — or nothing set at all, on the server's quota fields — is how unlimited is written.
+  if (spec.key === "budget_usd" && value === 0) return "unlimited";
+  if (spec.kind === "size" && (value === "" || value === "0")) return "unlimited";
   if (value === "") return spec.key === "model" ? "Claude Code default" : "same as orchestrator";
   return spec.unit ? `${value} ${spec.unit}` : String(value);
 }
@@ -111,13 +129,22 @@ function toDraft(settings: OrgSettings, modules: ModuleInfo[] | null): Draft {
 }
 
 function parseNumber(spec: FieldSpec, raw: string): number | null {
-  if (!/^\d+$/.test(raw.trim())) return null;
+  const pattern = spec.decimal ? /^\d+(\.\d+)?$/ : /^\d+$/;
+  if (!pattern.test(raw.trim())) return null;
   const n = Number(raw);
   if ((spec.min !== undefined && n < spec.min) || (spec.max !== undefined && n > spec.max)) return null;
   return n;
 }
 
-/** Inherited fields are sent as null; an empty model override also means inherit. */
+/** The server's disk-size rule, mirrored for instant feedback: `512M`, `16G`, bare bytes, either case.
+ *  Empty is unlimited too; returns the trimmed text to send, or null when it isn't a size. */
+function parseSize(raw: string): string | null {
+  const text = raw.trim();
+  if (text === "") return "";
+  return /^\d+[KkMmGgTt]?$/.test(text) ? text : null;
+}
+
+/** Inherited fields are sent as null; an empty model or size override also means inherit. */
 function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null } {
   const pick = (key: FieldKey): string | number | boolean | null => {
     const field = draft[key];
@@ -125,9 +152,18 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     if (!field.override) return null;
     if (spec.kind === "boolean") return Boolean(field.value);
     if (spec.kind === "model") return String(field.value).trim() || null;
+    if (spec.kind === "size") {
+      const text = parseSize(String(field.value));
+      return text === "" ? null : text; // an override left empty is no override at all
+    }
     return parseNumber(spec, String(field.value));
   };
-  const invalid = FIELDS.find((spec) => spec.kind === "number" && draft[spec.key].override && pick(spec.key) === null);
+  const invalid = FIELDS.find(
+    (spec) =>
+      draft[spec.key].override &&
+      ((spec.kind === "number" && parseNumber(spec, String(draft[spec.key].value)) === null) ||
+        (spec.kind === "size" && parseSize(String(draft[spec.key].value)) === null)),
+  );
   const settings: OrgSettings = {
     agent: {
       model: pick("model") as string | null,
@@ -135,6 +171,8 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       background_model: pick("background_model") as string | null,
     },
     max_parallel: pick("max_parallel") as number | null,
+    budget_usd: pick("budget_usd") as number | null,
+    host_disk: pick("host_disk") as string | null,
     memory: { enabled: pick("memory_enabled") as boolean | null },
     watchdog: {
       enabled: pick("watchdog_enabled") as boolean | null,
@@ -144,8 +182,20 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
   };
   return {
     settings,
-    error: invalid ? `${invalid.label} must be a whole number from ${invalid.min} to ${invalid.max}` : null,
+    error: invalid
+      ? invalid.kind === "size"
+        ? `${invalid.label} must be a size like 512M or 16G, or 0 for unlimited`
+        : numberError(invalid)
+      : null,
   };
+}
+
+/** What a rejected number must look like, for the message under the form. */
+function numberError(spec: FieldSpec): string {
+  const shape = spec.decimal ? "a dollar amount" : "a whole number";
+  if (spec.min !== undefined && spec.max !== undefined) return `${spec.label} must be ${shape} from ${spec.min} to ${spec.max}`;
+  if (spec.min !== undefined) return `${spec.label} must be ${shape} of ${spec.min} or more`;
+  return `${spec.label} must be ${shape}`;
 }
 
 /** Skillset overrides with sorted keys, so switching one back and forth doesn't read as a change. */
@@ -342,10 +392,10 @@ function OrgSettingsForm({
                       <div className="flex items-center gap-2">
                         <input
                           type="number"
-                          inputMode="numeric"
+                          inputMode={spec.decimal ? "decimal" : "numeric"}
                           min={spec.min}
                           max={spec.max}
-                          step={1}
+                          step={spec.decimal ? "any" : 1}
                           value={String(draft[spec.key].value)}
                           onChange={(e) => set(spec.key, { value: e.target.value })}
                           aria-label={`${spec.label} for ${org}`}
@@ -358,6 +408,21 @@ function OrgSettingsForm({
                         />
                         {spec.unit && <span className="text-[13px] text-muted">{spec.unit}</span>}
                       </div>
+                    )}
+                    {spec.kind === "size" && (
+                      <input
+                        type="text"
+                        value={String(draft[spec.key].value)}
+                        onChange={(e) => set(spec.key, { value: e.target.value })}
+                        placeholder="16G"
+                        aria-label={`${spec.label} for ${org}`}
+                        aria-invalid={parseSize(String(draft[spec.key].value)) === null}
+                        className={cx(
+                          inputClass,
+                          "w-28",
+                          parseSize(String(draft[spec.key].value)) === null && "border-err focus:border-err",
+                        )}
+                      />
                     )}
                     {spec.kind === "boolean" && (
                       <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
