@@ -3,6 +3,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { sortSessions } from "../sessionOrder";
 import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
+import { type ImagePull } from "../useImagePull";
 import {
   IconCheck,
   IconChevron,
@@ -15,7 +16,10 @@ import {
   IconSettings,
   IconX,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, Switch, cx, inputClass, meshBroken, occupiesSlot, orgOf, sameOrg, store, stored, timeAgo } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, Switch, cx, inputClass, meshBroken, occupiesSlot, orgOf, sameOrg, seconds, store, stored, timeAgo } from "./ui";
+
+/** Which pane the sidebar shows. Owned by App so Settings's Setup pane can open the launcher. */
+export type SidebarTab = "sessions" | "new";
 
 export type MainView = "colonies" | "memory";
 
@@ -54,6 +58,9 @@ export function Sidebar({
   pendingMemory,
   autopilotDefault,
   attentionStrip,
+  tab,
+  onTab,
+  pull,
 }: {
   status: HarnessStatus | null;
   statusError: boolean;
@@ -77,10 +84,15 @@ export function Sidebar({
   autopilotDefault: boolean;
   /** The notification layer's in-tab switch: when off, no strip — today's sidebar exactly. */
   attentionStrip: boolean;
+  /** Lifted to App: Setup's Launch button opens this tab directly. */
+  tab: SidebarTab;
+  onTab: (tab: SidebarTab) => void;
+  /** App's one image-pull poller; the download stays visible here after Setup closes. */
+  pull: ImagePull;
 }) {
   const api = useApi();
-  const [tab, setTab] = useState<"sessions" | "new">(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
 
+  // The sidebar remembers its own tab across loads; Setup writes nothing here.
   useEffect(() => {
     store("colonizer.sidebar-tab", tab);
   }, [tab]);
@@ -136,15 +148,16 @@ export function Sidebar({
       </div>
 
       <StatusRow status={status} error={statusError} onOpenSettings={onOpenSettings} />
+      <PullIndicator pull={pull} />
 
       {attentionStrip && <AttentionStrip sessions={sessions} onOpenColony={onOpenColony} />}
 
       <div role="tablist" aria-label="Sidebar" className="mx-3 mt-2 grid grid-cols-2 gap-1 rounded-lg bg-panel-2 p-1">
-        <SidebarTab active={tab === "sessions"} onClick={() => setTab("sessions")}>
+        <SidebarTab active={tab === "sessions"} onClick={() => onTab("sessions")}>
           Colonies
           {visible.length > 0 && <span className="text-faint">{visible.length}</span>}
         </SidebarTab>
-        <SidebarTab active={tab === "new"} onClick={() => setTab("new")}>
+        <SidebarTab active={tab === "new"} onClick={() => onTab("new")}>
           <IconPlus size={13} /> Launch
         </SidebarTab>
       </div>
@@ -157,7 +170,7 @@ export function Sidebar({
             selectedId={view === "colonies" ? selectedId : null}
             org={selectedOrg}
             onSelect={onSelect}
-            onNew={() => setTab("new")}
+            onNew={() => onTab("new")}
           />
         ) : (
           <NewSession
@@ -167,7 +180,7 @@ export function Sidebar({
             onOpenSettings={onOpenSettings}
             autopilotDefault={autopilotDefault}
             onCreated={(session) => {
-              setTab("sessions");
+              onTab("sessions");
               onCreated(session);
             }}
           />
@@ -463,6 +476,44 @@ function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpe
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** The image download as one quiet line under the status dots. It shows only while the pull
+ *  runs or has failed — done and cached need no attention — so it never becomes furniture.
+ *  Reads App's shared poller, so it keeps counting after Setup closes. */
+function PullIndicator({ pull }: { pull: ImagePull }) {
+  const { status, error } = pull;
+  // Re-render once a second while pulling so the elapsed time moves.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (status?.state !== "pulling") return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [status?.state]);
+
+  if (error || status?.state === "failed") {
+    return (
+      <button
+        type="button"
+        onClick={() => void pull.start()}
+        className="mx-4 flex w-[calc(100%-2rem)] cursor-pointer items-center gap-2 py-1 text-left text-[12px] text-err [overflow-wrap:anywhere]"
+      >
+        <span className="size-1.5 shrink-0 rounded-full bg-err" />
+        <span className="min-w-0 flex-1">
+          Image download failed{status?.error ? `: ${status.error}` : error ? `: ${error}` : ""} — a colony will retry at boot; click to retry now.
+        </span>
+      </button>
+    );
+  }
+  if (status?.state !== "pulling") return null;
+  return (
+    <div className="mx-4 flex items-center gap-2 py-1 text-[12px] text-muted" role="status">
+      <Spinner className="size-3" />
+      <span className="min-w-0 truncate">
+        Downloading <span className="font-mono">{status.image}</span> · {seconds(status.started_at)}s
+      </span>
     </div>
   );
 }

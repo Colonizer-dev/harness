@@ -16,7 +16,6 @@ import { notificationSupport, requestNotificationPermission, type NotificationPe
 import type {
   HarnessStatus,
   HeadroomStatus,
-  LoginView,
   Mem0Check,
   Mem0Status,
   ModelOption,
@@ -29,7 +28,6 @@ import type {
   ProviderPreset,
   ProviderPricing,
   ProviderWire,
-  PullStatus,
   SchemaField,
   TelemetryStatus,
   UpdateStatus,
@@ -37,6 +35,8 @@ import type {
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
+import { type ImagePull } from "../useImagePull";
+import { setupTone, type SetupView } from "../setup";
 import {
   BrandAlibabaCloud,
   BrandClaude,
@@ -61,14 +61,16 @@ import {
   type IconProps,
 } from "./icons";
 import { SkillsetField } from "./Skillsets";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, timeAgo, useMediaQuery, type Tone } from "./ui";
+import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
+import { SetupSection } from "./SetupSection";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -106,11 +108,16 @@ export function SettingsDialog({
   notifications,
   onNotificationsChanged,
   initialSection,
+  setup,
+  pull,
+  onLaunch,
+  onSetupShown,
+  onSetupDismissed,
 }: {
   open: boolean;
   onClose: () => void;
   status: HarnessStatus | null;
-  onStatusChanged: () => void;
+  onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
@@ -121,6 +128,16 @@ export function SettingsDialog({
   onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
   /** The section to open on, instead of the first. */
   initialSection?: SectionId;
+  /** The Setup checklist's derivation, computed in App from the same state the app polls. */
+  setup: SetupView | null;
+  /** The app-wide image-pull poller, shared with the sidebar and Setup. */
+  pull: ImagePull;
+  /** Setup's Launch row: closes Settings and opens the sidebar's launcher. */
+  onLaunch: () => void;
+  /** Fired once the Setup pane has been on screen, so the standalone live-map prompt stands down. */
+  onSetupShown: () => void;
+  /** "Not now": held in memory, so the auto-open may fire again on the next page load only. */
+  onSetupDismissed: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -150,6 +167,11 @@ export function SettingsDialog({
           notifications={notifications}
           onNotificationsChanged={onNotificationsChanged}
           initialSection={initialSection}
+          setup={setup}
+          pull={pull}
+          onLaunch={onLaunch}
+          onSetupShown={onSetupShown}
+          onSetupDismissed={onSetupDismissed}
           onClose={onClose}
         />
       )}
@@ -168,10 +190,15 @@ function SettingsBody({
   notifications,
   onNotificationsChanged,
   initialSection,
+  setup,
+  pull,
+  onLaunch,
+  onSetupShown,
+  onSetupDismissed,
   onClose,
 }: {
   status: HarnessStatus | null;
-  onStatusChanged: () => void;
+  onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
@@ -181,6 +208,11 @@ function SettingsBody({
   /** A React-style setter, so the pane can compose over the latest prefs (see SettingsDialog). */
   onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
   initialSection?: SectionId;
+  setup: SetupView | null;
+  pull: ImagePull;
+  onLaunch: () => void;
+  onSetupShown: () => void;
+  onSetupDismissed: () => void;
   onClose: () => void;
 }) {
   const api = useApi();
@@ -247,11 +279,29 @@ function SettingsBody({
   const claude = status?.claude;
   const connectionsTone: Tone | null = !status ? null : github?.connected && claude?.configured ? "ok" : "err";
   const runtimeBroken = Boolean(status && (!status.sandbox.msb_version || status.sandbox.claude_bin_error || meshBroken(status.mesh)));
+  // The Setup summary tone shares one derivation with the pane itself.
+  const setupToneValue: Tone | null = setup ? setupTone(setup) : null;
+
+  /** One save handler for module panes and Setup's stack pick alike: keeps the drafts and the app's modules in step. */
+  const onModuleSaved = (saved: ModuleInfo) => {
+    const next = (modules ?? []).map((m) => (m.kind === saved.kind ? saved : m));
+    setModules(next);
+    setDrafts((d) => ({ ...d, [saved.kind]: draftOf(saved) }));
+    onModulesChanged(next);
+  };
 
   const groups: NavGroup[] = [
     {
       label: "General",
       items: [
+        {
+          id: "setup",
+          label: "Setup",
+          hint: "The checklist for the first colony",
+          tone: setupToneValue,
+          toneText:
+            setupToneValue === "err" ? "Needs setup" : setupToneValue === "ok" ? "All set" : setupToneValue === "warn" ? "Not finished yet" : undefined,
+        },
         {
           id: "connections",
           label: "Connections",
@@ -313,7 +363,25 @@ function SettingsBody({
   const back = narrow ? () => setSection(null) : undefined;
 
   let pane: ReactNode = null;
-  if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
+  if (active === "setup") {
+    pane = (
+      <SetupSection
+        status={status}
+        setup={setup}
+        pull={pull}
+        telemetry={telemetry}
+        sandbox={(modules ?? []).find((m) => m.kind === "sandbox") ?? null}
+        onStatusChanged={onStatusChanged}
+        onSandboxSaved={onModuleSaved}
+        onTelemetryChanged={onTelemetryChanged}
+        onLaunch={onLaunch}
+        onDismiss={onSetupDismissed}
+        onShown={onSetupShown}
+        onOpenLiveMap={() => select("live-map")}
+        back={back}
+      />
+    );
+  } else if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
@@ -343,15 +411,11 @@ function SettingsBody({
           module={module}
           draft={draft}
           models={kind === "agent" ? models : undefined}
+          pull={pull}
           back={back}
           onDraft={(patch) => setDrafts((d) => ({ ...d, [kind]: { ...d[kind], ...patch } }))}
           onReset={() => setDrafts((d) => ({ ...d, [kind]: draftOf(module) }))}
-          onSaved={(saved) => {
-            const next = (modules ?? []).map((m) => (m.kind === saved.kind ? saved : m));
-            setModules(next);
-            setDrafts((d) => ({ ...d, [kind]: draftOf(saved) }));
-            onModulesChanged(next);
-          }}
+          onSaved={onModuleSaved}
         />
       ) : (
         <Pane title={kindInfo(kind).title} back={back}>
@@ -618,8 +682,6 @@ function Code({ children }: { children: ReactNode }) {
 // Connections: GitHub and Claude
 // ---------------------------------------------------------------------------
 
-const IDLE_LOGIN: LoginView = { state: "idle", url: null, message: null };
-
 /**
  * A remote account avatar, next to the login row. Same tile as a provider mark; the
  * panel background keeps it a quiet square if the image is missing or fails to load.
@@ -636,55 +698,6 @@ function Avatar({ src }: { src: string }) {
       referrerPolicy="no-referrer"
       className="size-8 shrink-0 select-none rounded-lg bg-panel-2 object-cover"
     />
-  );
-}
-
-/**
- * The saved Claude credential's provenance, under the login buttons: why the account
- * may not be identified, and when the token dies. Anthropic does not report an expiry,
- * so an estimated one says "about"; past, or within 30 days, it turns into a warning.
- */
-function ClaudeCredential({ claude }: { claude: HarnessStatus["claude"] }) {
-  const asDate = (ts: string | null | undefined) => {
-    if (!ts) return null;
-    const date = new Date(ts);
-    return isNaN(date.getTime()) ? null : date;
-  };
-  const savedAt = asDate(claude.saved_at);
-  const expiresAt = asDate(claude.expires_at);
-  const msLeft = expiresAt ? expiresAt.getTime() - Date.now() : null;
-  const expired = msLeft != null && msLeft <= 0;
-  const daysLeft = msLeft != null && msLeft > 0 ? msLeft / 86_400_000 : null;
-  const expiringSoon = daysLeft != null && daysLeft <= 30;
-  return (
-    <div className="space-y-1 text-[12.5px] [overflow-wrap:anywhere]">
-      {claude.account_note && <p className="text-muted">{claude.account_note}</p>}
-      {(savedAt || expiresAt) && (
-        <p className="text-muted">
-          {savedAt && <span>Saved {savedAt.toLocaleDateString()}</span>}
-          {savedAt && expiresAt && " · "}
-          {expiresAt &&
-            (expired ? (
-              <span className="text-err">
-                {claude.expires_estimated ? "estimated expiry passed " : "expired "}
-                {timeAgo(claude.expires_at)}
-              </span>
-            ) : (
-              <span className={cx(expiringSoon && "text-warn")}>
-                expires {claude.expires_estimated ? "about " : ""}
-                {expiresAt.toLocaleDateString()}
-              </span>
-            ))}
-        </p>
-      )}
-      {expiringSoon && daysLeft != null && (
-        <div>
-          <Badge tone="warn">
-            Expires in {Math.ceil(daysLeft)} day{Math.ceil(daysLeft) === 1 ? "" : "s"}
-          </Badge>
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -722,99 +735,10 @@ function ConnectionCard({
   );
 }
 
-function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessStatus | null; onStatusChanged: () => void; back?: () => void }) {
-  const api = useApi();
-  const toast = useToast();
-  const [githubToken, setGithubToken] = useState("");
-  const [claudeToken, setClaudeToken] = useState("");
-  const [saving, setSaving] = useState<"github" | "claude" | null>(null);
-  const [login, setLogin] = useState<LoginView>(IDLE_LOGIN);
-  const [code, setCode] = useState("");
-  const githubTokenId = useId();
-  const claudeTokenId = useId();
-  const codeId = useId();
-  const flowActive = login.state === "starting" || login.state === "awaiting_code" || login.state === "verifying";
-
-  useEffect(() => {
-    if (!flowActive) return;
-    const timer = setInterval(async () => {
-      try {
-        const view = await api.claudeLogin();
-        setLogin(view);
-        if (view.state === "done") {
-          toast(view.message || "Claude subscription connected");
-          onStatusChanged();
-        }
-      } catch {
-        /* retry on next tick */
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [api, flowActive, onStatusChanged, toast]);
-
-  const run = async (kind: "github" | "claude", fn: () => Promise<unknown>, success: string) => {
-    setSaving(kind);
-    try {
-      await fn();
-      toast(success);
-      onStatusChanged();
-    } catch (error) {
-      toast(errorMessage(error), "error");
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const startLogin = async () => {
-    setCode("");
-    try {
-      setLogin(await api.claudeLoginStart());
-    } catch (error) {
-      setLogin({ state: "error", url: null, message: errorMessage(error) });
-    }
-  };
-
-  const submitCode = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      setLogin(await api.claudeLoginCode(code.trim()));
-    } catch (error) {
-      toast(errorMessage(error), "error");
-    }
-  };
-
-  const github = status?.github;
-  const claude = status?.claude;
+function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessStatus | null; onStatusChanged: (fresh?: boolean) => Promise<void> | void; back?: () => void }) {
+  const github = status?.github ?? null;
+  const claude = status?.claude ?? null;
   const githubViaToken = github?.source === "saved token";
-
-  const githubForm = (
-    <form
-      className="flex flex-wrap gap-2"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void run("github", () => api.setGithubToken(githubToken.trim()), "GitHub token saved").then(() => setGithubToken(""));
-      }}
-    >
-      <label htmlFor={githubTokenId} className="sr-only">
-        GitHub token
-      </label>
-      <input
-        id={githubTokenId}
-        type="password"
-        autoComplete="off"
-        value={githubToken}
-        onChange={(e) => setGithubToken(e.target.value)}
-        placeholder="github_pat_… or ghp_…"
-        className={cx(inputClass, "min-w-48 flex-1")}
-      />
-      <Button type="submit" variant="primary" disabled={!githubToken.trim() || saving !== null}>
-        {saving === "github" && <Spinner />} Save
-      </Button>
-      <Button disabled={saving !== null} onClick={() => run("github", () => api.deleteGithubToken(), "Saved GitHub token removed")}>
-        Remove saved token
-      </Button>
-    </form>
-  );
 
   return (
     <Pane title="Connections" subtitle="Both are needed before the first colony" back={back}>
@@ -837,10 +761,12 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
           {github?.connected ? (
             <details className="text-[13px]">
               <summary className="cursor-pointer text-muted hover:text-text">{githubViaToken ? "Replace or remove the token" : "Use a token instead"}</summary>
-              <div className="mt-2">{githubForm}</div>
+              <div className="mt-2">
+                <GithubTokenForm onStatusChanged={onStatusChanged} />
+              </div>
             </details>
           ) : (
-            githubForm
+            <GithubTokenForm onStatusChanged={onStatusChanged} />
           )}
         </ConnectionCard>
 
@@ -860,101 +786,7 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
             </>
           }
         >
-          <div className="flex flex-wrap gap-2">
-            <Button variant="primary" onClick={startLogin} disabled={flowActive}>
-              {login.state === "starting" && <Spinner />} Log in with Claude subscription
-            </Button>
-            <Button onClick={() => run("claude", () => api.deleteClaudeToken(), "Saved Claude token removed")} disabled={saving !== null}>
-              Remove saved token
-            </Button>
-          </div>
-
-          {claude && claude.configured && <ClaudeCredential claude={claude} />}
-
-          {login.state !== "idle" && (
-            <div role="status" className="space-y-3 rounded-lg border border-dashed border-border-strong p-3.5">
-              {login.state === "starting" && (
-                <p className="flex items-center gap-2 text-[13px] text-muted">
-                  <Spinner /> Starting claude setup-token…
-                </p>
-              )}
-              {(login.state === "awaiting_code" || login.state === "verifying") && (
-                <>
-                  <ol className="space-y-1.5 text-[13px]">
-                    <li>
-                      <span className="mr-1 font-semibold">1.</span>
-                      {login.url?.startsWith("https://") ? (
-                        <a
-                          href={login.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 font-medium text-accent hover:underline"
-                        >
-                          Open the Claude sign-in page <IconExternal size={12} />
-                        </a>
-                      ) : (
-                        "Waiting for the sign-in link…"
-                      )}{" "}
-                      and approve access.
-                    </li>
-                    <li>
-                      <span className="mr-1 font-semibold">2.</span>Paste the code it shows.
-                    </li>
-                  </ol>
-                  <form onSubmit={submitCode} className="flex flex-wrap gap-2">
-                    <label htmlFor={codeId} className="sr-only">
-                      Sign-in code
-                    </label>
-                    <input
-                      id={codeId}
-                      value={code}
-                      onChange={(e) => setCode(e.target.value)}
-                      autoComplete="off"
-                      placeholder="Sign-in code"
-                      className={cx(inputClass, "min-w-48 flex-1 font-mono")}
-                    />
-                    <Button type="submit" variant="primary" disabled={!code.trim() || login.state === "verifying"}>
-                      {login.state === "verifying" && <Spinner />} Submit
-                    </Button>
-                    <Button onClick={async () => setLogin(await api.claudeLoginCancel().catch(() => IDLE_LOGIN))}>Cancel</Button>
-                  </form>
-                </>
-              )}
-              {login.state === "done" && (
-                <p className="flex items-center gap-2 text-[13px] text-ok">
-                  <IconCheck size={14} /> {login.message ?? "Connected"}
-                </p>
-              )}
-              {login.state === "error" && <p className="text-[13px] text-err">{login.message ?? "Sign-in failed"}</p>}
-            </div>
-          )}
-
-          <details className="text-[13px]">
-            <summary className="cursor-pointer text-muted hover:text-text">Use a token or API key instead</summary>
-            <form
-              className="mt-2 flex flex-wrap gap-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void run("claude", () => api.setClaudeToken(claudeToken.trim()), "Claude token saved").then(() => setClaudeToken(""));
-              }}
-            >
-              <label htmlFor={claudeTokenId} className="sr-only">
-                Claude token
-              </label>
-              <input
-                id={claudeTokenId}
-                type="password"
-                autoComplete="off"
-                value={claudeToken}
-                onChange={(e) => setClaudeToken(e.target.value)}
-                placeholder="sk-ant-oat01-… or sk-ant-api…"
-                className={cx(inputClass, "min-w-48 flex-1")}
-              />
-              <Button type="submit" disabled={!claudeToken.trim() || saving !== null}>
-                Save
-              </Button>
-            </form>
-          </details>
+          <ClaudeLoginSection claude={claude} onStatusChanged={onStatusChanged} />
         </ConnectionCard>
       </div>
     </Pane>
@@ -1570,53 +1402,6 @@ function fieldInfo(field: SchemaField): ReactNode | null {
   );
 }
 
-/**
- * The colony image's download, kept off the launch path.
- *
- * A cold pull of the default image measured 108 s. Started here when a stack is
- * saved, it happens while someone is looking at Settings instead of while their
- * first colony sits on a spinner. Polls only while a pull is running.
- */
-function useImagePull(active: boolean) {
-  const api = useApi();
-  const [status, setStatus] = useState<PullStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!active) return;
-    let stop = false;
-    api
-      .sandboxPullStatus()
-      .then((s) => !stop && setStatus(s))
-      .catch(() => {});
-    return () => {
-      stop = true;
-    };
-  }, [active, api]);
-
-  useEffect(() => {
-    if (!active || status?.state !== "pulling") return;
-    const timer = setInterval(() => {
-      api
-        .sandboxPullStatus()
-        .then(setStatus)
-        .catch(() => {});
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [active, api, status?.state]);
-
-  const start = useCallback(async () => {
-    setError(null);
-    try {
-      setStatus(await api.sandboxPull());
-    } catch (e) {
-      setError(errorMessage(e));
-    }
-  }, [api]);
-
-  return { status, error, start };
-}
-
 /** The Headroom bundle download (GET/POST /api/headroom), polled while it runs. */
 function useHeadroom(active: boolean) {
   const api = useApi();
@@ -1737,13 +1522,7 @@ function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadroom> })
   }
 }
 
-const seconds = (from: string | null, to?: string | null) => {
-  if (!from) return 0;
-  const end = to ? Date.parse(to) : Date.now();
-  return Math.max(0, Math.round((end - Date.parse(from)) / 1000));
-};
-
-function ImagePullRow({ pull }: { pull: ReturnType<typeof useImagePull> }) {
+function ImagePullRow({ pull }: { pull: ImagePull }) {
   const { status, error, start } = pull;
   // Re-render once a second while pulling so the elapsed time moves.
   const [, tick] = useState(0);
@@ -1824,6 +1603,7 @@ function ModulePane({
   module,
   draft,
   models,
+  pull,
   back,
   onDraft,
   onReset,
@@ -1832,6 +1612,8 @@ function ModulePane({
   module: ModuleInfo;
   draft: ModuleDraft;
   models?: ModelOption[];
+  /** App owns the one image-pull poller; the sandbox pane and Setup read the same state. */
+  pull: ImagePull;
   back?: () => void;
   onDraft: (patch: Partial<ModuleDraft>) => void;
   onReset: () => void;
@@ -1841,7 +1623,6 @@ function ModulePane({
   const toast = useToast();
   const [saving, setSaving] = useState(false);
   const providerId = useId();
-  const pull = useImagePull(module.kind === "sandbox");
   const headroom = useHeadroom(module.kind === "agent");
   const info = kindInfo(module.kind);
   const fields = Object.entries(module.schema?.properties ?? {});

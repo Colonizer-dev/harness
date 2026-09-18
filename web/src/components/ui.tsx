@@ -368,6 +368,13 @@ export function formatDuration(ms: number | null | undefined): string {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
+/** Whole seconds from an ISO timestamp until `to` (default now); used for elapsed counters. */
+export const seconds = (from: string | null, to?: string | null) => {
+  if (!from) return 0;
+  const end = to ? Date.parse(to) : Date.now();
+  return Math.max(0, Math.round((end - Date.parse(from)) / 1000));
+};
+
 export function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
   useEffect(() => {
