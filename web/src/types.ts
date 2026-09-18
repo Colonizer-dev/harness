@@ -588,4 +588,6 @@ export interface NewSessionRequest {
   title?: string;
   instructions?: string;
   autopilot?: boolean;
+  /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
+  allow_duplicate?: boolean;
 }
