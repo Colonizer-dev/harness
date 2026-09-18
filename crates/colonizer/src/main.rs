@@ -27,6 +27,7 @@ mod sessions;
 mod telemetry;
 mod timing;
 mod util;
+mod update;
 mod version;
 mod watchdog;
 
@@ -95,6 +96,7 @@ pub struct App {
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
     pub updates: version::Updates,
+    pub updater: update::Updater,
 }
 
 pub type Shared = Arc<App>;
@@ -369,6 +371,7 @@ async fn main() -> Result<()> {
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
         updates: version::Updates::new(&cfg.config_dir)?,
+        updater: update::Updater::new(),
         cfg,
     });
 
@@ -388,6 +391,7 @@ async fn main() -> Result<()> {
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
         .route("/api/version", get(version::version))
         .route("/api/update", get(version::status).put(version::put))
+        .route("/api/update/apply", post(update::apply))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -441,7 +445,22 @@ async fn main() -> Result<()> {
     }
 
     let recovery = app.clone();
-    tokio::spawn(async move { sessions::recover(&recovery).await });
+    tokio::spawn(async move {
+        sessions::recover(&recovery).await;
+        // Once recovery has settled, an app directory kept by an earlier update
+        // can go, unless a colony that survived it still mounts from there.
+        let live: Vec<std::path::PathBuf> = recovery
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| update::will_reconnect(s.status))
+            .filter_map(|s| s.app_slot.as_deref().map(std::path::PathBuf::from))
+            .collect();
+        for gone in update::sweep_slots(recovery.cfg.assets.as_deref(), &live) {
+            println!("removed the app directory left by an earlier update: {}", gone.display());
+        }
+    });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();

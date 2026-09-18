@@ -971,6 +971,24 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
 // Updates: which Colonizer this is, and whether a newer release is out (#45)
 // ---------------------------------------------------------------------------
 
+/// How far behind the running build is: the gap between when it was built and
+/// when the newer release came out. Null when the release carries no date.
+function daysBehind(builtAt: string, publishedAt: string | null): number | null {
+  if (!publishedAt) return null;
+  const gap = Date.parse(publishedAt) - Date.parse(builtAt);
+  if (!Number.isFinite(gap) || gap <= 0) return null;
+  return Math.floor(gap / 86_400_000);
+}
+
+/// One sentence about the gap, with the release date in it once.
+function behindLabel(builtAt: string, publishedAt: string | null): string | null {
+  const days = daysBehind(builtAt, publishedAt);
+  if (days === null || !publishedAt) return null;
+  const on = new Date(publishedAt).toLocaleDateString();
+  if (days < 1) return `Released ${on}, the same day as the build you are running.`;
+  return `Released ${on}, ${days} day${days === 1 ? "" : "s"} after the build you are running.`;
+}
+
 function UpdatesPane({
   update,
   onChanged,
@@ -983,6 +1001,33 @@ function UpdatesPane({
   const api = useApi();
   const toast = useToast();
   const [saving, setSaving] = useState(false);
+  const [applying, setApplying] = useState(false);
+
+  // While an update is being applied the process is about to be replaced, so the
+  // pane follows it until the answer stops coming.
+  useEffect(() => {
+    const phase = update?.apply.phase;
+    if (phase !== "installing" && phase !== "restarting") return;
+    const timer = setInterval(() => {
+      api
+        .update()
+        .then(onChanged)
+        .catch(() => {});
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [api, onChanged, update?.apply.phase]);
+
+  const install = async () => {
+    setApplying(true);
+    try {
+      await api.applyUpdate();
+      onChanged(await api.update());
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setApplying(false);
+    }
+  };
 
   const set = async (enabled: boolean) => {
     setSaving(true);
@@ -1023,12 +1068,18 @@ function UpdatesPane({
                 </>
               ) : null}
               built {new Date(update.installed.built_at).toLocaleString()}
+              {update.installed.release && update.installed.release !== update.installed.version
+                ? ` (after ${update.installed.release})`
+                : ""}
             </p>
           </div>
 
           {update.available && update.latest && (
             <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-[12.5px]">
               <p className="font-semibold text-[13px]">Colonizer {update.latest.version} is available</p>
+              {behindLabel(update.installed.built_at, update.latest.published_at) && (
+                <p className="text-muted">{behindLabel(update.installed.built_at, update.latest.published_at)}</p>
+              )}
               {update.latest.notes && (
                 <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-[12.5px] text-muted">
                   {update.latest.notes}
@@ -1037,9 +1088,40 @@ function UpdatesPane({
               <a className="mt-1.5 inline-flex items-center gap-1 text-accent hover:underline" href={update.latest.url} target="_blank" rel="noreferrer">
                 Release notes <IconExternal size={12} />
               </a>
-              <p className="mt-1.5 text-muted">
-                To update, re-run the installer. Updating in place, without losing running colonies, is not built yet.
-              </p>
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  disabled={applying || !update.can_apply.ok || update.apply.phase === "installing" || update.apply.phase === "restarting"}
+                  onClick={() => void install()}
+                >
+                  {update.apply.phase === "installing" || update.apply.phase === "restarting" ? <Spinner /> : null}
+                  {update.apply.phase === "installing"
+                    ? "Installing…"
+                    : update.apply.phase === "restarting"
+                      ? "Restarting…"
+                      : `Update to ${update.latest.version}`}
+                </Button>
+                {!update.can_apply.ok && <span className="text-muted">{update.can_apply.reason}</span>}
+              </div>
+              {update.apply.phase === "restarting" && (
+                <p className="mt-1.5 text-muted">
+                  Installed. The Mothership is restarting into it; colonies keep their microVMs and reconnect.
+                </p>
+              )}
+              {update.apply.colonies.length > 0 && update.apply.phase !== "idle" && (
+                <ul className="mt-1.5 space-y-0.5 text-muted">
+                  {update.apply.colonies.map((c) => (
+                    <li key={c.id}>
+                      {c.repo} — {c.outcome}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {update.apply.phase === "failed" && update.apply.error && (
+                <p className="mt-1.5 text-err">
+                  Update failed, and the running version is untouched: {update.apply.error}
+                </p>
+              )}
             </div>
           )}
 

@@ -126,6 +126,10 @@ pub struct Session {
     /// Set when a colony finishes booting, and replaced on resume.
     #[serde(default)]
     pub boot_timing: Option<Value>,
+    /// The app directory this colony's mounts came from. An update keeps that
+    /// directory until no live colony still names it (`update::sweep_slots`).
+    #[serde(default)]
+    pub app_slot: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -428,6 +432,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         attention: None,
         last_activity_at: None,
         boot_timing: None,
+        app_slot: None,
         created_at: now,
         updated_at: now,
     };
@@ -616,6 +621,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // this is the second line of defence, not the first.
         env.push(("ECC_HOOKS_ENABLED".into(), "false".into()));
         log.info(format!("loading {} plugin director{}", targets.len(), if targets.len() == 1 { "y" } else { "ies" })).await;
+    }
+    if let Some(assets) = app.cfg.assets.as_ref() {
+        // Remembered whether or not plugins are on: an update must not remove
+        // the directory any of this colony's mounts resolved through.
+        let slot = assets.display().to_string();
+        app.update_session(id, |x| x.app_slot = Some(slot)).await;
     }
 
     // Token savings (docs/protocol.md): what a switched-on setting needs inside the colony. When the
@@ -1897,6 +1908,7 @@ mod tests {
             attention: None,
             last_activity_at: None,
             boot_timing: None,
+            app_slot: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

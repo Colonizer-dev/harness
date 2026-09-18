@@ -88,6 +88,11 @@ echo "==> rtk (static musl build inside a microVM, for colonies that switch on c
 prebuilt_bin rtk || MSB="$msb" "$root/scripts/build-rtk.sh"
 
 echo "==> agent modules"
+# Shipped so an installed mothership can apply an update with the same verified
+# installer a person would run, instead of downloading a script to execute.
+mkdir -p "$dist/scripts"
+install -m 755 "$root/scripts/install-release.sh" "$dist/scripts/install-release.sh"
+
 mkdir -p "$dist/modules/agents"
 for module in "$root"/modules/agents/*/; do
   id=$(basename "$module")

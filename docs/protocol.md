@@ -426,7 +426,27 @@ on (`telemetry.md`). `COLONIZER_RELEASES_URL` points the check elsewhere, for a 
 `available` is true only when `latest` parses as a release newer than `installed.release`. A build
 whose version cannot be placed is never told it is behind.
 
-Applying an update is not implemented: the UI says to re-run the installer. See #45.
+`apply` reports an update being installed: `phase` is `idle`, `installing`, `restarting` or `failed`,
+with the installer's output and a line per live colony. `can_apply` says whether this install can update
+itself at all — a source checkout cannot, and says so.
+
+### `POST /api/update/apply`
+
+Installs the latest release and restarts into it. Answers as soon as the work starts.
+
+It runs `scripts/install-release.sh` from inside the app — the same installer a person would run — so the
+download, its checksum and the symlink swap are not reimplemented. A failure leaves the running version
+untouched, because the installer unpacks beside it and moves the symlink last.
+
+Refused with `409` when a colony is `publishing`: its microVM is already gone and the host is committing
+and pushing, and interrupting that leaves the colony failed with its pull request unopened. A colony that
+is merely working does not hold an update — it is detached, and `sessions::recover` reconnects it.
+
+The installer is run with `COLONIZER_KEEP_PREVIOUS=1`, because colonies mount vendored plugins out of the
+app directory this mothership started from (`resolve_assets` canonicalises the symlink away), and taking
+it out from under them would take their plugins too. Each session records that directory as `app_slot`;
+at the next start, once recovery has settled, a kept directory is removed if no live colony still names
+it.
 
 ### `POST /api/sandbox/pull` and `GET /api/sandbox/pull`
 
