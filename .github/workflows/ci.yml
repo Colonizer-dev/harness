@@ -1,0 +1,158 @@
+# Runs the checks every pull request has to pass: the Rust tests and lint, the Claude Code runner's
+# tests, the live map's receiver's tests, and the web UI's build and tests. Each piece is its own job
+# so a red run names what broke.
+#
+# No `cargo fmt --check` yet: the crates were written before rustfmt's current style, and letting
+# rustfmt reformat the whole tree is a dedicated change, not a drive-by. The clippy gate (with
+# -D warnings) keeps new code honest in the meantime.
+#
+# Node 24 is what every other workflow pins and what the colony image (node:24-bookworm) runs;
+# engines floors at 20, and CI checks the newest runtime people actually run.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nothing here publishes, so a superseded run's result is worthless: only the newest commit on a ref
+# matters, and an older one still running is just queued minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain the release builds use: stable, minimal profile.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      # Test and clippy share this cache; the target dir makes the second run of a branch cheap.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # Includes colonizer-agentd's integration and smoke tests, which boot the real agentd binary on
+      # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
+      # stock runners have it; no KVM is involved anywhere in this job.
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  runner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: modules/agents/claude-code
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: modules/agents/claude-code/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+  # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
+  # so there is nothing to install and `npm test` is plain `node --test`.
+  telemetry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: services/telemetry
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: npm test
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The build is tsc --noEmit && vite build: it is the only place the UI's types are checked.
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  # This job does not run by default, and until the repository has the runner it wants, it has never
+  # run. A colony boot needs nested virtualisation: microsandbox starts KVM microVMs, GitHub-hosted
+  # runners have no /dev/kvm, so even the rust:1-alpine build VM inside `scripts/build-agentd.sh`
+  # cannot start there. The job is therefore written for a self-hosted runner labelled `kvm` and is
+  # skipped unless the repository variable COLONIZER_KVM_RUNNER is set — without the guard it would
+  # sit queued forever on a repo with no such runner, and with it, it never gates a pull request and
+  # is deliberately not a required check. A permanently skipped job is not coverage: until one runs,
+  # the boot path is exercised only by unit tests plus the no-KVM smoke test in the rust job (real
+  # agentd binary, host process, loopback, stub agent), and `scripts/build-agentd.sh --smoke` on
+  # whichever machine has KVM and someone to run it.
+  #
+  # What a run needs is satisfied inside these steps: microsandbox comes pinned and sha256-verified
+  # from vendor/vendor.lock (`VENDOR_KINDS=msb`, no host install), build-agentd.sh targets the
+  # runner's own architecture for the guest build, and the agent is a stub module — with a fake
+  # runner there is no Claude credential to check and no mesh, so the mothership's credential gate
+  # (crates/colonizer/src/sessions.rs, "log in with Claude in Settings first", hit when the selected
+  # agent module needs Claude and no credential is saved) is never reached.
+  colony-smoke:
+    runs-on: [self-hosted, kvm]
+    timeout-minutes: 30
+    if: ${{ vars.COLONIZER_KVM_RUNNER == '1' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain the release builds use; assumes the runner has rustup, as self-hosted Rust
+      # runners do.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Vendored microsandbox
+        run: VENDOR_KINDS=msb scripts/fetch-vendor.sh
+
+      # Builds agentd inside a rust:1-alpine microVM, then boots it inside a node:24-bookworm
+      # microVM with a stub agent on 127.0.0.1:7070 and checks --version, an authenticated
+      # /v1/health and an unauthenticated 401: two real microVM boots per run.
+      - name: Smoke
+        run: MSB="$PWD/dist/vendor/microsandbox/bin/msb" scripts/build-agentd.sh --smoke

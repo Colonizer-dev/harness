@@ -101,10 +101,12 @@ pub async fn serve(mut socket: WebSocket, workspace: PathBuf, cols: u16, rows: u
                     let _ = input_tx.send(data.to_vec());
                 }
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(control) = serde_json::from_str::<Control>(&text) {
-                        if control.kind == "resize" && control.cols > 0 && control.rows > 0 {
-                            resize(&master, control.cols.min(1000), control.rows.min(1000));
-                        }
+                    if let Ok(control) = serde_json::from_str::<Control>(&text)
+                        && control.kind == "resize"
+                        && control.cols > 0
+                        && control.rows > 0
+                    {
+                        resize(&master, control.cols.min(1000), control.rows.min(1000));
                     }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break true,

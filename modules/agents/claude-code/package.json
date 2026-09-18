@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Colonizer agent module: Claude Code via the Claude Agent SDK",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test",
     "start": "node runner.mjs"
   },
   "license": "MIT",

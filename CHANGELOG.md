@@ -25,6 +25,9 @@ setting — is called out under **Take care** rather than left for you to find.
   same verified installer you would run by hand, and restarts into it. Colonies
   keep their microVMs and reconnect, and the pane says what happened to each
   one. ([#112])
+- `colonizer version` says what a binary is, and `colonizer update` applies a
+  newer release from a terminal against a running mothership — the same two
+  routes the Settings button uses. `colonizer --help` lists both. ([#131])
 - Shared memory can live in [mem0] instead of files on disk. ([#97])
 - `scripts/colony-report.mjs` prints how colonies went, out of what they already
   log. ([#99])
@@ -162,6 +165,7 @@ Macs. ([#74])
 [#110]: https://github.com/Colonizer-dev/harness/pull/110
 [#111]: https://github.com/Colonizer-dev/harness/pull/111
 [#112]: https://github.com/Colonizer-dev/harness/pull/112
+[#131]: https://github.com/Colonizer-dev/harness/pull/131
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2

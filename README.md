@@ -36,12 +36,15 @@ is not built yet, and nothing in this README pretends otherwise.
 > **Colonies only ever hold placeholders.**
 > The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
 > host-side TLS proxy, for one host, on the way out. A colony that goes rogue can wreck its own
-> worktree, and that's all.
+> worktree, and that's all. That is the design, not yet the measured truth: an external audit of
+> v0.1.3 found four ways past that wall, and they are not fixed yet
+> ([docs/audit.md](docs/audit.md)).
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
 it's going, is in [docs/vision.md](docs/vision.md). What has been decided against, and why, is in
-[docs/decisions.md](docs/decisions.md).
+[docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without
+losing colonies, is in [docs/updates.md](docs/updates.md).
 
 ---
 
@@ -253,15 +256,21 @@ Stated here rather than buried.
 - **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
   is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
   given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
+- **Not ready for unattended work on sensitive repositories.** That is the v0.1.3 audit's verdict,
+  real credentials included. It found four ways a colony could cross into the host, filed as draft
+  security advisories and not fixed yet ([docs/audit.md](docs/audit.md)).
 - **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
   crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
   microsandbox, the in-VM daemon, the agent module and the web UI beside it — use the installer.
   Nothing is published to npm.
-- **CI builds, audits and attests, but doesn't run the test suites.** Releases are built, smoke-tested
+- **CI runs every suite except the one that needs KVM.** The Rust tests and clippy, the runner's, the
+  live map receiver's and the web UI's all run on every pull request; releases are built, smoke-tested
   and attested with build provenance; dependency audits and SBOMs run with every change and on a weekly
-  schedule; runtime pins move only by reviewed pull request. The Rust, runner and UI test suites still
-  run only where a person runs them ([roadmap](#roadmap-in-public)). The crates are published to
-  crates.io through Trusted Publishing; nothing is published to npm.
+  schedule; runtime pins move only by reviewed pull request. What CI cannot do is boot a colony:
+  GitHub-hosted runners have no `/dev/kvm`, so that path is covered by unit tests, agentd's no-KVM
+  smoke test, and `scripts/build-agentd.sh --smoke` on a machine that has KVM
+  ([roadmap](#roadmap-in-public)). The crates are published to crates.io through Trusted Publishing;
+  nothing is published to npm.
 
 ---
 
@@ -291,7 +300,8 @@ Stated here rather than buried.
 | Fleet view, per-colony budgets and network policies | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
 
-The roadmap is the issue tracker. There is no private version of it.
+The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit
+sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 
 ---
 
@@ -313,6 +323,9 @@ The roadmap is the issue tracker. There is no private version of it.
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
+An external audit read this table against the code at v0.1.3. What it confirmed, what it found
+instead, and what has to be true before unattended work: [docs/audit.md](docs/audit.md).
+
 ## Configuration
 
 Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. Process settings
@@ -327,6 +340,9 @@ come from the environment:
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
+| `COLONIZER_APP` | `~/.local/share/colonizer/app` | The symlink an install moves; what an [update](docs/updates.md) follows |
+| `COLONIZER_UPDATE_CHECK` | on | `0` keeps the update check off whatever Settings says — then no request is made at all |
+| `COLONIZER_RELEASES_URL` | GitHub's latest release for this repo | Where the update check looks |
 | `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 
@@ -343,9 +359,11 @@ co_author = true
 ## Development
 
 ```sh
-cargo test --workspace                          # mothership and agentd
-(cd modules/agents/claude-code && node --test test/)
-(cd services/telemetry && node --test)          # the live map's receiver
+cargo test --workspace                          # mothership and agentd, including agentd's no-KVM smoke test
+cargo clippy --workspace --all-targets -- -D warnings
+(cd modules/agents/claude-code && npm test)
+(cd services/telemetry && npm test)             # the live map's receiver
+(cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
 node --test scripts/test/colony-report.test.mjs
 node scripts/colony-report.mjs                  # how colonies went, from what they already log
 node scripts/colony-report.mjs --transcript <id> # one colony, step by step
@@ -364,6 +382,10 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   <a href="docs/architecture.md">Architecture</a>
   &nbsp;·&nbsp;
   <a href="docs/protocol.md">Protocol</a>
+  &nbsp;·&nbsp;
+  <a href="docs/updates.md">Updates</a>
+  &nbsp;·&nbsp;
+  <a href="docs/audit.md">Audit</a>
 </p>
 
 <p align="center">
