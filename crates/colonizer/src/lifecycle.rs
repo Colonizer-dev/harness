@@ -111,9 +111,23 @@ pub async fn watch_sandboxes(app: Shared) {
         // deadlock against update_session's write lock.
         let sessions = app.sessions.read().await.clone();
         for s in sessions {
-            if !s.status.is_live() || s.status == SessionStatus::Starting || running.contains(&s.sandbox) {
+            if !watch_candidate(&s) || running.contains(&s.sandbox) {
                 continue;
             }
+            // Both the session list and the running set above are a snapshot, and the list moves under
+            // it while this loop works down the colonies. Take the colony's lifecycle lock and re-read
+            // it, so the teardown and the `stopped` flip it earns happen together: a resume admitted by
+            // that flip waits on the same lock and finds the teardown finished rather than booting a
+            // microVM that the in-flight `msb rm --force` then removes, and a stop already tearing the
+            // colony down holds the lock until its own teardown is done, keeping this flip out. The
+            // `running` check stays on the snapshot — it is the detection, and a microVM does not come
+            // back — but the flip below is a compare-and-set, so a publish that claimed the colony in
+            // between (it holds no lifecycle lock) is not clobbered.
+            let lifecycle = app.session_lock(&s.id).await;
+            let _lifecycle = lifecycle.lock().await;
+            let Some(s) = the_colony_to_stop(&app, &s.id).await else {
+                continue;
+            };
             app.session_log(
                 &s.id,
                 "error",
@@ -121,13 +135,40 @@ pub async fn watch_sandboxes(app: Shared) {
             )
             .await;
             teardown_vm(&app, &s).await;
-            app.update_session(&s.id, |x| {
-                x.status = SessionStatus::Stopped;
-                x.error = Some(VM_STOPPED_EARLY.into());
-            })
-            .await;
+            app.update_session(&s.id, |x| mark_stopped_after_teardown(x, s.status)).await;
         }
     }
+}
+
+/// Whether the sandbox watchdog has business with a colony: a live one that is no longer booting. The
+/// snapshot pass adds one more condition on top — the microVM must actually be gone from `msb ls` —
+/// but the re-check under the lifecycle lock cannot re-ask that (`msb ls` was the tick's one look,
+/// and a removed microVM does not come back), so both passes share this and only this.
+fn watch_candidate(s: &Session) -> bool {
+    s.status.is_live() && s.status != SessionStatus::Starting
+}
+
+/// The colony this tick is stopping, re-read under the lifecycle lock its caller holds: the snapshot
+/// the tick worked from moves under it, so by teardown time both the record and its status may be
+/// stale. A colony deleted since the snapshot is gone from the list, and one a resume or a publish
+/// claimed in the meantime no longer has the live non-booting status the snapshot saw; neither is
+/// this tick's to stop, and `None` says so.
+async fn the_colony_to_stop(app: &Shared, id: &str) -> Option<Session> {
+    let s = app.session(id).await?;
+    watch_candidate(&s).then_some(s)
+}
+
+/// The watchdog's flip of a colony whose microVM it has just removed: a compare-and-set against the
+/// status the snapshot read, so a publish that claimed the colony while the teardown was in flight —
+/// it holds no lifecycle lock — keeps the `publishing` this flip must not clobber. Returns whether
+/// the flip landed.
+fn mark_stopped_after_teardown(x: &mut Session, at_teardown: SessionStatus) -> bool {
+    if x.status != at_teardown {
+        return false;
+    }
+    x.status = SessionStatus::Stopped;
+    x.error = Some(VM_STOPPED_EARLY.into());
+    true
 }
 
 /// Whether `total_usd` is past a colony's budget. A budget of `0` means no budget at all: there is no
@@ -150,6 +191,11 @@ pub(crate) async fn stop_colony(
     error: String,
     warn: String,
 ) -> bool {
+    // The same discipline as the stop handler: the claim and the teardown under the colony's lifecycle
+    // lock, so a resume that finds the `stopped` claim waits for the teardown to finish instead of
+    // booting a microVM that this in-flight removal then takes with it.
+    let lifecycle = app.session_lock(&s.id).await;
+    let _lifecycle = lifecycle.lock().await;
     let claimed = app
         .update_session(&s.id, |x| {
             let due = x.status.is_live() && due(x);
@@ -177,7 +223,11 @@ pub(crate) async fn stop_colony(
 pub async fn enforce_budget(app: &Shared, id: &str) -> bool {
     let Some(s) = app.session(id).await else { return false };
     let org = app.org_settings(&s.org);
-    let modules = app.modules.read().await;
+    // Cloned, not held: the guard must not live across `stop_colony`, whose teardown takes the
+    // colony's lifecycle lock and, through `app.mesh()`, the modules lock again — a read guard held
+    // here would order modules before the colony lock against teardown's colony lock before modules,
+    // and a modules writer arriving in between turns that inversion into a deadlock.
+    let modules = app.modules.read().await.clone();
     let budget = orgs::budget_usd(&modules, &org);
     if !over_budget(s.total_cost_usd(), budget) {
         return false;
@@ -348,6 +398,19 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
     let org_limit = orgs::org_max_parallel(&app.org_settings(&s.org));
+    // The colony's lifecycle lock, held from here to the end of the handler. The claim below is the
+    // moment this colony gains a microVM (or a queue slot), and everything between it and the boot
+    // spawn — dropping the old agent link, rotating the event log, the revert if the rotation fails —
+    // assumes the colony stays claimed. Holding the guard through the `tokio::spawn` keeps that claim
+    // and the handoff to `boot` in one critical section; it is belt-and-braces, not the part that
+    // closes a race, because a stop landing before the spawn only flips the status out of `starting`
+    // and the boot's first `ensure_starting` then bails before it creates anything. The race this lock
+    // exists for is on the stopping side — a resume admitted between a stop's status flip and its
+    // teardown — and the stop holds this same lock across both, so this resume cannot be admitted into
+    // that window. Once the spawn has happened the boot's `ensure_starting` checkpoints take over.
+    // Every early return below (404, 409) simply drops it.
+    let lifecycle = app.session_lock(&id).await;
+    let _lifecycle = lifecycle.lock().await;
     // The claim comes first, exactly as the publish claim does: `failed` is both resumable and
     // publishable, so a resume landing just after a publish claimed the colony must be refused
     // rather than overwrite `publishing`. Nothing outside the list is touched until it succeeds, so
@@ -440,6 +503,20 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
 }
 
 pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+    // Checked before the lifecycle lock so a stop of an unknown id does not leave a lock slot behind
+    // for a colony that does not exist; the claim below stays the authority.
+    if app.session(&id).await.is_none() {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
+    }
+    // The lifecycle lock across the claim and the teardown: `stop` flips the colony to `stopped` — a
+    // status `can_resume` accepts — before `teardown_vm` removes the microVM, so a resume must wait
+    // for this lock instead of booting a microVM that the in-flight `msb rm --force` then removes
+    // under the same deterministic name. The early returns drop it, and safely so: they claim nothing
+    // and run no teardown, so there is no state change of ours here for a boot to race — the colony
+    // keeps whatever microVM it may still have (a teardown swallows its errors, so `stopped` does not
+    // prove the VM is gone) for the next stop or a publish to collect.
+    let lifecycle = app.session_lock(&id).await;
+    let _lifecycle = lifecycle.lock().await;
     let Some((s, was)) = app
         .update_session(&id, |x| {
             let was = x.status;
@@ -482,13 +559,55 @@ pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     if !cleanable(s.status) {
         return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
     }
-    {
+    // The lifecycle lock first, and the claim before the removal: `cleaned_up` is exactly what
+    // `can_resume` checks, so setting it while holding this lock means a resume waiting on it is
+    // refused outright rather than admitted onto the worktree this handler is about to delete — a
+    // boot bind-mounts that worktree rw at /workspace. Removing first, as this used to, let a resume
+    // claim `starting` on a worktree that was mid-deletion and then landed `cleaned_up` on a live
+    // colony, which `can_resume` refuses forever. An already-cleaned-up colony still cleans up
+    // cleanly: the claim does not look at `cleaned_up`, the worktree is already gone, and
+    // `remove_worktree` no-ops.
+    let lifecycle = app.session_lock(&id).await;
+    let _lifecycle = lifecycle.lock().await;
+    // Compare-and-set under the write lock: the pre-check above read a snapshot, and a resume or a
+    // stop may have claimed the colony in the meantime. The previous `cleaned_up` comes back so a
+    // failed removal can put it back.
+    let (s, (claimed, was_cleaned)) = app
+        .update_session(&id, |x| {
+            let allowed = cleanable(x.status);
+            let was_cleaned = x.cleaned_up;
+            if allowed {
+                x.cleaned_up = true;
+            }
+            (allowed, was_cleaned)
+        })
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if !claimed {
+        return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
+    }
+    let removed = {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
-        github::remove_worktree(&app, &s).await?;
+        github::remove_worktree(&app, &s).await
+    };
+    if let Err(e) = removed {
+        // The colony is marked cleaned up but its worktree may still be there, and `can_resume` reads
+        // `cleaned_up` — leaving the flag set would strand a colony that is really resumable. Put the
+        // old value back, as `delete` re-inserts the record when its worktree removal fails. A colony
+        // deleted while its worktree was being removed makes that a silent no-op: the record is gone,
+        // and there is nothing left to restore.
+        app.update_session(&id, |x| x.cleaned_up = was_cleaned).await;
+        return Err(e
+            .context("could not remove the colony's worktree; the colony is left cleanable so the cleanup can be retried")
+            .into());
     }
-    let (s, ()) = app
-        .update_session(&id, |x| x.cleaned_up = true)
+    // The answer is read after the removal, not taken from the claim's clone: `delete` takes no
+    // lifecycle lock, so a colony deleted while its worktree was being removed must come back as the
+    // 404 the old removal-first order got from its post-removal update, not as a 200 naming a colony
+    // that no longer exists.
+    let s = app
+        .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     Ok(Json(s))
@@ -550,6 +669,14 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         return Err(e.into());
     }
     app.runtimes.lock().await.remove(&id);
+    // The record is gone, so drop its lifecycle lock slot and the map does not grow without bound on a
+    // long-running mothership. A bound, not a guarantee: `watch_sandboxes` takes this lock before its
+    // existence re-check, so a reaper tick that snapshotted the colony before this delete can
+    // resurrect an empty entry afterwards, and a resume, stop or cleanup that passed its pre-check in
+    // that window can do the same. The cost of a raced delete is one small idle mutex and nothing
+    // more. Safe even if a guard were still held somewhere: the `Arc` keeps that mutex alive for as
+    // long as its holder needs it.
+    app.session_locks.lock().await.remove(&id);
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => None,
@@ -562,7 +689,7 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::tests::{admit_resume, app_with_colony, stopped_colony_with_worktree};
+    use crate::sessions::tests::{admit_resume, app_with_colony, colony, stopped_colony_with_worktree};
     use crate::util::short_id;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -783,5 +910,315 @@ mod tests {
             resumable - max_parallel,
             "the resumes that did not fit queued instead of being refused"
         );
+    }
+
+    // -- the colony lifecycle lock ---------------------------------------------------------------
+
+    /// Pushes live colonies until the app's global parallel limit is full, so an admission that would
+    /// boot queues instead: a real boot does git and `msb` work in the temp root and would move the
+    /// colony's status around while the test is asserting on it. The mutual exclusion under test does
+    /// not care which way the winning resume lands. Returns the limit it filled.
+    async fn fill_the_parallel_limit(app: &Shared) -> usize {
+        let max_parallel = orgs::global_max_parallel(&app.modules.read().await.clone()) as usize;
+        let mut sessions = app.sessions.write().await;
+        for i in sessions.len()..sessions.len() + max_parallel {
+            let mut filler = colony("acme", SessionStatus::Idle);
+            filler.id = format!("filler-{i}");
+            sessions.push(filler);
+        }
+        max_parallel
+    }
+
+    /// The body of the lock-wait test each lifecycle handler has to pass: with the colony's lifecycle
+    /// lock held elsewhere, the handler must neither finish nor make its claim, and once the lock
+    /// frees up the claim must go through. Purely cooperative, so there is no timing bet: each yield
+    /// lets the handler advance to the lock it cannot take.
+    async fn a_handler_held_behind_the_colony_lifecycle_lock_claims_nothing_until_it_is_dropped(
+        app: &Shared,
+        id: &str,
+        what: &str,
+        request: impl std::future::Future<Output = ApiResult<Session>> + Send + 'static,
+        claimed: impl Fn(&Session) -> bool,
+    ) {
+        let lifecycle = app.session_lock(id).await;
+        let held = lifecycle.lock().await;
+        let handled = tokio::spawn(request);
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert!(!handled.is_finished(), "the {what} waits for the colony's lifecycle lock");
+            assert!(
+                !claimed(&app.session(id).await.unwrap()),
+                "nothing is claimed while another task holds the colony's lifecycle lock"
+            );
+        }
+        drop(held);
+        if let Err(e) = handled.await.unwrap() {
+            panic!("the {what} failed once the lock freed up: {:#}", e.1);
+        }
+        assert!(
+            claimed(&app.session(id).await.unwrap()),
+            "the {what} claims the colony once the lock freed up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resume_waits_for_the_colony_s_lifecycle_lock_before_it_claims() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("git".into()))
+            .await
+            .unwrap();
+        fill_the_parallel_limit(&app).await;
+        a_handler_held_behind_the_colony_lifecycle_lock_claims_nothing_until_it_is_dropped(
+            &app,
+            "abc",
+            "resume",
+            resume(State(app.clone()), Path("abc".to_string())),
+            |s| s.status == SessionStatus::Queued,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_stop_waits_for_the_colony_s_lifecycle_lock_before_it_claims() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        a_handler_held_behind_the_colony_lifecycle_lock_claims_nothing_until_it_is_dropped(
+            &app,
+            "abc",
+            "stop",
+            stop(State(app.clone()), Path("abc".to_string())),
+            |s| s.status == SessionStatus::Stopped,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_waits_for_the_colony_s_lifecycle_lock_before_it_claims() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        a_handler_held_behind_the_colony_lifecycle_lock_claims_nothing_until_it_is_dropped(
+            &app,
+            "abc",
+            "cleanup",
+            cleanup(State(app.clone()), Path("abc".to_string())),
+            |s| s.cleaned_up,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn two_concurrent_resumes_of_one_colony_admit_exactly_one_and_refuse_the_other() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("git".into()))
+            .await
+            .unwrap();
+        // No free slot, so the winning resume queues (`Queued`) instead of spawning a boot whose git
+        // and `msb` work would flip the colony's status under the assertions below.
+        fill_the_parallel_limit(&app).await;
+        // Park both resumes behind the colony's lifecycle lock before letting either claim: both are
+        // then past their snapshot pre-checks, so the race is settled by the re-check under the
+        // admission lock rather than by whichever handler happened to read the list first.
+        let lifecycle = app.session_lock("abc").await;
+        let held = lifecycle.lock().await;
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let app = app.clone();
+            tasks.push(tokio::spawn(resume(State(app), Path("abc".to_string()))));
+        }
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            for task in &tasks {
+                assert!(!task.is_finished(), "each resume waits for the colony's lifecycle lock");
+            }
+        }
+        drop(held);
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(task.await.expect("resume task joined"));
+        }
+        assert_eq!(outcomes.len(), 2, "both resumes answered");
+        assert_eq!(
+            outcomes.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "exactly one of the two resumes claims the colony"
+        );
+        for e in outcomes.iter().filter_map(|r| r.as_ref().err()) {
+            assert_eq!(e.0, StatusCode::CONFLICT, "the loser is refused, not failed: {}", e.1);
+            assert!(e.1.to_string().contains(RESUME_CONFLICT), "{}", e.1);
+        }
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::Queued,
+            "the winner holds the one claim — queued here, since the parallel limit is full"
+        );
+        assert_eq!(s.error, None, "the winning claim cleared the colony's error");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_refuses_a_colony_that_stopped_being_cleanable_while_it_waited_and_leaves_the_worktree_alone() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        let worktree = root.join("worktrees/acme/repo/issue-1-abc");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("work.txt"), "the colony's work").unwrap();
+        app.update_session("abc", |s| s.worktree = worktree.display().to_string())
+            .await
+            .unwrap();
+        // Hold the lifecycle lock so the cleanup is parked between its snapshot pre-check (which sees
+        // `stopped` and passes) and its claim, then take the colony live in that window. The claim,
+        // not the pre-check, is what keeps a colony from being cleaned out from under a boot.
+        let lifecycle = app.session_lock("abc").await;
+        let held = lifecycle.lock().await;
+        let handled = tokio::spawn(cleanup(State(app.clone()), Path("abc".to_string())));
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert!(!handled.is_finished(), "the cleanup waits for the colony's lifecycle lock");
+            assert!(
+                !app.session("abc").await.unwrap().cleaned_up,
+                "nothing is claimed while the colony's lifecycle lock is held"
+            );
+        }
+        app.update_session("abc", |s| s.status = SessionStatus::Running)
+            .await
+            .unwrap();
+        drop(held);
+        let err = handled.await.unwrap().unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT, "{}", err.1);
+        assert!(err.1.to_string().contains("stop the session first"), "{}", err.1);
+        assert!(
+            !app.session("abc").await.unwrap().cleaned_up,
+            "the colony is not marked cleaned up"
+        );
+        assert!(worktree.join("work.txt").exists(), "the worktree is untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_whose_worktree_removal_fails_puts_cleaned_up_back_so_the_colony_stays_resumable() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        // A "worktree" that is a plain file: `remove_worktree` sees it exists, and then fails to write
+        // the `.git` file inside it — the one failure it propagates that is deterministic without a
+        // git binary or permission games (the tests run as root, so chmod-based denial does not fail).
+        let worktree = root.join("worktrees/acme/repo/issue-1-abc");
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        std::fs::write(&worktree, "not a directory").unwrap();
+        app.update_session("abc", |s| {
+            s.worktree = worktree.display().to_string();
+            s.git_admin_dir = Some("git".into());
+        })
+        .await
+        .unwrap();
+        let err = cleanup(State(app.clone()), Path("abc".to_string())).await.unwrap_err();
+        let body = err.1.to_string();
+        assert!(body.contains("could not remove the colony's worktree"), "{body}");
+        let s = app.session("abc").await.unwrap();
+        assert!(!s.cleaned_up, "cleaned_up is put back, or a resumable colony is stranded");
+        assert!(
+            can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()),
+            "the colony can still be resumed, and the cleanup retried"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_of_a_colony_deleted_while_its_worktree_was_being_removed_answers_not_found() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        // Park the cleanup between its claim and the worktree removal, then make the colony vanish in
+        // that window — as a delete does, taking no lifecycle lock. This colony has no worktree on
+        // disk, so the removal itself no-ops and the answer comes straight from the re-read.
+        let repo = app.session("abc").await.unwrap().repo;
+        let repo_lock = app.repo_lock(&repo).await;
+        let held = repo_lock.lock().await;
+        let handled = tokio::spawn(cleanup(State(app.clone()), Path("abc".to_string())));
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+            assert!(!handled.is_finished(), "the cleanup waits for the repo lock");
+            if app.session("abc").await.is_some_and(|s| s.cleaned_up) {
+                break;
+            }
+        }
+        assert!(
+            app.session("abc").await.is_some_and(|s| s.cleaned_up),
+            "the cleanup claimed the colony before its worktree removal"
+        );
+        app.sessions.write().await.retain(|s| s.id != "abc");
+        drop(held);
+        let handled = match handled.await.unwrap() {
+            Err(e) => e,
+            Ok(s) => panic!("a colony deleted during the removal must not answer 200: {:?}", s.status),
+        };
+        assert_eq!(handled.0, StatusCode::NOT_FOUND, "{}", handled.1);
+        assert!(handled.1.to_string().contains("no such session"), "{}", handled.1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- the sandbox watchdog ----------------------------------------------------------------------
+
+    #[test]
+    fn a_watch_candidate_is_a_live_colony_that_is_not_still_booting() {
+        use SessionStatus::*;
+        for status in [Running, WaitingForAnswer, Idle] {
+            assert!(
+                watch_candidate(&colony("acme", status)),
+                "{status:?} is live and past its boot"
+            );
+        }
+        for status in [
+            Starting, Queued, Publishing, Stopped, Failed, PrOpened, Merged, Closed, NoChanges,
+        ] {
+            assert!(
+                !watch_candidate(&colony("acme", status)),
+                "{status:?} is not the watchdog's to stop"
+            );
+        }
+    }
+
+    #[test]
+    fn a_watch_flip_lands_on_the_snapshot_status_and_not_on_a_publish_that_claimed_in_the_meantime() {
+        let mut stopped_early = colony("acme", SessionStatus::Running);
+        assert!(
+            mark_stopped_after_teardown(&mut stopped_early, SessionStatus::Running),
+            "the flip lands while the colony is still on the status the snapshot read"
+        );
+        assert_eq!(stopped_early.status, SessionStatus::Stopped, "the colony reads stopped");
+        assert_eq!(stopped_early.error, Some(VM_STOPPED_EARLY.into()), "the flip says why");
+        // A publish holds no lifecycle lock, so it can claim the colony while the watchdog's teardown
+        // is still in flight; the flip must leave that claim standing.
+        let mut claimed = colony("acme", SessionStatus::Publishing);
+        assert!(
+            !mark_stopped_after_teardown(&mut claimed, SessionStatus::Running),
+            "the flip refuses a colony that moved off its snapshot status"
+        );
+        assert_eq!(claimed.status, SessionStatus::Publishing, "the publish keeps its claim");
+        assert_eq!(claimed.error, None, "and the watchdog's error is not painted over it");
+    }
+
+    #[tokio::test]
+    async fn a_watch_s_re_read_skips_a_colony_deleted_or_claimed_after_its_snapshot() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let mut claimed = colony("acme", SessionStatus::Running);
+        claimed.id = "claimed".into();
+        app.sessions.write().await.push(claimed);
+        assert!(
+            the_colony_to_stop(&app, "abc").await.is_some(),
+            "an idle colony the re-read still finds is the tick's to stop"
+        );
+        // The two ways a snapshot goes stale while the tick works down the list: a delete, which takes
+        // no lifecycle lock, removes the record; a publish claims the colony out from under it.
+        app.sessions.write().await.retain(|s| s.id != "abc");
+        app.update_session("claimed", |x| x.status = SessionStatus::Publishing)
+            .await
+            .unwrap();
+        assert!(
+            the_colony_to_stop(&app, "abc").await.is_none(),
+            "a colony deleted since the snapshot is gone from the list, so there is nothing to stop"
+        );
+        assert!(
+            the_colony_to_stop(&app, "claimed").await.is_none(),
+            "a colony claimed off its snapshot status in the meantime is not the tick's to stop"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

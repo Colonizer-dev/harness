@@ -75,9 +75,10 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         return None; // another tick claimed it between the snapshot and the lock
     }
     if s.cleaned_up {
-        // Cleaned up while it waited (a cleanup racing a queued resume): its worktree and branch are
-        // gone, so starting it would boot onto a worktree that no longer exists, and `can_resume` would
-        // never take it back afterwards.
+        // Defence in depth: `cleanup` now claims `cleaned_up` under the colony's lifecycle lock, and
+        // its claim refuses a queued colony, so nothing should mark a queued colony cleaned up any
+        // more. If one ever does anyway, the worktree and branch are gone — starting it would boot
+        // onto a worktree that no longer exists, and `can_resume` would never take it back afterwards.
         s.status = SessionStatus::Failed;
         s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
         s.updated_at = Utc::now();
