@@ -34,8 +34,11 @@ No repository, issue, branch, code, prompt, user name, host name or path is sent
 exact heartbeat the mothership will send next.
 
 When you switch it off, the mothership sends `{"install_id": "…", "online": false}`, which removes its
-row straight away, and then forgets the id. If you switch it on again later, it gets a new id, so the two
-periods can't be linked. Stopping the mothership sends the same message, but keeps the id.
+row straight away, and then forgets the id. The id is forgotten whether or not that message gets
+through. If the service is unreachable, the row simply stays: it stops being counted 12 minutes after
+the last heartbeat, and because the id is gone, nothing can refresh it. If you switch it on again
+later, it gets a new id, so the two periods can't be linked. Stopping the mothership sends the same
+message, but keeps the id.
 
 ## What the service keeps
 
@@ -54,9 +57,20 @@ and is roughly city-level. The service snaps that estimate to its 25 km cell, an
 The IP address itself is never stored. It is used, in memory, only to limit each address to 30 requests
 a minute. Two motherships in the same cell are the same dot.
 
-A mothership counts as online for 12 minutes after its last heartbeat. Rows older than an hour are
-deleted, so the service keeps no history. Cloudflare's own request logs for the Worker are separate from
-this table.
+A cell is only as anonymous as the number of motherships in it. Where a cell holds one mothership, the
+dot is that one install, placed to within about 25 km, and most cells will hold one.
+
+A row stops being counted 12 minutes after its last heartbeat. That part is unconditional: every read
+filters on `seen_at`, so nothing older is ever served or counted. Deleting the row is a different
+matter. A prune removes rows more than an hour old, and it runs only on the back of a request to one of
+the two routes, a heartbeat or a read of the map, at most once every 10 minutes per isolate. A row can
+therefore outlive the hour by up to those ten minutes, and if nothing at all reaches the service,
+nothing is deleted: the row sits there, read by nothing, until the next request arrives. There is no
+scheduled prune; the section below says why.
+
+Cloudflare's own request logs for the Worker are outside this table and outside the project's control.
+They follow whatever retention the Cloudflare account has, which has not been checked, and unlike this
+table they do see IP addresses.
 
 ## What is public
 
@@ -76,6 +90,10 @@ this table.
 It gives counts per cell, never per mothership. Motherships the service couldn't place count towards the
 totals but have no cell.
 
+The counts are a floor, not a measurement: they count motherships that switched the live map on and
+whose heartbeat arrived in the last 12 minutes. They are not installs, not users, and not adoption
+statistics.
+
 ## Keeping it off for good
 
 Set `DO_NOT_TRACK=1` or `COLONIZER_TELEMETRY=off` in the mothership's environment. The live map then
@@ -92,5 +110,6 @@ npx wrangler d1 migrations apply colonizer-telemetry --remote
 npx wrangler deploy
 ```
 
-Old rows are pruned during heartbeats, at most once every 10 minutes, so the service needs no cron
-trigger.
+The prune rides on requests to either route, at most once every 10 minutes per isolate. There is no
+cron trigger, because one needs a workers.dev subdomain on the account, which it doesn't have (deploy
+error 10063).

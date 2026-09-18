@@ -1192,7 +1192,10 @@ function LiveMapPane({
         While it is on, the Mothership sends a heartbeat every 5 minutes, and within a minute when the number of running colonies changes.
         colonizer.dev/live shows a dot for its area, about 25 km across, lit while colonies run.
       </p>
-      <p>Switching it off takes the dot away at once and forgets the random id, so a later period on the map can’t be tied to this one.</p>
+      <p>
+        Switching it off takes the dot away at once and forgets the random id, so a later period on the map can’t be tied to this
+        one. The id is forgotten even if the service can’t be reached; then the dot goes out within 12 minutes instead of at once.
+      </p>
     </>
   );
 
@@ -1230,7 +1233,8 @@ function LiveMapPane({
             </pre>
             <p className="mt-2 text-[12.5px] text-muted">
               Nothing else: no repositories, issues, code, names or paths. The service sees this machine’s IP address, as any website
-              would, turns it into a 25 km area and doesn’t store it. Heartbeats are kept for an hour at most.
+              would, turns it into a 25 km area and doesn’t store it. A heartbeat stops counting 12 minutes after it arrives, and
+              its row is deleted about an hour after arrival, once anything else reaches the service. If this is the only mothership in its area, that dot is this one.
             </p>
           </div>
           {telemetry.enabled && (telemetry.last_sent_at || telemetry.last_error) && (
