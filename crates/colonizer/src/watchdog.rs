@@ -21,6 +21,8 @@ pub struct Activity {
     pub nudges: u64,
     pub last_nudge: Option<DateTime<Utc>>,
     pub question_since: Option<DateTime<Utc>>,
+    /// Questions autonomous mode has answered for this colony, against its own cap.
+    pub judged: u64,
 }
 
 impl Activity {
@@ -30,6 +32,7 @@ impl Activity {
             nudges: 0,
             last_nudge: None,
             question_since: None,
+            judged: 0,
         }
     }
 }
@@ -269,6 +272,7 @@ mod tests {
             nudges: 1,
             last_nudge: Some(at(15)),
             question_since: None,
+            judged: 0,
         };
         assert_eq!(
             decide(&SETTINGS, at(34), Observed::Working, &activity, None),
@@ -284,6 +288,7 @@ mod tests {
             nudges: 0,
             last_nudge: None,
             question_since: Some(at(0)),
+            judged: 0,
         };
         assert_eq!(
             decide(&SETTINGS, at(29), Observed::WaitingForAnswer, &activity, None),

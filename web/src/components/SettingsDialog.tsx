@@ -78,6 +78,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   publish: { title: "Publish", description: "Where finished work goes" },
   memory: { title: "Memory", description: "Shared notes colonies can search and propose" },
   watchdog: { title: "Watchdog", description: "Notices stalled colonies and nudges them" },
+  autonomy: { title: "Autonomy", description: "Who answers a colony's questions when you are not there" },
 };
 
 const kindInfo = (kind: string) => KIND_INFO[kind] ?? { title: kind, description: "" };
