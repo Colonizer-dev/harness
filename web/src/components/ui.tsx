@@ -91,6 +91,14 @@ export function occupiesSlot(status: SessionStatus): boolean {
   return isLive(status) || status === "publishing";
 }
 
+/** Statuses the publish endpoint accepts: live colonies, plus stopped, failed and no-changes ones whose worktree can still be finished. */
+const PUBLISHABLE: SessionStatus[] = ["running", "waiting_for_answer", "idle", "stopped", "failed", "no_changes"];
+
+/** Whether publishing this colony is possible: it kept its worktree (`git_admin_dir`, the server's own condition) and its status is one the endpoint reconciles — mirrored from the server, so the button never offers a publish that would 409. */
+export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git_admin_dir">): boolean {
+  return !session.cleaned_up && session.git_admin_dir != null && PUBLISHABLE.includes(session.status);
+}
+
 export function StatusBadge({ status }: { status: SessionStatus }) {
   const meta = SESSION_STATUS[status] ?? { label: status, tone: "neutral" as Tone, live: false };
   const animated = status === "starting" || status === "running" || status === "publishing" || status === "waiting_for_answer";

@@ -1,5 +1,6 @@
 // In-browser mock of the harness API and event streams, enabled with `?mock=1`.
 import { ApiError, type Api, type SocketLike } from "./api";
+import { canPublish } from "./components/ui";
 import type {
   AgentEvent,
   AgentEventBody,
@@ -760,6 +761,7 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
     branch: `colonizer/${slug}`,
     base: "main",
     worktree: `/home/you/.local/share/colonizer/worktrees/${repo}/${slug}`,
+    git_admin_dir: `/home/you/.local/share/colonizer/repos/${repo}.git/worktrees/${slug}`,
     sandbox: `colony-${id}`,
     mesh: { name: `colony-${id}`, ip: `100.64.0.${Math.floor(Math.random() * 200) + 10}` },
     agent: "claude-code",
@@ -844,9 +846,24 @@ export function createMockApi(): Api {
   });
   failed.seedFailedHistory();
   failed.session.updated_at = ago(93);
+  // A colony whose publish failed after committing (issue #85): "Finish PR" completes it on the
+  // existing worktree, no resume needed.
+  const stuck = new MockSession({
+    ...baseSession("stuck2468", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
+    status: "failed",
+    mesh: null,
+    error: "publish failed: git push was rejected by the remote",
+    publish_stage: "committed",
+    created_at: ago(50),
+  });
+  stuck.seedFailedHistory();
+  stuck.log("Publish committed 2 files on colonizer/issue-43-stuck2468");
+  stuck.log("Publish failed: git push was rejected by the remote", "error");
+  stuck.session.updated_at = ago(48);
   sessions.set(demo.session.id, demo);
   sessions.set(failed.session.id, failed);
   sessions.set(old.session.id, old);
+  sessions.set(stuck.session.id, stuck);
 
   const mem0: Mem0Status = { has_key: false, source: null, active: false };
 
@@ -1373,13 +1390,19 @@ export function createMockApi(): Api {
     },
     publishSession: async (id) => {
       const s = find(id);
-      if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
+      if (!canPublish(s.session)) throw new ApiError("this colony cannot be published", 409);
+      const live = isLive(s.session.status);
       s.halt();
-      s.patch({ status: "publishing" });
-      s.log("Stopping the agent and removing the microVM");
+      s.patch({ status: "publishing", error: null });
+      s.log(live ? "Stopping the agent and removing the microVM" : "Finishing the last publish on the existing worktree");
       setTimeout(() => {
         s.log(`Committed 3 files on ${s.session.branch} and pushed`);
-        s.patch({ status: "pr_opened", mesh: null, pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}` });
+        s.patch({
+          status: "pr_opened",
+          mesh: null,
+          pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}`,
+          publish_stage: "pr_opened",
+        });
         s.log("Opened pull request");
       }, 1800);
       return clone(s.session);

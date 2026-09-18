@@ -35,11 +35,15 @@ export interface Session {
   branch: string;
   base: string | null;
   worktree: string;
+  /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
+  git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
   agent: string;
   autopilot: boolean;
   pr_url: string | null;
+  /** How far the last publish attempt got; absent when no publish has made progress. */
+  publish_stage?: "committed" | "pushed" | "pr_opened";
   error: string | null;
   /** Claude models only; routed models are counted in `model_usage` as tokens. */
   cost_usd: number | null;

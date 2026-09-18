@@ -184,7 +184,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
-| `POST /api/sessions/{id}/publish` | Stop the agent, commit (co-authored by Colonizer), push the colony's own `colonizer/…` branch (never the base or default branch), open PR |
+| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one — so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree) |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
@@ -218,11 +218,17 @@ missing values mean the `default`.
   "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
-  "pr_url": null, "error": null, "cost_usd": 0.42, "cleaned_up": false,
+  "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null, "cost_usd": 0.42, "cleaned_up": false,
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
 }
 ```
+
+`publish_stage` records how far the last publish got — committed, pushed or pr_opened — so a retry
+finishes from where it stopped and browsers can show the progress. It is left out until a publish
+commits something, kept in place when a publish fails part-way, and cleared when a publish finds no
+changes; the publish re-derives the truth from git and origin, so the field is the record, not the
+authority.
 
 `boot_timing` is where the last launch's time went, filled in when the colony finishes booting and
 replaced on resume. The phases are consecutive spans in boot order and partition the launch, so they
