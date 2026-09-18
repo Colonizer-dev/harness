@@ -75,13 +75,20 @@ fn platform_for(os: &str, arch: &str) -> &'static str {
     }
 }
 
+/// Whether a `COLONIZER_TELEMETRY` value switches the optional senders off: `0`, `off`, `false` or
+/// `no`, case-insensitively. One helper for the live map and usage reporting, so the one environment
+/// variable means the same thing to each.
+pub(crate) fn colonizer_telemetry_off(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no"))
+}
+
 /// `DO_NOT_TRACK` (https://consoledonottrack.com) or `COLONIZER_TELEMETRY=off` keep the live map off whatever
 /// Settings says, for machines where nobody should have to remember to answer.
 fn blocked_by(do_not_track: Option<&str>, colonizer_telemetry: Option<&str>) -> Option<&'static str> {
     if do_not_track.is_some_and(|v| !matches!(v.trim(), "" | "0" | "false")) {
         return Some("DO_NOT_TRACK");
     }
-    if colonizer_telemetry.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no")) {
+    if colonizer_telemetry_off(colonizer_telemetry) {
         return Some("COLONIZER_TELEMETRY");
     }
     None
@@ -308,6 +315,9 @@ mod tests {
         assert_eq!(blocked_by(Some(""), None), None);
         assert_eq!(blocked_by(None, Some("off")), Some("COLONIZER_TELEMETRY"));
         assert_eq!(blocked_by(None, Some("OFF")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(blocked_by(None, Some("0")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(blocked_by(None, Some("false")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(blocked_by(None, Some("No")), Some("COLONIZER_TELEMETRY"));
         assert_eq!(blocked_by(None, Some("on")), None);
     }
 

@@ -8,6 +8,11 @@ switched it on.
 can change your answer at any time in Settings, under Live map. Until you answer, and whenever it is off,
 the mothership sends nothing.
 
+**This is not [usage data](usage-data.md).** That is a second, separate thing: a batch of counts about
+how the harness is used, with its own switch and a different random id, and on by default — though in
+its current release it is never sent at all, only built, shown and kept. The environment switches below
+keep both off.
+
 ## What is sent
 
 While it is on, the mothership sends a heartbeat to `https://telemetry.colonizer.dev/v1/heartbeat` every
@@ -99,6 +104,9 @@ statistics.
 Set `DO_NOT_TRACK=1` or `COLONIZER_TELEMETRY=off` in the mothership's environment. The live map then
 stays off, whatever Settings says, and the web UI doesn't ask. `COLONIZER_TELEMETRY_URL` points the
 heartbeat at another receiver, such as your own deployment of the service.
+
+Both switches keep [usage data](usage-data.md) off too; that page also names one more switch,
+`CI=true`, which this map ignores.
 
 ## Running the service
 
