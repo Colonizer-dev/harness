@@ -21,10 +21,10 @@ use crate::{
     orgs::valid_org,
     util::{truncate, valid_repo},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::HashMap, time::Duration};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.mem0.ai";
@@ -72,7 +72,11 @@ impl Mem0 {
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { base_url: base_url.to_string(), key, client })
+        Ok(Self {
+            base_url: base_url.to_string(),
+            key,
+            client,
+        })
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<(StatusCode, Value)> {
@@ -89,7 +93,11 @@ impl Mem0 {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             bail!("mem0 rejected the API key ({status})");
         }
-        let value = if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
+        let value = if text.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&text).unwrap_or(Value::String(text))
+        };
         Ok((status, value))
     }
 
@@ -104,7 +112,9 @@ impl Mem0 {
     /// Confirms the key and endpoint work, with the cheapest request that needs both.
     pub async fn check(&self) -> Result<()> {
         let body = json!({"filters": {"user_id": scope_id("global", "")?, "app_id": APP_ID}});
-        self.ok(Method::POST, "/v3/memories/?page=1&page_size=1", Some(body)).await.map(|_| ())
+        self.ok(Method::POST, "/v3/memories/?page=1&page_size=1", Some(body))
+            .await
+            .map(|_| ())
     }
 
     /// Stores an approved note verbatim and returns mem0's id for it.
@@ -145,7 +155,12 @@ impl Mem0 {
             let path = format!("/v3/memories/?page={page}&page_size={PAGE_SIZE}");
             let response = self.ok(Method::POST, &path, Some(body.clone())).await?;
             let results = response["results"].as_array().cloned().unwrap_or_default();
-            notes.extend(results.iter().filter_map(note_from).filter(|n| n.scope == scope && n.key == key));
+            notes.extend(
+                results
+                    .iter()
+                    .filter_map(note_from)
+                    .filter(|n| n.scope == scope && n.key == key),
+            );
             if results.is_empty() || response["next"].is_null() || notes.len() >= MAX_PER_SCOPE {
                 break;
             }
@@ -157,7 +172,10 @@ impl Mem0 {
 
     /// mem0's relevance ranking for `query` across the given scopes: memory id → rank, 0 best.
     pub async fn rank(&self, query: &str, scopes: &[(&str, &str)], top_k: usize) -> Result<HashMap<String, usize>> {
-        let ids = scopes.iter().map(|(scope, key)| scope_id(scope, key)).collect::<Result<Vec<_>>>()?;
+        let ids = scopes
+            .iter()
+            .map(|(scope, key)| scope_id(scope, key))
+            .collect::<Result<Vec<_>>>()?;
         let body = json!({
             "query": truncate(query.trim(), MAX_QUERY),
             "filters": {"user_id": {"in": ids}, "app_id": APP_ID},
@@ -168,7 +186,12 @@ impl Mem0 {
         Ok(response["results"]
             .as_array()
             .map(|results| {
-                results.iter().filter_map(|m| m["id"].as_str()).enumerate().map(|(rank, id)| (id.to_string(), rank)).collect()
+                results
+                    .iter()
+                    .filter_map(|m| m["id"].as_str())
+                    .enumerate()
+                    .map(|(rank, id)| (id.to_string(), rank))
+                    .collect()
             })
             .unwrap_or_default())
     }
@@ -214,7 +237,10 @@ fn note_from(memory: &Value) -> Option<Note> {
         key: meta["key"].as_str().unwrap_or_default().to_string(),
         title: title.to_string(),
         content: content.to_string(),
-        tags: meta["tags"].as_array().map(|t| t.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
+        tags: meta["tags"]
+            .as_array()
+            .map(|t| t.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
         created_at,
         source: meta["source"].clone(),
     })
@@ -227,12 +253,12 @@ pub mod mock {
     //! inside `filters` rather than beside them, which the real API rejects with a 400.
 
     use axum::{
+        Json, Router,
         extract::{Path, State},
         http::{HeaderMap, StatusCode},
         routing::{get, post},
-        Json, Router,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 
     pub const KEY: &str = "m0-test-key";
@@ -273,7 +299,11 @@ pub mod mock {
         });
         mock.memories.lock().unwrap().push(memory);
         // The real API answers with results only when infer is false; mirror that.
-        let results = if body["infer"] == json!(false) { json!([{"id": id, "event": "ADD"}]) } else { Value::Null };
+        let results = if body["infer"] == json!(false) {
+            json!([{"id": id, "event": "ADD"}])
+        } else {
+            Value::Null
+        };
         (StatusCode::OK, Json(json!({"status": "ok", "results": results})))
     }
 
@@ -282,10 +312,23 @@ pub mod mock {
             return (StatusCode::UNAUTHORIZED, Json(json!({})));
         }
         if body.get("user_id").is_some() {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": "entity ids belong in filters"})));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "entity ids belong in filters"})),
+            );
         }
-        let results: Vec<Value> = mock.memories.lock().unwrap().iter().filter(|m| matches(m, &body["filters"])).cloned().collect();
-        (StatusCode::OK, Json(json!({"count": results.len(), "next": null, "previous": null, "results": results})))
+        let results: Vec<Value> = mock
+            .memories
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| matches(m, &body["filters"]))
+            .cloned()
+            .collect();
+        (
+            StatusCode::OK,
+            Json(json!({"count": results.len(), "next": null, "previous": null, "results": results})),
+        )
     }
 
     /// Ranks by how many query words a memory contains: crude, but deterministic.
@@ -293,7 +336,13 @@ pub mod mock {
         if !authorized(&headers) {
             return (StatusCode::UNAUTHORIZED, Json(json!({})));
         }
-        let words: Vec<String> = body["query"].as_str().unwrap_or_default().to_lowercase().split_whitespace().map(String::from).collect();
+        let words: Vec<String> = body["query"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase()
+            .split_whitespace()
+            .map(String::from)
+            .collect();
         let mut scored: Vec<(usize, Value)> = mock
             .memories
             .lock()
@@ -359,7 +408,10 @@ mod tests {
     fn scopes_map_to_entity_ids_and_bad_ones_are_refused() {
         assert_eq!(scope_id("global", "").unwrap(), "colonizer:global");
         assert_eq!(scope_id("org", "Colonizer-dev").unwrap(), "colonizer:org:Colonizer-dev");
-        assert_eq!(scope_id("repo", "Colonizer-dev/harness").unwrap(), "colonizer:repo:Colonizer-dev/harness");
+        assert_eq!(
+            scope_id("repo", "Colonizer-dev/harness").unwrap(),
+            "colonizer:repo:Colonizer-dev/harness"
+        );
         assert!(scope_id("global", "x").is_err());
         assert!(scope_id("org", "../x").is_err());
         assert!(scope_id("repo", "owner").is_err());
@@ -402,8 +454,14 @@ mod tests {
     #[tokio::test]
     async fn a_scope_lists_only_its_own_notes_and_never_another_apps() {
         let (mem0, mock) = client().await;
-        for (scope, key, title) in [("repo", "o/r", "repo note"), ("org", "o", "org note"), ("repo", "o/other", "other repo")] {
-            mem0.add(&draft(scope, key, title, "content", &[], Value::Null).unwrap()).await.unwrap();
+        for (scope, key, title) in [
+            ("repo", "o/r", "repo note"),
+            ("org", "o", "org note"),
+            ("repo", "o/other", "other repo"),
+        ] {
+            mem0.add(&draft(scope, key, title, "content", &[], Value::Null).unwrap())
+                .await
+                .unwrap();
         }
         // Another tool's memory in the same mem0 project, under the very same user_id.
         mock.memories.lock().unwrap().push(json!({
@@ -417,10 +475,21 @@ mod tests {
     #[tokio::test]
     async fn delete_refuses_a_memory_colonizer_did_not_write_in_that_scope() {
         let (mem0, mock) = client().await;
-        let ours = mem0.add(&draft("repo", "o/r", "ours", "c", &[], Value::Null).unwrap()).await.unwrap();
-        mock.memories.lock().unwrap().push(json!({"id": "11111111-2222-3333-4444-555555555555", "user_id": "colonizer:repo:o/r", "app_id": "someone-else"}));
+        let ours = mem0
+            .add(&draft("repo", "o/r", "ours", "c", &[], Value::Null).unwrap())
+            .await
+            .unwrap();
+        mock.memories.lock().unwrap().push(
+            json!({"id": "11111111-2222-3333-4444-555555555555", "user_id": "colonizer:repo:o/r", "app_id": "someone-else"}),
+        );
 
-        assert!(!mem0.delete("repo", "o/r", "11111111-2222-3333-4444-555555555555").await.unwrap(), "another app's memory");
+        assert!(
+            !mem0
+                .delete("repo", "o/r", "11111111-2222-3333-4444-555555555555")
+                .await
+                .unwrap(),
+            "another app's memory"
+        );
         assert!(!mem0.delete("org", "o", &ours).await.unwrap(), "right memory, wrong scope");
         assert!(!mem0.delete("repo", "o/r", "../../v1/memories").await.unwrap(), "not an id");
         assert_eq!(mock.memories.lock().unwrap().len(), 2, "nothing was deleted yet");
@@ -433,9 +502,32 @@ mod tests {
     #[tokio::test]
     async fn ranking_follows_the_query() {
         let (mem0, _mock) = client().await;
-        let deploy = mem0.add(&draft("repo", "o/r", "Deploys", "deploy with the staging workflow first", &[], Value::Null).unwrap()).await.unwrap();
-        let style = mem0.add(&draft("org", "o", "Style", "prefer small commits", &[], Value::Null).unwrap()).await.unwrap();
-        let ranks = mem0.rank("how do I deploy to staging", &[("global", ""), ("org", "o"), ("repo", "o/r")], 10).await.unwrap();
+        let deploy = mem0
+            .add(
+                &draft(
+                    "repo",
+                    "o/r",
+                    "Deploys",
+                    "deploy with the staging workflow first",
+                    &[],
+                    Value::Null,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let style = mem0
+            .add(&draft("org", "o", "Style", "prefer small commits", &[], Value::Null).unwrap())
+            .await
+            .unwrap();
+        let ranks = mem0
+            .rank(
+                "how do I deploy to staging",
+                &[("global", ""), ("org", "o"), ("repo", "o/r")],
+                10,
+            )
+            .await
+            .unwrap();
         assert!(ranks[&deploy] < ranks[&style]);
     }
 

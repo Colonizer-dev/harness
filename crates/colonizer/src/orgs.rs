@@ -1,20 +1,19 @@
 //! Org workspaces: per-GitHub-org defaults layered over the global module settings.
 
 use crate::{
-    client_error,
-    config::{setting_f64, setting_str, setting_u64, ModuleChoice, ModulesConfig},
+    ApiResult, App, Shared, client_error,
+    config::{ModuleChoice, ModulesConfig, setting_f64, setting_str, setting_u64},
     modules::schema_for,
     util::parse_disk_size,
     watchdog::WatchdogSettings,
-    ApiResult, App, Shared,
 };
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -83,7 +82,10 @@ impl App {
     }
 
     pub fn all_org_settings(&self) -> BTreeMap<String, OrgSettings> {
-        std::fs::read(self.orgs_file()).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(self.orgs_file())
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     pub fn org_settings(&self, org: &str) -> OrgSettings {
@@ -104,7 +106,11 @@ impl App {
 pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoice {
     let mut choice = modules.agent.clone();
     if let Some(agent) = &org.agent {
-        for (key, value) in [("model", &agent.model), ("subagent_model", &agent.subagent_model), ("background_model", &agent.background_model)] {
+        for (key, value) in [
+            ("model", &agent.model),
+            ("subagent_model", &agent.subagent_model),
+            ("background_model", &agent.background_model),
+        ] {
             if let Some(value) = value {
                 choice.settings.insert(key.to_string(), Value::String(value.clone()));
             }
@@ -157,7 +163,11 @@ pub fn budget_usd(modules: &ModulesConfig, org: &OrgSettings) -> f64 {
 
 /// Which budget that is, for messages about it: the org's own, or the mothership default.
 pub fn budget_source(org: &OrgSettings) -> &'static str {
-    if org.budget_usd.is_some() { "the org's own budget" } else { "the default budget" }
+    if org.budget_usd.is_some() {
+        "the org's own budget"
+    } else {
+        "the default budget"
+    }
 }
 
 /// The mothership-wide per-colony host-disk quota from the sandbox module, in bytes. The default is `0`:
@@ -182,23 +192,43 @@ pub fn host_disk(modules: &ModulesConfig, org: &OrgSettings) -> u64 {
 
 /// Which quota that is, for messages about it: the org's own, or the mothership default.
 pub fn host_disk_source(org: &OrgSettings) -> &'static str {
-    if org_host_disk(org).is_some() { "the org's own host-disk quota" } else { "the default host-disk quota" }
+    if org_host_disk(org).is_some() {
+        "the org's own host-disk quota"
+    } else {
+        "the default host-disk quota"
+    }
 }
 
 pub fn effective_memory_enabled(modules: &ModulesConfig, org: &OrgSettings) -> bool {
-    let global = modules.memory.enabled && modules.memory.settings.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let global = modules.memory.enabled
+        && modules
+            .memory
+            .settings
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
     org.memory.as_ref().and_then(|m| m.enabled).unwrap_or(global)
 }
 
 pub fn memory_requires_review(modules: &ModulesConfig) -> bool {
-    modules.memory.settings.get("require_review").and_then(Value::as_bool).unwrap_or(true)
+    modules
+        .memory
+        .settings
+        .get("require_review")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 pub fn effective_watchdog(modules: &ModulesConfig, org: &OrgSettings) -> WatchdogSettings {
     let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
     let number = |key: &str| setting_u64(&modules.watchdog, &schema, key);
-    let global_enabled =
-        modules.watchdog.enabled && modules.watchdog.settings.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let global_enabled = modules.watchdog.enabled
+        && modules
+            .watchdog
+            .settings
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
     let overrides = org.watchdog.clone().unwrap_or_default();
     WatchdogSettings {
         enabled: overrides.enabled.unwrap_or(global_enabled),
@@ -210,13 +240,19 @@ pub fn effective_watchdog(modules: &ModulesConfig, org: &OrgSettings) -> Watchdo
 
 fn validate(settings: &OrgSettings) -> Result<(), String> {
     if let Some(agent) = &settings.agent {
-        for model in [&agent.model, &agent.subagent_model, &agent.background_model].into_iter().flatten() {
+        for model in [&agent.model, &agent.subagent_model, &agent.background_model]
+            .into_iter()
+            .flatten()
+        {
             if model.len() > 120 || model.contains(char::is_whitespace) {
                 return Err("model names can't contain spaces or exceed 120 characters".into());
             }
         }
         if let Some(skillsets) = &agent.skillsets
-            && (skillsets.len() > 64 || !skillsets.keys().all(|name| crate::util::is_plain_name(name) && name.len() <= 64))
+            && (skillsets.len() > 64
+                || !skillsets
+                    .keys()
+                    .all(|name| crate::util::is_plain_name(name) && name.len() <= 64))
         {
             return Err("skillset names are plain directory names, at most 64 of them".into());
         }
@@ -291,7 +327,9 @@ pub struct PutOrg {
 fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Option<&Value>) {
     let named = |field: &str| raw.and_then(|settings| settings.get(field)).is_some();
     let unnamed_sub = |object: &str, field: &str| {
-        raw.and_then(|settings| settings.get(object)).and_then(|object| object.get(field)).is_none()
+        raw.and_then(|settings| settings.get(object))
+            .and_then(|object| object.get(field))
+            .is_none()
     };
     if !named("agent") {
         incoming.agent = saved.agent.clone();
@@ -339,7 +377,11 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
         agent.skillsets = None;
     }
     let mut all = app.all_org_settings();
-    keep_unnamed_fields(&mut req.settings, all.get(&org).unwrap_or(&OrgSettings::default()), named.as_ref());
+    keep_unnamed_fields(
+        &mut req.settings,
+        all.get(&org).unwrap_or(&OrgSettings::default()),
+        named.as_ref(),
+    );
     if req.settings == OrgSettings::default() {
         all.remove(&org);
     } else {
@@ -357,8 +399,14 @@ mod tests {
     fn org_overrides_layer_over_global_settings() {
         let modules = ModulesConfig::default();
         let org = OrgSettings {
-            agent: Some(AgentOverrides { subagent_model: Some("deepseek/deepseek-flash".into()), ..Default::default() }),
-            watchdog: Some(WatchdogOverrides { stall_minutes: Some(5), ..Default::default() }),
+            agent: Some(AgentOverrides {
+                subagent_model: Some("deepseek/deepseek-flash".into()),
+                ..Default::default()
+            }),
+            watchdog: Some(WatchdogOverrides {
+                stall_minutes: Some(5),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let agent = effective_agent(&modules, &org);
@@ -372,7 +420,10 @@ mod tests {
         assert_eq!(effective_watchdog(&modules, &OrgSettings::default()).stall_minutes, 15);
 
         assert!(effective_memory_enabled(&modules, &OrgSettings::default()));
-        let disabled = OrgSettings { memory: Some(MemoryOverrides { enabled: Some(false) }), ..Default::default() };
+        let disabled = OrgSettings {
+            memory: Some(MemoryOverrides { enabled: Some(false) }),
+            ..Default::default()
+        };
         assert!(!effective_memory_enabled(&modules, &disabled));
     }
 
@@ -386,11 +437,25 @@ mod tests {
 
         modules.sandbox.settings.insert("budget_usd".into(), json!(10.0));
         assert_eq!(budget_usd(&modules, &OrgSettings::default()), 10.0);
-        let org = OrgSettings { budget_usd: Some(5.5), ..Default::default() };
-        assert_eq!(budget_usd(&modules, &org), 5.5, "the org's own budget beats the global default");
+        let org = OrgSettings {
+            budget_usd: Some(5.5),
+            ..Default::default()
+        };
+        assert_eq!(
+            budget_usd(&modules, &org),
+            5.5,
+            "the org's own budget beats the global default"
+        );
         assert_eq!(budget_source(&org), "the org's own budget");
-        let opted_out = OrgSettings { budget_usd: Some(0.0), ..Default::default() };
-        assert_eq!(budget_usd(&modules, &opted_out), 0.0, "an org can opt out of a global budget with 0");
+        let opted_out = OrgSettings {
+            budget_usd: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            budget_usd(&modules, &opted_out),
+            0.0,
+            "an org can opt out of a global budget with 0"
+        );
     }
 
     #[test]
@@ -403,12 +468,29 @@ mod tests {
 
         modules.sandbox.settings.insert("host_disk".into(), json!("16G"));
         assert_eq!(host_disk(&modules, &OrgSettings::default()), 16 * 1024 * 1024 * 1024);
-        let org = OrgSettings { host_disk: Some("512M".into()), ..Default::default() };
-        assert_eq!(host_disk(&modules, &org), 512 * 1024 * 1024, "the org's own quota beats the global default");
+        let org = OrgSettings {
+            host_disk: Some("512M".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            host_disk(&modules, &org),
+            512 * 1024 * 1024,
+            "the org's own quota beats the global default"
+        );
         assert_eq!(host_disk_source(&org), "the org's own host-disk quota");
-        let opted_out = OrgSettings { host_disk: Some("0".into()), ..Default::default() };
-        assert_eq!(host_disk(&modules, &opted_out), 0, "an org can opt out of a global quota with 0");
-        let malformed = OrgSettings { host_disk: Some("a lot".into()), ..Default::default() };
+        let opted_out = OrgSettings {
+            host_disk: Some("0".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            host_disk(&modules, &opted_out),
+            0,
+            "an org can opt out of a global quota with 0"
+        );
+        let malformed = OrgSettings {
+            host_disk: Some("a lot".into()),
+            ..Default::default()
+        };
         assert_eq!(
             host_disk(&modules, &malformed),
             16 * 1024 * 1024 * 1024,
@@ -419,25 +501,86 @@ mod tests {
 
     #[test]
     fn org_settings_are_validated() {
-        assert!(validate(&OrgSettings { max_parallel: Some(0), ..Default::default() }).is_err());
-        assert!(validate(&OrgSettings { budget_usd: Some(-1.0), ..Default::default() }).is_err(), "a budget can't be negative");
-        assert!(validate(&OrgSettings { budget_usd: Some(0.0), ..Default::default() }).is_ok(), "0 is a budget of none");
-        assert!(validate(&OrgSettings { budget_usd: Some(12.5), ..Default::default() }).is_ok());
-        assert!(validate(&OrgSettings { host_disk: Some("a lot".into()), ..Default::default() }).is_err(), "a quota must parse as a size");
-        assert!(validate(&OrgSettings { host_disk: Some("16G".into()), ..Default::default() }).is_ok());
-        assert!(validate(&OrgSettings { host_disk: Some("0".into()), ..Default::default() }).is_ok(), "0 is no quota");
-        let bad_model = OrgSettings { agent: Some(AgentOverrides { model: Some("two words".into()), ..Default::default() }), ..Default::default() };
+        assert!(
+            validate(&OrgSettings {
+                max_parallel: Some(0),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate(&OrgSettings {
+                budget_usd: Some(-1.0),
+                ..Default::default()
+            })
+            .is_err(),
+            "a budget can't be negative"
+        );
+        assert!(
+            validate(&OrgSettings {
+                budget_usd: Some(0.0),
+                ..Default::default()
+            })
+            .is_ok(),
+            "0 is a budget of none"
+        );
+        assert!(
+            validate(&OrgSettings {
+                budget_usd: Some(12.5),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+        assert!(
+            validate(&OrgSettings {
+                host_disk: Some("a lot".into()),
+                ..Default::default()
+            })
+            .is_err(),
+            "a quota must parse as a size"
+        );
+        assert!(
+            validate(&OrgSettings {
+                host_disk: Some("16G".into()),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+        assert!(
+            validate(&OrgSettings {
+                host_disk: Some("0".into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "0 is no quota"
+        );
+        let bad_model = OrgSettings {
+            agent: Some(AgentOverrides {
+                model: Some("two words".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         assert!(validate(&bad_model).is_err());
         assert!(valid_org("Colonizer-dev"));
         assert!(!valid_org("../etc"));
 
         let skillsets = |names: &[(&str, bool)]| OrgSettings {
-            agent: Some(AgentOverrides { skillsets: Some(names.iter().map(|(n, on)| (n.to_string(), *on)).collect()), ..Default::default() }),
+            agent: Some(AgentOverrides {
+                skillsets: Some(names.iter().map(|(n, on)| (n.to_string(), *on)).collect()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert!(validate(&skillsets(&[("google-skills", true)])).is_ok());
-        assert!(validate(&skillsets(&[("../ecc", true)])).is_err(), "a skillset is a directory name, never a path");
-        assert!(validate(&skillsets(&[("a,b", true)])).is_err(), "a comma would split into two names in the setting");
+        assert!(
+            validate(&skillsets(&[("../ecc", true)])).is_err(),
+            "a skillset is a directory name, never a path"
+        );
+        assert!(
+            validate(&skillsets(&[("a,b", true)])).is_err(),
+            "a comma would split into two names in the setting"
+        );
     }
 
     #[test]
@@ -451,7 +594,10 @@ mod tests {
             max_parallel: Some(4),
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
-            watchdog: Some(WatchdogOverrides { waiting_minutes: Some(45), ..Default::default() }),
+            watchdog: Some(WatchdogOverrides {
+                waiting_minutes: Some(45),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         // A web build from before the budget and the quota names only the fields it knows: those it sends
@@ -465,11 +611,33 @@ mod tests {
         });
         let mut incoming: OrgSettings = serde_json::from_value(old_build.clone()).unwrap();
         keep_unnamed_fields(&mut incoming, &saved, Some(&old_build));
-        assert_eq!(incoming.budget_usd, Some(20.0), "a budget the client never heard of survives the save");
-        assert_eq!(incoming.host_disk.as_deref(), Some("16G"), "so does a host-disk quota it never heard of");
-        assert_eq!(incoming.max_parallel, None, "a field the client names as null is a real request to inherit");
-        assert_eq!(incoming.agent.map(|a| (a.model, a.skillsets)), Some((None, None)), "named nulls clear, named values win");
-        assert_eq!(incoming.watchdog, Some(WatchdogOverrides { waiting_minutes: Some(45), ..Default::default() }), "a sub-field the client never sends keeps its saved value");
+        assert_eq!(
+            incoming.budget_usd,
+            Some(20.0),
+            "a budget the client never heard of survives the save"
+        );
+        assert_eq!(
+            incoming.host_disk.as_deref(),
+            Some("16G"),
+            "so does a host-disk quota it never heard of"
+        );
+        assert_eq!(
+            incoming.max_parallel, None,
+            "a field the client names as null is a real request to inherit"
+        );
+        assert_eq!(
+            incoming.agent.map(|a| (a.model, a.skillsets)),
+            Some((None, None)),
+            "named nulls clear, named values win"
+        );
+        assert_eq!(
+            incoming.watchdog,
+            Some(WatchdogOverrides {
+                waiting_minutes: Some(45),
+                ..Default::default()
+            }),
+            "a sub-field the client never sends keeps its saved value"
+        );
 
         // A save with no settings object at all — an empty PUT — changes nothing.
         let mut blank: OrgSettings = Default::default();
@@ -485,13 +653,19 @@ mod tests {
         let mut modules = ModulesConfig::default();
         modules.agent.settings.insert("plugins".into(), json!("ecc, team-skills"));
         let org = |names: &[(&str, bool)]| OrgSettings {
-            agent: Some(AgentOverrides { skillsets: Some(names.iter().map(|(n, on)| (n.to_string(), *on)).collect()), ..Default::default() }),
+            agent: Some(AgentOverrides {
+                skillsets: Some(names.iter().map(|(n, on)| (n.to_string(), *on)).collect()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let plugins = |org: &OrgSettings| effective_agent(&modules, org).settings.get("plugins").cloned();
 
         // Unnamed skillsets follow the global switches, in the global order.
-        assert_eq!(plugins(&org(&[("ecc", false), ("google-skills", true)])), Some(json!("team-skills,google-skills")));
+        assert_eq!(
+            plugins(&org(&[("ecc", false), ("google-skills", true)])),
+            Some(json!("team-skills,google-skills"))
+        );
         // Switching on what is already on changes nothing.
         assert_eq!(plugins(&org(&[("ecc", true)])), Some(json!("ecc,team-skills")));
         // No overrides leaves the global setting exactly as the operator wrote it.
@@ -500,6 +674,11 @@ mod tests {
 
         // With nothing on globally (the default), an org can still switch one on.
         let fresh = ModulesConfig::default();
-        assert_eq!(effective_agent(&fresh, &org(&[("superpowers", true)])).settings.get("plugins"), Some(&json!("superpowers")));
+        assert_eq!(
+            effective_agent(&fresh, &org(&[("superpowers", true)]))
+                .settings
+                .get("plugins"),
+            Some(&json!("superpowers"))
+        );
     }
 }

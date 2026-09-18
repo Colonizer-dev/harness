@@ -5,20 +5,19 @@
 //! colony.
 
 use crate::{
-    client_error,
-    gateway::{DEFAULT_TIMEOUT_SECS, COLONY_HEADER},
+    ApiResult, App, Shared, client_error,
+    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS},
     orgs::effective_agent,
     sessions::agent_env,
     util::{read_trimmed, write_secret},
-    ApiResult, App, Shared,
 };
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 
 /// The protocol an endpoint speaks. An `anthropic` endpoint is proxied byte-for-byte; an `openai` one
@@ -144,7 +143,11 @@ const AUTH_MODES: [&str; 3] = ["x-api-key", "bearer", "none"];
 /// The preset a provider was added from: a label for the UI, not a capability. The catalogue names
 /// dozens, so this is checked for shape rather than against a list.
 fn valid_preset(preset: &str) -> bool {
-    !preset.is_empty() && preset.len() <= 48 && preset.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    !preset.is_empty()
+        && preset.len() <= 48
+        && preset
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// The runner reads these to decide which routes a colony actually uses.
@@ -160,7 +163,10 @@ impl App {
     }
 
     pub fn providers(&self) -> Vec<Provider> {
-        std::fs::read(self.providers_file()).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(self.providers_file())
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
@@ -201,7 +207,12 @@ fn api_model(model: &str) -> &str {
 
 /// Removes OAuth capability betas, which only Anthropic understands.
 pub fn strip_oauth_betas(value: &str) -> String {
-    value.split(',').map(str::trim).filter(|beta| !beta.is_empty() && !beta.starts_with("oauth-")).collect::<Vec<_>>().join(",")
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|beta| !beta.is_empty() && !beta.starts_with("oauth-"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Splits `scheme://host[:port][/path]`; only http and https are accepted.
@@ -250,14 +261,24 @@ impl ColonyRoutes {
         let models: Vec<&str> = MODEL_VARS.iter().filter_map(|var| runner_env.get(*var)?.as_str()).collect();
         self.providers
             .iter()
-            .filter(|p| models.iter().any(|m| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/'))))
+            .filter(|p| {
+                models
+                    .iter()
+                    .any(|m| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/')))
+            })
             .cloned()
             .collect()
     }
 }
 
 pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
-    let port = app.cfg.gateway_bind.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(41750);
+    let port = app
+        .cfg
+        .gateway_bind
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(41750);
     let providers = app.providers();
     let routes = providers
         .iter()
@@ -286,8 +307,10 @@ fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> 
     let mut used: Vec<&'static str> = Vec::new();
     for env in envs {
         for (var, setting) in MODEL_VARS.iter().zip(["model", "subagent_model", "background_model"]) {
-            let points_here =
-                env.get(*var).and_then(Value::as_str).is_some_and(|m| m.strip_prefix(provider_id).is_some_and(|rest| rest.starts_with('/')));
+            let points_here = env
+                .get(*var)
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.strip_prefix(provider_id).is_some_and(|rest| rest.starts_with('/')));
             if points_here && !used.contains(&setting) {
                 used.push(setting);
             }
@@ -299,7 +322,9 @@ fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> 
 /// The claude-code runner env for the global agent settings (schema defaults layered under
 /// modules.json), plus one per org that overrides them: every configuration a colony could start with.
 async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
-    let Some(agent) = app.agents.iter().find(|a| a.id == "claude-code") else { return Vec::new() };
+    let Some(agent) = app.agents.iter().find(|a| a.id == "claude-code") else {
+        return Vec::new();
+    };
     let modules = app.modules.read().await;
     let mut envs = vec![agent_env(agent, &modules.agent)];
     for org in app.all_org_settings().into_values() {
@@ -386,7 +411,9 @@ fn valid_price(value: f64) -> bool {
 pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<PutProvider>) -> ApiResult<Value> {
     let bad = |message: &str| client_error(StatusCode::BAD_REQUEST, message);
     if !valid_id(&id) {
-        return Err(bad("provider ids are lowercase letters, digits and dashes, and can't be \"anthropic\""));
+        return Err(bad(
+            "provider ids are lowercase letters, digits and dashes, and can't be \"anthropic\"",
+        ));
     }
     let name = req.name.trim();
     if name.is_empty() || name.len() > 60 {
@@ -399,13 +426,20 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if !AUTH_MODES.contains(&req.auth.as_str()) {
         return Err(bad("auth must be x-api-key, bearer or none"));
     }
-    let models: Vec<String> = req.models.iter().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    let models: Vec<String> = req
+        .models
+        .iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
     if models.len() > 50 || !models.iter().all(|m| valid_model(m)) {
         return Err(bad("models must be up to 50 model IDs without spaces"));
     }
     let preset = req.preset.unwrap_or_else(|| "custom".into());
     if !valid_preset(&preset) {
-        return Err(bad("preset ids are lowercase letters, digits and dashes, up to 48 characters"));
+        return Err(bad(
+            "preset ids are lowercase letters, digits and dashes, up to 48 characters",
+        ));
     }
     if !in_range(req.timeout_secs, 30, 3600) {
         return Err(bad("request timeout must be 30-3600 seconds"));
@@ -419,10 +453,16 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if !in_range(req.context_tokens, 1024, 2_000_000) {
         return Err(bad("context window must be 1,024-2,000,000 tokens"));
     }
-    let pricing_ok = req
-        .pricing
-        .as_ref()
-        .is_none_or(|p| [p.input_per_mtok, p.output_per_mtok, p.cache_read_per_mtok, p.cache_write_per_mtok].iter().all(|rate| valid_price(*rate)));
+    let pricing_ok = req.pricing.as_ref().is_none_or(|p| {
+        [
+            p.input_per_mtok,
+            p.output_per_mtok,
+            p.cache_read_per_mtok,
+            p.cache_write_per_mtok,
+        ]
+        .iter()
+        .all(|rate| valid_price(*rate))
+    });
     if !pricing_ok {
         return Err(bad("pricing rates must be dollar amounts per million tokens, zero or more"));
     }
@@ -434,7 +474,9 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         Some("") => {
             let _ = std::fs::remove_file(app.provider_key_file(&id));
         }
-        Some(key) if key.len() > 500 || key.contains(char::is_whitespace) => return Err(bad("that doesn't look like an API key")),
+        Some(key) if key.len() > 500 || key.contains(char::is_whitespace) => {
+            return Err(bad("that doesn't look like an API key"));
+        }
         Some(key) => write_secret(&app.provider_key_file(&id), key)?,
         None => {}
     }
@@ -488,8 +530,10 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
 }
 
 pub async fn models(State(app): State<Shared>) -> Json<Vec<Value>> {
-    let mut out: Vec<Value> =
-        ANTHROPIC_MODELS.iter().map(|(id, label)| json!({"id": id, "label": label, "provider": "anthropic"})).collect();
+    let mut out: Vec<Value> = ANTHROPIC_MODELS
+        .iter()
+        .map(|(id, label)| json!({"id": id, "label": label, "provider": "anthropic"}))
+        .collect();
     for provider in app.providers() {
         for model in &provider.models {
             out.push(json!({
@@ -526,19 +570,50 @@ mod tests {
 
     #[test]
     fn routed_tokens_are_priced_per_million_and_unpriced_providers_cost_nothing() {
-        let usage = Usage { input_tokens: 1_000_000, output_tokens: 500_000, cache_read_tokens: 2_000_000, cache_write_tokens: 0 };
-        let pricing = Pricing { input_per_mtok: 3.0, output_per_mtok: 15.0, cache_read_per_mtok: 0.3, cache_write_per_mtok: 3.75 };
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_read_tokens: 2_000_000,
+            cache_write_tokens: 0,
+        };
+        let pricing = Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cache_read_per_mtok: 0.3,
+            cache_write_per_mtok: 3.75,
+        };
         let cost = pricing.cost_usd(usage);
-        assert!((cost - (3.0 + 7.5 + 0.6)).abs() < 1e-9, "3 in + 0.5 out at 15 + 2 cache read at 0.3, got {cost}");
+        assert!(
+            (cost - (3.0 + 7.5 + 0.6)).abs() < 1e-9,
+            "3 in + 0.5 out at 15 + 2 cache read at 0.3, got {cost}"
+        );
         // Cached reads are priced separately from fresh input: the same million tokens twice, once each way.
-        let fresh = Usage { input_tokens: 1_000_000, ..Default::default() };
-        let cached = Usage { cache_read_tokens: 1_000_000, ..Default::default() };
-        let one_rate = Pricing { input_per_mtok: 1.0, cache_read_per_mtok: 0.1, ..Default::default() };
+        let fresh = Usage {
+            input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let cached = Usage {
+            cache_read_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let one_rate = Pricing {
+            input_per_mtok: 1.0,
+            cache_read_per_mtok: 0.1,
+            ..Default::default()
+        };
         assert!((one_rate.cost_usd(fresh) - 1.0).abs() < 1e-9);
-        assert!((one_rate.cost_usd(cached) - 0.1).abs() < 1e-9, "{:?}", one_rate.cost_usd(cached));
+        assert!(
+            (one_rate.cost_usd(cached) - 0.1).abs() < 1e-9,
+            "{:?}",
+            one_rate.cost_usd(cached)
+        );
 
         let unpriced = provider("local");
-        assert_eq!(unpriced.cost_usd(usage), 0.0, "no pricing configured: tokens counted, dollars none");
+        assert_eq!(
+            unpriced.cost_usd(usage),
+            0.0,
+            "no pricing configured: tokens counted, dollars none"
+        );
         assert_eq!(Usage::default().total_tokens(), 0);
         assert_eq!(usage.total_tokens(), 3_500_000);
     }
@@ -555,8 +630,21 @@ mod tests {
             r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","pricing":{"input_per_mtok":0.27,"output_per_mtok":1.1}}"#,
         )
         .unwrap();
-        assert_eq!(priced.pricing, Some(Pricing { input_per_mtok: 0.27, output_per_mtok: 1.1, ..Default::default() }));
-        assert_eq!(priced.cost_usd(Usage { input_tokens: 1_000_000, ..Default::default() }), 0.27);
+        assert_eq!(
+            priced.pricing,
+            Some(Pricing {
+                input_per_mtok: 0.27,
+                output_per_mtok: 1.1,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            priced.cost_usd(Usage {
+                input_tokens: 1_000_000,
+                ..Default::default()
+            }),
+            0.27
+        );
     }
 
     #[test]
@@ -574,8 +662,14 @@ mod tests {
             split_url("https://api.deepseek.com/anthropic"),
             Some(("https".into(), "api.deepseek.com".into(), None, "/anthropic".into()))
         );
-        assert_eq!(split_url("http://127.0.0.1:8080"), Some(("http".into(), "127.0.0.1".into(), Some(8080), String::new())));
-        assert_eq!(split_url("http://[::1]:9000/v1"), Some(("http".into(), "[::1]".into(), Some(9000), "/v1".into())));
+        assert_eq!(
+            split_url("http://127.0.0.1:8080"),
+            Some(("http".into(), "127.0.0.1".into(), Some(8080), String::new()))
+        );
+        assert_eq!(
+            split_url("http://[::1]:9000/v1"),
+            Some(("http".into(), "[::1]".into(), Some(9000), "/v1".into()))
+        );
         assert!(split_url("ftp://example.com").is_none());
         assert!(split_url("https://user:pass@example.com").is_none());
         assert!(split_url("https://example.com:notaport").is_none());
@@ -590,7 +684,8 @@ mod tests {
         let provider: Provider = serde_json::from_str(saved).unwrap();
         assert_eq!(provider.wire, Wire::Anthropic);
 
-        let put: PutProvider = serde_json::from_str(r#"{"name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic"}"#).unwrap();
+        let put: PutProvider =
+            serde_json::from_str(r#"{"name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic"}"#).unwrap();
         assert_eq!(put.wire, Wire::Anthropic);
 
         assert_eq!(serde_json::to_value(Wire::Openai).unwrap(), serde_json::json!("openai"));
@@ -599,7 +694,13 @@ mod tests {
     #[test]
     fn preset_ids_are_checked_for_shape_not_membership() {
         // The catalogue names dozens of vendors, and its longest id today is 34 characters.
-        for ok in ["custom", "deepseek", "kimi-for-coding", "9527code", "tencent-token-plan-enterprise-lite"] {
+        for ok in [
+            "custom",
+            "deepseek",
+            "kimi-for-coding",
+            "9527code",
+            "tencent-token-plan-enterprise-lite",
+        ] {
             assert!(valid_preset(ok), "{ok}");
         }
         for bad in ["", "Custom", "has space", "under_score", &"x".repeat(49)] {
@@ -631,7 +732,10 @@ mod tests {
 
     #[test]
     fn used_providers_follow_the_model_settings() {
-        let routes = ColonyRoutes { routes: vec![], providers: vec![provider("strix"), provider("str"), provider("deepseek")] };
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("str"), provider("deepseek")],
+        };
         let mut env = Map::new();
         env.insert("COLONIZER_MODEL".into(), json!("opus"));
         env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
@@ -648,7 +752,11 @@ mod tests {
         global.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("str/llama"));
         let mut org = Map::new();
         org.insert("COLONIZER_MODEL".into(), json!("strix/qwen3"));
-        assert_eq!(used_by("strix", &[global.clone(), org]), vec!["subagent_model", "model"], "an org override counts");
+        assert_eq!(
+            used_by("strix", &[global.clone(), org]),
+            vec!["subagent_model", "model"],
+            "an org override counts"
+        );
         // "strix/deepseek-v4-flash" shares "str" as a prefix but only "str/llama" is provider str's model.
         assert_eq!(used_by("str", &[global.clone()]), vec!["background_model"]);
 

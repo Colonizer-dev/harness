@@ -78,7 +78,10 @@ impl Drop for Daemon {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
     let dir = std::env::temp_dir().join(format!("colonizer-agentd-{name}-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(dir.join("workspace")).unwrap();
     dir
@@ -86,7 +89,11 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Spawns the real binary from a session.json, the way a colony boots it, and waits for /v1/health.
 async fn start(dir: &Path, initial_prompt: &str) -> Daemon {
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     std::fs::write(dir.join("runner.py"), STUB_RUNNER).unwrap();
     std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
     let config = json!({
@@ -119,20 +126,24 @@ async fn start(dir: &Path, initial_prompt: &str) -> Daemon {
 async fn http(port: u16, method: &str, path: &str, token: Option<&str>) -> std::io::Result<(u16, String)> {
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
     let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
-    let request =
-        format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n");
+    let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
     let mut response = String::new();
     stream.read_to_string(&mut response).await?;
     let status = response.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let body = response.split_once("\r\n\r\n").map(|(_, body)| body.to_string()).unwrap_or_default();
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
     Ok((status, body))
 }
 
 async fn ws(port: u16, path: &str, token: Option<&str>) -> Result<Ws, WsError> {
     let mut request = format!("ws://127.0.0.1:{port}{path}").into_client_request().unwrap();
     if let Some(token) = token {
-        request.headers_mut().insert("authorization", HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
+        request
+            .headers_mut()
+            .insert("authorization", HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
     }
     connect_async(request).await.map(|(stream, _)| stream)
 }
@@ -172,7 +183,9 @@ fn assert_stamped(events: &[Value]) {
         );
     }
     for event in events {
-        let ts = event["ts"].as_str().unwrap_or_else(|| panic!("every event carries a ts: {event}"));
+        let ts = event["ts"]
+            .as_str()
+            .unwrap_or_else(|| panic!("every event carries a ts: {event}"));
         DateTime::parse_from_rfc3339(ts).unwrap_or_else(|e| panic!("ts must be RFC 3339: {ts} ({e})"));
         assert!(ts.ends_with('Z'), "ts must be UTC: {ts}");
     }
@@ -202,8 +215,13 @@ async fn boot_to_health_events_message_replay_and_clean_shutdown() {
     let opening = collect_until(&mut events, |e| e["type"] == "status" && e["state"] == "waiting_for_answer").await;
     assert_eq!(opening[0]["seq"], 1, "seq starts at 1");
     assert_stamped(&opening);
-    assert!(has(&opening, |e| e["type"] == "status" && e["state"] == "idle"), "the runner's own stdout came through");
-    assert!(has(&opening, |e| e["type"] == "user_message" && e["id"] == "initial" && e["text"] == "boot check"));
+    assert!(
+        has(&opening, |e| e["type"] == "status" && e["state"] == "idle"),
+        "the runner's own stdout came through"
+    );
+    assert!(has(&opening, |e| e["type"] == "user_message"
+        && e["id"] == "initial"
+        && e["text"] == "boot check"));
     assert!(has(&opening, |e| {
         e["type"] == "question"
             && e["question_id"] == "q-smoke"
@@ -246,19 +264,31 @@ async fn boot_to_health_events_message_replay_and_clean_shutdown() {
     // live for the next turn.
     let mut resumed = ws(port, &format!("/v1/events?since={turn1}"), Some(TOKEN)).await.unwrap();
     let replayed_first = collect_until(&mut resumed, |e| e["type"] == "status").await;
-    assert_eq!(replayed_first[0]["seq"].as_u64().unwrap(), turn1 + 1, "replay starts right after `since`");
+    assert_eq!(
+        replayed_first[0]["seq"].as_u64().unwrap(),
+        turn1 + 1,
+        "replay starts right after `since`"
+    );
 
     // A message posted in reaches the runner's stdin. agentd has no POST /v1/message: the documented
     // surface is a user_message frame on the events socket, which is also how the harness sends the
     // browser's chat input. The runner's echo coming back proves both hops.
     events
-        .send(Message::Text(json!({"type": "user_message", "id": "u-1", "text": "hello colony"}).to_string().into()))
+        .send(Message::Text(
+            json!({"type": "user_message", "id": "u-1", "text": "hello colony"})
+                .to_string()
+                .into(),
+        ))
         .await
         .unwrap();
-    let second_turn = collect_until(&mut resumed, |e| e["type"] == "assistant_text" && e["text"] == "echo: hello colony")
-        .await;
+    let second_turn = collect_until(&mut resumed, |e| {
+        e["type"] == "assistant_text" && e["text"] == "echo: hello colony"
+    })
+    .await;
     assert_stamped(&second_turn);
-    assert!(has(&second_turn, |e| e["type"] == "user_message" && e["id"] == "u-1" && e["text"] == "hello colony"));
+    assert!(has(&second_turn, |e| e["type"] == "user_message"
+        && e["id"] == "u-1"
+        && e["text"] == "hello colony"));
     assert!(
         has(&second_turn, |e| e["type"] == "status" && e["state"] == "working"),
         "the live turn arrived on the resuming client, not just the replay: {second_turn:#?}"
@@ -286,7 +316,11 @@ async fn boot_to_health_events_message_replay_and_clean_shutdown() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     let seqs: Vec<u64> = log.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
-    assert_eq!(seqs, (1..=last_seq).collect::<Vec<u64>>(), "the event log is complete and gap-free");
+    assert_eq!(
+        seqs,
+        (1..=last_seq).collect::<Vec<u64>>(),
+        "the event log is complete and gap-free"
+    );
 
     // The daemon's own shutdown: SIGTERM stops it cleanly with the runner already gone.
     unsafe { libc::kill(daemon.child.id() as libc::pid_t, libc::SIGTERM) };

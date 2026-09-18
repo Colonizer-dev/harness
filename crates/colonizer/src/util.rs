@@ -1,6 +1,6 @@
 //! Small process, file and string helpers shared across the harness.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
@@ -37,7 +37,11 @@ pub async fn exec(cmd: &mut Command) -> Result<String> {
         .await
         .with_context(|| format!("failed to start `{desc}`"))?;
     if !out.status.success() {
-        bail!("`{desc}` failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "`{desc}` failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -56,7 +60,10 @@ pub async fn exec_status(cmd: &mut Command) -> Result<bool> {
 }
 
 pub fn read_trimmed(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Writes a secret with 0600 permissions, tightening the parent directory to 0700.
@@ -71,7 +78,12 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
 /// Writes a file with 0600 permissions without touching the parent directory's mode.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
     f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     f.write_all(bytes)?;
     Ok(())
@@ -89,7 +101,12 @@ pub async fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = path
         .file_name()
         .map(|name| path.with_file_name(format!("{}.tmp", name.to_string_lossy())))
-        .with_context(|| format!("could not write {}: it names no file, so there is no temp path to write", path.display()))?;
+        .with_context(|| {
+            format!(
+                "could not write {}: it names no file, so there is no temp path to write",
+                path.display()
+            )
+        })?;
     let write = async {
         faults::check(path, faults::Op::Write)?;
         let mut f = OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).await?;
@@ -172,7 +189,10 @@ pub(crate) mod faults {
     #[cfg(test)]
     pub fn inject(path_contains: &str, op: Op, make: fn() -> std::io::Error) -> FaultGuard {
         INJECTED.with_borrow_mut(|faults| faults.push((path_contains.to_string(), op, make)));
-        FaultGuard { contains: path_contains.to_string(), op }
+        FaultGuard {
+            contains: path_contains.to_string(),
+            op,
+        }
     }
 
     /// Clears the fault injected by `inject` when dropped.
@@ -186,7 +206,9 @@ pub(crate) mod faults {
     impl std::ops::Drop for FaultGuard {
         fn drop(&mut self) {
             INJECTED.with_borrow_mut(|faults| {
-                if let Some(at) = faults.iter().position(|(contains, op, _)| *contains == self.contains && *op == self.op)
+                if let Some(at) = faults
+                    .iter()
+                    .position(|(contains, op, _)| *contains == self.contains && *op == self.op)
                 {
                     faults.remove(at);
                 }
@@ -244,7 +266,11 @@ pub fn mount_spec(src: &Path, dst: &str, read_only: bool) -> Result<String> {
     if s.contains(':') || s.contains(',') {
         bail!("cannot mount {s}: path contains ':' or ','");
     }
-    Ok(if read_only { format!("{s}:{dst}:ro") } else { format!("{s}:{dst}") })
+    Ok(if read_only {
+        format!("{s}:{dst}:ro")
+    } else {
+        format!("{s}:{dst}")
+    })
 }
 
 pub fn short_id() -> String {
@@ -388,11 +414,19 @@ mod tests {
     #[test]
     fn disk_sizes_parse_with_their_suffixes_and_empty_or_zero_mean_unlimited() {
         assert_eq!(parse_disk_size("16G"), Some(16 * 1024 * 1024 * 1024));
-        assert_eq!(parse_disk_size("512m"), Some(512 * 1024 * 1024), "the suffix is case-insensitive");
+        assert_eq!(
+            parse_disk_size("512m"),
+            Some(512 * 1024 * 1024),
+            "the suffix is case-insensitive"
+        );
         assert_eq!(parse_disk_size("4K"), Some(4 * 1024));
         assert_eq!(parse_disk_size("2t"), Some(2u64 * 1024 * 1024 * 1024 * 1024));
         assert_eq!(parse_disk_size("1024"), Some(1024), "a bare number is bytes");
-        assert_eq!(parse_disk_size(" 8G "), Some(8 * 1024 * 1024 * 1024), "surrounding space is trimmed");
+        assert_eq!(
+            parse_disk_size(" 8G "),
+            Some(8 * 1024 * 1024 * 1024),
+            "surrounding space is trimmed"
+        );
         assert_eq!(parse_disk_size("0"), Some(0), "0 means unlimited");
         assert_eq!(parse_disk_size(""), Some(0), "and so does nothing set");
     }
@@ -408,7 +442,11 @@ mod tests {
     fn disk_sizes_are_formatted_back_the_way_they_are_written() {
         assert_eq!(format_disk_size(0), "0B");
         assert_eq!(format_disk_size(512), "512B");
-        assert_eq!(format_disk_size(4 * 1024 + 512), "4.5K", "one decimal when there is a fraction");
+        assert_eq!(
+            format_disk_size(4 * 1024 + 512),
+            "4.5K",
+            "one decimal when there is a fraction"
+        );
         assert_eq!(format_disk_size(512 * 1024 * 1024), "512M");
         assert_eq!(format_disk_size(1_610_612_736), "1.5G");
         assert_eq!(format_disk_size(16 * 1024 * 1024 * 1024), "16G");
@@ -426,8 +464,16 @@ mod tests {
         symlink(root.join("nowhere"), root.join("dangling")).unwrap();
         let linked = std::fs::symlink_metadata(root.join("link")).unwrap().len();
         let dangling = std::fs::symlink_metadata(root.join("dangling")).unwrap().len();
-        assert_eq!(dir_size(&root), 4096 + 10 + linked + dangling, "the targets of symlinks stay out of the sum");
-        assert_eq!(dir_size(&root.join("nowhere")), 0, "a missing root measures nothing instead of failing");
+        assert_eq!(
+            dir_size(&root),
+            4096 + 10 + linked + dangling,
+            "the targets of symlinks stay out of the sum"
+        );
+        assert_eq!(
+            dir_size(&root.join("nowhere")),
+            0,
+            "a missing root measures nothing instead of failing"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -454,7 +500,10 @@ mod tests {
                 Err(e) => panic!("could not nest {levels} deep: {e}"),
             }
         }
-        assert!(levels > 200, "only nested {levels} deep; too shallow to say anything about the walk");
+        assert!(
+            levels > 200,
+            "only nested {levels} deep; too shallow to say anything about the walk"
+        );
         // The deepest directory is at the limit itself, so a file name may no longer fit beside it: back
         // out a level at a time until one does.
         loop {
@@ -467,7 +516,10 @@ mod tests {
                 Err(e) => panic!("could not write the file at the bottom: {e}"),
             }
         }
-        assert!(dir_size(&root) >= "deep payload".len() as u64, "a tree {levels} directories deep is summed right down to its bottom file");
+        assert!(
+            dir_size(&root) >= "deep payload".len() as u64,
+            "a tree {levels} directories deep is summed right down to its bottom file"
+        );
         // `remove_dir_all` walks with `openat`, so it takes the tree apart without ever naming a path
         // too long to open — which is exactly why the walk under test does not build paths either.
         let _ = std::fs::remove_dir_all(&root);
@@ -475,7 +527,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use faults::{inject, Op};
+    use faults::{Op, inject};
 
     /// A fresh directory per test, as in memory.rs; there is no tempfile dev-dependency.
     fn temp_root(label: &str) -> PathBuf {
@@ -503,7 +555,10 @@ mod tests {
         write_atomic(&path, b"first").await.unwrap();
         write_atomic(&path, b"second").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
-        assert!(!path.with_extension("json.tmp").exists(), "sessions.json must get its old sessions.json.tmp sibling");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "sessions.json must get its old sessions.json.tmp sibling"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -515,7 +570,11 @@ mod tests {
         let _guard = inject("sessions.json", Op::Write, enospc);
         let err = write_atomic(&path, b"new").await.unwrap_err();
         assert!(err.to_string().contains("sessions.json"), "{err:#}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous", "no silent success, no lost contents");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "previous",
+            "no silent success, no lost contents"
+        );
         assert!(!path.with_extension("json.tmp").exists(), "the leftover temp is cleaned up");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -542,7 +601,11 @@ mod tests {
         let _guard = inject("sessions.json", Op::Rename, eio);
         let err = write_atomic(&path, b"new").await.unwrap_err();
         assert!(err.to_string().contains("in place"), "{err:#}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous", "the old file is still intact");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "previous",
+            "the old file is still intact"
+        );
         assert!(!path.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -577,7 +640,11 @@ mod tests {
         let _guard = inject("events.jsonl", Op::Append, denied);
         let err = append_line(&path, "{\"seq\":3}").await.unwrap_err();
         assert!(err.to_string().contains("events.jsonl"), "{err:#}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"seq\":1}\n{\"seq\":2}\n", "the line did not land");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"seq\":1}\n{\"seq\":2}\n",
+            "the line did not land"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

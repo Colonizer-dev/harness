@@ -113,8 +113,7 @@ async fn main() -> ExitCode {
 
 async fn run(args: Args) -> Result<(), BoxError> {
     let raw = std::fs::read(&args.config).map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
-    let config: SessionConfig =
-        serde_json::from_slice(&raw).map_err(|e| format!("invalid {}: {e}", args.config.display()))?;
+    let config: SessionConfig = serde_json::from_slice(&raw).map_err(|e| format!("invalid {}: {e}", args.config.display()))?;
     let token = std::fs::read_to_string(&args.token_file)
         .map_err(|e| format!("cannot read {}: {e}", args.token_file.display()))?
         .trim()
@@ -123,8 +122,7 @@ async fn run(args: Args) -> Result<(), BoxError> {
         return Err(format!("{} is empty", args.token_file.display()).into());
     }
     let store = Arc::new(
-        EventStore::open(&args.state_dir)
-            .map_err(|e| format!("cannot open event log in {}: {e}", args.state_dir.display()))?,
+        EventStore::open(&args.state_dir).map_err(|e| format!("cannot open event log in {}: {e}", args.state_dir.display()))?,
     );
     // Bind before starting the runner so a bad listen address fails fast.
     let listener = tokio::net::TcpListener::bind(&config.listen)
@@ -136,11 +134,19 @@ async fn run(args: Args) -> Result<(), BoxError> {
     );
     store.append(log_event(
         "info",
-        format!("colonizer-agentd {VERSION} listening on {} (agent module {})", config.listen, config.agent.module),
+        format!(
+            "colonizer-agentd {VERSION} listening on {} (agent module {})",
+            config.listen, config.agent.module
+        ),
     ));
 
     let runner = runner::start(&config, store.clone());
-    let state = AppState { store, runner: runner.clone(), token: Arc::from(token), workspace: config.workspace };
+    let state = AppState {
+        store,
+        runner: runner.clone(),
+        token: Arc::from(token),
+        workspace: config.workspace,
+    };
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/events", get(events))
@@ -267,13 +273,18 @@ async fn stream_events(socket: WebSocket, state: AppState, since: u64) {
 }
 
 fn forward_command(state: &AppState, text: &str) {
-    let Ok(command @ Value::Object(_)) = serde_json::from_str::<Value>(text) else { return };
+    let Ok(command @ Value::Object(_)) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
     let kind = command["type"].as_str().unwrap_or_default();
     if !matches!(kind, "user_message" | "answer" | "interrupt") {
         return;
     }
     if !state.runner.send(&command) {
-        state.store.append(log_event("warn", format!("agent runner is not running; dropped `{kind}` command")));
+        state.store.append(log_event(
+            "warn",
+            format!("agent runner is not running; dropped `{kind}` command"),
+        ));
     }
 }
 

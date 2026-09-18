@@ -5,24 +5,15 @@
 //! The autopilot decision itself is a pure function (`autopilot_step`) so the policy can be tested
 //! apart from the stream it acts on.
 
-use crate::{
-    findings, github, memory,
-    orgs,
-    util::append_line, Shared,
-};
+use crate::{Shared, findings, github, memory, orgs, util::append_line};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
-    sync::{
-        atomic::Ordering,
-        Arc,
-    },
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tokio::{
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self};
 
 use crate::protocol::{AgentEvent, AgentState};
@@ -55,7 +46,9 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
 pub(crate) async fn start_link(app: &Shared, id: &str) {
     let rt = app.runtime(id).await;
     rt.stop.send_replace(false);
-    let Some(commands) = rt.commands_rx.lock().await.take() else { return };
+    let Some(commands) = rt.commands_rx.lock().await.take() else {
+        return;
+    };
     tokio::spawn(agent_link(app.clone(), id.to_string(), rt, commands));
 }
 
@@ -76,7 +69,11 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
         let since = rt.last_seq.load(Ordering::SeqCst);
         match agentd_ws(&app, &s, &format!("/v1/events?since={since}")).await {
             Ok(ws) => {
-                let message = if connected_before { "reconnected to the agent" } else { "connected to the agent" };
+                let message = if connected_before {
+                    "reconnected to the agent"
+                } else {
+                    "connected to the agent"
+                };
                 app.session_log(&id, "info", message.into()).await;
                 connected_before = true;
                 warned = false;
@@ -109,7 +106,8 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
             }
             Err(e) => {
                 if backoff >= Duration::from_secs(8) && !warned {
-                    app.session_log(&id, "error", format!("can't reach the agent, retrying: {e:#}")).await;
+                    app.session_log(&id, "error", format!("can't reach the agent, retrying: {e:#}"))
+                        .await;
                     warned = true;
                 }
             }
@@ -123,7 +121,9 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
 }
 
 pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
-    let Ok(event) = serde_json::from_str::<Value>(line) else { return };
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
     let Some(seq) = event["seq"].as_u64() else { return };
     let persisted = {
         let _guard = rt.file_lock.lock().await;
@@ -145,7 +145,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // chance — but once a later event succeeds, `last_seq` jumps past the lost one and the gap
         // is permanent. This is a second chance, not a retry that is guaranteed to happen.
         app.storage_failed("append to the colony's event log", &e).await;
-        app.session_log(id, "error", format!("could not append to {}: {e:#}", rt.events_path.display())).await;
+        app.session_log(
+            id,
+            "error",
+            format!("could not append to {}: {e:#}", rt.events_path.display()),
+        )
+        .await;
     }
     rt.broadcast(Some(seq), line.to_string());
 
@@ -159,11 +164,17 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     {
         // A type this build acts on, whose body it could not read: worth saying out loud, because the
         // runner and the harness have drifted apart on a contract both are supposed to keep.
-        app.session_log(id, "warn", format!("ignored a malformed {} event: {e}", event["type"].as_str().unwrap_or("?"))).await;
+        app.session_log(
+            id,
+            "warn",
+            format!("ignored a malformed {} event: {e}", event["type"].as_str().unwrap_or("?")),
+        )
+        .await;
     }
 
     // Progress for the watchdog: anything but status changes and the echo of its own nudges.
-    let watchdog_echo = matches!(&deserialised, Ok(AgentEvent::UserMessage { id: echoed, .. }) if echoed.starts_with("watchdog-"));
+    let watchdog_echo =
+        matches!(&deserialised, Ok(AgentEvent::UserMessage { id: echoed, .. }) if echoed.starts_with("watchdog-"));
     if !matches!(&deserialised, Ok(AgentEvent::Status { .. })) && !watchdog_echo {
         {
             let mut activity = rt.activity.lock().await;
@@ -186,9 +197,11 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 AgentState::Unknown => return,
             };
             let error = match state {
-                AgentState::Error | AgentState::Exited => {
-                    Some(format!("agent {}{}", state.as_str(), detail.map(|d| format!(": {d}")).unwrap_or_default()))
-                }
+                AgentState::Error | AgentState::Exited => Some(format!(
+                    "agent {}{}",
+                    state.as_str(),
+                    detail.map(|d| format!(": {d}")).unwrap_or_default()
+                )),
                 _ => None,
             };
             if let Some(current) = app.session(id).await
@@ -212,25 +225,36 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             *rt.open_question.lock().await = None;
             rt.activity.lock().await.question_since = None;
         }
-        AgentEvent::MemoryProposal { scope, title, content, tags } => {
+        AgentEvent::MemoryProposal {
+            scope,
+            title,
+            content,
+            tags,
+        } => {
             memory_proposal(app, id, scope.as_deref(), &title, &content, &tags).await;
         }
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
         }
-        AgentEvent::TurnEnd { is_error, cost_usd, model_usage, .. } => {
+        AgentEvent::TurnEnd {
+            is_error,
+            cost_usd,
+            model_usage,
+            ..
+        } => {
             let cost = cost_usd;
             let usage = model_usage.filter(|u| u.is_object());
-            if let Some((s, ())) = app.update_session(id, |x| {
-                if cost.is_some() {
-                    x.cost_usd = cost;
-                }
-                if usage.is_some() {
-                    x.model_usage = usage;
-                }
-            })
-            .await
+            if let Some((s, ())) = app
+                .update_session(id, |x| {
+                    if cost.is_some() {
+                        x.cost_usd = cost;
+                    }
+                    if usage.is_some() {
+                        x.model_usage = usage;
+                    }
+                })
+                .await
             {
                 // Claude's own cost just landed, so the budget can trip here exactly as it can in the
                 // gateway; checked before autopilot, which must not publish a colony the budget stopped.
@@ -249,12 +273,25 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     let open_question = rt.open_question.lock().await.is_some();
                     match autopilot_step(errored, interrupted, open_question, pr_written) {
                         Autopilot::Publish => {
-                            app.session_log(id, "info", "autopilot: the agent finished and wrote its PR description, publishing".into()).await;
+                            app.session_log(
+                                id,
+                                "info",
+                                "autopilot: the agent finished and wrote its PR description, publishing".into(),
+                            )
+                            .await;
                             tokio::spawn(publish_session(app.clone(), id.to_string()));
                         }
-                        Autopilot::Wait(reason) => app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}")).await,
+                        Autopilot::Wait(reason) => {
+                            app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
+                                .await
+                        }
                         Autopilot::Hold(reason) => {
-                            app.session_log(id, "warn", format!("autopilot: not publishing, {reason}; press Create PR when the work is ready")).await;
+                            app.session_log(
+                                id,
+                                "warn",
+                                format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
+                            )
+                            .await;
                             app.update_session(id, |x| {
                                 x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
                             })
@@ -274,7 +311,12 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
     let Some(s) = app.session(id).await else { return };
     let modules = app.modules.read().await.clone();
     if !orgs::effective_memory_enabled(&modules, &app.org_settings(&s.org)) {
-        app.session_log(id, "info", "ignored a memory proposal: shared memory is off for this org".into()).await;
+        app.session_log(
+            id,
+            "info",
+            "ignored a memory proposal: shared memory is off for this org".into(),
+        )
+        .await;
         return;
     }
     let scope = scope.unwrap_or("repo");
@@ -287,7 +329,8 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
     let note = match memory::draft(scope, &key, title, content, tags, source) {
         Ok(note) => note,
         Err(e) => {
-            app.session_log(id, "error", format!("rejected a memory proposal: {e:#}")).await;
+            app.session_log(id, "error", format!("rejected a memory proposal: {e:#}"))
+                .await;
             return;
         }
     };
@@ -304,7 +347,12 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
             // With review off there is no queue to fall back on, so make one: a store that is down
             // (mem0 unreachable, a rejected key) must not cost the colony its proposal.
             Err(e) => {
-                app.session_log(id, "warn", format!("could not store the note ({e:#}); queued it for review instead")).await;
+                app.session_log(
+                    id,
+                    "warn",
+                    format!("could not store the note ({e:#}); queued it for review instead"),
+                )
+                .await;
                 app.memory.add_proposal(note).await.map(|proposal| json!(proposal))
             }
         }
@@ -314,7 +362,11 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
             let waiting = proposal["status"] == "pending";
             let message = format!(
                 "memory: the agent proposed \"{title}\" for {scope} memory{}",
-                if waiting { ", waiting for your review" } else { " (review is off, so it is live)" }
+                if waiting {
+                    ", waiting for your review"
+                } else {
+                    " (review is off, so it is live)"
+                }
             );
             app.session_log(id, "info", message).await;
             let rt = app.runtimes.lock().await.get(id).cloned();
@@ -322,7 +374,10 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
                 rt.broadcast(None, json!({"type": "memory_proposed", "proposal": proposal}).to_string());
             }
         }
-        Err(e) => app.session_log(id, "error", format!("could not store a memory proposal: {e:#}")).await,
+        Err(e) => {
+            app.session_log(id, "error", format!("could not store a memory proposal: {e:#}"))
+                .await
+        }
     }
 }
 
@@ -333,7 +388,12 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     let Some(s) = app.session(&id).await else { return };
     let modules = app.modules.read().await.clone();
     if !findings_enabled(&app, &modules) {
-        app.session_log(&id, "info", "ignored a finding: filing findings is switched off in Settings".into()).await;
+        app.session_log(
+            &id,
+            "info",
+            "ignored a finding: filing findings is switched off in Settings".into(),
+        )
+        .await;
         return;
     }
     let finding = match findings::parse(&event) {
@@ -357,15 +417,21 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     }
     let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md")).await;
     let (level, message, entry) = match &outcome {
-        Ok(findings::Filed::Issue(url)) => {
-            ("info", format!("filed finding \"{}\" as {url}", finding.title), json!({"title": finding.title, "issue": url}))
-        }
+        Ok(findings::Filed::Issue(url)) => (
+            "info",
+            format!("filed finding \"{}\" as {url}", finding.title),
+            json!({"title": finding.title, "issue": url}),
+        ),
         Ok(findings::Filed::Duplicate(url)) => (
             "info",
             format!("did not file \"{}\": {url} is already open with that title", finding.title),
             json!({"title": finding.title, "duplicate_of": url}),
         ),
-        Err(e) => ("error", format!("could not file finding \"{}\": {e:#}", finding.title), Value::Null),
+        Err(e) => (
+            "error",
+            format!("could not file finding \"{}\": {e:#}", finding.title),
+            Value::Null,
+        ),
     };
     // Only a filed or matched finding counts toward the cap; a GitHub error should not use one up.
     if !entry.is_null() {
@@ -374,7 +440,12 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.
             app.storage_failed("append to the colony's findings log", &e).await;
-            app.session_log(&id, "error", format!("could not record the finding in {}: {e:#}", record.display())).await;
+            app.session_log(
+                &id,
+                "error",
+                format!("could not record the finding in {}: {e:#}", record.display()),
+            )
+            .await;
         }
     }
     app.session_log(&id, level, message).await;

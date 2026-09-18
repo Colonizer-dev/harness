@@ -4,10 +4,10 @@
 //! scripts/fetch-vendor.sh. Boot and the Settings list both resolve through this module, so what the
 //! toggles show is what a colony will mount.
 
-use crate::{config::Settings, util::is_plain_name, Shared};
-use anyhow::{bail, Result};
-use axum::{extract::State, Json};
-use serde_json::{json, Value};
+use crate::{Shared, config::Settings, util::is_plain_name};
+use anyhow::{Result, bail};
+use axum::{Json, extract::State};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -45,20 +45,27 @@ pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
     }
     match vendored_root(cfg).map(|vendored| vendored.join(name)) {
         Some(vendored) if vendored.is_dir() => Ok(vendored),
-        _ => bail!("plugin directory {name:?} is not in {} or among the app's vendored plugins", root.display()),
+        _ => bail!(
+            "plugin directory {name:?} is not in {} or among the app's vendored plugins",
+            root.display()
+        ),
     }
 }
 
 /// Entries directly under `dir` that `keep` accepts; 0 when the directory is absent.
 fn count(dir: &Path, keep: impl Fn(&Path) -> bool) -> usize {
-    std::fs::read_dir(dir).map(|entries| entries.flatten().filter(|entry| keep(&entry.path())).count()).unwrap_or(0)
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().filter(|entry| keep(&entry.path())).count())
+        .unwrap_or(0)
 }
 
 /// What a switch in Settings needs to say about one plugin directory. The counts are the context cost
 /// of switching it on: Claude Code discovers `skills/<name>/SKILL.md`, `agents/*.md` and `commands/*.md`.
 fn describe(name: &str, dir: &Path, source: &str, shadows_vendored: bool) -> Value {
-    let manifest: Value =
-        std::fs::read(dir.join(".claude-plugin/plugin.json")).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default();
+    let manifest: Value = std::fs::read(dir.join(".claude-plugin/plugin.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default();
     let markdown = |path: &Path| path.is_file() && path.extension().is_some_and(|ext| ext == "md");
     json!({
         "name": name,
@@ -74,7 +81,9 @@ fn describe(name: &str, dir: &Path, source: &str, shadows_vendored: bool) -> Val
 
 /// Plain-named subdirectories of `root`, by name.
 fn directories(root: &Path) -> BTreeMap<String, PathBuf> {
-    let Ok(entries) = std::fs::read_dir(root) else { return BTreeMap::new() };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return BTreeMap::new();
+    };
     entries
         .flatten()
         .filter(|entry| entry.path().is_dir())
@@ -87,7 +96,10 @@ fn directories(root: &Path) -> BTreeMap<String, PathBuf> {
 pub fn available(cfg: &Settings) -> Value {
     let root = local_root(cfg);
     let vendored = vendored_root(cfg).map(|dir| directories(&dir)).unwrap_or_default();
-    let mut plugins: BTreeMap<String, Value> = vendored.iter().map(|(name, dir)| (name.clone(), describe(name, dir, "vendored", false))).collect();
+    let mut plugins: BTreeMap<String, Value> = vendored
+        .iter()
+        .map(|(name, dir)| (name.clone(), describe(name, dir, "vendored", false)))
+        .collect();
     for (name, dir) in directories(&root) {
         let shadows = vendored.contains_key(&name);
         plugins.insert(name.clone(), describe(&name, &dir, "local", shadows));
@@ -105,7 +117,11 @@ mod tests {
 
     fn plugin(dir: &Path, version: &str, skills: &[&str], agents: &[&str]) {
         std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
-        std::fs::write(dir.join(".claude-plugin/plugin.json"), json!({"name": "x", "version": version, "description": "d"}).to_string()).unwrap();
+        std::fs::write(
+            dir.join(".claude-plugin/plugin.json"),
+            json!({"name": "x", "version": version, "description": "d"}).to_string(),
+        )
+        .unwrap();
         for skill in skills {
             std::fs::create_dir_all(dir.join("skills").join(skill)).unwrap();
             std::fs::write(dir.join("skills").join(skill).join("SKILL.md"), "---\n").unwrap();
@@ -146,7 +162,10 @@ mod tests {
 
     #[test]
     fn plugin_lists_parse_in_order_without_blanks_or_repeats() {
-        assert_eq!(parse_list(" ecc, ,superpowers,ecc,google-skills "), ["ecc", "superpowers", "google-skills"]);
+        assert_eq!(
+            parse_list(" ecc, ,superpowers,ecc,google-skills "),
+            ["ecc", "superpowers", "google-skills"]
+        );
         assert!(parse_list("").is_empty());
     }
 
@@ -183,7 +202,13 @@ mod tests {
         let summary: Vec<(String, String, bool, u64, u64)> = plugins
             .iter()
             .map(|p| {
-                (p["name"].as_str().unwrap().into(), p["source"].as_str().unwrap().into(), p["shadows_vendored"].as_bool().unwrap(), p["skills"].as_u64().unwrap(), p["agents"].as_u64().unwrap())
+                (
+                    p["name"].as_str().unwrap().into(),
+                    p["source"].as_str().unwrap().into(),
+                    p["shadows_vendored"].as_bool().unwrap(),
+                    p["skills"].as_u64().unwrap(),
+                    p["agents"].as_u64().unwrap(),
+                )
             })
             .collect();
         assert_eq!(
@@ -203,6 +228,9 @@ mod tests {
     fn a_missing_app_or_plugins_folder_lists_nothing() {
         let root = std::env::temp_dir().join(format!("colonizer-plugins-test-{}", crate::util::short_id()));
         assert_eq!(available(&settings(&root, None))["plugins"], json!([]));
-        assert_eq!(available(&settings(&root, Some(root.join("no-such-app"))))["plugins"], json!([]));
+        assert_eq!(
+            available(&settings(&root, Some(root.join("no-such-app"))))["plugins"],
+            json!([])
+        );
     }
 }

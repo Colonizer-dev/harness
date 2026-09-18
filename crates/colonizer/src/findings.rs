@@ -6,12 +6,12 @@
 //! capped per colony and checked against open issues before anything is created.
 
 use crate::{
+    App,
     sessions::Session,
     util::{exec, truncate},
-    App,
 };
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 use std::path::Path;
 
 /// The label filed findings carry, so they can be found and triaged together.
@@ -53,14 +53,24 @@ pub fn parse(event: &Value) -> Result<Finding> {
     if title.contains('\n') {
         bail!("the finding's title spans more than one line");
     }
-    Ok(Finding { title, body: field("body", MAX_BODY)?, evidence: field("evidence", MAX_EVIDENCE)? })
+    Ok(Finding {
+        title,
+        body: field("body", MAX_BODY)?,
+        evidence: field("evidence", MAX_EVIDENCE)?,
+    })
 }
 
 /// Titles compared the way a person would: case, punctuation and spacing do not make an issue new.
 pub fn normalize_title(title: &str) -> String {
     title
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_lowercase().next().unwrap_or(c) } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_lowercase().next().unwrap_or(c)
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -76,7 +86,9 @@ fn search_terms(title: &str) -> String {
 pub fn duplicate_of(title: &str, issues: &Value) -> Option<String> {
     let wanted = normalize_title(title);
     issues.as_array()?.iter().find_map(|issue| {
-        (normalize_title(issue["title"].as_str()?) == wanted).then(|| issue["url"].as_str().map(String::from)).flatten()
+        (normalize_title(issue["title"].as_str()?) == wanted)
+            .then(|| issue["url"].as_str().map(String::from))
+            .flatten()
     })
 }
 
@@ -94,7 +106,9 @@ pub fn issue_body(finding: &Finding, s: &Session) -> String {
 
 /// How many findings a colony has already filed or matched, from its record on disk.
 pub fn count(record: &Path) -> usize {
-    std::fs::read_to_string(record).map(|content| content.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0)
+    std::fs::read_to_string(record)
+        .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
 }
 
 /// Files `finding` on the colony's repository unless an open issue already has its title.
@@ -104,7 +118,18 @@ pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -
     if !terms.is_empty() {
         let search = format!("{terms} in:title");
         let open = exec(&mut app.gh([
-            "issue", "list", "-R", repo, "--state", "open", "--search", search.as_str(), "--json", "title,url", "--limit", "30",
+            "issue",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--search",
+            search.as_str(),
+            "--json",
+            "title,url",
+            "--limit",
+            "30",
         ]))
         .await?;
         if let Some(url) = duplicate_of(&finding.title, &serde_json::from_str(&open).unwrap_or(json!([]))) {
@@ -115,11 +140,27 @@ pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -
     std::fs::write(body_path, issue_body(finding, s))?;
     // Best effort: the label may exist already, or the token may not be allowed to create labels.
     let _ = exec(&mut app.gh([
-        "label", "create", LABEL, "-R", repo, "--color", "C5DEF5", "--description", "Found and confirmed by a Colonizer colony",
+        "label",
+        "create",
+        LABEL,
+        "-R",
+        repo,
+        "--color",
+        "C5DEF5",
+        "--description",
+        "Found and confirmed by a Colonizer colony",
     ]))
     .await;
     let create = |label: bool| {
-        let mut cmd = app.gh(["issue", "create", "-R", repo, "--title", finding.title.as_str(), "--body-file"]);
+        let mut cmd = app.gh([
+            "issue",
+            "create",
+            "-R",
+            repo,
+            "--title",
+            finding.title.as_str(),
+            "--body-file",
+        ]);
         cmd.arg(body_path);
         if label {
             cmd.args(["--label", LABEL]);
@@ -145,10 +186,18 @@ mod tests {
 
     #[test]
     fn a_finding_needs_a_title_a_body_and_the_evidence_it_was_checked() {
-        let ok = parse(&event("  Career pages are promised but unsupported ", "llms.txt says…", "Read model.rs")).unwrap();
+        let ok = parse(&event(
+            "  Career pages are promised but unsupported ",
+            "llms.txt says…",
+            "Read model.rs",
+        ))
+        .unwrap();
         assert_eq!(ok.title, "Career pages are promised but unsupported");
         assert!(parse(&event("", "body", "evidence")).is_err());
-        assert!(parse(&event("title", "body", "   ")).is_err(), "unconfirmed findings are not filed");
+        assert!(
+            parse(&event("title", "body", "   ")).is_err(),
+            "unconfirmed findings are not filed"
+        );
         assert!(parse(&json!({"type": "finding", "title": "t", "body": "b"})).is_err());
         assert!(parse(&event("two\nlines", "body", "evidence")).is_err());
         assert!(parse(&event(&"x".repeat(MAX_TITLE + 1), "body", "evidence")).is_err());
@@ -156,19 +205,28 @@ mod tests {
 
     #[test]
     fn titles_match_regardless_of_case_punctuation_and_spacing() {
-        assert_eq!(normalize_title("  Career-pages: NOT supported! "), "career pages not supported");
+        assert_eq!(
+            normalize_title("  Career-pages: NOT supported! "),
+            "career pages not supported"
+        );
         let open = json!([
             {"title": "Something else", "url": "https://github.com/o/r/issues/1"},
             {"title": "career pages not supported", "url": "https://github.com/o/r/issues/2"},
         ]);
-        assert_eq!(duplicate_of("Career-pages: NOT supported!", &open).as_deref(), Some("https://github.com/o/r/issues/2"));
+        assert_eq!(
+            duplicate_of("Career-pages: NOT supported!", &open).as_deref(),
+            Some("https://github.com/o/r/issues/2")
+        );
         assert_eq!(duplicate_of("Career pages are supported", &open), None);
         assert_eq!(duplicate_of("anything", &json!({"not": "a list"})), None);
     }
 
     #[test]
     fn search_terms_cannot_carry_github_qualifiers() {
-        assert_eq!(search_terms("is:closed author:someone \"quoted\""), "is closed author someone quoted");
+        assert_eq!(
+            search_terms("is:closed author:someone \"quoted\""),
+            "is closed author someone quoted"
+        );
         assert_eq!(search_terms("!!!"), "");
     }
 

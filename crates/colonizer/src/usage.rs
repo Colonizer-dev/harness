@@ -14,15 +14,15 @@
 //! phases and failures as labels the harness itself defines.
 
 use crate::{
-    client_error,
-    config::{setting_str, ModulesConfig},
-    modules::{schema_for, AgentModule, KINDS},
+    Shared, client_error,
+    config::{ModulesConfig, setting_str},
+    modules::{AgentModule, KINDS, schema_for},
     presets,
     sessions::{self, Session, SessionStatus},
-    telemetry, util, Shared,
+    telemetry, util,
 };
-use anyhow::{bail, Context, Result};
-use axum::{extract::State, http::StatusCode, Json};
+use anyhow::{Context, Result, bail};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -42,7 +42,16 @@ const LAST_BATCH_FILE: &str = "usage-last.json";
 
 /// The boot phases `boot_inner` marks, in the order a boot runs them. A phase name outside this set
 /// (a future version, a hand-edited sessions.json) is dropped rather than sent.
-const BOOT_PHASES: [&str; 8] = ["issue", "git", "providers", "mesh-start", "image-pull", "vm-boot", "mesh-join", "agentd"];
+const BOOT_PHASES: [&str; 8] = [
+    "issue",
+    "git",
+    "providers",
+    "mesh-start",
+    "image-pull",
+    "vm-boot",
+    "mesh-join",
+    "agentd",
+];
 
 /// The attention reason autopilot sets when it holds a colony back from publishing (sessions.rs).
 const AUTOPILOT_HELD: &str = "autopilot_held";
@@ -170,7 +179,10 @@ fn image_baseline(preset: &str, schema: &Value) -> String {
     // resolves and every default install would otherwise report its image as changed.
     match presets::defaults(preset)["image"].as_str() {
         Some(image) => image.to_string(),
-        None => schema["properties"]["image"]["default"].as_str().unwrap_or_default().to_string(),
+        None => schema["properties"]["image"]["default"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -184,7 +196,9 @@ fn settings_set(modules: &ModulesConfig, agents: &[AgentModule]) -> Vec<String> 
     for kind in KINDS {
         let Some(choice) = modules.get(kind) else { continue };
         let schema = schema_for(kind, &choice.provider, agents);
-        let Some(properties) = schema["properties"].as_object() else { continue };
+        let Some(properties) = schema["properties"].as_object() else {
+            continue;
+        };
         for key in choice.settings.keys() {
             if properties.contains_key(key) {
                 names.insert(format!("{kind}.{key}"));
@@ -200,9 +214,13 @@ fn settings_set(modules: &ModulesConfig, agents: &[AgentModule]) -> Vec<String> 
 fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
     let mut samples: Vec<(&str, Vec<u64>)> = BOOT_PHASES.iter().map(|phase| (*phase, Vec::new())).collect();
     for session in sessions {
-        let Some(phases) = session.boot_timing.as_ref().and_then(|t| t["phases"].as_array()) else { continue };
+        let Some(phases) = session.boot_timing.as_ref().and_then(|t| t["phases"].as_array()) else {
+            continue;
+        };
         for phase in phases {
-            let (Some(name), Some(ms)) = (phase["name"].as_str(), phase["ms"].as_u64()) else { continue };
+            let (Some(name), Some(ms)) = (phase["name"].as_str(), phase["ms"].as_u64()) else {
+                continue;
+            };
             if let Some(entry) = samples.iter_mut().find(|(known, _)| *known == name) {
                 entry.1.push(ms);
             }
@@ -213,7 +231,10 @@ fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
         .filter(|(_, samples)| !samples.is_empty())
         .map(|(phase, mut samples)| {
             samples.sort_unstable();
-            BootPhase { phase, bucket: bucket_ms(samples[samples.len() / 2]) }
+            BootPhase {
+                phase,
+                bucket: bucket_ms(samples[samples.len() / 2]),
+            }
         })
         .collect()
 }
@@ -226,7 +247,10 @@ fn attention_reason(session: &Session) -> Option<&'static str> {
     if reason == AUTOPILOT_HELD {
         return Some(AUTOPILOT_HELD);
     }
-    crate::watchdog::WATCHDOG_REASONS.iter().find(|known| **known == reason).copied()
+    crate::watchdog::WATCHDOG_REASONS
+        .iter()
+        .find(|known| **known == reason)
+        .copied()
 }
 
 /// The label for a fixed harness message, or nothing: a failure the harness did not name itself
@@ -266,7 +290,10 @@ fn build(
 ) -> Batch {
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, agents);
     let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
-    let held = sessions.iter().filter(|s| attention_reason(s) == Some(AUTOPILOT_HELD)).count();
+    let held = sessions
+        .iter()
+        .filter(|s| attention_reason(s) == Some(AUTOPILOT_HELD))
+        .count();
     Batch {
         payload_version: PAYLOAD_VERSION,
         usage_id,
@@ -286,7 +313,10 @@ fn build(
             // Only the comparison is sent: the image string itself is user free text.
             image_changed_from_default: sessions::colony_image(agents, modules) != image_baseline(&preset, &sandbox_schema),
         },
-        autopilot: Autopilot { enabled: sessions::autopilot_default(agents, modules), held: bucket_count(held) },
+        autopilot: Autopilot {
+            enabled: sessions::autopilot_default(agents, modules),
+            held: bucket_count(held),
+        },
         settings_set: settings_set(modules, agents),
         boot_ms: boot_ms(sessions),
         providers: bucket_count(providers),
@@ -348,7 +378,10 @@ pub struct Choice {
 
 impl Choice {
     fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        std::fs::read(path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
     }
 
     fn save(&self, path: &Path) -> Result<()> {
@@ -377,14 +410,21 @@ impl Usage {
     }
 
     fn with(path: PathBuf, blocked: Option<&'static str>) -> Self {
-        Self { last: path.with_file_name(LAST_BATCH_FILE), choice: Mutex::new(Choice::load(&path)), path, blocked }
+        Self {
+            last: path.with_file_name(LAST_BATCH_FILE),
+            choice: Mutex::new(Choice::load(&path)),
+            path,
+            blocked,
+        }
     }
 
     /// Re-reads the answer from disk, so a choice written by another process — `colonizer telemetry
     /// off` in a terminal, while the mothership runs — is honoured without a restart. The file is a
     /// few lines, so this is cheap; if it cannot be read, the copy in memory stands in.
     async fn reload(&self) {
-        let fresh = std::fs::read(&self.path).ok().and_then(|data| serde_json::from_slice(&data).ok());
+        let fresh = std::fs::read(&self.path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok());
         if let Some(fresh) = fresh {
             *self.choice.lock().await = fresh;
         }
@@ -479,7 +519,11 @@ fn disabled_by_env() -> Option<&'static str> {
 
 /// The pure half of [`disabled_by_env`], so the switches can be tested without touching the process
 /// environment. First match wins.
-fn disabled_by_env_values(colonizer_telemetry: Option<&str>, do_not_track: Option<&str>, ci: Option<&str>) -> Option<&'static str> {
+fn disabled_by_env_values(
+    colonizer_telemetry: Option<&str>,
+    do_not_track: Option<&str>,
+    ci: Option<&str>,
+) -> Option<&'static str> {
     // The app's own switch, read the same way the live map reads it.
     if telemetry::colonizer_telemetry_off(colonizer_telemetry) {
         return Some("COLONIZER_TELEMETRY");
@@ -532,7 +576,10 @@ pub struct SetRequest {
 /// `PUT /api/telemetry/usage` — `{"enabled": true|false}`
 pub async fn put(State(app): State<Shared>, Json(body): Json<SetRequest>) -> crate::ApiResult<Status> {
     if app.usage.blocked.is_some() {
-        return Err(client_error(StatusCode::CONFLICT, "usage reporting is kept off by the mothership's environment"));
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "usage reporting is kept off by the mothership's environment",
+        ));
     }
     app.usage.set(body.enabled).await?;
     Ok(Json(view(&app).await))
@@ -652,20 +699,72 @@ mod tests {
     /// added here deliberately.
     const ALLOWED: &[&str] = &[
         // Field names.
-        "payload_version", "usage_id", "harness_version", "platform", "colonies", "parallel_now", "terminal",
-        "pr_opened", "no_changes", "stopped", "failed", "sandbox", "preset", "image_changed_from_default",
-        "autopilot", "enabled", "held", "settings_set", "boot_ms", "phase", "bucket", "providers", "error_kinds",
+        "payload_version",
+        "usage_id",
+        "harness_version",
+        "platform",
+        "colonies",
+        "parallel_now",
+        "terminal",
+        "pr_opened",
+        "no_changes",
+        "stopped",
+        "failed",
+        "sandbox",
+        "preset",
+        "image_changed_from_default",
+        "autopilot",
+        "enabled",
+        "held",
+        "settings_set",
+        "boot_ms",
+        "phase",
+        "bucket",
+        "providers",
+        "error_kinds",
         // Count and duration buckets.
-        "0", "1", "2-3", "4-7", "8-15", "16-63", "64+", "<1s", "1-2s", "2-5s", "5-15s", "15-60s", "60s+",
+        "0",
+        "1",
+        "2-3",
+        "4-7",
+        "8-15",
+        "16-63",
+        "64+",
+        "<1s",
+        "1-2s",
+        "2-5s",
+        "5-15s",
+        "15-60s",
+        "60s+",
         // Sandbox stacks: the preset ids, plus the label for one the harness does not know.
-        "node", "python", "rust", "go", "custom", "unknown",
+        "node",
+        "python",
+        "rust",
+        "go",
+        "custom",
+        "unknown",
         // Boot phases, in boot order.
-        "issue", "git", "providers", "mesh-start", "image-pull", "vm-boot", "mesh-join", "agentd",
+        "issue",
+        "git",
+        "providers",
+        "mesh-start",
+        "image-pull",
+        "vm-boot",
+        "mesh-join",
+        "agentd",
         // Failure kinds: the harness's own names and the attention reasons it sets.
-        "agentd_not_ready", "harness_restarted", "vm_stopped", "publish_interrupted", "stalled",
-        "waiting_for_answer", "nudges_exhausted", "autopilot_held",
+        "agentd_not_ready",
+        "harness_restarted",
+        "vm_stopped",
+        "publish_interrupted",
+        "stalled",
+        "waiting_for_answer",
+        "nudges_exhausted",
+        "autopilot_held",
         // Setting names this install set (schema-declared keys, never values).
-        "agent.model", "sandbox.image", "sandbox.preset",
+        "agent.model",
+        "sandbox.image",
+        "sandbox.preset",
     ];
 
     /// Every string in the JSON: object keys and string values, recursively.
@@ -722,10 +821,14 @@ mod tests {
         ];
 
         let mut modules = ModulesConfig::default();
-        modules.sandbox.settings =
-            json!({"preset": "node", "image": "ghcr.io/acme-corp/secret-project:v2"}).as_object().cloned().unwrap();
-        modules.agent.settings =
-            json!({"model": "acme/claude-opus-private-router", "backdoor": "yes"}).as_object().cloned().unwrap();
+        modules.sandbox.settings = json!({"preset": "node", "image": "ghcr.io/acme-corp/secret-project:v2"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        modules.agent.settings = json!({"model": "acme/claude-opus-private-router", "backdoor": "yes"})
+            .as_object()
+            .cloned()
+            .unwrap();
 
         let providers = [Provider {
             id: "acme-internal".into(),
@@ -754,9 +857,24 @@ mod tests {
 
         // Not one hostile substring anywhere in what a sender would transmit.
         for secret in [
-            "acme", "secret-project", "ghcr.io", "could not read Username", "https://", "private.git",
-            "claude-opus-private-router", "llm.corp", ":8080", "/home/me", "issue-42", "colonizer/", "DROP TABLE",
-            "secret-hook", "backdoor", "STYLE.md", "pull/7", "a1b2c3d4",
+            "acme",
+            "secret-project",
+            "ghcr.io",
+            "could not read Username",
+            "https://",
+            "private.git",
+            "claude-opus-private-router",
+            "llm.corp",
+            ":8080",
+            "/home/me",
+            "issue-42",
+            "colonizer/",
+            "DROP TABLE",
+            "secret-hook",
+            "backdoor",
+            "STYLE.md",
+            "pull/7",
+            "a1b2c3d4",
         ] {
             assert!(!text.contains(secret), "the batch leaked `{secret}`: {text}");
         }
@@ -783,8 +901,19 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["autopilot", "boot_ms", "colonies", "error_kinds", "harness_version", "payload_version", "platform",
-             "providers", "sandbox", "settings_set", "usage_id"]
+            [
+                "autopilot",
+                "boot_ms",
+                "colonies",
+                "error_kinds",
+                "harness_version",
+                "payload_version",
+                "platform",
+                "providers",
+                "sandbox",
+                "settings_set",
+                "usage_id"
+            ]
         );
         assert_eq!(value["payload_version"], 1);
         assert_eq!(value["usage_id"], Value::Null, "no id when none was minted to ride on");
@@ -829,16 +958,27 @@ mod tests {
         assert_eq!(disabled_by_env_values(Some("OFF"), None, None), Some("COLONIZER_TELEMETRY"));
         assert_eq!(disabled_by_env_values(Some("false"), None, None), Some("COLONIZER_TELEMETRY"));
         assert_eq!(disabled_by_env_values(Some("No"), None, None), Some("COLONIZER_TELEMETRY"));
-        assert_eq!(disabled_by_env_values(Some("on"), None, None), None, "the app switch must name off to block");
+        assert_eq!(
+            disabled_by_env_values(Some("on"), None, None),
+            None,
+            "the app switch must name off to block"
+        );
         assert_eq!(disabled_by_env_values(None, Some("1"), None), Some("DO_NOT_TRACK"));
         assert_eq!(disabled_by_env_values(None, Some("yes"), None), Some("DO_NOT_TRACK"));
         assert_eq!(disabled_by_env_values(None, Some("0"), None), None);
         assert_eq!(disabled_by_env_values(None, Some(""), None), None);
         assert_eq!(disabled_by_env_values(None, None, Some("true")), Some("CI"));
         assert_eq!(disabled_by_env_values(None, None, Some("TRUE")), Some("CI"));
-        assert_eq!(disabled_by_env_values(None, None, Some("1")), None, "CI counts only as `true`");
+        assert_eq!(
+            disabled_by_env_values(None, None, Some("1")),
+            None,
+            "CI counts only as `true`"
+        );
         // First match wins, but any one of the three is enough.
-        assert_eq!(disabled_by_env_values(Some("0"), Some("1"), Some("true")), Some("COLONIZER_TELEMETRY"));
+        assert_eq!(
+            disabled_by_env_values(Some("0"), Some("1"), Some("true")),
+            Some("COLONIZER_TELEMETRY")
+        );
         assert_eq!(disabled_by_env_values(Some("on"), Some("1"), None), Some("DO_NOT_TRACK"));
     }
 
@@ -846,9 +986,13 @@ mod tests {
     async fn the_environment_beats_a_saved_yes() {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         let path = dir.join("usage.json");
-        Choice { enabled: Some(true), usage_id: Some(uuid::Uuid::new_v4().to_string()), notice_shown: false }
-            .save(&path)
-            .unwrap();
+        Choice {
+            enabled: Some(true),
+            usage_id: Some(uuid::Uuid::new_v4().to_string()),
+            notice_shown: false,
+        }
+        .save(&path)
+        .unwrap();
         let usage = Usage::with(path, Some("CI"));
         assert!(!usage.active().await, "an environment block beats a saved yes");
         assert!(usage.set(true).await.is_err(), "a blocked switch cannot be turned on");
@@ -861,11 +1005,16 @@ mod tests {
         // The API drops undeclared keys on save, but ModulesConfig::load does not re-validate, so a
         // hand-edited modules.json can carry anything. The batch intersects with the schema first.
         let mut modules = ModulesConfig::default();
-        modules.sandbox.settings =
-            json!({"image": "node:24-bookworm", "total_secrets": "yes", "backdoor": true}).as_object().cloned().unwrap();
+        modules.sandbox.settings = json!({"image": "node:24-bookworm", "total_secrets": "yes", "backdoor": true})
+            .as_object()
+            .cloned()
+            .unwrap();
         let batch = build(None, &[], &modules, &[], 0);
         assert_eq!(batch.settings_set, vec!["sandbox.image"]);
-        assert!(!serde_json::to_string(&batch).unwrap().contains("bookworm"), "values are never sent");
+        assert!(
+            !serde_json::to_string(&batch).unwrap().contains("bookworm"),
+            "values are never sent"
+        );
     }
 
     #[tokio::test]
@@ -873,23 +1022,41 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         let path = dir.join("usage.json");
         let usage = Usage::with(path.clone(), None);
-        assert!(usage.path.ends_with("usage.json"), "kept beside the live map's telemetry.json, not in it");
+        assert!(
+            usage.path.ends_with("usage.json"),
+            "kept beside the live map's telemetry.json, not in it"
+        );
 
         usage.set(true).await.unwrap();
         let id = usage.choice.lock().await.usage_id.clone().expect("an id once switched on");
         assert!(uuid::Uuid::parse_str(&id).is_ok_and(|u| u.get_version_num() == 4));
         assert_eq!(
             Choice::load(&path),
-            Choice { enabled: Some(true), usage_id: Some(id.clone()), notice_shown: false }
+            Choice {
+                enabled: Some(true),
+                usage_id: Some(id.clone()),
+                notice_shown: false
+            }
         );
 
         usage.set(false).await.unwrap();
         // The file stays — the question has been answered — but the id is gone, so the next period
         // cannot be joined to this one. No network is touched: there is no sender to tell.
-        assert_eq!(Choice::load(&path), Choice { enabled: Some(false), usage_id: None, notice_shown: false });
+        assert_eq!(
+            Choice::load(&path),
+            Choice {
+                enabled: Some(false),
+                usage_id: None,
+                notice_shown: false
+            }
+        );
 
         usage.set(true).await.unwrap();
-        assert_ne!(usage.choice.lock().await.usage_id.as_deref(), Some(id.as_str()), "a new period gets a new id");
+        assert_ne!(
+            usage.choice.lock().await.usage_id.as_deref(),
+            Some(id.as_str()),
+            "a new period gets a new id"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -904,7 +1071,11 @@ mod tests {
         // nobody ever answered the question.
         let id = usage.batch_id().await.expect("a batch carries an id without an explicit yes");
         assert!(uuid::Uuid::parse_str(&id).is_ok_and(|u| u.get_version_num() == 4));
-        assert_eq!(Choice::load(&path).usage_id.as_deref(), Some(id.as_str()), "the id is persisted on first use");
+        assert_eq!(
+            Choice::load(&path).usage_id.as_deref(),
+            Some(id.as_str()),
+            "the id is persisted on first use"
+        );
 
         // A no is still a no, and it forgets the id as before.
         usage.set(false).await.unwrap();
@@ -921,13 +1092,25 @@ mod tests {
         assert!(usage.active().await);
 
         // Another process — `colonizer telemetry off` — writes the file behind the running mothership.
-        Choice { enabled: Some(false), usage_id: None, notice_shown: false }.save(&path).unwrap();
+        Choice {
+            enabled: Some(false),
+            usage_id: None,
+            notice_shown: false,
+        }
+        .save(&path)
+        .unwrap();
         assert!(!usage.active().await, "the answer is re-read before it is consulted");
         assert_eq!(usage.batch_id().await, None, "so the next batch carries no id");
 
         // And a yes written out of band works the same way, id included: it is used, not replaced.
         let id = uuid::Uuid::new_v4().to_string();
-        Choice { enabled: Some(true), usage_id: Some(id.clone()), notice_shown: false }.save(&path).unwrap();
+        Choice {
+            enabled: Some(true),
+            usage_id: Some(id.clone()),
+            notice_shown: false,
+        }
+        .save(&path)
+        .unwrap();
         assert_eq!(usage.batch_id().await.as_deref(), Some(id.as_str()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -938,17 +1121,27 @@ mod tests {
         let batch = build(None, &[], &ModulesConfig::default(), &[], 0);
 
         let fresh = Usage::with(dir.join("usage.json"), None);
-        assert!(fresh.show_notice(&batch).await.unwrap(), "the first start shows the batch on stderr");
+        assert!(
+            fresh.show_notice(&batch).await.unwrap(),
+            "the first start shows the batch on stderr"
+        );
         assert!(
             Choice::load(&dir.join("usage.json")).notice_shown,
             "shown is recorded in the answer's file, so a restart is quiet"
         );
-        assert!(!fresh.show_notice(&batch).await.unwrap(), "and it is not shown twice in one life either");
+        assert!(
+            !fresh.show_notice(&batch).await.unwrap(),
+            "and it is not shown twice in one life either"
+        );
 
         // An install that answered — either way — is never shown it.
-        Choice { enabled: Some(false), usage_id: None, notice_shown: false }
-            .save(&dir.join("answered.json"))
-            .unwrap();
+        Choice {
+            enabled: Some(false),
+            usage_id: None,
+            notice_shown: false,
+        }
+        .save(&dir.join("answered.json"))
+        .unwrap();
         let answered = Usage::with(dir.join("answered.json"), None);
         assert!(!answered.show_notice(&batch).await.unwrap());
 
@@ -967,8 +1160,15 @@ mod tests {
         assert!(keep_last(&last, &batch), "the first batch built is kept");
         let mut expected = serde_json::to_vec_pretty(&batch).unwrap();
         expected.push(b'\n');
-        assert_eq!(std::fs::read(&last).unwrap(), expected, "exactly the bytes `telemetry show` should print");
-        assert!(!keep_last(&last, &batch), "an unchanged batch is not written again, however often it is built");
+        assert_eq!(
+            std::fs::read(&last).unwrap(),
+            expected,
+            "exactly the bytes `telemetry show` should print"
+        );
+        assert!(
+            !keep_last(&last, &batch),
+            "an unchanged batch is not written again, however often it is built"
+        );
 
         let other = build(Some(uuid::Uuid::new_v4().to_string()), &[], &ModulesConfig::default(), &[], 0);
         assert!(keep_last(&last, &other), "a changed batch is written");
@@ -980,16 +1180,26 @@ mod tests {
     fn the_cli_records_the_answer_without_a_running_mothership() {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         cli_set(&dir, true).unwrap();
-        let id = Choice::load(&dir.join(CHOICE_FILE)).usage_id.expect("an id, minted by the cli too");
+        let id = Choice::load(&dir.join(CHOICE_FILE))
+            .usage_id
+            .expect("an id, minted by the cli too");
         cli_set(&dir, false).unwrap();
         assert_eq!(
             Choice::load(&dir.join(CHOICE_FILE)),
-            Choice { enabled: Some(false), usage_id: None, notice_shown: false }
+            Choice {
+                enabled: Some(false),
+                usage_id: None,
+                notice_shown: false
+            }
         );
         cli_set(&dir, true).unwrap();
         let again = Choice::load(&dir.join(CHOICE_FILE));
         assert_eq!(again.enabled, Some(true));
-        assert_ne!(again.usage_id.as_deref(), Some(id.as_str()), "off forgot the id, so on starts a new period");
+        assert_ne!(
+            again.usage_id.as_deref(),
+            Some(id.as_str()),
+            "off forgot the id, so on starts a new period"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1006,7 +1216,13 @@ mod tests {
         let mut injected = session(SessionStatus::Running);
         injected.attention = Some(json!({"reason": "whatever_a_hand_edited_file_says"}));
 
-        let batch = build(None, &[agentd, stopped, watchdog, own_text, injected], &ModulesConfig::default(), &[], 0);
+        let batch = build(
+            None,
+            &[agentd, stopped, watchdog, own_text, injected],
+            &ModulesConfig::default(),
+            &[],
+            0,
+        );
         assert_eq!(
             batch.error_kinds,
             BTreeMap::from([("agentd_not_ready", "1"), ("nudges_exhausted", "1"), ("vm_stopped", "1")]),
@@ -1027,20 +1243,38 @@ mod tests {
     fn the_image_is_reported_only_as_changed_or_not() {
         let modules = ModulesConfig::default();
         let batch = build(None, &[], &modules, &[], 0);
-        assert_eq!(batch.sandbox, Sandbox { preset: "node", image_changed_from_default: false });
+        assert_eq!(
+            batch.sandbox,
+            Sandbox {
+                preset: "node",
+                image_changed_from_default: false
+            }
+        );
 
         let mut pinned = ModulesConfig::default();
-        pinned.sandbox.settings =
-            json!({"preset": "rust", "image": "ghcr.io/acme-corp/secret-project:v2"}).as_object().cloned().unwrap();
+        pinned.sandbox.settings = json!({"preset": "rust", "image": "ghcr.io/acme-corp/secret-project:v2"})
+            .as_object()
+            .cloned()
+            .unwrap();
         let batch = build(None, &[], &pinned, &[], 0);
-        assert_eq!(batch.sandbox, Sandbox { preset: "rust", image_changed_from_default: true });
-        assert!(!serde_json::to_string(&batch).unwrap().contains("ghcr.io"), "the image string is not sent");
+        assert_eq!(
+            batch.sandbox,
+            Sandbox {
+                preset: "rust",
+                image_changed_from_default: true
+            }
+        );
+        assert!(
+            !serde_json::to_string(&batch).unwrap().contains("ghcr.io"),
+            "the image string is not sent"
+        );
     }
 
     #[test]
     fn boot_ms_buckets_the_median_of_each_known_phase() {
         let mut a = session(SessionStatus::Idle);
-        a.boot_timing = Some(json!({"total_ms": 10_000, "phases": [{"name": "vm-boot", "ms": 1_200}, {"name": "agentd", "ms": 400}]}));
+        a.boot_timing =
+            Some(json!({"total_ms": 10_000, "phases": [{"name": "vm-boot", "ms": 1_200}, {"name": "agentd", "ms": 400}]}));
         let mut b = session(SessionStatus::Idle);
         b.boot_timing = Some(json!({"phases": [{"name": "vm-boot", "ms": 6_000}]}));
         let mut c = session(SessionStatus::Idle);
@@ -1048,7 +1282,16 @@ mod tests {
         let batch = build(None, &[a, b, c], &ModulesConfig::default(), &[], 0);
         assert_eq!(
             batch.boot_ms,
-            vec![BootPhase { phase: "vm-boot", bucket: "5-15s" }, BootPhase { phase: "agentd", bucket: "<1s" }],
+            vec![
+                BootPhase {
+                    phase: "vm-boot",
+                    bucket: "5-15s"
+                },
+                BootPhase {
+                    phase: "agentd",
+                    bucket: "<1s"
+                }
+            ],
             "the median of 1200, 6000 and 900000, in boot order, and an unnamed phase never appears"
         );
     }
@@ -1065,14 +1308,27 @@ mod tests {
             session(SessionStatus::Stopped),
         ];
         let batch = build(None, &sessions, &ModulesConfig::default(), &[], 3);
-        assert_eq!(batch.colonies.parallel_now, "2-3", "live colonies only; queued holds no microVM");
+        assert_eq!(
+            batch.colonies.parallel_now, "2-3",
+            "live colonies only; queued holds no microVM"
+        );
         assert_eq!(batch.colonies.terminal.pr_opened, "2-3");
         assert_eq!(batch.colonies.terminal.no_changes, "0");
         assert_eq!(batch.colonies.terminal.stopped, "1");
         assert_eq!(batch.colonies.terminal.failed, "1");
         assert_eq!(batch.providers, "2-3", "three providers, bucketed like any other count");
         // publish.autopilot's schema default is on, and nothing in this install overrides it.
-        assert_eq!(batch.autopilot, Autopilot { enabled: true, held: "0" });
-        assert_eq!(batch.settings_set, Vec::<String>::new(), "an install that set nothing names nothing");
+        assert_eq!(
+            batch.autopilot,
+            Autopilot {
+                enabled: true,
+                held: "0"
+            }
+        );
+        assert_eq!(
+            batch.settings_set,
+            Vec::<String>::new(),
+            "an install that set nothing names nothing"
+        );
     }
 }

@@ -10,7 +10,7 @@
 //! Presets only supply defaults. Anything set explicitly in `modules.json`
 //! still wins, so an existing configuration keeps the image it had.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Compiled in, so the pin always matches the harness that was built.
 const LOCK: &str = include_str!("../images.lock");
@@ -30,11 +30,35 @@ pub struct Preset {
 /// `node` reproduces the previous defaults exactly, so an install that never
 /// touches this setting boots the same colony it booted before.
 pub const PRESETS: &[Preset] = &[
-    Preset { id: "node", image: "node:24-bookworm", cpus: 4, memory: "8G", root_disk: "16G" },
-    Preset { id: "python", image: "python:3.13-bookworm", cpus: 4, memory: "8G", root_disk: "16G" },
+    Preset {
+        id: "node",
+        image: "node:24-bookworm",
+        cpus: 4,
+        memory: "8G",
+        root_disk: "16G",
+    },
+    Preset {
+        id: "python",
+        image: "python:3.13-bookworm",
+        cpus: 4,
+        memory: "8G",
+        root_disk: "16G",
+    },
     // Rust builds are memory and disk hungry in a way the others are not.
-    Preset { id: "rust", image: "rust:1-bookworm", cpus: 6, memory: "12G", root_disk: "32G" },
-    Preset { id: "go", image: "golang:1-bookworm", cpus: 4, memory: "8G", root_disk: "16G" },
+    Preset {
+        id: "rust",
+        image: "rust:1-bookworm",
+        cpus: 6,
+        memory: "12G",
+        root_disk: "32G",
+    },
+    Preset {
+        id: "go",
+        image: "golang:1-bookworm",
+        cpus: 4,
+        memory: "8G",
+        root_disk: "16G",
+    },
 ];
 
 pub const CUSTOM: &str = "custom";
@@ -52,13 +76,15 @@ pub fn find(id: &str) -> Option<&'static Preset> {
 /// name, version, platform, kind, sha256, url — the reference is matched in the
 /// url position, and only rows of kind `image` count.
 fn digest_for<'a>(lock: &'a str, image: &str) -> Option<&'a str> {
-    lock.lines().filter(|line| !line.trim_start().starts_with('#')).find_map(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        match fields.as_slice() {
-            [_name, _version, _platform, "image", sha256, url] if *url == image => Some(*sha256),
-            _ => None,
-        }
-    })
+    lock.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            match fields.as_slice() {
+                [_name, _version, _platform, "image", sha256, url] if *url == image => Some(*sha256),
+                _ => None,
+            }
+        })
 }
 
 /// The reference a colony boots: `image` pinned by digest when the lock knows
@@ -129,8 +155,16 @@ golang    1-bookworm    any  binary 3333  golang:1-bookworm
         assert_eq!(digest_for(LOCK_SAMPLE, "node:24-bookworm"), Some("1111"));
         assert_eq!(digest_for(LOCK_SAMPLE, "python:3.13-bookworm"), Some("2222"));
         // The reference also appears on a non-image row, which must not match.
-        assert_eq!(digest_for(LOCK_SAMPLE, "golang:1-bookworm"), None, "a non-image kind never matches");
-        assert_eq!(digest_for(LOCK_SAMPLE, "rust:1-bookworm"), None, "an unknown reference pins nothing");
+        assert_eq!(
+            digest_for(LOCK_SAMPLE, "golang:1-bookworm"),
+            None,
+            "a non-image kind never matches"
+        );
+        assert_eq!(
+            digest_for(LOCK_SAMPLE, "rust:1-bookworm"),
+            None,
+            "an unknown reference pins nothing"
+        );
     }
 
     #[test]

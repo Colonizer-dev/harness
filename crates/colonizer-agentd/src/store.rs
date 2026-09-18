@@ -54,7 +54,11 @@ impl EventStore {
         let (live, _) = broadcast::channel(1024);
         Ok(Self {
             path,
-            inner: Mutex::new(Inner { file, last_seq, agent_state: "starting".into() }),
+            inner: Mutex::new(Inner {
+                file,
+                last_seq,
+                agent_state: "starting".into(),
+            }),
             live,
         })
     }
@@ -101,7 +105,9 @@ impl EventStore {
             return Vec::new();
         }
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || read_events(&path, after, upto)).await.unwrap_or_default()
+        tokio::task::spawn_blocking(move || read_events(&path, after, upto))
+            .await
+            .unwrap_or_default()
     }
 }
 
