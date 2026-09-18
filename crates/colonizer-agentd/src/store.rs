@@ -68,10 +68,10 @@ impl EventStore {
             "ts".into(),
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         );
-        if event.get("type").and_then(Value::as_str) == Some("status") {
-            if let Some(state) = event.get("state").and_then(Value::as_str) {
-                inner.agent_state = state.to_string();
-            }
+        if event.get("type").and_then(Value::as_str) == Some("status")
+            && let Some(state) = event.get("state").and_then(Value::as_str)
+        {
+            inner.agent_state = state.to_string();
         }
         let line = Value::Object(event).to_string();
         if let Err(e) = writeln!(inner.file, "{line}") {
