@@ -4,7 +4,7 @@
 
 use crate::{
     ApiResult, App, ClaudeCred, Shared, client_error, resolve_host_claude_bin,
-    util::{shell_quote, truncate, write_secret},
+    util::{fingerprint, shell_quote, truncate, write_secret},
 };
 use anyhow::Context;
 use axum::{Json, extract::State, http::StatusCode};
@@ -69,7 +69,7 @@ pub async fn status(State(app): State<Shared>) -> Json<LoginView> {
 }
 
 pub async fn start(State(app): State<Shared>) -> ApiResult<LoginView> {
-    let bin = resolve_host_claude_bin(&app.cfg).await?;
+    let bin = resolve_host_claude_bin(&app).await?;
     // A very wide terminal keeps the sign-in URL and the token on single lines.
     let script = format!(
         "stty cols 4000 rows 60; exec {} setup-token",
@@ -541,14 +541,6 @@ fn saved_at(app: &App, cred: &ClaudeCred) -> Option<DateTime<Utc>> {
 /// `claude setup-token` mints a token that is valid for one year.
 fn estimated_expiry(saved: DateTime<Utc>) -> DateTime<Utc> {
     saved + chrono::Duration::days(365)
-}
-
-/// A short, non-reversible fingerprint of the token, used as the cache key so a new credential
-/// invalidates the cached lookup. The token itself must never be recoverable from it.
-fn fingerprint(token: &str) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
-    let hex: String = digest.as_ref().iter().take(8).map(|b| format!("{b:02x}")).collect();
-    format!("len={}:sha256={hex}", token.len())
 }
 
 #[cfg(test)]

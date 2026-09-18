@@ -4,7 +4,7 @@
 //! This network is completely separate from any tailnet the host is on: its own control server,
 //! its own state directory, its own socket, and `--no-logs-no-support`.
 
-use crate::util::{exec, write_private};
+use crate::util::{exec, exec_within, write_private};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
@@ -21,6 +21,12 @@ use tokio::{
 pub const COLONIZER_HOSTNAME: &str = "colonizer";
 const COLONIZER_USER: &str = "harness";
 const VMS_USER: &str = "vms";
+/// Caps the three CLI calls `Mesh::status` makes (`backend_state`, `nodes`, `tailscale ip -4`),
+/// so a wedged CLI cannot park them indefinitely. Deliberately generous: `wait_online` and
+/// `delete_nodes_named` propagate an error from these same calls with `?`, and a cap that tripped
+/// on a slow-but-healthy CLI would fail a boot or a teardown for nothing. `/api/status` gets its
+/// tighter guarantee from `MESH_STATUS_LIMIT` instead.
+const CLI_LIMIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ports {
@@ -289,7 +295,7 @@ taildrop:
     }
 
     async fn backend_state(&self) -> Result<String> {
-        let out = exec(self.tailscale().args(["status", "--json"])).await?;
+        let out = exec_within(CLI_LIMIT, self.tailscale().args(["status", "--json"])).await?;
         let status: Value = serde_json::from_str(&out)?;
         Ok(status["BackendState"].as_str().unwrap_or_default().to_string())
     }
@@ -347,7 +353,7 @@ taildrop:
     }
 
     async fn nodes(&self) -> Result<Vec<Value>> {
-        let out = exec(self.headscale().args(["nodes", "list", "-o", "json"])).await?;
+        let out = exec_within(CLI_LIMIT, self.headscale().args(["nodes", "list", "-o", "json"])).await?;
         Ok(serde_json::from_str::<Value>(&out)
             .ok()
             .and_then(|v| v.as_array().cloned())
@@ -443,7 +449,7 @@ taildrop:
             return json!({"enabled": true, "provider": "headscale", "state": "stopped", "harness_ip": null, "nodes": 0});
         }
         let state = self.backend_state().await.ok().map(|s| s.to_lowercase());
-        let harness_ip = exec(self.tailscale().args(["ip", "-4"]))
+        let harness_ip = exec_within(CLI_LIMIT, self.tailscale().args(["ip", "-4"]))
             .await
             .ok()
             .map(|ip| ip.trim().to_string());

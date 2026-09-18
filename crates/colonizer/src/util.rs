@@ -5,6 +5,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
     process::Stdio,
+    time::Duration,
 };
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, process::Command};
 
@@ -44,6 +45,15 @@ pub async fn exec(cmd: &mut Command) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Runs a command with a deadline. Timing out drops the future, which is what fires `exec`'s
+/// `kill_on_drop`, so a wedged binary is killed rather than left running.
+pub async fn exec_within(limit: Duration, cmd: &mut Command) -> Result<String> {
+    let desc = describe(cmd);
+    tokio::time::timeout(limit, exec(cmd))
+        .await
+        .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
 }
 
 /// Runs a command for its exit status only.
@@ -281,6 +291,14 @@ pub fn short_id() -> String {
 /// 244 bits of randomness, hex encoded.
 pub fn random_token() -> String {
     format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+}
+
+/// A short, non-reversible fingerprint of a credential, used as a cache key so a new credential
+/// invalidates the cached lookup. The credential itself must never be recoverable from it.
+pub fn fingerprint(secret: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, secret.as_bytes());
+    let hex: String = digest.as_ref().iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("len={}:sha256={hex}", secret.len())
 }
 
 /// Parses a disk size the way the sandbox settings write them (`memory` is `"8G"`, `root_disk` is `"16G"`):
@@ -647,5 +665,29 @@ mod tests {
             "the line did not land"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn exec_within_returns_the_output_of_a_command_that_finishes_in_time() {
+        let out = exec_within(Duration::from_secs(5), Command::new("echo").arg("answered"))
+            .await
+            .unwrap();
+        assert_eq!(out, "answered\n");
+    }
+
+    #[tokio::test]
+    async fn exec_within_gives_up_promptly_and_names_the_command_when_it_outruns_the_limit() {
+        let started = std::time::Instant::now();
+        let err = exec_within(Duration::from_millis(200), Command::new("sleep").arg("5"))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "returned after {elapsed:?}; the future was waited out, not dropped"
+        );
+        let message = err.to_string();
+        assert!(message.contains("sleep 5"), "the command is named: {message}");
+        assert!(message.contains("timed out"), "{message}");
     }
 }

@@ -916,7 +916,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if agent.needs_claude {
         let cred = app.claude_cred().context("log in with Claude in Settings first")?;
         mounts.push(Mount {
-            source: resolve_guest_claude_bin(&app.cfg).await?,
+            source: resolve_guest_claude_bin(app).await?,
             target: "/opt/claude/bin/claude".into(),
             read_only: true,
         });
