@@ -394,6 +394,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 node --test scripts/test/colony-report.test.mjs
 node scripts/colony-report.mjs                  # how colonies went, from what they already log
 node scripts/colony-report.mjs --transcript <id> # one colony, step by step
+node --test scripts/test/bench.test.mjs
+node scripts/bench.mjs run --repo owner/bench --label before   # the fixed tasks, scored (docs/bench.md)
 (cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
 ```
