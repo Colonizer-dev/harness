@@ -66,7 +66,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use tower_http::services::{ServeDir, ServeFile};
-use util::{env_nonempty, exec, is_elf, read_trimmed};
+use util::{env_nonempty, exec, is_elf, is_plain_name, read_trimmed};
 
 pub const CLAUDE_API_HOST: &str = "api.anthropic.com";
 
@@ -429,31 +429,48 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     }
 }
 
-/// Load the session list from `sessions.json`. A file we cannot read or parse is moved aside to
-/// `sessions.json.corrupt-<unix-timestamp>` — never overwritten, so its bytes stay recoverable —
-/// and the harness starts with an empty list and a sticky alert: the colonies on that list are
-/// missing from it although their worktrees, branches and microVMs may still exist. If even the
-/// move-aside fails, the next save would overwrite the file, so that is an error rather than a
-/// degraded start.
+/// Load the session list from `sessions.json`. A file we cannot read or parse as a list at all is
+/// moved aside to `sessions.json.corrupt-<unix-timestamp>` — never overwritten, so its bytes stay
+/// recoverable — and the harness starts with an empty list and a sticky alert: the colonies on that
+/// list are missing from it although their worktrees, branches and microVMs may still exist. A list
+/// where records are damaged — some or all of them — is salvaged instead: the good colonies load,
+/// and the original is copied aside untouched, so the next startup can salvage from it again if the
+/// harness stops before the next save. If even the aside fails, the next save would overwrite the
+/// file, so that is an error rather than a degraded start.
 fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> {
-    let reason = match std::fs::read(path) {
+    let data = match std::fs::read(path) {
         // A missing file is a first run, not a corruption.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
-        Err(e) => format!("could not be read ({e})"),
-        Ok(data) => match serde_json::from_slice::<Vec<Session>>(&data) {
-            Ok(sessions) => return Ok((sessions, None)),
-            Err(e) => format!("could not be parsed ({e})"),
-        },
+        Err(e) => {
+            let saved = move_corrupt_aside(path)?;
+            return Ok(unusable(path, &saved, format!("could not be read ({e})")));
+        }
+        Ok(data) => data,
     };
-    let saved = move_corrupt_aside(path)?;
+    let values = match serde_json::from_slice::<Vec<Value>>(&data) {
+        Ok(values) => values,
+        Err(e) => {
+            let saved = move_corrupt_aside(path)?;
+            return Ok(unusable(path, &saved, format!("could not be parsed ({e})")));
+        }
+    };
+    let (sessions, damaged) = salvage(values);
+    if damaged == 0 {
+        // Unchanged happy path: nothing damaged, so the file is left exactly as it is.
+        return Ok((sessions, None));
+    }
+    let saved = copy_corrupt_aside(path)?;
     let message = format!(
-        "{} {reason} and was saved as {}; colonies are missing from the list, although their worktrees, branches and microVMs may still exist",
+        "{} kept {} of {} records and copied the original to {}, but {} of them could not be loaded; those colonies are missing from the list, although their worktrees, branches and microVMs may still exist",
         path.display(),
-        saved.display()
+        sessions.len(),
+        sessions.len() + damaged,
+        saved.display(),
+        damaged
     );
     eprintln!("sessions: {message}");
     Ok((
-        Vec::new(),
+        sessions,
         Some(StorageAlert {
             message,
             ts: Utc::now(),
@@ -462,8 +479,46 @@ fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> 
     ))
 }
 
-/// Moves a `sessions.json` the harness cannot use aside, into the same directory, so its bytes survive.
-fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
+/// What a file with nothing usable in it turns into: an empty list and a sticky alert saying where
+/// the bytes went.
+fn unusable(path: &FsPath, saved: &FsPath, reason: String) -> (Vec<Session>, Option<StorageAlert>) {
+    let message = format!(
+        "{} {reason} and was saved as {}; colonies are missing from the list, although their worktrees, branches and microVMs may still exist",
+        path.display(),
+        saved.display()
+    );
+    eprintln!("sessions: {message}");
+    (
+        Vec::new(),
+        Some(StorageAlert {
+            message,
+            ts: Utc::now(),
+            failures: 1,
+        }),
+    )
+}
+
+/// Splits a parsed list into the records that load and the ones that cannot. A record is damaged
+/// when it fails to deserialize or its `id` is not a plain name: with every field defaulting, an
+/// unrelated object would otherwise load as a blank colony, and since an `id` names the colony's
+/// directory under `data/sessions` — which `lifecycle::delete` removes whole — a record like
+/// `../../victim` must be refused before anything can act on it.
+fn salvage(values: Vec<Value>) -> (Vec<Session>, usize) {
+    let mut sessions = Vec::new();
+    let mut damaged = 0;
+    for value in values {
+        let record = serde_json::from_value::<Session>(value).ok().filter(|s| is_plain_name(&s.id));
+        match record {
+            Some(s) => sessions.push(s),
+            None => damaged += 1,
+        }
+    }
+    (sessions, damaged)
+}
+
+/// The timestamped name both ruin paths save under: `sessions.json.corrupt-<unix-timestamp>`, in the
+/// same directory. The stamp only ever moves forward, so an old copy is not silently replaced.
+fn corrupt_aside_name(path: &FsPath) -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -472,7 +527,12 @@ fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "sessions.json".into());
-    let saved = path.with_file_name(format!("{name}.corrupt-{stamp}"));
+    path.with_file_name(format!("{name}.corrupt-{stamp}"))
+}
+
+/// Moves a `sessions.json` the harness cannot use aside, into the same directory, so its bytes survive.
+fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
+    let saved = corrupt_aside_name(path);
     let aside = || {
         format!(
             "could not move the unusable {} aside to {}; move it aside yourself and restart",
@@ -482,6 +542,26 @@ fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
     };
     util::faults::check(path, util::faults::Op::Rename).with_context(aside)?;
     std::fs::rename(path, &saved).with_context(aside)?;
+    Ok(saved)
+}
+
+/// Copies a partly usable `sessions.json` aside, leaving the original in place: the good records are
+/// in memory and the next save rewrites the file, but if the harness stops before that, the next
+/// startup salvages from the original again, and the copy keeps the bytes as they were found. A copy
+/// is a write of the aside file, so it goes through the fault seam as a `Write`, like the temp write
+/// in `write_atomic` — and if even the copy fails, startup aborts rather than go on with the damaged
+/// bytes unpreserved: the next save would drop them.
+fn copy_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
+    let saved = corrupt_aside_name(path);
+    let aside = || {
+        format!(
+            "could not copy the partly unusable {} aside to {}; move it aside yourself and restart",
+            path.display(),
+            saved.display()
+        )
+    };
+    util::faults::check(path, util::faults::Op::Write).with_context(aside)?;
+    std::fs::copy(path, &saved).with_context(aside)?;
     Ok(saved)
 }
 
@@ -837,19 +917,23 @@ pub(crate) mod tests {
 
     /// A session list with exactly the fields the format requires; everything else defaults.
     fn session_json() -> String {
-        json!([{
-            "id": "abc123",
+        json!([record_json("abc123")]).to_string()
+    }
+
+    /// One colony record with exactly the fields the format requires, keyed by `id`.
+    fn record_json(id: &str) -> Value {
+        json!({
+            "id": id,
             "repo": "acme/app",
             "issue_title": "Fix the deploy",
             "status": "idle",
-            "branch": "colonizer/issue-1-abc123",
-            "worktree": "/colonizer/worktrees/acme/app/issue-1-abc123",
-            "sandbox": "colonizer-abc123",
+            "branch": format!("colonizer/issue-1-{id}"),
+            "worktree": format!("/colonizer/worktrees/acme/app/issue-1-{id}"),
+            "sandbox": format!("colonizer-{id}"),
             "agent": "claude",
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
-        }])
-        .to_string()
+        })
     }
 
     #[test]
@@ -898,6 +982,117 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// One damaged record must not cost the others: the good colonies load, the alert names the
+    /// counts, and the original file stays on disk with a byte-identical copy beside it.
+    #[test]
+    fn a_damaged_record_is_salvaged_around_and_the_original_file_is_kept() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        let mut damaged = record_json("broken");
+        damaged["cost_usd"] = json!("not a number");
+        let file = json!([record_json("first"), damaged, record_json("third")]).to_string();
+        std::fs::write(&path, &file).unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert_eq!(sessions.len(), 2, "the good records survive the damaged one");
+        assert_eq!(sessions[0].id, "first");
+        assert_eq!(sessions[1].id, "third");
+        let alert = alert.unwrap();
+        assert!(alert.message.contains("kept 2 of 3 records"), "{}", alert.message);
+        assert!(alert.message.contains("1 of them could not be loaded"), "{}", alert.message);
+        assert!(alert.message.contains(".corrupt-"), "{}", alert.message);
+        assert!(path.exists(), "the original stays for the next startup to salvage again");
+        let saved = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(".corrupt-"))
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), file.as_bytes(), "the copy is the original");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A file where every record is damaged still parses as a list, so it is salvaged, not moved
+    /// aside: nothing is renamed, the original stays put for the next startup, the copy holds the
+    /// bytes, and the alert says all the records were lost.
+    #[test]
+    fn a_file_where_every_record_is_damaged_is_salvaged_to_an_empty_list() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        let mut damaged = record_json("broken");
+        damaged["cost_usd"] = json!("not a number");
+        let file = json!([damaged, {"repo": "acme/app"}]).to_string();
+        std::fs::write(&path, &file).unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert!(sessions.is_empty(), "nothing was salvageable");
+        let alert = alert.unwrap();
+        assert!(alert.message.contains("kept 0 of 2 records"), "{}", alert.message);
+        assert!(alert.message.contains("2 of them could not be loaded"), "{}", alert.message);
+        assert!(path.exists(), "the original stays put rather than being renamed aside");
+        let saved = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(".corrupt-"))
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), file.as_bytes(), "the copy is the original");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With every field defaulting, an unrelated object would otherwise load as a blank colony, so a
+    /// record whose `id` is not a plain name counts as damaged and is dropped; here the `id` is
+    /// missing altogether and so defaults to empty.
+    #[test]
+    fn a_record_without_an_id_is_damaged_and_dropped() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        let file = json!([record_json("kept"), {"repo": "acme/app"}]).to_string();
+        std::fs::write(&path, file).unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "kept");
+        let alert = alert.unwrap();
+        assert!(alert.message.contains("kept 1 of 2 records"), "{}", alert.message);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An `id` names the colony's directory under `data/sessions`, and deleting a colony removes that
+    /// directory whole, so a traversal-shaped id must be refused at load: a record that deserializes
+    /// fine but names a directory elsewhere counts as damaged and is dropped.
+    #[test]
+    fn a_record_with_a_traversal_id_is_damaged_and_dropped() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        let file = json!([record_json("kept"), record_json("../../victim")]).to_string();
+        std::fs::write(&path, file).unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "kept");
+        let alert = alert.unwrap();
+        assert!(alert.message.contains("kept 1 of 2 records"), "{}", alert.message);
+        assert!(path.exists(), "the original stays for the next startup to salvage again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The salvage copy must not fire on the happy path: a fully valid file loads with no alert and
+    /// leaves no `.corrupt-*` file behind.
+    #[test]
+    fn a_fully_valid_file_loads_with_no_alert_and_no_copy_made() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        std::fs::write(&path, session_json()).unwrap();
+        let (sessions, alert) = load_sessions(&path).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(alert.is_none());
+        assert!(path.exists(), "the file is untouched");
+        assert!(
+            !std::fs::read_dir(path.parent().unwrap()).unwrap().any(|e| e
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .contains(".corrupt-")),
+            "nothing was copied aside"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn an_unsalvageable_sessions_file_stops_startup_and_is_left_untouched() {
         let root = temp_root();
@@ -909,6 +1104,34 @@ pub(crate) mod tests {
         let err = load_sessions(&path).unwrap_err();
         assert!(err.to_string().contains("move it aside yourself"), "{err:#}");
         assert_eq!(std::fs::read(&path).unwrap(), b"this is not json", "the file is untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The salvage copy rides the same fault seam as the move-aside: inject a failure at the copy and
+    /// startup must abort, because going on would leave the damaged bytes unpreserved and the next
+    /// save would silently drop them. The original is left exactly as it was found.
+    #[test]
+    fn a_salvage_copy_that_fails_stops_startup_and_the_original_is_left_untouched() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        let mut damaged = record_json("broken");
+        damaged["cost_usd"] = json!("not a number");
+        let file = json!([record_json("first"), damaged]).to_string();
+        std::fs::write(&path, &file).unwrap();
+        let _guard = util::faults::inject("sessions.json", util::faults::Op::Write, || {
+            std::io::Error::from_raw_os_error(5)
+        });
+        let err = load_sessions(&path).unwrap_err();
+        assert!(err.to_string().contains("move it aside yourself"), "{err:#}");
+        assert_eq!(std::fs::read(&path).unwrap(), file.as_bytes(), "the file is untouched");
+        assert!(
+            !std::fs::read_dir(path.parent().unwrap()).unwrap().any(|e| e
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .contains(".corrupt-")),
+            "no copy was made"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

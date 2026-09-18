@@ -43,6 +43,16 @@ setting — is called out under **Take care** rather than left for you to find.
 - A colony that cannot be resumed says why, instead of quoting `gh` at you.
   ([#111])
 
+### Fixed
+
+- A new field in a colony's record can no longer make an existing
+  `sessions.json` unparseable: every field now defaults when missing, so a
+  sessions.json written by an older version loads with what it has. ([#127])
+- One damaged record no longer throws away every colony in the list. Startup
+  keeps the good records, copies the original file aside as
+  `sessions.json.corrupt-<timestamp>` — the original stays put — and the alert
+  says how many loaded, how many were damaged and where the copy is. ([#127])
+
 ### Take care
 
 - An update applied from Settings keeps the previous app directory until no
@@ -165,6 +175,7 @@ Macs. ([#74])
 [#110]: https://github.com/Colonizer-dev/harness/pull/110
 [#111]: https://github.com/Colonizer-dev/harness/pull/111
 [#112]: https://github.com/Colonizer-dev/harness/pull/112
+[#127]: https://github.com/Colonizer-dev/harness/issues/127
 [#131]: https://github.com/Colonizer-dev/harness/pull/131
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3

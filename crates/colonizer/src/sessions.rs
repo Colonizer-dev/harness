@@ -117,17 +117,19 @@ pub struct MeshInfo {
     pub ip: Option<String>,
 }
 
+/// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
+/// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
+/// making every existing file unparseable on upgrade. New fields need no annotation of their own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Session {
     pub id: String,
     pub repo: String,
     /// The GitHub org (repository owner) whose workspace this colony belongs to.
-    #[serde(default)]
     pub org: String,
     /// `None` for an open session that starts from the repository alone.
     pub issue: Option<u64>,
     pub issue_title: String,
-    #[serde(default)]
     pub instructions: String,
     pub status: SessionStatus,
     pub branch: String,
@@ -136,14 +138,12 @@ pub struct Session {
     pub git_admin_dir: Option<String>,
     pub sandbox: String,
     pub mesh: Option<MeshInfo>,
-    #[serde(default)]
     pub local_port: Option<u16>,
     pub agent: String,
-    #[serde(default)]
     pub autopilot: bool,
     pub pr_url: Option<String>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
     pub error: Option<String>,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
@@ -152,35 +152,71 @@ pub struct Session {
     pub cost_usd: Option<f64>,
     /// Tokens per model from the last turn end, cumulative: `{model: {input_tokens, output_tokens, cache_read_tokens,
     /// cache_write_tokens}}` — every model the colony used, priced or not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<Value>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
-    #[serde(default)]
     pub routed_cost_usd: Option<f64>,
     /// What the colony leaves on the host — its worktree plus its session directory — as last measured by
     /// the host-disk check, which runs only when a host-disk quota applies to the colony. Not the
     /// microVM's root disk, which is a separate limit (microsandbox's `--root-disk`).
-    #[serde(default)]
     pub host_disk_bytes: Option<u64>,
-    #[serde(default)]
     pub cleaned_up: bool,
     /// Set by the watchdog: `{reason, since, nudges}`.
-    #[serde(default)]
     pub attention: Option<Value>,
     /// Last agent progress (filled from the runtime for live colonies).
-    #[serde(default)]
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
     /// Set when a colony finishes booting, and replaced on resume.
-    #[serde(default)]
     pub boot_timing: Option<Value>,
     /// The app directory this colony's mounts came from. An update keeps that
     /// directory until no live colony still names it (`update::sweep_slots`).
-    #[serde(default)]
     pub app_slot: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Default for Session {
+    /// Every field inert: nothing live, nothing claimed, and the epoch for the timestamps, so a colony
+    /// whose record lacked a field never looks freshly touched. Written by hand rather than derived
+    /// because `DateTime<Utc>` has no `Default` — which is also why the per-field `#[serde(default)]`
+    /// this replaces could never cover the whole record.
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            repo: String::new(),
+            org: String::new(),
+            issue: None,
+            issue_title: String::new(),
+            instructions: String::new(),
+            // Stopped, not Queued: the queue starts queued colonies on its first tick, and `recover`
+            // reverts live statuses; a colony of unknown state must wait for the operator instead.
+            status: SessionStatus::Stopped,
+            branch: String::new(),
+            base: None,
+            worktree: String::new(),
+            git_admin_dir: None,
+            sandbox: String::new(),
+            mesh: None,
+            local_port: None,
+            agent: String::new(),
+            autopilot: false,
+            pr_url: None,
+            publish_stage: None,
+            error: None,
+            cost_usd: None,
+            model_usage: None,
+            routed_cost_usd: None,
+            host_disk_bytes: None,
+            cleaned_up: false,
+            attention: None,
+            last_activity_at: None,
+            boot_timing: None,
+            app_slot: None,
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            updated_at: DateTime::<Utc>::UNIX_EPOCH,
+        }
+    }
 }
 
 /// In-memory state for a session's event fan-out and agent link.
@@ -1440,6 +1476,53 @@ pub(crate) mod tests {
         let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"running","branch":"b","base":null,"worktree":"","git_admin_dir":null,"sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
         let s: Session = serde_json::from_str(saved).unwrap();
         assert_eq!(s.host_disk_bytes, None);
+    }
+
+    /// The container-level `#[serde(default)]` is the whole contract that keeps a sessions.json from
+    /// an older version loadable, so it is enforced mechanically: take a fully populated record,
+    /// drop one key at a time, and the rest must still load. A field added without a usable default
+    /// fails here, naming itself, before it can break anyone's file on upgrade.
+    #[test]
+    fn every_session_field_tolerates_absence() {
+        let mut full = colony("acme", SessionStatus::Running);
+        full.id = "c".into();
+        full.issue = Some(7);
+        full.issue_title = "Fix the deploy".into();
+        full.instructions = "do the thing".into();
+        full.branch = "b".into();
+        full.base = Some("main".into());
+        full.worktree = "w".into();
+        full.git_admin_dir = Some("git".into());
+        full.sandbox = "s".into();
+        full.mesh = Some(MeshInfo {
+            name: "m".into(),
+            ip: Some("10.0.0.1".into()),
+        });
+        full.local_port = Some(7070);
+        full.agent = "claude".into();
+        full.autopilot = true;
+        full.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+        full.publish_stage = Some(PublishStage::Pushed);
+        full.error = Some("boom".into());
+        full.cost_usd = Some(1.5);
+        full.model_usage = Some(json!({"claude-x": {"input_tokens": 1}}));
+        full.routed_cost_usd = Some(0.25);
+        full.host_disk_bytes = Some(1024);
+        full.cleaned_up = true;
+        full.attention = Some(json!({"reason": "stalled"}));
+        full.last_activity_at = Some(Utc::now());
+        full.boot_timing = Some(json!({"total_ms": 5}));
+        full.app_slot = Some("slot".into());
+
+        let Value::Object(fields) = serde_json::to_value(&full).unwrap() else {
+            panic!("a session should serialize to an object");
+        };
+        for key in fields.keys() {
+            let mut without = fields.clone();
+            without.remove(key);
+            serde_json::from_value::<Session>(Value::Object(without))
+                .unwrap_or_else(|e| panic!("a session without `{key}` should still load: {e}"));
+        }
     }
 
     pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
