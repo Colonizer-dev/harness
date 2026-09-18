@@ -49,6 +49,30 @@ pub struct Build {
     pub built_at: DateTime<Utc>,
     /// The last release tag this build contains, if any: what an update compares against.
     pub release: Option<String>,
+    /// Not a release: built after a tag, from a modified tree, or with no tag at all.
+    /// The UI needs this to avoid offering an update to someone running their own build.
+    pub development: bool,
+}
+
+impl Build {
+    /// One line, for `colonizer version` and anywhere a log wants it.
+    ///
+    /// `v0.1.4 (1367191, built 2026-09-17T17:21:32Z)`, with `development` said
+    /// plainly rather than left for the reader to infer from the shape of a tag.
+    pub fn line(&self) -> String {
+        let mut line = self.version.clone();
+        if let Some(commit) = &self.commit {
+            line.push_str(&format!(" ({}", &commit[..commit.len().min(7)]));
+            if self.dirty {
+                line.push_str(", modified tree");
+            }
+            line.push_str(&format!(", built {})", self.built_at.format("%Y-%m-%dT%H:%M:%SZ")));
+        }
+        if self.development {
+            line.push_str(" — development build");
+        }
+        line
+    }
 }
 
 pub fn build() -> &'static Build {
@@ -67,6 +91,9 @@ pub fn build() -> &'static Build {
             commit: (!commit.is_empty()).then(|| commit.to_string()),
             dirty: describe.ends_with("-dirty"),
             built_at: Utc.timestamp_opt(built_at, 0).single().unwrap_or_else(Utc::now),
+            // A describe that is exactly a tag is a release; anything else — a tag plus
+            // commits, a dirty tree, or no tag at all — is not.
+            development: Semver::parse(describe).is_none() || describe.contains("-g") || describe.ends_with("-dirty"),
             release: Semver::parse(describe).map(|v| v.to_tag()).or_else(|| {
                 // No git: the crate version is the release this was cut from.
                 Semver::parse(env!("CARGO_PKG_VERSION")).map(|v| v.to_tag())
@@ -380,6 +407,28 @@ mod tests {
         assert!(!is_newer(None, "v9.9.9"));
         assert!(!is_newer(Some("abc1234"), "v9.9.9"));
         assert!(!is_newer(Some("v0.1.4"), "not-a-tag"));
+    }
+
+    #[test]
+    fn a_release_build_is_not_a_development_build() {
+        // These are the shapes `git describe --tags --always --dirty` produces.
+        let dev = |d: &str| Semver::parse(d).is_none() || d.contains("-g") || d.ends_with("-dirty");
+        assert!(!dev("v0.1.4"), "an exact tag is a release");
+        assert!(dev("v0.1.4-12-gabc1234"), "commits after a tag");
+        assert!(dev("v0.1.4-dirty"), "a modified tree");
+        assert!(dev("abc1234"), "no tag at all");
+        assert!(dev(""), "no git at all");
+    }
+
+    #[test]
+    fn the_one_line_form_names_the_commit_and_says_when_it_is_a_development_build() {
+        let b = build();
+        let line = b.line();
+        assert!(line.starts_with(&b.version), "{line}");
+        if let Some(commit) = &b.commit {
+            assert!(line.contains(&commit[..7]), "{line}");
+        }
+        assert_eq!(line.contains("development build"), b.development, "{line}");
     }
 
     #[test]

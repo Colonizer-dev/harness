@@ -43,7 +43,8 @@ is not built yet, and nothing in this README pretends otherwise.
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
 it's going, is in [docs/vision.md](docs/vision.md). What has been decided against, and why, is in
-[docs/decisions.md](docs/decisions.md).
+[docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without
+losing colonies, is in [docs/updates.md](docs/updates.md).
 
 ---
 
@@ -331,6 +332,9 @@ come from the environment:
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
+| `COLONIZER_APP` | `~/.local/share/colonizer/app` | The symlink an install moves; what an [update](docs/updates.md) follows |
+| `COLONIZER_UPDATE_CHECK` | on | `0` keeps the update check off whatever Settings says — then no request is made at all |
+| `COLONIZER_RELEASES_URL` | GitHub's latest release for this repo | Where the update check looks |
 | `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 
@@ -370,6 +374,8 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   <a href="docs/architecture.md">Architecture</a>
   &nbsp;·&nbsp;
   <a href="docs/protocol.md">Protocol</a>
+  &nbsp;·&nbsp;
+  <a href="docs/updates.md">Updates</a>
   &nbsp;·&nbsp;
   <a href="docs/audit.md">Audit</a>
 </p>
