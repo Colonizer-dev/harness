@@ -5,7 +5,9 @@
  * services listed here; several are resellers rather than the company that runs the model.
  *
  * Left out: AWS Bedrock, whose endpoint speaks Bedrock's own InvokeModel API and signs with SigV4,
- * and Gemini's native format — the gateway can serve neither as it stands.
+ * and Gemini's native format — the gateway can serve neither as it stands. ChatGPT plans, for the
+ * same reason: a ChatGPT sign-in token is honoured by Codex's Responses API, not the Chat Completions
+ * endpoint `wire: "openai"` translates to (docs/decisions.md).
  *
  * Referral parameters the source carries on some links (`aff=`, `utm_content=`, `from=`) are not
  * reproduced here: a link from this list credits nobody.
@@ -58,7 +60,6 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "claudeapi", name: "ClaudeAPI", base_url: "https://gw.apito.ai", auth: "bearer", wire: "anthropic", site: "https://www.apito.ai" },
   { id: "claudecn", name: "ClaudeCN", base_url: "https://claudecn.top", auth: "bearer", wire: "anthropic", site: "https://claudecn.top" },
   { id: "code0", name: "Code0", base_url: "https://code0.ai", auth: "bearer", wire: "anthropic", site: "https://code0.ai" },
-  { id: "codex", name: "Codex", base_url: "https://chatgpt.com/backend-api/codex", auth: "bearer", wire: "openai", site: "https://openai.com/chatgpt/pricing" },
   { id: "compshare", name: "Compshare", base_url: "https://api.modelverse.cn", auth: "bearer", wire: "anthropic", site: "https://www.compshare.cn" },
   { id: "compshare-coding-plan", name: "Compshare Coding Plan", base_url: "https://cp.compshare.cn", auth: "bearer", wire: "anthropic", site: "https://www.compshare.cn" },
   { id: "crazyrouter", name: "CrazyRouter", base_url: "https://cn.crazyrouter.com", auth: "bearer", wire: "anthropic", site: "https://www.crazyrouter.com" },
