@@ -35,7 +35,9 @@ is live there yet, and nothing in this README pretends otherwise.
 > **Colonies only ever hold placeholders.**
 > The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
 > host-side TLS proxy, for one host, on the way out. A colony that goes rogue can wreck its own
-> worktree, and that's all.
+> worktree, and that's all. That is the design, not yet the measured truth: an external audit of
+> v0.1.3 found four ways past that wall, and they are not fixed yet
+> ([docs/audit.md](docs/audit.md)).
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
@@ -234,7 +236,13 @@ Stated here rather than buried.
 - **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
   is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
   given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
-- **No CI yet**, and nothing is published to crates.io or npm.
+- **Not ready for unattended work on sensitive repositories.** That is the v0.1.3 audit's verdict,
+  real credentials included. It found four ways a colony could cross into the host, filed as draft
+  security advisories and not fixed yet ([docs/audit.md](docs/audit.md)).
+- **No CI runs the tests.** The three workflows that exist do releases, Headroom bundles and
+  vendor-update proposals. Publishing happens on a tag: a `v` tag sends `colonizer-agentd` and
+  `colonizer-harness` to crates.io through Trusted Publishing, and both are published there.
+  Nothing is published to npm.
 
 ---
 
@@ -262,7 +270,8 @@ Stated here rather than buried.
 | Fleet view, per-colony budgets and network policies | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
 
-The roadmap is the issue tracker. There is no private version of it.
+The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit
+sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 
 ---
 
@@ -281,6 +290,9 @@ The roadmap is the issue tracker. There is no private version of it.
 | Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
+
+An external audit read this table against the code at v0.1.3. What it confirmed, what it found
+instead, and what has to be true before unattended work: [docs/audit.md](docs/audit.md).
 
 ## Configuration
 
@@ -330,6 +342,8 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   <a href="docs/architecture.md">Architecture</a>
   &nbsp;·&nbsp;
   <a href="docs/protocol.md">Protocol</a>
+  &nbsp;·&nbsp;
+  <a href="docs/audit.md">Audit</a>
 </p>
 
 <p align="center">

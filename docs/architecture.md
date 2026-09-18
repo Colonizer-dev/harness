@@ -143,6 +143,9 @@ stateDiagram-v2
 - agentd requires a per-session bearer token even inside the private mesh.
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
 
+The external audit of v0.1.3 checked these boundaries against the code; its findings and the
+release checkpoints are in [audit.md](audit.md).
+
 ## Packaging
 
 `scripts/install.sh` produces a self-contained app directory (`COLONIZER_HOME`, default
