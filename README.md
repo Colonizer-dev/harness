@@ -235,7 +235,13 @@ Stated here rather than buried.
 - **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
   is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
   given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
-- **No CI yet**, and nothing is published to crates.io or npm.
+- **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
+  crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
+  microsandbox, the in-VM daemon, the agent module and the web UI beside it — use the installer.
+  Nothing is published to npm.
+- **No test CI yet.** No workflow runs the Rust, runner or UI test suites on a push or a pull request;
+  GitHub Actions cuts the releases, publishes the crates and proposes the vendored plugin updates —
+  none of it runs the test suites.
 
 ---
 
