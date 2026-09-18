@@ -64,7 +64,9 @@ dist/bin/colonizer
 
 [docs/install.md](docs/install.md) has the rest: what a Linux machine needs for Claude Code, what the
 installer does on a Mac, the install options, the first run, where things live and how to update. It is
-also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install).
+also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install). The binary takes a few
+arguments, too: `colonizer --help` lists them — `telemetry show`, `telemetry on` and `telemetry off`
+for the [usage data](docs/usage-data.md) switch, and `--version`.
 
 ---
 
@@ -277,13 +279,16 @@ The roadmap is the issue tracker. There is no private version of it.
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |
 | Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
+| Usage data | On by default: an anonymous batch of counts, built and shown locally — and nothing is sent at all in this release. A different random id from the live map's; `colonizer telemetry off` switches it off ([docs/usage-data.md](docs/usage-data.md)). |
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
 ## Configuration
 
-Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. Process settings
-come from the environment:
+Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. The answers to
+the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) questions live beside it, in
+`telemetry.json` and `usage.json`, and `usage-last.json` beside those keeps the last usage batch
+built. Process settings come from the environment:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
@@ -294,7 +299,8 @@ come from the environment:
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
-| `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
+| `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) off whatever Settings says |
+| `CI=true` | – | Also keeps [usage data](docs/usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 
 A few things belong in neither the UI nor the environment. They live in `~/.config/colonizer/colonizer.toml`,

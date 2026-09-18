@@ -7,7 +7,7 @@ import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView } from "./components/Sidebar";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
-import type { HarnessStatus, ModuleInfo, OrgInfo, Session, TelemetryStatus } from "./types";
+import type { HarnessStatus, ModuleInfo, OrgInfo, Session, TelemetryStatus, UsageStatus } from "./types";
 
 export function App() {
   const api = useApi();
@@ -22,6 +22,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
+  const [usage, setUsage] = useState<UsageStatus | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string | null>(() => stored("colonizer.org") || null);
@@ -84,10 +85,19 @@ export function App() {
     }
   }, [api]);
 
+  const loadUsage = useCallback(async () => {
+    try {
+      setUsage(await api.usage());
+    } catch {
+      /* older mothership: no usage endpoint, and nothing to ask */
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadStatus();
     void loadSessions();
     void loadTelemetry();
+    void loadUsage();
     void loadOrgs();
     void loadPendingMemory();
     api.modules().then(applyModules).catch(() => {});
@@ -98,7 +108,7 @@ export function App() {
       setInterval(loadPendingMemory, 10_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, applyModules]);
+  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -236,12 +246,15 @@ export function App() {
         onClose={() => {
           setSettingsOpen(false);
           void loadTelemetry();
+          void loadUsage();
         }}
         status={status}
         onStatusChanged={loadStatus}
         onModulesChanged={applyModules}
         telemetry={telemetry}
         onTelemetryChanged={setTelemetry}
+        usage={usage}
+        onUsageChanged={setUsage}
         initialSection={settingsSection}
       />
       {telemetry && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status?.github.connected && status.claude.configured && (

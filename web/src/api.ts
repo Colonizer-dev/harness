@@ -22,6 +22,7 @@ import type {
   SaveProviderRequest,
   Session,
   TelemetryStatus,
+  UsageStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -57,6 +58,8 @@ export interface Api {
   headroomDownload(): Promise<HeadroomStatus>;
   telemetry(): Promise<TelemetryStatus>;
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
+  usage(): Promise<UsageStatus>;
+  setUsage(enabled: boolean): Promise<UsageStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   sessions(): Promise<Session[]>;
@@ -143,6 +146,8 @@ export const httpApi: Api = {
   headroomDownload: () => post("/api/headroom/download"),
   telemetry: () => request("/api/telemetry"),
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
+  usage: () => request("/api/telemetry/usage"),
+  setUsage: (enabled) => put("/api/telemetry/usage", { enabled }),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

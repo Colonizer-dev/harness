@@ -25,6 +25,7 @@ mod sandbox;
 mod sessions;
 mod telemetry;
 mod timing;
+mod usage;
 mod util;
 mod watchdog;
 
@@ -45,6 +46,7 @@ use sessions::Session;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path as FsPath, PathBuf},
+    process::ExitCode,
     sync::Arc,
     time::Duration,
 };
@@ -89,6 +91,8 @@ pub struct App {
     pub headroom: Mutex<headroom::Status>,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
+    /// Anonymous usage reporting, local half only: the batch that would be sent and the switch for it.
+    pub usage: usage::Usage,
 }
 
 pub type Shared = Arc<App>;
@@ -326,8 +330,95 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     }
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const USAGE: &str = "usage: colonizer
+       colonizer telemetry show|on|off
+
+  (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
+  telemetry show  print the exact anonymous usage batch that would be sent
+  telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
+  telemetry off   record no to anonymous usage reporting
+  --help, -h      print this help
+  --version, -V   print the version";
+
+/// What the binary was asked to do. Starting the mothership is the default; the telemetry
+/// subcommands read or write the usage switch with no network and no running mothership, in the
+/// argv style of colonizer-agentd.
+enum Args {
+    Serve,
+    TelemetryShow,
+    TelemetrySet(bool),
+}
+
+impl Args {
+    /// `Ok(None)` means the command was fully handled (`--help`, `--version`).
+    fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
+        let mut iter = argv.into_iter();
+        let Some(arg) = iter.next() else { return Ok(Some(Self::Serve)) };
+        let command = match arg.as_str() {
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(None);
+            }
+            "--version" | "-V" => {
+                println!("colonizer {VERSION}");
+                return Ok(None);
+            }
+            "telemetry" => {
+                let sub = iter.next().ok_or_else(|| "telemetry needs a command: show, on or off".to_string())?;
+                match sub.as_str() {
+                    "show" => Self::TelemetryShow,
+                    "on" => Self::TelemetrySet(true),
+                    "off" => Self::TelemetrySet(false),
+                    other => return Err(format!("unknown telemetry command: {other}")),
+                }
+            }
+            _ => return Err(format!("unknown argument: {arg}")),
+        };
+        if let Some(extra) = iter.next() {
+            return Err(format!("unknown argument: {extra}"));
+        }
+        Ok(Some(command))
+    }
+
+    async fn run(self) -> Result<()> {
+        match self {
+            Self::Serve => serve().await,
+            Self::TelemetryShow => {
+                let cfg = Settings::from_env()?;
+                usage::cli_show(&cfg.config_dir)
+            }
+            Self::TelemetrySet(enabled) => {
+                let cfg = Settings::from_env()?;
+                usage::cli_set(&cfg.config_dir, enabled)
+            }
+        }
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    let args = match Args::parse(std::env::args().skip(1).collect()) {
+        Ok(Some(args)) => args,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match args.run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
+/// background loops.
+async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
@@ -360,6 +451,7 @@ async fn main() -> Result<()> {
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
+        usage: usage::Usage::new(&cfg.config_dir),
         cfg,
     });
 
@@ -377,6 +469,7 @@ async fn main() -> Result<()> {
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
+        .route("/api/telemetry/usage", get(usage::status).put(usage::put))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -414,6 +507,8 @@ async fn main() -> Result<()> {
         Some(assets) => println!("assets: {}", assets.display()),
         None => println!("assets: not found (run scripts/install.sh)"),
     }
+    // The first-run notice: once, while nobody has answered yet, show the exact usage batch on stderr.
+    usage::first_run_notice(&app).await;
     match tokio::net::TcpListener::bind(&app.cfg.gateway_bind).await {
         Ok(listener) => {
             println!("provider gateway on http://{}", app.cfg.gateway_bind);
