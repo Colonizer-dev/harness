@@ -1033,16 +1033,17 @@ async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &st
                 "error" | "exited" => Some(format!("agent {state}{}", event["detail"].as_str().map(|d| format!(": {d}")).unwrap_or_default())),
                 _ => None,
             };
-            if let Some(current) = app.session(id).await {
-                if current.status.is_live() && (current.status != next || error.is_some()) {
-                    app.update_session(id, |x| {
-                        x.status = next;
-                        if error.is_some() {
-                            x.error = error;
-                        }
-                    })
-                    .await;
-                }
+            if let Some(current) = app.session(id).await
+                && current.status.is_live()
+                && (current.status != next || error.is_some())
+            {
+                app.update_session(id, |x| {
+                    x.status = next;
+                    if error.is_some() {
+                        x.error = error;
+                    }
+                })
+                .await;
             }
         }
         Some("question") => {
@@ -1227,10 +1228,10 @@ async fn teardown_vm(app: &Shared, s: &Session) {
         let _ = tokio::time::timeout(Duration::from_secs(15), agentd_http(app, s, "POST", "/v1/shutdown")).await;
     }
     sandbox::remove(&app.cfg.msb, &s.sandbox).await;
-    if s.mesh.is_some() {
-        if let Ok(mesh) = app.mesh().await {
-            let _ = mesh.delete_nodes_named(&s.sandbox).await;
-        }
+    if s.mesh.is_some()
+        && let Ok(mesh) = app.mesh().await
+    {
+        let _ = mesh.delete_nodes_named(&s.sandbox).await;
     }
 }
 

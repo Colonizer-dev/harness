@@ -1003,10 +1003,11 @@ mod tests {
             // Real git refuses to move a remote branch that the pushed head does not descend from, and
             // the real push carries no `--force`: the modelled remote accepts only its own absence, the
             // local head, or the commit the local head descends from.
-            if let Some(remote) = self.state.borrow().remote.as_deref() {
-                if remote != LOCAL && remote != PARENT {
-                    bail!("! [rejected]        colonizer/x -> colonizer/x (non-fast-forward)");
-                }
+            if let Some(remote) = self.state.borrow().remote.as_deref()
+                && remote != LOCAL
+                && remote != PARENT
+            {
+                bail!("! [rejected]        colonizer/x -> colonizer/x (non-fast-forward)");
             }
             self.state.borrow_mut().remote = Some(LOCAL.into());
             Ok(())
