@@ -410,9 +410,9 @@ don't go through the shell and aren't rewritten.
 
 `scripts/build-rtk.sh` builds rtk from the source pinned in `vendor/vendor.lock` as a static musl binary
 inside a `rust:1-alpine` microVM, like `colonizer-agentd`, and skips the build when that source is already
-built for the machine. Upstream's aarch64 Linux release is linked against glibc 2.39, newer than the
-colony image's 2.36, so it would not start in a colony on Apple Silicon. rtk's telemetry is opt-in and
-never switched on in a colony.
+built for the machine and the build mode. Upstream's aarch64 Linux release is linked against glibc
+2.39, newer than the colony image's 2.36, so it would not start in a colony on Apple Silicon. rtk's
+telemetry is opt-in and never switched on in a colony.
 
 ### Pre-flight scan
 

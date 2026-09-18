@@ -1,6 +1,6 @@
 //! Process settings (environment) and module selection (persisted JSON in the config dir).
 
-use crate::util::env_nonempty;
+use crate::util::{env_nonempty, is_elf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -76,6 +76,21 @@ impl Settings {
         let path = root.join(relative);
         if !path.exists() {
             bail!("missing bundled asset {} (run scripts/install.sh)", path.display());
+        }
+        Ok(path)
+    }
+
+    /// A bundled binary that a colony `exec`s inside a Linux microVM: it must exist and be an ELF.
+    /// The build scripts refuse a here build off Linux, so a non-ELF still here is a stale artefact
+    /// from before that guard or a binary copied by hand — caught now, not by Linux's ENOEXEC with
+    /// the VM already booting.
+    pub fn linux_binary(&self, relative: &str) -> Result<PathBuf> {
+        let path = self.asset(relative)?;
+        if !is_elf(&path) {
+            bail!(
+                "{} is not an ELF binary, so the colony cannot exec it (a stale artefact from before the build scripts checked, or a hand-copied binary); run scripts/install.sh",
+                path.display()
+            );
         }
         Ok(path)
     }
@@ -395,5 +410,38 @@ mod tests {
             serde_json::to_string(&modules).unwrap().contains("notify"),
             "created on first save"
         );
+    }
+
+    #[test]
+    fn linux_binary_refuses_an_asset_the_colony_cannot_exec() {
+        let dir = std::env::temp_dir().join(format!("colonizer-config-elf-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let cfg = Settings {
+            bind: String::new(),
+            data_dir: dir.clone(),
+            config_dir: dir.clone(),
+            runtime_dir: dir.clone(),
+            assets: Some(dir.clone()),
+            msb: String::new(),
+            claude_bin: None,
+            gateway_bind: String::new(),
+            allowed_hosts: Vec::new(),
+        };
+
+        let missing = cfg.linux_binary("bin/colonizer-agentd").unwrap_err().to_string();
+        assert!(missing.contains("scripts/install.sh"), "{missing}");
+
+        // What a Mac build with COLONIZER_BUILD_HERE=1 installs.
+        std::fs::write(dir.join("bin/colonizer-agentd"), b"\xcf\xfa\xed\xfe").unwrap();
+        let macho = cfg.linux_binary("bin/colonizer-agentd").unwrap_err().to_string();
+        assert!(macho.contains("is not an ELF binary"), "{macho}");
+        assert!(macho.contains("scripts/install.sh"), "{macho}");
+
+        std::fs::write(dir.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
+        assert_eq!(
+            cfg.linux_binary("bin/colonizer-agentd").unwrap(),
+            dir.join("bin/colonizer-agentd")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -79,8 +79,8 @@ jobs:
       - name: Test
         run: npm test
 
-  # The measuring scripts: the colony report and the bench. No dependencies either, and neither one
-  # touches a mothership, a colony or the network in its tests.
+  # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
+  # either, and none of them touch a mothership, a colony or the network in their tests.
   scripts:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -93,6 +93,12 @@ jobs:
 
       - name: Test
         run: node --test scripts/test/*.test.mjs
+
+      # The build scripts' tests drive the real scripts against stub uname, cargo and msb on PATH, so
+      # they need no cargo, no microsandbox and no network; the happy paths need a Linux host, which
+      # the runner is, and skip with a message anywhere else.
+      - name: Test the build scripts
+        run: sh scripts/test/build-scripts.test.sh
 
   # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
   # so there is nothing to install and `npm test` is plain `node --test`.

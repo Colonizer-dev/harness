@@ -574,7 +574,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if agent.needs_claude && app.claude_cred().is_none() {
         return Err(client_error(StatusCode::BAD_REQUEST, "log in with Claude in Settings first"));
     }
-    if let Err(e) = app.cfg.asset("bin/colonizer-agentd") {
+    if let Err(e) = app.cfg.linux_binary("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
     if let (Some(issue), false) = (req.issue, req.allow_duplicate)
@@ -878,7 +878,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             read_only: false,
         },
         Mount {
-            source: app.cfg.asset("bin/colonizer-agentd")?,
+            source: app.cfg.linux_binary("bin/colonizer-agentd")?,
             target: "/opt/colonizer/bin/colonizer-agentd".into(),
             read_only: true,
         },
@@ -942,15 +942,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // the reason a colony doesn't start.
     let switched_on = |env: &Map<String, Value>, key: &str| env.get(key).and_then(Value::as_str) == Some("true");
     if switched_on(&runner_env, "COLONIZER_RTK") {
-        match app.cfg.asset("bin/rtk") {
+        match app.cfg.linux_binary("bin/rtk") {
             Ok(source) => mounts.push(Mount {
                 source,
                 target: "/opt/colonizer/bin/rtk".into(),
                 read_only: true,
             }),
-            Err(_) => {
+            Err(e) => {
                 runner_env.remove("COLONIZER_RTK");
-                log.info("compact command output is switched on, but rtk isn't installed (scripts/install.sh builds it); running without it").await;
+                log.info(format!(
+                    "compact command output is switched on, but rtk can't be used ({e:#}); running without it"
+                ))
+                .await;
             }
         }
     }
