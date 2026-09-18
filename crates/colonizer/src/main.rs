@@ -55,6 +55,7 @@ use serde_json::{Value, json};
 use sessions::Session;
 use std::{
     collections::{BTreeSet, HashMap},
+    future::Future,
     path::{Path as FsPath, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -290,6 +291,25 @@ fn storage_status(alert: Option<StorageAlert>) -> Value {
     }
 }
 
+/// The `mesh` key of `/api/status`. `live` is awaited only when the mesh is enabled and its
+/// binaries are vendored: the running mesh's own status, or the reason none could be built.
+async fn mesh_status(modules: &ModulesConfig, assets: Option<&FsPath>, live: impl Future<Output = Result<Value>>) -> Value {
+    if !modules.mesh_enabled() {
+        json!({"enabled": false, "provider": "none"})
+    } else if !assets.is_some_and(mesh::binaries_present) {
+        // Not an error the operator can clear: this platform has no mesh binaries to
+        // vendor. It goes in `detail`, not `error`: anything in `error` is read as a
+        // fault, and this one used to paint every Mac's runtime red.
+        json!({"enabled": true, "provider": "headscale", "state": "unavailable",
+               "detail": "colonies use a loopback port on this platform", "error": Value::Null})
+    } else {
+        match live.await {
+            Ok(status) => status,
+            Err(e) => json!({"enabled": true, "provider": "headscale", "state": "error", "error": format!("{e:#}")}),
+        }
+    }
+}
+
 async fn status(State(app): State<Shared>) -> Json<Value> {
     let mut msb = Command::new(&app.cfg.msb);
     msb.arg("--version");
@@ -301,20 +321,13 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
         claude_login::claude_status(&app, cred.as_ref()),
     );
     let modules = app.modules.read().await.clone();
-    let mesh = if !modules.mesh_enabled() {
-        json!({"enabled": false, "provider": "none"})
-    } else if !app.cfg.assets.as_deref().is_some_and(mesh::binaries_present) {
-        // Not an error the operator can clear: this platform has no mesh binaries to
-        // vendor. It goes in `detail`, not `error`: anything in `error` is read as a
-        // fault, and this one used to paint every Mac's runtime red.
-        json!({"enabled": true, "provider": "headscale", "state": "unavailable",
-               "detail": "colonies use a loopback port on this platform", "error": Value::Null})
-    } else {
+    let live = async {
         match app.mesh().await {
-            Ok(mesh) => mesh.status().await,
-            Err(e) => json!({"enabled": true, "provider": "headscale", "state": "error", "error": format!("{e:#}")}),
+            Ok(mesh) => Ok(mesh.status().await),
+            Err(e) => Err(e),
         }
     };
+    let mesh = mesh_status(&modules, app.cfg.assets.as_deref(), live).await;
     let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
     let storage_alert = app.storage_alert.read().await.clone();
@@ -932,5 +945,49 @@ pub(crate) mod tests {
             value["ts"].is_string(),
             "the ts is the RFC 3339 string the harness_log frames use: {value}"
         );
+    }
+
+    /// A platform whose assets vendor no mesh binaries — every Mac — is a fact to explain, not a
+    /// fault (#128). Before the fix the explanation sat in `error`, and everything the web UI reads
+    /// from `error` turns red, so every Mac's Runtime section showed "Something is missing" for its
+    /// whole life. The real handler over the stock fixture does exactly that shape: mesh enabled,
+    /// no assets, nothing broken.
+    #[tokio::test]
+    async fn the_status_mesh_is_unavailable_with_a_null_error_where_no_binaries_are_vendored() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let Json(payload) = status(State(app)).await;
+        let mesh = &payload["mesh"];
+        assert_eq!(mesh["enabled"], true);
+        assert_eq!(mesh["provider"], "headscale");
+        assert_eq!(mesh["state"], "unavailable", "{mesh}");
+        assert!(mesh["detail"].as_str().is_some_and(|d| !d.is_empty()), "{mesh}");
+        assert!(
+            mesh["error"].is_null(),
+            "a non-null error here is the regression: the UI paints it as a fault: {mesh}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The other half of the contract: a mesh that genuinely cannot be built is a fault, and the
+    /// reason lands in `error`, the field the web UI reads as "something is missing".
+    #[tokio::test]
+    async fn a_mesh_that_cannot_be_built_is_reported_as_an_error_carrying_the_reason() {
+        let root = temp_root();
+        let assets = root.join("assets");
+        for rel in [
+            "vendor/headscale",
+            "vendor/tailscale/tailscale",
+            "vendor/tailscale/tailscaled",
+        ] {
+            let path = assets.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+        }
+        let broken: Result<Value> = Err(anyhow!("headscale refused to start"));
+        let value = mesh_status(&ModulesConfig::default(), Some(&assets), async move { broken }).await;
+        assert_eq!(value["state"], "error", "{value}");
+        assert_eq!(value["error"], "headscale refused to start", "{value}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
