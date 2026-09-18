@@ -94,6 +94,13 @@ prebuilt_bin colonizer-agentd || MSB="$msb" "$root/scripts/build-agentd.sh"
 echo "==> rtk (static musl build inside a microVM, for colonies that switch on compact command output)"
 prebuilt_bin rtk || MSB="$msb" "$root/scripts/build-rtk.sh"
 
+# The host's own mesh needs a tailscaled, and Tailscale publishes no macOS build of it: on a Mac the
+# vendored source is built into the app. Linux's tailscaled came from the vendored tgz above.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo "==> tailscale for the host (built from pinned source inside a microVM)"
+  MSB="$msb" "$root/scripts/build-tailscaled.sh"
+fi
+
 echo "==> agent modules"
 # Shipped so an installed mothership can apply an update with the same verified
 # installer a person would run, instead of downloading a script to execute.
