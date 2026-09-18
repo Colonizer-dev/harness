@@ -38,7 +38,8 @@ x86_64 with KVM, or an Apple Silicon Mac.
 - **A microVM per task.** Not a shared-kernel container: a colony that goes rogue can wreck its own
   worktree, and that is all.
 - **A private mesh home.** Colonies join a private network with the mothership, never your own tailnet,
-  and can't reach each other. On a Mac, colonies are reached on a loopback port instead.
+  and can't reach each other. If the mesh binaries are absent, colonies are reached on a loopback
+  port instead.
 - **Choices, not walls of text.** Questions arrive as cards with an "Other…" answer, in a web UI that shows
   each colony's chat and terminal side by side.
 - **Placeholders only.** The GitHub token never enters a colony, and the agent's API credential is swapped

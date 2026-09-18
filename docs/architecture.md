@@ -4,6 +4,11 @@ Colonizer turns a task (a GitHub issue today) into a pull request by running a c
 inside a disposable microVM, with a web UI to watch, answer the agent's questions, and open a
 terminal in the VM.
 
+Colonizer runs on Linux x86_64 with `/dev/kvm` readable and writable, or an Apple Silicon Mac. An
+Intel Mac can't run it, because microsandbox's libkrun backend is aarch64-only. On Linux the host
+also needs glibc 2.28 or newer, which the pinned microsandbox binary requires.
+[docs/install.md](install.md) has the rest.
+
 ```mermaid
 flowchart TB
   browser["browser"]
@@ -129,7 +134,9 @@ stateDiagram-v2
   (microsandbox `host` network profile).
 - The harness node is a separate userspace `tailscaled` (own state dir, socket under
   `/run/user/<uid>/colonizer/`, fixed UDP port, `--no-logs-no-support`). It never touches the
-  system tailscaled or the user's tailnet.
+  system tailscaled or the user's tailnet. Tailscale publishes no macOS `tailscaled`, so on a Mac the
+  bundled one is built from the source pinned in `vendor/vendor.lock` (`scripts/build-tailscaled.sh`);
+  on Linux it comes from upstream's tgz.
 - VMs get one narrow extra rule, `allow@<host-lan-ip>:udp:<harness-udp-port>`, so WireGuard
   connects directly (≈1 ms) instead of through a public DERP relay. LAN access stays blocked.
 - Users: `harness` and `vms`. Policy: `harness@` may reach `vms@:*`; VMs cannot reach each other.
@@ -155,8 +162,9 @@ stateDiagram-v2
 ```
 bin/colonizer            host server
 bin/colonizer-agentd             static musl build (built in a rust:alpine microVM)
+bin/claude-guest                 Mac only: linux-arm64 Claude Code, fetched at install time (the host's own binary is Mach-O)
 vendor/headscale              pinned + sha256-verified (vendor/vendor.lock)
-vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified
+vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified (built from source on a Mac)
 vendor/derpmap.yaml           DERP relay map snapshot (committed)
 modules/agents/claude-code/   runner + production node_modules
 web/                          built UI

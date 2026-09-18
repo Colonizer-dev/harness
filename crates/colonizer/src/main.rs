@@ -540,8 +540,8 @@ async fn main() -> Result<()> {
     tokio::spawn(version::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
-        // Retrying would never help: no mesh binary is published for this platform, so there is
-        // nothing for another `scripts/install.sh` to fetch. Colonies use a loopback port instead.
+        // Restarting would never help: the binaries are missing from this install, and the app does
+        // not fetch them at runtime. Colonies use a loopback port instead.
         println!("mesh: no mesh binaries for this platform; colonies will use a loopback port");
     }
     if app.modules.read().await.mesh_enabled() && mesh_vendored {

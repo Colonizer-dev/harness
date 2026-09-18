@@ -6,6 +6,12 @@ microsandbox 0.6.18    linux-x86_64  msb     b001b3c6b980ab1ffcceb817496648c1520
 microsandbox 0.6.18    linux-aarch64 msb     e53098e7601fddd85af7e943d4af3d4370ace276d9e863a89456338f2d076d1b  https://github.com/microsandbox/microsandbox/releases/download/v0.6.18/microsandbox-linux-aarch64.tar.gz
 microsandbox 0.6.18    darwin-arm64  msb     1e8c40859142cd38fb99b301bdb1fb4095a985a4065d080f99b3a3e7cb9a6305  https://github.com/microsandbox/microsandbox/releases/download/v0.6.18/microsandbox-darwin-aarch64.tar.gz
 
+# The mesh on a Mac. headscale ships a darwin-arm64 binary just as it does for Linux. Tailscale
+# publishes no macOS tailscaled anywhere, so the darwin row pins the same v1.102.4 tag as the Linux
+# tgz above, as source, and scripts/build-tailscaled.sh builds tailscale and tailscaled from it.
+headscale    0.29.3    darwin-arm64  binary  fb55b6d3d1ef3b850fe02837299ac1853f383a06f561d7f180d36b9ce406904b  https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_darwin_arm64
+tailscale    1.102.4   darwin-arm64  source  784b023e825e1cca7b146ac6a7aff08b179d60d10839b51019f315dab426c871  https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/v1.102.4
+
 # Claude Code plugin directories, staged read-only into the app and loadable per
 # colony with the claude-code module's `plugins` setting. Platform `any`.
 #
