@@ -55,7 +55,7 @@ import {
   type IconProps,
 } from "./icons";
 import { SkillsetField } from "./Skillsets";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, timeAgo, useMediaQuery, type Tone } from "./ui";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, meshBroken, timeAgo, type Tone, useMediaQuery } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
@@ -217,7 +217,7 @@ function SettingsBody({
   const github = status?.github;
   const claude = status?.claude;
   const connectionsTone: Tone | null = !status ? null : github?.connected && claude?.configured ? "ok" : "err";
-  const runtimeBroken = Boolean(status && (!status.sandbox.msb_version || status.sandbox.claude_bin_error || status.mesh?.error));
+  const runtimeBroken = Boolean(status && (!status.sandbox.msb_version || status.sandbox.claude_bin_error || meshBroken(status.mesh)));
 
   const groups: NavGroup[] = [
     {
@@ -936,10 +936,12 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
           label: "Mesh",
           value: status.mesh
             ? status.mesh.enabled
-              ? [status.mesh.provider, status.mesh.state, status.mesh.harness_ip, status.mesh.error].filter(Boolean).join(" · ")
+              ? [status.mesh.provider, status.mesh.state, status.mesh.harness_ip, status.mesh.detail, status.mesh.error]
+                  .filter(Boolean)
+                  .join(" · ")
               : "disabled"
             : "—",
-          bad: Boolean(status.mesh?.error),
+          bad: meshBroken(status.mesh),
         },
       ]
     : [];
