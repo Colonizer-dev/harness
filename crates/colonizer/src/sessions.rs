@@ -53,6 +53,17 @@ use tokio_tungstenite::{
 const AGENTD_PORT: u16 = 7070;
 const MAX_LOGS: usize = 200;
 
+/// Fixed failure messages the harness records verbatim. They double as the closed vocabulary
+/// usage.rs buckets failures with: `Session.error` itself is free text and is never sent anywhere.
+pub(crate) const AGENTD_NOT_READY: &str = "the agent daemon in the microVM did not become ready";
+/// Recorded when a live colony's microVM is gone once the harness has restarted (`recover`).
+pub(crate) const VM_GONE_AFTER_RESTART: &str = "the microVM was not running when the harness restarted";
+/// Recorded when a live colony's microVM stops on its own (its max session length) or the host stopped it.
+pub(crate) const VM_STOPPED_EARLY: &str =
+    "the microVM stopped (its max session length, or the host stopped it); press Resume to continue";
+/// Recorded for a colony that was mid-publish when the harness restarted.
+pub(crate) const PUBLISH_LOST_TO_RESTART: &str = "the harness restarted while publishing; the worktree is intact, publish again";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
@@ -346,16 +357,20 @@ fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     setting(&modules.publish, &schema, "file_findings").and_then(Value::as_bool).unwrap_or(true)
 }
 
-/// The container image a colony boots: the stack preset's, unless modules.json names one.
-fn colony_image(app: &App, modules: &ModulesConfig) -> String {
-    let schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+/// The container image a colony boots: the stack preset's, unless modules.json names one. Takes the
+/// agent list rather than the app, so usage.rs can resolve the same image for its
+/// changed-from-default check without an `App`.
+pub(crate) fn colony_image(agents: &[AgentModule], modules: &ModulesConfig) -> String {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, agents);
     let preset = setting_str(&modules.sandbox, &schema, "preset");
     let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
     setting_str(&settings, &schema, "image")
 }
 
-fn autopilot_default(app: &App, modules: &ModulesConfig) -> bool {
-    let schema = schema_for("publish", &modules.publish.provider, &app.agents);
+/// Whether new colonies publish automatically: the publish module's `autopilot` setting. Takes the
+/// agent list rather than the app, so usage.rs can report the same default.
+pub(crate) fn autopilot_default(agents: &[AgentModule], modules: &ModulesConfig) -> bool {
+    let schema = schema_for("publish", &modules.publish.provider, agents);
     setting(&modules.publish, &schema, "autopilot").and_then(Value::as_bool).unwrap_or(false)
 }
 
@@ -444,7 +459,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         mesh: None,
         local_port: None,
         agent: agent.id.clone(),
-        autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app, &modules)),
+        autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app.agents, &modules)),
         pr_url: None,
         publish_stage: None,
         error: None,
@@ -608,7 +623,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
     }
     // What the colony can and cannot run is part of the agent's brief (runner.mjs).
-    runner_env.insert("COLONIZER_IMAGE".into(), Value::String(colony_image(app, &modules)));
+    runner_env.insert("COLONIZER_IMAGE".into(), Value::String(colony_image(&app.agents, &modules)));
 
     // The private mesh needs the three vendored binaries. Without them a colony is reached on a
     // loopback port rather than failing to boot.
@@ -833,7 +848,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     loop {
         match agentd_http(app, &s, "GET", "/v1/health").await {
             Ok((200, _)) => break,
-            _ if tokio::time::Instant::now() > deadline => bail!("the agent daemon in the microVM did not become ready"),
+            _ if tokio::time::Instant::now() > deadline => bail!("{}", AGENTD_NOT_READY),
             _ => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
@@ -1312,7 +1327,7 @@ pub async fn recover(app: &Shared) {
             teardown_vm(app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Failed;
-                x.error = Some("the harness restarted while publishing; the worktree is intact, publish again".into());
+                x.error = Some(PUBLISH_LOST_TO_RESTART.into());
             })
             .await;
             continue;
@@ -1338,7 +1353,7 @@ pub async fn recover(app: &Shared) {
             teardown_vm(app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Stopped;
-                x.error = Some("the microVM was not running when the harness restarted".into());
+                x.error = Some(VM_GONE_AFTER_RESTART.into());
             })
             .await;
         }
@@ -1367,7 +1382,7 @@ pub async fn watch_sandboxes(app: Shared) {
             teardown_vm(&app, &s).await;
             app.update_session(&s.id, |x| {
                 x.status = SessionStatus::Stopped;
-                x.error = Some("the microVM stopped (its max session length, or the host stopped it); press Resume to continue".into());
+                x.error = Some(VM_STOPPED_EARLY.into());
             })
             .await;
         }
