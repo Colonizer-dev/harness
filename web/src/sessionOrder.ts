@@ -1,4 +1,5 @@
 // Sidebar ordering: what the colony wants from you first, then recency inside each group.
+import { needsYou } from "./notifications";
 import type { Session, SessionStatus } from "./types";
 
 /**
@@ -21,9 +22,9 @@ const RANK: Record<SessionStatus, number> = {
   failed: 4,
 };
 
-/** A flagged colony joins the unanswered at the top, whatever its status. */
+/** A colony that needs a person joins the unanswered at the top, whatever its status — same predicate the notifications read. */
 export function sessionRank(session: Session): number {
-  return session.attention ? 0 : RANK[session.status];
+  return needsYou(session) ? 0 : RANK[session.status];
 }
 
 /** Newest first inside a group; ties fall through to `id` so the order holds between polls. */

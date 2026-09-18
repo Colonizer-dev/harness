@@ -7,6 +7,22 @@ import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView } from "./components/Sidebar";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
+import {
+  NOTIFICATIONS_KEY,
+  applyFavicon,
+  applyTabTitle,
+  diffEvents,
+  eventText,
+  needsYou,
+  orgFilterForTarget,
+  parseNotificationPrefs,
+  playQuestionBlip,
+  serializeNotificationPrefs,
+  showColonyNotification,
+  snapshotOf,
+  type NotificationPrefs,
+  type SessionSnapshot,
+} from "./notifications";
 import type { HarnessStatus, ModuleInfo, OrgInfo, Session, StorageHealth, TelemetryStatus, UsageStatus } from "./types";
 
 export function App() {
@@ -29,6 +45,7 @@ export function App() {
   const [view, setView] = useState<MainView>(() => (stored("colonizer.view") === "memory" ? "memory" : "colonies"));
   const [pendingMemory, setPendingMemory] = useState(0);
   const [orgSettingsFor, setOrgSettingsFor] = useState<string | null>(null);
+  const [notifyPrefs, setNotifyPrefs] = useState<NotificationPrefs>(() => parseNotificationPrefs(stored(NOTIFICATIONS_KEY)));
   // The mothership's storage alert is sticky, so dismissal is client-side, keyed on the alert's ts
   // (or its message when an older mothership omits the ts): a newer failure shows the card again.
   const [dismissedStorageTs, setDismissedStorageTs] = useState<string | null>(null);
@@ -129,6 +146,19 @@ export function App() {
     store("colonizer.view", view);
   }, [view]);
 
+  // Notifications preferences are client-side only (no client-settings endpoint), so they persist as one localStorage blob like the other colonizer.* keys.
+  useEffect(() => {
+    store(NOTIFICATIONS_KEY, serializeNotificationPrefs(notifyPrefs));
+  }, [notifyPrefs]);
+
+  // The in-tab layer. With the layer off App passes 0, which is today's look exactly: tabTitle(0) is
+  // the static "Colonizer" and faviconHref(false) the href index.html ships with.
+  useEffect(() => {
+    const count = notifyPrefs.inTab ? sessions.filter(needsYou).length : 0;
+    applyTabTitle(count);
+    applyFavicon(count > 0);
+  }, [sessions, notifyPrefs.inTab]);
+
   useEffect(() => {
     if (promptedForSettings.current || !status) return;
     promptedForSettings.current = true;
@@ -149,11 +179,37 @@ export function App() {
     });
   }, []);
 
-  const select = (id: string) => {
+  // Stable identity, so the notifier effect can call the latest selection without re-running on every render.
+  const select = useCallback((id: string) => {
     setSelectedId(id);
     setView("colonies");
     setSidebarOpen(false);
-  };
+  }, []);
+
+  // A notification's click is delivered to the onSelect captured when the notification was raised,
+  // which can be hours earlier — meanwhile the colony may have moved orgs, the org filter may have
+  // been switched, or the colony may be gone. So the resolver below is kept in a ref that always
+  // holds the latest one, and this stable wrapper is what the notifier effect passes: it reads
+  // nothing but the ref, so a click resolves against the list and filter as they are at click time.
+  const openFromNotificationRef = useRef<(id: string) => void>(() => {});
+  const openFromNotification = useCallback((id: string) => openFromNotificationRef.current(id), []);
+
+  // The edge-triggered notifier, fed by both paths that update `sessions` (the 4s poll and the
+  // per-colony WebSocket frames). The first list only seeds the snapshot, so colonies already
+  // waiting on load stay quiet — the sidebar shows them. The snapshot updates even when every
+  // channel is off, so switching a channel on later cannot replay a backlog.
+  const notifySeen = useRef<Record<string, SessionSnapshot> | null>(null);
+  useEffect(() => {
+    const snapshot = snapshotOf(sessions);
+    const previous = notifySeen.current;
+    notifySeen.current = snapshot;
+    if (!previous) return;
+    for (const event of diffEvents(previous, sessions, notifyPrefs.events)) {
+      if (event.kind === "question" && notifyPrefs.sound) playQuestionBlip();
+      // Browser notifications are for when this tab is not in front; in front of it, the strip and title are the message.
+      if (notifyPrefs.browser && !document.hasFocus()) showColonyNotification(eventText(event), event.id, openFromNotification);
+    }
+  }, [sessions, notifyPrefs, openFromNotification]);
 
   const selectOrg = (org: string | null) => {
     setSelectedOrg(org);
@@ -164,6 +220,29 @@ export function App() {
       setSelectedId(inOrg.find((s) => isLive(s.status))?.id ?? inOrg[0]?.id ?? null);
     }
   };
+
+  // The strip counts every waiting colony whatever the org filter shows, so one of its entries can
+  // open a colony the filtered list does not contain. Clearing goes through selectOrg — writing the
+  // stored filter here too would let the two drift — and a colony the filter already shows leaves
+  // the filter untouched.
+  const openColony = (session: Session) => {
+    const filter = orgFilterForTarget(selectedOrg, session);
+    if (filter !== selectedOrg) selectOrg(filter);
+    select(session.id);
+  };
+
+  // The notification click takes the same reveal as the strip — this is its only other caller, so
+  // the reveal stays defined once. The colony is looked up at click time from the list as it is
+  // then, because the event deliberately carries only the address (`id`, `repo`), never the org;
+  // and a colony that has vanished by then cannot be hidden by any filter, so it falls through to
+  // the plain select and its fallback effect for a missing id, exactly as before.
+  useEffect(() => {
+    openFromNotificationRef.current = (id: string) => {
+      const session = sessions.find((s) => s.id === id);
+      if (session) openColony(session);
+      else select(id);
+    };
+  });
 
   const openMemory = useCallback(() => {
     setView("memory");
@@ -185,6 +264,7 @@ export function App() {
       sessionsLoaded={sessionsLoaded}
       selectedId={selectedId}
       onSelect={select}
+      onOpenColony={openColony}
       onCreated={(session) => {
         upsertSession(session);
         select(session.id);
@@ -207,6 +287,7 @@ export function App() {
       onOpenMemory={openMemory}
       pendingMemory={pendingMemory}
       autopilotDefault={autopilotDefault}
+      attentionStrip={notifyPrefs.inTab}
     />
   );
 
@@ -263,6 +344,8 @@ export function App() {
         onTelemetryChanged={setTelemetry}
         usage={usage}
         onUsageChanged={setUsage}
+        notifications={notifyPrefs}
+        onNotificationsChanged={setNotifyPrefs}
         initialSection={settingsSection}
       />
       {(storageAlert || liveMapPrompt) && (

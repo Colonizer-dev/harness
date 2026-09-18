@@ -2,8 +2,9 @@
 
 use crate::{
     ApiResult, App, Shared, client_error,
-    config::{ModuleChoice, ModulesConfig, setting_f64, setting_str, setting_u64},
+    config::{ModuleChoice, ModulesConfig, setting, setting_f64, setting_str, setting_u64},
     modules::schema_for,
+    notify::NotifySettings,
     util::parse_disk_size,
     watchdog::WatchdogSettings,
 };
@@ -51,6 +52,24 @@ pub struct WatchdogOverrides {
     pub waiting_minutes: Option<u64>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct NotifyOverrides {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub on_question: Option<bool>,
+    #[serde(default)]
+    pub on_attention: Option<bool>,
+    #[serde(default)]
+    pub on_failed: Option<bool>,
+    #[serde(default)]
+    pub on_pull_request: Option<bool>,
+    #[serde(default)]
+    pub desktop: Option<bool>,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -70,6 +89,8 @@ pub struct OrgSettings {
     pub memory: Option<MemoryOverrides>,
     #[serde(default)]
     pub watchdog: Option<WatchdogOverrides>,
+    #[serde(default)]
+    pub notify: Option<NotifyOverrides>,
 }
 
 pub fn valid_org(org: &str) -> bool {
@@ -238,6 +259,32 @@ pub fn effective_watchdog(modules: &ModulesConfig, org: &OrgSettings) -> Watchdo
     }
 }
 
+/// The notify module's settings for an org's colonies. There is nothing to resolve until the module
+/// has been configured: an org can narrow what announces, never switch the module on by itself.
+pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySettings {
+    let schema = schema_for("notify", "default", &[]);
+    let empty = ModuleChoice {
+        provider: "default".into(),
+        enabled: false,
+        settings: serde_json::Map::new(),
+    };
+    let choice = modules.notify.as_ref().unwrap_or(&empty);
+    let flag = |key: &str, default: bool| setting(choice, &schema, key).and_then(Value::as_bool).unwrap_or(default);
+    let overrides = org.notify.clone().unwrap_or_default();
+    NotifySettings {
+        enabled: choice.enabled && overrides.enabled.unwrap_or(true),
+        on_question: overrides.on_question.unwrap_or_else(|| flag("on_question", true)),
+        on_attention: overrides.on_attention.unwrap_or_else(|| flag("on_attention", true)),
+        on_failed: overrides.on_failed.unwrap_or_else(|| flag("on_failed", true)),
+        on_pull_request: overrides.on_pull_request.unwrap_or_else(|| flag("on_pull_request", true)),
+        desktop: overrides.desktop.unwrap_or_else(|| flag("desktop", false)),
+        webhook_url: overrides
+            .webhook_url
+            .clone()
+            .unwrap_or_else(|| setting_str(choice, &schema, "webhook_url")),
+    }
+}
+
 fn validate(settings: &OrgSettings) -> Result<(), String> {
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
@@ -276,6 +323,12 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
         if watchdog.max_nudges.is_some_and(|n| n > 20) {
             return Err("max nudges must be 20 or fewer".into());
         }
+    }
+    if let Some(url) = settings.notify.as_ref().and_then(|n| n.webhook_url.as_deref())
+        && !url.is_empty()
+        && !(url.starts_with("http://") || url.starts_with("https://"))
+    {
+        return Err("the webhook URL must be an http:// or https:// address".into());
     }
     Ok(())
 }
@@ -356,6 +409,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
         && unnamed_sub("watchdog", "waiting_minutes")
     {
         watchdog.waiting_minutes = saved_watchdog.waiting_minutes;
+    }
+    if !named("notify") {
+        incoming.notify = saved.notify.clone();
     }
 }
 
@@ -584,6 +640,54 @@ mod tests {
     }
 
     #[test]
+    fn notify_settings_layer_over_the_module_like_the_watchdogs() {
+        let modules = ModulesConfig::default();
+        // Not configured anywhere: nothing announces, whatever the org says — an org narrows, never enables.
+        let eager = OrgSettings {
+            notify: Some(NotifyOverrides {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!effective_notify(&modules, &eager).enabled);
+
+        let mut configured = ModulesConfig {
+            notify: Some(ModuleChoice {
+                provider: "default".into(),
+                enabled: true,
+                settings: serde_json::from_str(
+                    r#"{"on_failed": false, "desktop": true, "webhook_url": "https://example.com/hook"}"#,
+                )
+                .unwrap(),
+            }),
+            ..Default::default()
+        };
+        let plain = effective_notify(&configured, &OrgSettings::default());
+        assert!(plain.enabled);
+        assert!(plain.on_question, "events the module doesn't name default on");
+        assert!(!plain.on_failed);
+        assert!(plain.desktop);
+        assert_eq!(plain.webhook_url, "https://example.com/hook");
+
+        let overridden = OrgSettings {
+            notify: Some(NotifyOverrides {
+                on_attention: Some(false),
+                webhook_url: Some("http://127.0.0.1:9000/hook".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let org = effective_notify(&configured, &overridden);
+        assert!(!org.on_attention);
+        assert_eq!(org.webhook_url, "http://127.0.0.1:9000/hook");
+        assert!(org.desktop, "a field the org doesn't name inherits the module's");
+        // A module switched off stays off, however much the org overrides.
+        configured.notify.as_mut().unwrap().enabled = false;
+        assert!(!effective_notify(&configured, &overridden).enabled);
+    }
+
+    #[test]
     fn a_settings_save_only_replaces_the_fields_the_client_names() {
         let saved = OrgSettings {
             agent: Some(AgentOverrides {
@@ -596,6 +700,10 @@ mod tests {
             host_disk: Some("16G".into()),
             watchdog: Some(WatchdogOverrides {
                 waiting_minutes: Some(45),
+                ..Default::default()
+            }),
+            notify: Some(NotifyOverrides {
+                on_failed: Some(false),
                 ..Default::default()
             }),
             ..Default::default()
@@ -637,6 +745,11 @@ mod tests {
                 ..Default::default()
             }),
             "a sub-field the client never sends keeps its saved value"
+        );
+        assert_eq!(
+            incoming.notify,
+            saved.notify.clone(),
+            "so does a whole module a web build from before it has never heard of"
         );
 
         // A save with no settings object at all — an empty PUT — changes nothing.

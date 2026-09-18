@@ -5,11 +5,14 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type Dispatch,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
+import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
 import type {
   HarnessStatus,
   HeadroomStatus,
@@ -65,7 +68,7 @@ import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDurat
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | `module:${string}`;
+export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -100,6 +103,8 @@ export function SettingsDialog({
   onTelemetryChanged,
   usage,
   onUsageChanged,
+  notifications,
+  onNotificationsChanged,
   initialSection,
 }: {
   open: boolean;
@@ -111,6 +116,9 @@ export function SettingsDialog({
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
   usage: UsageStatus | null;
   onUsageChanged: (usage: UsageStatus) => void;
+  notifications: NotificationPrefs;
+  /** A React-style setter, so the pane can compose over the latest prefs: the browser's permission answer lands after a delay, and a value-based write from the opening render would revert anything toggled meanwhile. */
+  onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
   /** The section to open on, instead of the first. */
   initialSection?: SectionId;
 }) {
@@ -139,6 +147,8 @@ export function SettingsDialog({
           onTelemetryChanged={onTelemetryChanged}
           usage={usage}
           onUsageChanged={onUsageChanged}
+          notifications={notifications}
+          onNotificationsChanged={onNotificationsChanged}
           initialSection={initialSection}
           onClose={onClose}
         />
@@ -155,6 +165,8 @@ function SettingsBody({
   onTelemetryChanged,
   usage,
   onUsageChanged,
+  notifications,
+  onNotificationsChanged,
   initialSection,
   onClose,
 }: {
@@ -165,6 +177,9 @@ function SettingsBody({
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
   usage: UsageStatus | null;
   onUsageChanged: (usage: UsageStatus) => void;
+  notifications: NotificationPrefs;
+  /** A React-style setter, so the pane can compose over the latest prefs (see SettingsDialog). */
+  onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
   initialSection?: SectionId;
   onClose: () => void;
 }) {
@@ -272,6 +287,13 @@ function SettingsBody({
           hint: "An anonymous batch, built here and shown — nothing is sent yet",
           badge: usage ? (usage.enabled ? "On" : "Off") : undefined,
         },
+        {
+          id: "notifications",
+          label: "Notifications",
+          hint: "What tells you a colony needs you when the tab is not in front",
+          // The badge follows the two opt-in channels; the in-tab layer is on by default and needs no advertising.
+          badge: notifications.sound || notifications.browser ? "On" : "Off",
+        },
       ],
     },
     {
@@ -296,6 +318,7 @@ function SettingsBody({
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
+  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -1358,6 +1381,163 @@ function UsagePane({
           </div>
         </div>
       )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Notifications: what tells a person a colony needs them when the tab is not
+// in front. Client-side only — the prefs persist in localStorage (see
+// notifications.ts), not through the Api, so there is nothing here to save.
+// ---------------------------------------------------------------------------
+
+function NotificationsPane({
+  prefs,
+  onChanged,
+  back,
+}: {
+  prefs: NotificationPrefs;
+  onChanged: Dispatch<SetStateAction<NotificationPrefs>>;
+  back?: () => void;
+}) {
+  // The browser's answer as of the pane opening, or as of the last ask from the switch below.
+  const [permission, setPermission] = useState<NotificationPermissionState>(() => notificationSupport());
+  const [asked, setAsked] = useState(false);
+
+  // Functional update: the permission answer below arrives after the dialog has kept taking
+  // toggles, and a write from this render's `prefs` would silently revert them.
+  const patch = (partial: Partial<NotificationPrefs>) => onChanged((previous) => ({ ...previous, ...partial }));
+
+  // Turning browser notifications on asks the browser right here, inside the click: the prompt is
+  // only shown within a user gesture, which is why this setting lives behind a button and can never
+  // fire on load. The switch only comes on for "granted" — a denied or dismissed prompt is
+  // explained below rather than silently swallowed.
+  const setBrowser = (wanted: boolean) => {
+    if (!wanted) {
+      patch({ browser: false });
+      return;
+    }
+    setAsked(true);
+    void requestNotificationPermission().then((outcome) => {
+      setPermission(outcome);
+      patch({ browser: outcome === "granted" });
+    });
+  };
+
+  const info = (
+    <>
+      <p>
+        A colony that asks a question and then waits is otherwise quiet: a status pill in a sidebar that may be behind another window or
+        another desk. The tab always shows what needs you, and that layer is never the only record — the sidebar list is — so nothing can
+        be missed permanently.
+      </p>
+      <p>
+        Notifications stay short and dull on purpose, because they land on screens other people can see: the repository and issue number
+        only, never the issue title, the question a colony asked, or an error.
+      </p>
+    </>
+  );
+
+  // A permission the user revoked in the browser keeps the stored switch honest: it cannot count as on.
+  const browserOn = prefs.browser && permission === "granted";
+
+  return (
+    <Pane title="Notifications" subtitle="How a colony that needs you gets your attention" info={info} back={back}>
+      <div className="space-y-4">
+        <Row
+          id="notifications-in-tab"
+          label="In this tab"
+          info={<p>The count of colonies that need you in the tab title, a dot on the favicon, and a strip above the colony list.</p>}
+          inline
+        >
+          <Switch
+            id="notifications-in-tab"
+            labelledBy="notifications-in-tab-label"
+            label="In this tab"
+            checked={prefs.inTab}
+            onChange={(checked) => patch({ inTab: checked })}
+          />
+        </Row>
+        <Row id="notifications-sound" label="Play a sound when a colony asks a question" inline>
+          <Switch
+            id="notifications-sound"
+            labelledBy="notifications-sound-label"
+            label="Play a sound when a colony asks a question"
+            checked={prefs.sound}
+            onChange={(checked) => patch({ sound: checked })}
+          />
+        </Row>
+        <Row id="notifications-browser" label="Browser notifications while the tab is not in front" inline>
+          <Switch
+            id="notifications-browser"
+            labelledBy="notifications-browser-label"
+            label="Browser notifications while the tab is not in front"
+            checked={browserOn}
+            disabled={permission === "unsupported"}
+            onChange={setBrowser}
+          />
+        </Row>
+        {permission === "unsupported" && (
+          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            This browser does not offer notifications — the API is missing, or the page is not on a secure origin.
+          </p>
+        )}
+        {permission === "denied" && (
+          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            The browser is blocking notifications for this site. Allow Colonizer in the browser’s own site settings, then switch this on
+            here — this switch cannot lift a block the browser set.
+          </p>
+        )}
+        {asked && permission === "default" && !prefs.browser && (
+          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            The permission prompt was dismissed without an answer. Switch it on again to ask once more.
+          </p>
+        )}
+
+        <div>
+          <h4 className="mb-1 text-[12.5px] font-semibold">Which events interrupt</h4>
+          <p className="mb-1 text-[12.5px] text-muted">
+            These gate the sound and the browser notifications. The tab title, the favicon and the strip always show every colony that needs
+            you, whatever these say.
+          </p>
+          <Row id="notifications-event-question" label="A colony asks a question" inline>
+            <Switch
+              id="notifications-event-question"
+              labelledBy="notifications-event-question-label"
+              label="A colony asks a question"
+              checked={prefs.events.question}
+              onChange={(checked) => patch({ events: { ...prefs.events, question: checked } })}
+            />
+          </Row>
+          <Row id="notifications-event-attention" label="A colony has stalled, or is out of nudges" inline>
+            <Switch
+              id="notifications-event-attention"
+              labelledBy="notifications-event-attention-label"
+              label="A colony has stalled, or is out of nudges"
+              checked={prefs.events.attention}
+              onChange={(checked) => patch({ events: { ...prefs.events, attention: checked } })}
+            />
+          </Row>
+          <Row id="notifications-event-failed" label="A colony fails" inline>
+            <Switch
+              id="notifications-event-failed"
+              labelledBy="notifications-event-failed-label"
+              label="A colony fails"
+              checked={prefs.events.failed}
+              onChange={(checked) => patch({ events: { ...prefs.events, failed: checked } })}
+            />
+          </Row>
+          <Row id="notifications-event-pull-request" label="A colony opens a pull request" inline>
+            <Switch
+              id="notifications-event-pull-request"
+              labelledBy="notifications-event-pull-request-label"
+              label="A colony opens a pull request"
+              checked={prefs.events.pull_request}
+              onChange={(checked) => patch({ events: { ...prefs.events, pull_request: checked } })}
+            />
+          </Row>
+        </div>
+      </div>
     </Pane>
   );
 }

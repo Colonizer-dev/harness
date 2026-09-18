@@ -216,9 +216,10 @@ mothership also tells you when a newer release is out, and can install it.
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 | `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
+| `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request. Off until configured, and the webhook carries no repository content — colony, event and time only | Slack or email relays `PLANNED` |
 
 Every GitHub org is a workspace with its own overrides for models, the parallel limit, the per-colony
-budget and host-disk quota, memory and the watchdog. Model providers (DeepSeek, a server on your LAN or
+budget and host-disk quota, memory, the watchdog and notifications. Model providers (DeepSeek, a server on your LAN or
 tailnet, any Anthropic-compatible endpoint)
 are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
 keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
