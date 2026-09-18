@@ -40,6 +40,7 @@ function rhythm(seed: number): () => number {
 }
 const now = () => new Date().toISOString();
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+const ahead = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
 const clone = <T>(value: T): T => structuredClone(value);
 const LIVE: SessionStatus[] = ["starting", "running", "waiting_for_answer", "idle"];
 const isLive = (status: SessionStatus) => LIVE.includes(status);
@@ -1021,7 +1022,16 @@ export function createMockApi(): Api {
   const orgOfKey = (note: MemoryNote) => (note.scope === "org" ? note.key : note.scope === "repo" ? note.key.split("/")[0] : null);
 
   let githubSource = "gh CLI login";
-  let claude: HarnessStatus["claude"] = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+  let claude: HarnessStatus["claude"] = {
+    configured: true,
+    source: "Claude subscription",
+    kind: "CLAUDE_CODE_OAUTH_TOKEN",
+    account: null,
+    account_note: "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+    saved_at: ago(52 * 24 * 60),
+    expires_at: ahead(313),
+    expires_estimated: true,
+  };
   let login: LoginView = { state: "idle", url: null, message: null };
   const modules: ModuleInfo[] = [
     { kind: "source", provider: "github", providers: [{ id: "github", name: "GitHub", description: "Issues from repositories you can access" }], enabled: true, settings: {}, schema: null },
@@ -1182,7 +1192,7 @@ export function createMockApi(): Api {
     mock: true,
     status: () =>
       later(() => ({
-        github: { connected: true, login: "octocat", name: "The Octocat", source: githubSource },
+        github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
         claude,
         sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
         mesh: {
@@ -1328,11 +1338,23 @@ export function createMockApi(): Api {
       if (!token.trim().startsWith("sk-ant-")) {
         throw new ApiError("expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)", 400);
       }
-      claude = { configured: true, source: token.includes("-api") ? "saved API key" : "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+      const apiKey = token.trim().startsWith("sk-ant-api");
+      claude = {
+        configured: true,
+        source: apiKey ? "saved API key" : "Claude subscription",
+        kind: apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN",
+        account: null,
+        account_note: apiKey
+          ? "an API key does not identify an account"
+          : "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+        saved_at: now(),
+        expires_at: apiKey ? null : ahead(365),
+        expires_estimated: !apiKey,
+      };
       return { ok: true };
     },
     deleteClaudeToken: async () => {
-      claude = { configured: false, source: null, kind: null };
+      claude = { configured: false, source: null, kind: null, account: null, account_note: null, saved_at: null, expires_at: null, expires_estimated: false };
       return { ok: true };
     },
     claudeLogin: () => later(() => login, 60),
@@ -1351,7 +1373,16 @@ export function createMockApi(): Api {
       login = { ...login, state: "verifying" };
       setTimeout(() => {
         login = { state: "done", url: null, message: "Connected your Claude subscription" };
-        claude = { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" };
+        claude = {
+          configured: true,
+          source: "Claude subscription",
+          kind: "CLAUDE_CODE_OAUTH_TOKEN",
+          account: null,
+          account_note: "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+          saved_at: now(),
+          expires_at: ahead(365),
+          expires_estimated: true,
+        };
       }, 1200);
       return clone(login);
     },
