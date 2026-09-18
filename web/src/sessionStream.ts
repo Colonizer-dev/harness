@@ -13,6 +13,7 @@ import type {
   ClientCommand,
   LogLevel,
   MemoryProposal,
+  ModelTokens,
   Question,
   ServerFrame,
   Session,
@@ -66,6 +67,13 @@ export interface TurnSummary {
   result: string | null;
   costUsd: number | null;
   durationMs: number | null;
+  /**
+   * The models that served *this* turn, most tokens first. Not the raw backend field: `turn_end.model_usage`
+   * is cumulative for the whole colony (docs/protocol.md §4), so these are derived by diffing each `turn_end`
+   * against the previous one. Empty when no model's total grew (a cached, no-op or error turn) or the runner
+   * sent no usage.
+   */
+  models: string[];
   ts: string | null;
 }
 
@@ -96,6 +104,12 @@ export interface StreamState {
   connection: ConnectionState;
   /** Questions whose answer was sent but not yet acknowledged with `question_answered`. */
   submitting: Record<string, true>;
+  /**
+   * Summed tokens per model as of the last observed `turn_end` — the baseline the next `turn_end` is diffed
+   * against to work out which models served the turn in between. Null until a `turn_end` with `model_usage`
+   * is seen; past turns are recovered because a (re)connect replays the session's stored event log.
+   */
+  modelUsage: Record<string, number> | null;
 }
 
 export function initialStreamState(): StreamState {
@@ -110,6 +124,7 @@ export function initialStreamState(): StreamState {
     lastSeq: 0,
     connection: "connecting",
     submitting: {},
+    modelUsage: null,
   };
 }
 
@@ -151,6 +166,35 @@ function withoutKey(record: Record<string, true>, key: string): Record<string, t
   const next = { ...record };
   delete next[key];
   return next;
+}
+
+/** Sums a `model_usage` map into one total per model, treating missing or non-finite counts as zero. */
+function usageTotals(usage: Record<string, ModelTokens> | undefined): Record<string, number> {
+  const totals: Record<string, number> = {};
+  for (const [model, tokens] of Object.entries(usage ?? {})) {
+    if (!tokens || typeof tokens !== "object") continue;
+    const count = (value: number) => (Number.isFinite(value) ? value : 0);
+    totals[model] = count(tokens.input_tokens) + count(tokens.output_tokens) + count(tokens.cache_read_tokens) + count(tokens.cache_write_tokens);
+  }
+  return totals;
+}
+
+/**
+ * The models that served one turn, most tokens first. `turn_end.model_usage` is the colony's cumulative
+ * total (docs/protocol.md §4), so a model only counts if its total grew since the previous `turn_end`.
+ * With no previous snapshot the whole total counts: a fresh colony's first `turn_end` really is all this
+ * turn's usage, and any earlier turns a client missed come back as replayed `turn_end`s that rebuild the
+ * baseline chain first (a resumed colony starts a fresh runner whose totals restart at zero, so nothing
+ * that served before the resume is misattributed). Models whose total stalls or shrinks — a cached, no-op
+ * or error turn — name nothing: silence beats inventing a model, and a shrunk total is never subtracted
+ * into a negative.
+ */
+function modelsOfTurn(previous: Record<string, number> | null, current: Record<string, number>): string[] {
+  return Object.entries(current)
+    .map(([model, total]) => [model, total - (previous?.[model] ?? 0)] as const)
+    .filter(([, delta]) => delta > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([model]) => model);
 }
 
 export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState {
@@ -283,12 +327,16 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
 
     case "turn_end": {
       const last = s.messages[s.messages.length - 1];
+      // `model_usage` is the colony's cumulative total, not this turn's own usage, so diff it against the
+      // previous `turn_end` to name the models that actually served this one.
+      const usage = usageTotals(ev.model_usage);
       const turn: TurnSummary = {
         afterMessageId: last?.id ?? null,
         isError: ev.is_error,
         result: ev.result,
         costUsd: ev.cost_usd,
         durationMs: ev.duration_ms,
+        models: modelsOfTurn(s.modelUsage, usage),
         ts,
       };
       // Any text still marked streaming is final now.
@@ -297,7 +345,8 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
           ? { ...m, blocks: m.blocks.map((b) => (b.kind === "text" ? { ...b, streaming: false } : b)) }
           : m,
       );
-      return { ...s, messages, turns: [...s.turns, turn] };
+      // A `turn_end` without `model_usage` says nothing new about usage; keep the last known baseline.
+      return { ...s, messages, turns: [...s.turns, turn], modelUsage: Object.keys(usage).length > 0 ? usage : s.modelUsage };
     }
 
     case "log": {

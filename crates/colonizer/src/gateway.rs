@@ -17,12 +17,15 @@ use axum::{
     routing::any,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -41,6 +44,39 @@ const DROP_RESPONSE_HEADERS: [&str; 6] = ["connection", "keep-alive", "proxy-con
 /// connection (and any byte-level idle watchdog downstream) alive during a long prefill.
 const SSE_PING_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_PING: &[u8] = b": keep-alive\n\n";
+/// How long dirty usage counters may go unwritten; a crash loses at most this much of the tally.
+const USAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Cumulative per-provider usage, kept across restarts in `<data_dir>/provider-usage.json`. The live
+/// `in_flight`/`queued` gauges are zero whenever nobody is mid-request, so these counters are what says
+/// whether a request has ever actually gone to the provider.
+///
+/// - `requests`: requests the gateway accepted for this provider. Counted once everything that can refuse a
+///   request locally has passed (colony auth, provider lookup, path and body translation), so queueing, the
+///   upstream call and the streamed body are all included, and a request the gateway itself refuses is not.
+///   An attempt that queues past `queue_timeout_secs` and never reaches the provider still counts — it was a
+///   real request against this provider — so `requests` is not a count of requests the provider saw.
+/// - `failures`: requests that produced no usable upstream response — one of the gateway's three fallback
+///   answers (queue timeout, unreachable, timeout), an upstream status >= 400, or an openai-wire response
+///   whose body failed or never finished. A failure after the headers, part-way through a streamed body,
+///   is not counted. A subset of `requests`.
+/// - `fallbacks`: requests that will fall back to Claude. A prediction, not an observation: the gateway
+///   answered 502/503/504 with `x-colonizer-fallback` and the provider has a `fallback_model`, which is
+///   exactly when the colony's model router (router.mjs) retries on Claude. The retry itself never comes
+///   back through the gateway. A subset of `failures`.
+/// - `duration_ms`: cumulative wall-clock time of dispatched requests, including streaming the response
+///   body. Timed from when a request's concurrency slot was acquired, so time spent queued is never counted.
+/// - `last_request_at`: when the last request was accepted (before any queue wait), RFC3339 like the other
+///   timestamps here.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderUsage {
+    pub requests: u64,
+    pub failures: u64,
+    pub fallbacks: u64,
+    pub duration_ms: u64,
+    pub last_request_at: Option<DateTime<Utc>>,
+}
 
 /// Counts up while alive; used for in-flight and queued requests.
 struct Counted(Arc<AtomicU64>);
@@ -58,10 +94,91 @@ impl Drop for Counted {
     }
 }
 
+/// Adds the elapsed wall-clock time to the provider's cumulative `duration_ms` when dropped — the same
+/// lifetime as the request's other guards, so the streamed body is included. Created once the request's
+/// concurrency slot is acquired, not while it waits for one, so `duration_ms` measures dispatched time only.
+struct Timed {
+    counters: Arc<UsageCounters>,
+    start: Instant,
+}
+
+impl Timed {
+    fn new(counters: Arc<UsageCounters>) -> Self {
+        Self { counters, start: Instant::now() }
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        self.counters.duration_ms.fetch_add(self.start.elapsed().as_millis() as u64, Ordering::SeqCst);
+        self.counters.dirty.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct ProviderStats {
     in_flight: Arc<AtomicU64>,
     queued: Arc<AtomicU64>,
+}
+
+/// Live cumulative usage for one provider, seeded from disk at startup and written back by
+/// `flush_usage` when dirty. The request path only touches these atomics, never the file.
+#[derive(Default)]
+struct UsageCounters {
+    requests: AtomicU64,
+    failures: AtomicU64,
+    fallbacks: AtomicU64,
+    duration_ms: AtomicU64,
+    last_request_at: Mutex<Option<DateTime<Utc>>>,
+    /// Set by every change; `flush_usage` clears it and writes.
+    dirty: AtomicBool,
+}
+
+impl UsageCounters {
+    fn seeded(usage: ProviderUsage) -> Self {
+        Self {
+            requests: AtomicU64::new(usage.requests),
+            failures: AtomicU64::new(usage.failures),
+            fallbacks: AtomicU64::new(usage.fallbacks),
+            duration_ms: AtomicU64::new(usage.duration_ms),
+            last_request_at: Mutex::new(usage.last_request_at),
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    fn add_request(&self) {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        *self.last_request_at.lock().unwrap() = Some(Utc::now());
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// A failure with no fallback answer: an upstream status >= 400, or an openai-wire body that failed or
+    /// never finished. The colony's router retries none of these — only the gateway's own three fallback
+    /// errors get that.
+    fn add_failure(&self) {
+        self.failures.fetch_add(1, Ordering::SeqCst);
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// One of the three gateway-level fallback errors, and — when the provider has a fallback model —
+    /// the fallback to Claude the colony's router will make with it (see [`ProviderUsage::fallbacks`]).
+    fn add_failure_with_fallback(&self, provider: &Provider) {
+        self.add_failure();
+        if provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) {
+            self.fallbacks.fetch_add(1, Ordering::SeqCst);
+            self.dirty.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn snapshot(&self) -> ProviderUsage {
+        ProviderUsage {
+            requests: self.requests.load(Ordering::SeqCst),
+            failures: self.failures.load(Ordering::SeqCst),
+            fallbacks: self.fallbacks.load(Ordering::SeqCst),
+            duration_ms: self.duration_ms.load(Ordering::SeqCst),
+            last_request_at: *self.last_request_at.lock().unwrap(),
+        }
+    }
 }
 
 struct Limit {
@@ -75,16 +192,25 @@ pub struct Gateway {
     limits: Mutex<HashMap<String, Limit>>,
     /// Requests each colony has open through the gateway, queued or streaming.
     colonies: Mutex<HashMap<String, Arc<AtomicU64>>>,
+    /// Cumulative usage per provider, seeded from `usage_file` at startup and written back to it when dirty.
+    usage: Mutex<HashMap<String, Arc<UsageCounters>>>,
+    usage_file: PathBuf,
 }
 
 impl Gateway {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(data_dir: &std::path::Path) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(90))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        Ok(Self { client, stats: Default::default(), limits: Default::default(), colonies: Default::default() })
+        let usage_file = data_dir.join("provider-usage.json");
+        // A missing or corrupt file means the counters start over, never that the gateway fails.
+        let saved: BTreeMap<String, ProviderUsage> =
+            std::fs::read(&usage_file).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default();
+        let usage: HashMap<String, Arc<UsageCounters>> =
+            saved.into_iter().map(|(id, usage)| (id, Arc::new(UsageCounters::seeded(usage)))).collect();
+        Ok(Self { client, stats: Default::default(), limits: Default::default(), colonies: Default::default(), usage: Mutex::new(usage), usage_file })
     }
 
     fn stats(&self, provider: &str) -> Arc<ProviderStats> {
@@ -95,6 +221,68 @@ impl Gateway {
     pub fn load(&self, provider: &str) -> (u64, u64) {
         let stats = self.stats(provider);
         (stats.in_flight.load(Ordering::SeqCst), stats.queued.load(Ordering::SeqCst))
+    }
+
+    fn usage_counters(&self, provider: &str) -> Arc<UsageCounters> {
+        self.usage.lock().unwrap().entry(provider.to_string()).or_default().clone()
+    }
+
+    /// Cumulative usage for a provider since the counters were first kept.
+    pub fn usage(&self, provider: &str) -> ProviderUsage {
+        self.usage_counters(provider).snapshot()
+    }
+
+    /// Writes the whole usage map atomically (tmp + rename). Unlike the crate's other JSON state this file
+    /// has three concurrent writers — the flush loop, the shutdown flush and [`Self::forget_usage`] — so the
+    /// tmp path is unique per call: writers sharing one path interleave their writes and can rename a
+    /// half-overwritten file into place, which `Gateway::new` would read as corrupt and silently reset every
+    /// provider's tally. Renames can still land out of order, but each one is a complete snapshot, so the
+    /// worst a lost race does is persist a slightly stale tally until the next flush.
+    fn write_usage(&self) {
+        let snapshot: BTreeMap<String, ProviderUsage> =
+            self.usage.lock().unwrap().iter().map(|(id, counters)| (id.clone(), counters.snapshot())).collect();
+        if let Ok(data) = serde_json::to_vec_pretty(&snapshot) {
+            let tmp = self.usage_file.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+            if std::fs::write(&tmp, data).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.usage_file);
+            } else {
+                // A failed write may have left a partial tmp behind; it must not pile up in the data dir.
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+
+    /// Writes the usage counters if anything changed since the last flush. Called every
+    /// [`USAGE_FLUSH_INTERVAL`] and on shutdown, never per request: the request path only touches the
+    /// in-memory counters, so a crash loses at most [`USAGE_FLUSH_INTERVAL`] of the tally.
+    pub fn flush_usage(&self) {
+        // Swaps every flag: `any` would stop at the first dirty entry and leave the rest set even though
+        // write_usage below persists the whole map.
+        let mut dirty = false;
+        {
+            let map = self.usage.lock().unwrap();
+            for counters in map.values() {
+                dirty |= counters.dirty.swap(false, Ordering::SeqCst);
+            }
+        }
+        if !dirty {
+            return;
+        }
+        if let Some(dir) = self.usage_file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        self.write_usage();
+    }
+
+    /// Forgets a provider's usage and flushes at once, so deleting the provider also deletes its tally
+    /// even if nothing else is dirty.
+    pub fn forget_usage(&self, provider: &str) {
+        if self.usage.lock().unwrap().remove(provider).is_some() {
+            if let Some(dir) = self.usage_file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            self.write_usage();
+        }
     }
 
     fn colony_counter(&self, colony: &str) -> Arc<AtomicU64> {
@@ -154,6 +342,14 @@ pub fn router(app: Shared) -> Router {
         .with_state(app)
 }
 
+/// Flushes dirty usage counters every [`USAGE_FLUSH_INTERVAL`]; spawned once at startup.
+pub async fn flush_loop(app: Shared) {
+    loop {
+        tokio::time::sleep(USAGE_FLUSH_INTERVAL).await;
+        app.gateway.flush_usage();
+    }
+}
+
 /// An error in Anthropic's shape, so Claude Code reports it like any API error.
 fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallback: Option<&'static str>) -> Response {
     let mut response = (status, Json(json!({"type": "error", "error": {"type": kind, "message": message.into()}}))).into_response();
@@ -163,8 +359,9 @@ fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallbac
     response
 }
 
-/// Busy/in-flight counters and the provider's concurrency permit, held for as long as the response body.
-type Guards = (Counted, Counted, Option<OwnedSemaphorePermit>);
+/// Busy/in-flight counters, the provider's concurrency permit and the usage timer, held for as long as
+/// the response body.
+type Guards = (Counted, Counted, Option<OwnedSemaphorePermit>, Timed);
 
 /// Streams `chunks` downstream, translating provider errors and enforcing `timeout` as an overall
 /// silence deadline. For an SSE response (`is_sse`), a `: keep-alive` comment — ignored by any
@@ -291,6 +488,11 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
         }
     };
 
+    // Counted as usage from here on: everything that can refuse the request locally has passed, so every
+    // remaining outcome is a real provider one (or waiting on it). A request that never gets a slot still
+    // counts as a request and a failure, but the timer only starts once it is dispatched, below.
+    let usage = app.gateway.usage_counters(&id);
+    usage.add_request();
     let busy = Counted::new(&app.gateway.colony_counter(&colony));
     let stats = app.gateway.stats(&id);
     let timeout = Duration::from_secs(provider.timeout_secs());
@@ -304,6 +506,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
             match acquired {
                 Ok(Ok(permit)) => Some(permit),
                 _ => {
+                    usage.add_failure_with_fallback(&provider);
                     return api_error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "overloaded_error",
@@ -315,6 +518,9 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
         }
     };
     let in_flight = Counted::new(&stats.in_flight);
+    // The timer starts with the slot in hand, not before the wait for it: a request that queues out must
+    // not add its queue time to `duration_ms`, which measures dispatched time only.
+    let timed = Timed::new(usage.clone());
 
     let request = app
         .gateway
@@ -326,6 +532,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
             let reason = if e.is_connect() { "connection failed" } else { "request failed" };
+            usage.add_failure_with_fallback(&provider);
             return api_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -334,6 +541,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
             );
         }
         Err(_) => {
+            usage.add_failure_with_fallback(&provider);
             return api_error(
                 StatusCode::GATEWAY_TIMEOUT,
                 "api_error",
@@ -344,12 +552,15 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
     };
 
     // The guards live as long as the body, so slots and activity cover the whole streamed response.
-    let guards = (busy, in_flight, permit);
+    let guards = (busy, in_flight, permit, timed);
     if let Some(info) = translation {
-        return openai_response(upstream, guards, timeout, &info, &id).await;
+        return openai_response(upstream, guards, usage, timeout, &info, &id).await;
     }
 
     let status = upstream.status();
+    if status.as_u16() >= 400 {
+        usage.add_failure();
+    }
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
         if !DROP_RESPONSE_HEADERS.contains(&name.as_str()) {
@@ -370,7 +581,7 @@ async fn proxy(State(app): State<Shared>, Path((id, _)): Path<(String, String)>,
 /// An `openai`-wire provider's response in Anthropic's shape. Only `retry-after` is copied from upstream:
 /// OpenAI's other headers (`openai-*`, `x-ratelimit-*`) describe a different API. Once response headers
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
-async fn openai_response(upstream: reqwest::Response, guards: Guards, timeout: Duration, info: &openai::RequestInfo, id: &str) -> Response {
+async fn openai_response(upstream: reqwest::Response, guards: Guards, usage: Arc<UsageCounters>, timeout: Duration, info: &openai::RequestInfo, id: &str) -> Response {
     let status = upstream.status();
     let retry_after = upstream.headers().get("retry-after").cloned();
     if status.is_success() && info.stream {
@@ -382,8 +593,14 @@ async fn openai_response(upstream: reqwest::Response, guards: Guards, timeout: D
     }
     let bytes = match tokio::time::timeout(timeout, upstream.bytes()).await {
         Ok(Ok(bytes)) => bytes,
-        Ok(Err(e)) => return api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\" response failed: {}", e.without_url()), None),
-        Err(_) => return api_error(StatusCode::GATEWAY_TIMEOUT, "api_error", format!("provider \"{id}\" did not finish its response within {} s", timeout.as_secs()), None),
+        Ok(Err(e)) => {
+            usage.add_failure();
+            return api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\" response failed: {}", e.without_url()), None);
+        }
+        Err(_) => {
+            usage.add_failure();
+            return api_error(StatusCode::GATEWAY_TIMEOUT, "api_error", format!("provider \"{id}\" did not finish its response within {} s", timeout.as_secs()), None);
+        }
     };
     drop(guards);
     let mut response = if status.is_success() {
@@ -392,6 +609,9 @@ async fn openai_response(upstream: reqwest::Response, guards: Guards, timeout: D
             Err(message) => api_error(StatusCode::BAD_GATEWAY, "api_error", format!("provider \"{id}\": {message}"), None),
         }
     } else {
+        if status.as_u16() >= 400 {
+            usage.add_failure();
+        }
         let (status, kind, message) = openai::translate_error(status, &bytes, id);
         api_error(status, kind, message, None)
     };
@@ -485,9 +705,208 @@ mod tests {
         assert!(forward_headers(&only_oauth, None).get("anthropic-beta").is_none());
     }
 
+    /// A gateway whose usage file lives in a fresh temp directory.
+    fn usage_gateway(dir: &std::path::Path) -> Gateway {
+        Gateway::new(dir).unwrap()
+    }
+
+    fn provider(id: &str, fallback_model: Option<&str>) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            base_url: "http://127.0.0.1:9".into(),
+            auth: "none".into(),
+            wire: crate::providers::Wire::Anthropic,
+            models: vec![],
+            preset: "custom".into(),
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: fallback_model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn usage_counts_every_outcome_a_request_can_have() {
+        let gateway = usage_gateway(&std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4())));
+        let usage = gateway.usage_counters("strix");
+
+        // A dispatched request that streamed back fine.
+        usage.add_request();
+        let timed = Timed::new(usage.clone());
+        std::thread::sleep(Duration::from_millis(2));
+        drop(timed);
+        let after_success = usage.snapshot();
+        assert_eq!((after_success.requests, after_success.failures, after_success.fallbacks), (1, 0, 0));
+        assert!(after_success.last_request_at.is_some());
+
+        // Each of the three gateway-level fallback errors, with a fallback model configured.
+        let fallback = provider("strix", Some("sonnet"));
+        for _ in 0..3 {
+            usage.add_request();
+            usage.add_failure_with_fallback(&fallback);
+        }
+        let after_errors = usage.snapshot();
+        assert_eq!((after_errors.requests, after_errors.failures, after_errors.fallbacks), (4, 3, 3));
+
+        // An upstream status >= 400 is a failure without a fallback answer.
+        usage.add_request();
+        usage.add_failure();
+        let after_status = usage.snapshot();
+        assert_eq!((after_status.requests, after_status.failures, after_status.fallbacks), (5, 4, 3));
+        assert!(after_status.duration_ms > 0, "the dropped timer recorded the request's wall-clock time");
+
+        // Without a fallback model the failure is counted, the predicted fallback is not.
+        usage.add_failure_with_fallback(&provider("strix", None));
+        assert_eq!(usage.snapshot().fallbacks, 3);
+        assert_eq!(usage.snapshot().failures, 5);
+    }
+
+    /// A request that queues past `queue_timeout_secs` never reaches the provider: it still counts as a
+    /// request and a fallback failure, but `proxy` only creates the `Timed` guard once the slot is in hand,
+    /// so the queue wait adds nothing to `duration_ms`.
+    #[tokio::test]
+    async fn a_queue_timeout_counts_a_request_and_a_failure_but_no_duration() {
+        let gateway = usage_gateway(&std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4())));
+        let usage = gateway.usage_counters("strix");
+        // The provider's only slot is held by a request already in flight, and the one below is given no
+        // queue time to speak of, so its wait gives up immediately.
+        let held = gateway.slots("strix", Some(1)).unwrap().acquire_owned().await.unwrap();
+        let queued_out = Provider { queue_timeout_secs: Some(0), ..provider("strix", Some("sonnet")) };
+
+        // The queue-timeout path in `proxy`, in its order: the attempt counts before it waits, the wait
+        // times out, and the failure carries the fallback prediction — with no timer covering any of it.
+        usage.add_request();
+        let acquired = tokio::time::timeout(Duration::from_secs(queued_out.queue_timeout_secs()), gateway.slots("strix", Some(1)).unwrap().acquire_owned()).await;
+        assert!(acquired.is_err(), "the wait gives up while the first request holds the slot");
+        usage.add_failure_with_fallback(&queued_out);
+
+        let snapshot = usage.snapshot();
+        assert_eq!((snapshot.requests, snapshot.failures, snapshot.fallbacks), (1, 1, 1));
+        assert_eq!(snapshot.duration_ms, 0, "queued time is not dispatched time: nothing reached the provider");
+        drop(held);
+    }
+
+    /// A response whose headers arrived but whose body then failed still counts as a failure: the colony
+    /// got no usable response. Counted once per request, never also at the header phase when the status
+    /// was >= 400.
+    #[tokio::test]
+    async fn an_openai_body_that_fails_after_the_headers_still_counts_as_a_failure() {
+        let usage = Arc::new(UsageCounters::default());
+        let info = openai::RequestInfo { model: "gpt-5.5".into(), stream: false };
+        let broken_body = |status: u16| {
+            let reset: futures_util::stream::Once<futures_util::future::Ready<Result<Bytes, std::io::Error>>> =
+                futures_util::stream::once(futures_util::future::ready(Err(std::io::Error::other("connection reset mid-body"))));
+            reqwest::Response::from(axum::http::Response::builder().status(status).body(reqwest::Body::wrap_stream(reset)).unwrap())
+        };
+        let response = openai_response(broken_body(200), guards(), usage.clone(), Duration::from_secs(30), &info, "strix").await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(usage.snapshot().failures, 1, "the body-phase failure is counted");
+
+        // A >= 400 status whose body then fails must not count twice: the body-phase count is the only one.
+        let response = openai_response(broken_body(500), guards(), usage.clone(), Duration::from_secs(30), &info, "strix").await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(usage.snapshot().failures, 2, "one per request, never a header-phase count on top of the body-phase one");
+    }
+
+    #[test]
+    fn usage_survives_a_restart_and_a_broken_file_degrades_to_defaults() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        let usage = gateway.usage_counters("strix");
+        usage.add_request();
+        gateway.flush_usage();
+        assert!(dir.join("provider-usage.json").exists(), "a dirty flush writes the file");
+
+        let reopened = usage_gateway(&dir);
+        let reopened_usage = reopened.usage("strix");
+        assert_eq!((reopened_usage.requests, reopened_usage.failures, reopened_usage.fallbacks), (1, 0, 0));
+        assert_eq!(reopened_usage.last_request_at, usage.snapshot().last_request_at);
+
+        // Two providers dirty at once flush together, and the flush clears every flag: after it, removing
+        // the file and flushing again must not write it back, since both providers were persisted.
+        usage.add_request();
+        gateway.usage_counters("loki").add_request();
+        gateway.flush_usage();
+        std::fs::remove_file(dir.join("provider-usage.json")).unwrap();
+        gateway.flush_usage();
+        assert!(!dir.join("provider-usage.json").exists(), "a flush with nothing left dirty does not write the file");
+
+        std::fs::write(dir.join("provider-usage.json"), "{not json").unwrap();
+        assert_eq!(usage_gateway(&dir).usage("strix"), ProviderUsage::default(), "a corrupt file means empty counters");
+        assert_eq!(
+            usage_gateway(&std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()))).usage("strix"),
+            ProviderUsage::default(),
+            "a missing file means empty counters"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_provider_forgets_its_usage_and_flushes_the_removal() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        gateway.usage_counters("strix").add_request();
+        gateway.flush_usage();
+        gateway.forget_usage("strix");
+        assert_eq!(usage_gateway(&dir).usage("strix"), ProviderUsage::default(), "the removal is written at once");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The flush loop, the shutdown flush and `forget_usage` can write at the same time, so every write
+    /// gets its own tmp path: whatever the interleaving and whichever rename lands last, the file on disk
+    /// is a complete snapshot that parses — never a half-overwritten one — and no tmp file is left behind.
+    #[test]
+    fn concurrent_writers_always_leave_a_parseable_usage_file() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = Arc::new(usage_gateway(&dir));
+        // Writers whose snapshots differ in size — ids padded to different lengths, the map growing as they
+        // go — the interleaving that used to let a shorter write cut a longer one off mid-JSON.
+        let threads: Vec<_> = (0..3)
+            .map(|t| {
+                let gateway = gateway.clone();
+                std::thread::spawn(move || {
+                    let pad = "x".repeat((t + 1) * 64);
+                    for i in 0..40 {
+                        gateway.usage_counters(&format!("w{t}-{i}-{pad}")).add_request();
+                        gateway.write_usage();
+                    }
+                })
+            })
+            .chain(std::iter::once({
+                let gateway = gateway.clone();
+                std::thread::spawn(move || {
+                    for i in 0..40 {
+                        gateway.usage_counters(&format!("gone-{i}")).add_request();
+                        gateway.forget_usage(&format!("gone-{i}"));
+                    }
+                })
+            }))
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let saved: BTreeMap<String, ProviderUsage> =
+            serde_json::from_slice(&std::fs::read(dir.join("provider-usage.json")).expect("the last write left the file in place"))
+                .expect("the file always parses, whatever the interleaving");
+        assert!(!saved.is_empty(), "the surviving providers are on disk");
+        for (id, usage) in &saved {
+            let kept = id.starts_with("w0-") || id.starts_with("w1-") || id.starts_with("w2-");
+            assert!(kept || id.starts_with("gone-"), "unexpected provider {id}");
+            assert_eq!(usage.requests, 1, "provider {id} kept its tally");
+        }
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|entry| entry.unwrap().file_name() == "provider-usage.json"),
+            "no tmp file is left behind"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn slots_follow_the_configured_limit() {
-        let gateway = Gateway::new().unwrap();
+        let gateway = usage_gateway(&std::env::temp_dir().join(format!("colonizer-gateway-{}", uuid::Uuid::new_v4())));
         assert!(gateway.slots("local", None).is_none());
         let one = gateway.slots("local", Some(1)).unwrap();
         let held = one.clone().acquire_owned().await.unwrap();
@@ -511,7 +930,7 @@ mod tests {
     }
 
     fn guards() -> Guards {
-        (Counted::new(&Default::default()), Counted::new(&Default::default()), None)
+        (Counted::new(&Default::default()), Counted::new(&Default::default()), None, Timed::new(Default::default()))
     }
 
     /// A mock provider stream that yields `items` spaced out by their delays.

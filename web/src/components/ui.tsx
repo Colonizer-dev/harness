@@ -335,7 +335,9 @@ export function timeAgo(ts: string | null | undefined): string {
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null) return "";
   const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
 export function useMediaQuery(query: string): boolean {
