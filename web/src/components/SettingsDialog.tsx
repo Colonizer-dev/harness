@@ -971,6 +971,24 @@ function RuntimePane({ status, back }: { status: HarnessStatus | null; back?: ()
 // Updates: which Colonizer this is, and whether a newer release is out (#45)
 // ---------------------------------------------------------------------------
 
+/// How far behind the running build is: the gap between when it was built and
+/// when the newer release came out. Null when the release carries no date.
+function daysBehind(builtAt: string, publishedAt: string | null): number | null {
+  if (!publishedAt) return null;
+  const gap = Date.parse(publishedAt) - Date.parse(builtAt);
+  if (!Number.isFinite(gap) || gap <= 0) return null;
+  return Math.floor(gap / 86_400_000);
+}
+
+/// One sentence about the gap, with the release date in it once.
+function behindLabel(builtAt: string, publishedAt: string | null): string | null {
+  const days = daysBehind(builtAt, publishedAt);
+  if (days === null || !publishedAt) return null;
+  const on = new Date(publishedAt).toLocaleDateString();
+  if (days < 1) return `Released ${on}, the same day as the build you are running.`;
+  return `Released ${on}, ${days} day${days === 1 ? "" : "s"} after the build you are running.`;
+}
+
 function UpdatesPane({
   update,
   onChanged,
@@ -1050,12 +1068,18 @@ function UpdatesPane({
                 </>
               ) : null}
               built {new Date(update.installed.built_at).toLocaleString()}
+              {update.installed.release && update.installed.release !== update.installed.version
+                ? ` (after ${update.installed.release})`
+                : ""}
             </p>
           </div>
 
           {update.available && update.latest && (
             <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-[12.5px]">
               <p className="font-semibold text-[13px]">Colonizer {update.latest.version} is available</p>
+              {behindLabel(update.installed.built_at, update.latest.published_at) && (
+                <p className="text-muted">{behindLabel(update.installed.built_at, update.latest.published_at)}</p>
+              )}
               {update.latest.notes && (
                 <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-[12.5px] text-muted">
                   {update.latest.notes}

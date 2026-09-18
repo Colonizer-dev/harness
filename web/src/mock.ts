@@ -796,7 +796,7 @@ const MOCK_LATEST = {
 let mockUpdate: UpdateStatus = {
   enabled: true,
   blocked_by: null,
-  installed: { version: "v0.1.3", commit: "abc1234def5678", dirty: false, built_at: "2026-09-17T09:20:00Z", release: "v0.1.3" },
+  installed: { version: "v0.1.3", commit: "abc1234def5678", dirty: false, built_at: "2026-09-05T09:20:00Z", release: "v0.1.3" },
   latest: MOCK_LATEST,
   available: true,
   last_checked: "2026-09-17T18:00:00Z",
