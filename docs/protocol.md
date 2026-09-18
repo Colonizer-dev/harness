@@ -190,6 +190,10 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
+| `GET /api/version` | What this build is: `version`, `release`, `commit`, `dirty`, `built_at`, `development` |
+| `GET /api/update` · `PUT /api/update` | The update check and self-update (`docs/updates.md`); `{enabled}` switches the check (see below) |
+| `POST /api/update/check` | Ask GitHub for the latest release now, and return the same view as `GET /api/update` |
+| `POST /api/update/apply` | Install the newer release beside this one, repoint `app` and re-exec |
 
 Module `schema` is a JSON Schema subset (also used for `settings` in agent `module.json` manifests):
 
@@ -337,8 +341,8 @@ they were. What it changes is the size of large tool results: in the bundle's sm
 - `--no-cache`. Headroom's semantic cache answers a similar-enough request without calling the model,
   which an agent must never get.
 - `--stateless`. Nothing it would write is worth keeping in a disposable colony.
-- No network of its own. Telemetry, update checks, subscription tracking, model downloads and LiteLLM's
-  price-map fetch are switched off through its environment.
+- No network of its own. Telemetry, its own update checks, subscription tracking, model downloads and
+  LiteLLM's price-map fetch are switched off through its environment.
 - No ML compression. Kompress needs a 261 MB model that the bundle doesn't carry, and it is disabled.
 - No credential. From the runner's environment it gets `PATH`, `LANG` and the certificate-bundle
   variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), and nothing else. The
@@ -462,6 +466,67 @@ status. Switching on creates a random `install_id` and sends a heartbeat within 
 Switching off sends `{"install_id", "online": false}` and forgets the id. `PUT` returns `409` while the
 environment keeps it off.
 
+### `GET /api/version`
+
+What this build is (`docs/updates.md`), compiled in at build time from git — an empty field, never a
+failure, when git could not answer, as in a build from crates.io:
+
+```json
+{"version": "v0.1.3", "release": "v0.1.3", "commit": "d89ce76f8e0d884b997d8392d5c0adbde6a3202c",
+ "dirty": false, "built_at": "2026-09-17T12:00:00Z", "development": false}
+```
+
+`version` is the `git describe` string, or the crate version when there is no git answer. `release` is
+the tag the build contains, the thing a newer release is compared against; `commit` and `built_at` are
+`null` when they could not be recorded. `development` is true for anything that is not exactly a tagged
+release: ahead of its tag, built from a dirty tree, or never on a tag. `colonizer version` prints a
+one-line form of the same facts, e.g. `colonizer v0.1.3 (d89ce76, 2026-09-17T12:00:00Z)` — the version,
+the first seven characters of the commit, `built_at`, and a `development build` marker when it is one.
+It leaves out `release` and `dirty`.
+
+### `GET /api/update` and `PUT /api/update`
+
+The update check (`docs/updates.md`), on until switched off. `GET` returns:
+
+```json
+{
+  "enabled": true, "blocked_by": null, "repo": "Colonizer-dev/harness",
+  "installed": {"version": "v0.1.3", "release": "v0.1.3", "commit": "d89ce76f8e0d884b997d8392d5c0adbde6a3202c",
+                "dirty": false, "built_at": "2026-09-17T12:00:00Z", "development": false},
+  "last_checked_at": "2026-09-17T13:10:00Z", "last_error": null,
+  "latest": {"version": "v0.2.0", "name": "Colonizer v0.2.0", "notes": "Fixes and a feature",
+             "url": "https://github.com/Colonizer-dev/harness/releases/tag/v0.2.0", "published_at": "…"},
+  "available": true, "can_apply": true, "blocked_reason": null, "busy": [],
+  "apply": {"state": "idle", "version": null, "bytes": 0, "total": null,
+            "started_at": null, "finished_at": null, "error": null}
+}
+```
+
+`latest` is what the last check saw, `null` before one; its `notes` are cut at 16 KiB. `available`
+compares `latest.version` against the installed `release`. `can_apply` is `available` and then some:
+`blocked_reason` names it when this platform has no release bundle, the mothership runs from a source
+checkout, or the install predates the versioned layout. `busy` names what would break right now — a
+colony mid-publish, an apply already under way. `apply` follows the work: `state` is `idle`,
+`downloading`, `verifying`, `unpacking`, `installing`, `restarting` or `failed` (then `error` says why),
+with `bytes` of `total` during the download.
+
+`PUT` with `{"enabled": true|false}` saves the answer to `<config>/update.json` and returns the same
+view; turning the check on runs one at once. `PUT` returns `409` while the environment keeps it off —
+`blocked_by` names `COLONIZER_UPDATE_CHECK` and `enabled` is `false`.
+
+### `POST /api/update/check`
+
+Runs a check now, whatever the regular interval would have said, and returns the same view as `GET`.
+`409` when the environment keeps the check off, or the switch does ("switch it on first").
+
+### `POST /api/update/apply`
+
+Installs the release `latest` names beside this one, repoints `app` and re-execs the mothership onto it.
+The walk itself, and what colonies see, is `docs/updates.md`'s to tell. Returns at once with the view —
+the work runs in the background, and `GET /api/update` follows it. Refused with `409` and the reason,
+nothing changed, when the check is off, nothing newer is known, this install cannot apply a release, a
+colony is publishing, or an apply is already under way.
+
 ### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
 
 Server → client:
@@ -491,7 +556,8 @@ Byte-for-byte proxy of agentd `/v1/pty` (same binary/text frame rules).
   Built to `web/dist`; dev server proxies `/api` (incl. WebSockets) to `http://127.0.0.1:7878`.
 - Layout: sidebar (repositories → issues, sessions list) · session view (header with status, branch,
   mesh name, cost, actions: Create PR, Stop, Clean up) · chat panel and terminal panel side by side
-  (tabs below 900 px). Settings dialog: Connections (GitHub, Claude subscription login) and Modules.
+  (tabs below 900 px). Settings dialog: Connections (GitHub, Claude subscription login), Model
+  providers, Runtime, Live map, Updates, and Modules.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.

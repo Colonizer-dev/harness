@@ -229,6 +229,62 @@ export interface TelemetryStatus {
   heartbeat: { install_id: string | null; version: string; platform: string; colonies: number };
 }
 
+/** GET /api/version, and GET /api/update → `installed`: what this Mothership was built from. */
+export interface BuildInfo {
+  version: string;
+  /** The release tag it was built from, null on a source checkout. */
+  release: string | null;
+  commit: string | null;
+  /** True when the working tree had uncommitted changes at build time. */
+  dirty: boolean;
+  built_at: string | null;
+  development: boolean;
+}
+
+/** A release published on GitHub, as GET /api/update → `latest`. */
+export interface ReleaseInfo {
+  version: string;
+  name: string;
+  /** Markdown release notes. */
+  notes: string;
+  url: string;
+  published_at: string | null;
+}
+
+/** GET /api/update → `apply.state`: the self-update's walk from download to restart. */
+export type ApplyState = "idle" | "downloading" | "verifying" | "unpacking" | "installing" | "restarting" | "failed";
+
+/** GET /api/update: the update check, and a self-update's progress while one runs. */
+export interface UpdateStatus {
+  /** The check is on by default; `blocked_by` overrides this to off. */
+  enabled: boolean;
+  /** An environment variable keeping the check off whatever this switch says. */
+  blocked_by: string | null;
+  repo: string;
+  installed: BuildInfo;
+  last_checked_at: string | null;
+  last_error: string | null;
+  /** The newest published release, once a check has succeeded. */
+  latest: ReleaseInfo | null;
+  /** True when `latest` is newer than `installed`. */
+  available: boolean;
+  /** False when this install cannot update in place; `blocked_reason` says why in words. */
+  can_apply: boolean;
+  blocked_reason: string | null;
+  /** Why an update would be refused right now, e.g. a colony that is publishing. */
+  busy: string[];
+  /** While `state` is "restarting" the Mothership is about to re-exec: expect the connection to drop and come back. */
+  apply: {
+    state: ApplyState;
+    version: string | null;
+    bytes: number;
+    total: number | null;
+    started_at: string | null;
+    finished_at: string | null;
+    error: string | null;
+  };
+}
+
 export interface ProviderHealth {
   reachable: boolean;
   /** HTTP status of the probe, when a response arrived. */

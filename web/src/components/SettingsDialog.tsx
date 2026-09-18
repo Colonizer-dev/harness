@@ -11,6 +11,7 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import type {
+  ApplyState,
   HarnessStatus,
   HeadroomStatus,
   LoginView,
@@ -25,9 +26,11 @@ import type {
   PullStatus,
   SchemaField,
   TelemetryStatus,
+  UpdateStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { useModels } from "../useModels";
+import { MarkdownBlock } from "./Markdown";
 import {
   BrandAlibabaCloud,
   BrandClaude,
@@ -52,14 +55,14 @@ import {
   type IconProps,
 } from "./icons";
 import { SkillsetField } from "./Skillsets";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, useMediaQuery, type Tone } from "./ui";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "connections" | "providers" | "runtime" | "live-map" | `module:${string}`;
+export type SectionId = "connections" | "providers" | "runtime" | "live-map" | "updates" | `module:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -91,6 +94,8 @@ export function SettingsDialog({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  update,
+  onUpdateChanged,
   initialSection,
 }: {
   open: boolean;
@@ -100,6 +105,8 @@ export function SettingsDialog({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  update: UpdateStatus | null;
+  onUpdateChanged: (update: UpdateStatus) => void;
   /** The section to open on, instead of the first. */
   initialSection?: SectionId;
 }) {
@@ -126,6 +133,8 @@ export function SettingsDialog({
           onModulesChanged={onModulesChanged}
           telemetry={telemetry}
           onTelemetryChanged={onTelemetryChanged}
+          update={update}
+          onUpdateChanged={onUpdateChanged}
           initialSection={initialSection}
           onClose={onClose}
         />
@@ -140,6 +149,8 @@ function SettingsBody({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  update,
+  onUpdateChanged,
   initialSection,
   onClose,
 }: {
@@ -148,6 +159,8 @@ function SettingsBody({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  update: UpdateStatus | null;
+  onUpdateChanged: (update: UpdateStatus) => void;
   initialSection?: SectionId;
   onClose: () => void;
 }) {
@@ -228,6 +241,12 @@ function SettingsBody({
           hint: "This mothership as a dot on colonizer.dev",
           badge: telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
         },
+        {
+          id: "updates",
+          label: "Updates",
+          hint: "Version, and whether to check for new releases",
+          badge: update?.available ? "New" : undefined,
+        },
       ],
     },
     {
@@ -250,6 +269,7 @@ function SettingsBody({
   if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
+  else if (active === "updates") pane = <UpdatesPane update={update} onChanged={onUpdateChanged} back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -959,6 +979,234 @@ function LiveMapPane({
         </div>
       )}
     </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Updates: this Mothership's version, and in-place self-updates
+// ---------------------------------------------------------------------------
+
+function UpdatesPane({
+  update,
+  onChanged,
+  back,
+}: {
+  update: UpdateStatus | null;
+  onChanged: (update: UpdateStatus) => void;
+  back?: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
+
+  // Follow a running self-update once a second, the way the image pull and Headroom do.
+  const applying = update !== null && update.apply.state !== "idle" && update.apply.state !== "failed";
+  useEffect(() => {
+    if (!applying) return;
+    const timer = setInterval(() => {
+      api
+        .updates()
+        .then(onChanged)
+        .catch(() => {});
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [api, applying, onChanged]);
+
+  const set = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setUpdates(enabled));
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const check = async () => {
+    setChecking(true);
+    try {
+      onChanged(await api.checkUpdates());
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const apply = async () => {
+    try {
+      onChanged(await api.applyUpdate());
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
+  };
+
+  const info = (
+    <>
+      <p>An update swaps the Mothership's own release in and restarts it. Colonies keep their worktrees, chats and settings, and reconnect on their own when it is back.</p>
+      <p className="text-muted">Nothing is applied without the button; a refused update (a colony mid-publish, say) changes nothing.</p>
+    </>
+  );
+
+  return (
+    <Pane title="Updates" subtitle="Version, and whether to check for new releases" info={info} back={back}>
+      {!update ? (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[15px] font-semibold">{update.installed.version}</span>
+              {update.installed.development && <Badge tone="warn">development build</Badge>}
+              {update.available && update.latest && <Badge tone="accent">{update.latest.version} is out</Badge>}
+            </div>
+            {(update.installed.commit || update.installed.built_at) && (
+              <p className="mt-1 text-[12.5px] text-muted">
+                {update.installed.commit && (
+                  <>
+                    Commit <Code>{update.installed.commit.slice(0, 7)}</Code>
+                    {update.installed.dirty && " (modified)"}
+                  </>
+                )}
+                {update.installed.commit && update.installed.built_at && " · "}
+                {update.installed.built_at && `Built ${new Date(update.installed.built_at).toLocaleString()}`}
+              </p>
+            )}
+          </div>
+
+          <Row id="updates-switch" label="Check for new releases" inline>
+            <Switch
+              id="updates-switch"
+              labelledBy="updates-switch-label"
+              label="Check for new releases"
+              checked={update.enabled}
+              disabled={saving || update.blocked_by !== null}
+              onChange={(checked) => void set(checked)}
+            />
+          </Row>
+          {update.blocked_by && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              Kept off by <Code>{update.blocked_by}</Code> in the Mothership’s environment.
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className={cx("min-w-0 flex-1 text-[12.5px] [overflow-wrap:anywhere]", update.last_error ? "text-err" : "text-muted")}>
+              {update.last_error
+                ? `Last check failed: ${update.last_error}`
+                : update.last_checked_at
+                  ? `Last checked ${timeAgo(update.last_checked_at)}`
+                  : "Not checked yet"}
+            </p>
+            <Button size="sm" disabled={checking || !update.enabled || update.blocked_by !== null || applying} onClick={() => void check()}>
+              {checking && <Spinner />} Check now
+            </Button>
+          </div>
+
+          {update.available && update.latest && (
+            <div className="space-y-2.5 rounded-xl border border-border p-3.5">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="text-[14px] font-semibold">{update.latest.name}</span>
+                {update.latest.published_at && (
+                  <span className="text-[12.5px] text-muted">published {new Date(update.latest.published_at).toLocaleDateString()}</span>
+                )}
+                <a
+                  className="ml-auto inline-flex items-center gap-1 text-[12.5px] text-accent hover:underline"
+                  href={update.latest.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  On GitHub <IconExternal size={12} />
+                </a>
+              </div>
+              <div className="scroll-thin max-h-56 overflow-y-auto rounded-lg border border-border bg-panel-2 px-3.5 py-2.5">
+                <MarkdownBlock>{update.latest.notes}</MarkdownBlock>
+              </div>
+
+              {applying ? (
+                <ApplyProgress apply={update.apply} />
+              ) : update.apply.state === "failed" ? (
+                <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-err">
+                  <div className="min-w-0 flex-1">The update failed: {update.apply.error ?? "unknown error"}</div>
+                  <Button size="sm" onClick={() => void apply()}>
+                    Retry
+                  </Button>
+                </div>
+              ) : update.can_apply ? (
+                <div>
+                  <Button variant="primary" disabled={update.busy.length > 0} onClick={() => void apply()}>
+                    Update to {update.latest.version}
+                  </Button>
+                  {update.busy.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[12.5px] text-muted">
+                      {update.busy.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : (
+                <p className="text-[12.5px] text-muted">{update.blocked_reason ?? "This install cannot update itself."}</p>
+              )}
+            </div>
+          )}
+          {!update.available && applying && <ApplyProgress apply={update.apply} />}
+        </div>
+      )}
+    </Pane>
+  );
+}
+
+/** Progress for a running self-update; "restarting" means the Mothership is about to drop the connection and come back. */
+function ApplyProgress({ apply }: { apply: UpdateStatus["apply"] }) {
+  const pct = apply.total ? Math.min(100, Math.round((apply.bytes * 100) / apply.total)) : null;
+  if (apply.state === "restarting") {
+    return (
+      <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-muted">
+        <p className="flex items-center gap-2">
+          <Spinner /> <span className="font-medium text-text">The Mothership is restarting.</span>
+        </p>
+        <p className="mt-1.5">This page comes back on its own; colonies keep their worktrees and reconnect by themselves.</p>
+      </div>
+    );
+  }
+  const label: Record<ApplyState, string> = {
+    idle: "Preparing",
+    downloading: "Downloading",
+    verifying: "Verifying",
+    unpacking: "Unpacking",
+    installing: "Installing",
+    restarting: "Restarting",
+    failed: "Failed",
+  };
+  return (
+    <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-muted">
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <Spinner />
+        <span>
+          {label[apply.state]} {apply.version ?? ""}
+          {apply.state === "downloading" && apply.total ? ` · ${megabytes(apply.bytes)} of ${megabytes(apply.total)}` : ""}
+        </span>
+      </div>
+      <div
+        className="h-1 overflow-hidden rounded-full bg-border"
+        role="progressbar"
+        aria-label={`Updating to ${apply.version ?? "the new release"}`}
+        aria-valuenow={pct ?? undefined}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        {pct === null || apply.state !== "downloading" ? (
+          <div className="pull-slide h-full w-1/3 rounded-full bg-accent" />
+        ) : (
+          <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
+        )}
+      </div>
+    </div>
   );
 }
 

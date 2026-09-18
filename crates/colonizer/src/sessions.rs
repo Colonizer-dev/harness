@@ -122,6 +122,10 @@ pub struct Session {
     /// Set when a colony finishes booting, and replaced on resume.
     #[serde(default)]
     pub boot_timing: Option<Value>,
+    /// The assets directory this colony's read-only mounts (agent, plugins, vendored tools) come
+    /// from, recorded at boot so an update knows which version directories are still in use.
+    #[serde(default)]
+    pub app_dir: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -250,7 +254,7 @@ impl App {
         Some((session, result))
     }
 
-    async fn persist_sessions(&self) {
+    pub async fn persist_sessions(&self) {
         let _guard = self.session_persist.lock().await;
         let data = serde_json::to_vec_pretty(&*self.sessions.read().await);
         if let Ok(data) = data {
@@ -424,6 +428,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         attention: None,
         last_activity_at: None,
         boot_timing: None,
+        app_dir: app.cfg.assets.as_ref().map(|p| p.display().to_string()),
         created_at: now,
         updated_at: now,
     };
@@ -472,6 +477,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
     let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
+    // The mounts below are built from the assets the mothership runs now, so record what this boot
+    // actually mounts: a colony resumed after an update moves to the new version with its boot.
+    if let Some(assets) = app.cfg.assets.as_ref() {
+        let dir = assets.display().to_string();
+        if s.app_dir.as_deref() != Some(dir.as_str()) {
+            app.update_session(id, |x| x.app_dir = Some(dir.clone())).await;
+        }
+    }
     let modules = app.modules.read().await.clone();
     let agent = app.agents.iter().find(|a| a.id == s.agent).cloned().context("agent module is not installed")?;
 
@@ -1758,6 +1771,7 @@ mod tests {
             attention: None,
             last_activity_at: None,
             boot_timing: None,
+            app_dir: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

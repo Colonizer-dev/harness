@@ -13,6 +13,7 @@ mod findings;
 mod gateway;
 mod github;
 mod headroom;
+mod install;
 mod memory;
 mod mesh;
 mod modules;
@@ -25,7 +26,9 @@ mod sandbox;
 mod sessions;
 mod telemetry;
 mod timing;
+mod update;
 mod util;
+mod version;
 mod watchdog;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -89,6 +92,8 @@ pub struct App {
     pub headroom: Mutex<headroom::Status>,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
+    /// What newer releases exist, checked anonymously against GitHub while the mothership runs.
+    pub updates: update::Updates,
 }
 
 pub type Shared = Arc<App>;
@@ -132,6 +137,12 @@ impl App {
         let created = Arc::new(Mesh::new(&assets, &self.cfg.data_dir, &self.cfg.runtime_dir, ports));
         *mesh = Some(created.clone());
         Ok(created)
+    }
+
+    /// The mesh manager when one has already been started — unlike [`mesh`](Self::mesh), never a
+    /// reason to start one. The update's restart path uses this on the way out.
+    pub async fn running_mesh(&self) -> Option<Arc<Mesh>> {
+        self.mesh.lock().await.clone()
     }
 }
 
@@ -326,8 +337,61 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     }
 }
 
+/// What `colonizer version` prints: the version, then the commit, the build time and the development
+/// flag as far as build.rs could record them, e.g. `colonizer v0.1.3 (d89ce76, 2026-09-17T12:00:00Z)`.
+fn describe_build() -> String {
+    let build = version::build();
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(commit) = &build.commit {
+        parts.push(commit.get(..7).unwrap_or(commit).to_string());
+    }
+    if let Some(built_at) = &build.built_at {
+        parts.push(built_at.clone());
+    }
+    if build.development {
+        parts.push("development build".into());
+    }
+    if parts.is_empty() {
+        format!("colonizer {}", build.version)
+    } else {
+        format!("colonizer {} ({})", build.version, parts.join(", "))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // A hand-rolled dispatch: the harness has no other subcommands and should keep serving unless it
+    // was explicitly asked what it is. Any other argument, or none, serves exactly as before.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V" | "version") => {
+            println!("{}", describe_build());
+            return Ok(());
+        }
+        // A thin client of a running mothership: it does the checking, downloading and restarting.
+        Some("update") => {
+            return update::command().await;
+        }
+        Some("--help" | "-h") => {
+            println!("colonizer — turn a task into a pull request; see https://colonizer.dev/docs");
+            println!();
+            println!("usage: colonizer [--help] [--version] [update]");
+            println!();
+            println!("  (no argument)  serve the harness and its web UI");
+            println!("  update         update a running mothership to its newest release");
+            println!("  version        print what this build is (also --version, -V)");
+            println!();
+            println!(
+                "Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,"
+            );
+            println!("COLONIZER_CONFIG_DIR, COLONIZER_UPDATE_CHECK, COLONIZER_UPDATE_API,");
+            println!(
+                "COLONIZER_UPDATE_REPO, DO_NOT_TRACK and the rest of the list under Configuration"
+            );
+            println!("in the README (https://github.com/Colonizer-dev/harness#configuration).");
+            return Ok(());
+        }
+        _ => {}
+    }
     let cfg = Settings::from_env()?;
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
@@ -360,6 +424,7 @@ async fn main() -> Result<()> {
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
+        updates: update::Updates::new(&cfg.config_dir)?,
         cfg,
     });
 
@@ -377,6 +442,10 @@ async fn main() -> Result<()> {
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
+        .route("/api/version", get(version::status))
+        .route("/api/update", get(update::status).put(update::put))
+        .route("/api/update/check", post(update::check_now))
+        .route("/api/update/apply", post(update::apply))
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
@@ -408,7 +477,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&app.cfg.bind)
         .await
         .with_context(|| format!("cannot bind {}", app.cfg.bind))?;
-    println!("colonizer listening on http://{}", app.cfg.bind);
+    println!("colonizer {} listening on http://{}", version::build().version, app.cfg.bind);
     println!("data: {}", app.cfg.data_dir.display());
     match &app.cfg.assets {
         Some(assets) => println!("assets: {}", assets.display()),
@@ -428,13 +497,19 @@ async fn main() -> Result<()> {
     }
 
     let recovery = app.clone();
-    tokio::spawn(async move { sessions::recover(&recovery).await });
+    tokio::spawn(async move {
+        sessions::recover(&recovery).await;
+        // With recovery's answer about which colonies are still live, the version directories
+        // nothing can reach any more go.
+        install::prune_unused(&recovery).await;
+    });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { sessions::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();
     tokio::spawn(async move { sessions::run_queue(queue).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
+    tokio::spawn(update::run(app.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
         // Retrying would never help: no mesh binary is published for this platform, so there is

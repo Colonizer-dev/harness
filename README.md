@@ -52,8 +52,13 @@ curl -fsSL https://colonizer.dev/install.sh | sh
 colonizer               # then open http://127.0.0.1:7878
 ```
 
-That installs the latest [release](https://github.com/Colonizer-dev/harness/releases). To build from
-source instead, you also need Node.js 20+ and Rust 1.88+:
+That installs the latest [release](https://github.com/Colonizer-dev/harness/releases) into
+`~/.local/share/colonizer/versions/<version>` and points an `app` symlink at it. Every release keeps its
+own directory, so updating swaps a symlink instead of touching what is running — and you don't update by
+re-running the installer: the mothership tells you a release is out and applies it from Settings →
+Updates, or `colonizer update` does it from a terminal, without losing colonies
+([docs/updates.md](docs/updates.md)). To build from source instead, you also need Node.js 20+ and Rust
+1.88+:
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness
@@ -63,8 +68,9 @@ dist/bin/colonizer
 ```
 
 [docs/install.md](docs/install.md) has the rest: what a Linux machine needs for Claude Code, what the
-installer does on a Mac, the install options, the first run, where things live and how to update. It is
-also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install).
+installer does on a Mac, the install options, the first run and where things live. Updating has its own
+page at [docs/updates.md](docs/updates.md). The install guide is also on
+[colonizer.dev/docs/install](https://colonizer.dev/docs/install).
 
 ---
 
@@ -183,7 +189,7 @@ protocol on stdio, so an agent module can be written in anything.
 
 | Path | What it is | Status |
 | :--- | :--- | :--- |
-| [`crates/colonizer`](crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
+| [`crates/colonizer`](crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish, self-update | `SHIPPING` |
 | [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
@@ -232,7 +238,9 @@ Stated here rather than buried.
   API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
   wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
 - **Memory search is plain text matching**, not semantic search.
-- **No CI yet**, and nothing is published to crates.io or npm.
+- **No test gate on a pull request yet.** The CI that exists builds and smoke-tests the install and
+  release paths when they change; `cargo test` and the web build run by hand. The Rust crates are
+  published to crates.io with each release; nothing is published to npm.
 
 ---
 
@@ -254,6 +262,7 @@ Stated here rather than buried.
 | Daily proposals for vendored plugin updates, described in skills added, removed and changed ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
 | Token savings: terse replies (caveman) and compact command output (rtk), each a switch | `SHIPPING` |
 | Token savings: Headroom compacting tool results, its bundle downloaded when switched on ([#53](https://github.com/Colonizer-dev/harness/issues/53)) | `SHIPPING` |
+| Tell the operator when a newer release is out, and update without losing colonies ([#45](https://github.com/Colonizer-dev/harness/issues/45)) | `SHIPPING` |
 | More agent modules behind the runner protocol | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
@@ -277,6 +286,7 @@ The roadmap is the issue tracker. There is no private version of it.
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |
 | Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
+| Updates | On until you switch it off: an anonymous check of GitHub's releases API every 6 hours. No token, no query, nothing about the install ([docs/updates.md](docs/updates.md)). |
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
@@ -296,6 +306,8 @@ come from the environment:
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
 | `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) off whatever Settings says |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
+| `COLONIZER_UPDATE_CHECK=off` | – | Keep the [update check](docs/updates.md) off whatever Settings says |
+| `COLONIZER_UPDATE_API`, `COLONIZER_UPDATE_REPO`, `COLONIZER_UPDATE_DOWNLOAD_URL` | GitHub, for `Colonizer-dev/harness` | Point the update check and its release downloads elsewhere |
 
 A few things belong in neither the UI nor the environment. They live in `~/.config/colonizer/colonizer.toml`,
 which you write and Colonizer only reads — a missing file means the defaults:

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "./context";
-import { IconMenu, IconSpark } from "./components/icons";
+import { IconMenu, IconSpark, IconX } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView } from "./components/Sidebar";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
-import type { HarnessStatus, ModuleInfo, OrgInfo, Session, TelemetryStatus } from "./types";
+import type { HarnessStatus, ModuleInfo, OrgInfo, Session, TelemetryStatus, UpdateStatus } from "./types";
 
 export function App() {
   const api = useApi();
@@ -22,6 +22,9 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  // The last release whose "update available" notice was dismissed; a newer release asks again.
+  const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(() => stored("colonizer.update-dismissed"));
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string | null>(() => stored("colonizer.org") || null);
@@ -84,21 +87,32 @@ export function App() {
     }
   }, [api]);
 
+  const loadUpdate = useCallback(async () => {
+    try {
+      setUpdate(await api.updates());
+    } catch {
+      /* older mothership: no update check, and nothing to ask */
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadStatus();
     void loadSessions();
     void loadTelemetry();
     void loadOrgs();
     void loadPendingMemory();
+    void loadUpdate();
     api.modules().then(applyModules).catch(() => {});
     const timers = [
       setInterval(loadSessions, 4000),
       setInterval(loadStatus, 30_000),
       setInterval(loadOrgs, 15_000),
       setInterval(loadPendingMemory, 10_000),
+      // Update checks are the Mothership's own hourly job; this only keeps the notice current.
+      setInterval(loadUpdate, 300_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, applyModules]);
+  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUpdate, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -158,6 +172,27 @@ export function App() {
   }, []);
 
   const current = sessions.find((s) => s.id === selectedId) ?? null;
+
+  // Both floating cards anchor to the same corner, so the update notice waits while the
+  // first-run live-map question is up, and appears as soon as that is answered.
+  const liveMapPrompt =
+    telemetry !== null &&
+    telemetry.enabled === null &&
+    !telemetry.blocked_by &&
+    !settingsOpen &&
+    status?.github.connected === true &&
+    status.claude.configured === true;
+  const updateApplying = update !== null && update.apply.state !== "idle" && update.apply.state !== "failed";
+  const updateNotice =
+    update !== null &&
+    update.available &&
+    update.latest !== null &&
+    !updateApplying &&
+    !liveMapPrompt &&
+    !settingsOpen &&
+    dismissedUpdate !== update.latest.version
+      ? update.latest
+      : null;
 
   const sidebar = (
     <Sidebar
@@ -236,21 +271,38 @@ export function App() {
         onClose={() => {
           setSettingsOpen(false);
           void loadTelemetry();
+          void loadUpdate();
         }}
         status={status}
         onStatusChanged={loadStatus}
         onModulesChanged={applyModules}
         telemetry={telemetry}
         onTelemetryChanged={setTelemetry}
+        update={update}
+        onUpdateChanged={setUpdate}
         initialSection={settingsSection}
       />
-      {telemetry && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status?.github.connected && status.claude.configured && (
+      {liveMapPrompt && (
         <LiveMapPrompt
           narrow={narrow}
           onAnswered={setTelemetry}
           onDetails={() => {
             setSettingsSection("live-map");
             setSettingsOpen(true);
+          }}
+        />
+      )}
+      {updateNotice && (
+        <UpdateBanner
+          latest={updateNotice}
+          narrow={narrow}
+          onOpen={() => {
+            setSettingsSection("updates");
+            setSettingsOpen(true);
+          }}
+          onDismiss={() => {
+            setDismissedUpdate(updateNotice.version);
+            store("colonizer.update-dismissed", updateNotice.version);
           }}
         />
       )}
@@ -317,6 +369,53 @@ function LiveMapPrompt({
         <button type="button" onClick={onDetails} className="ml-auto cursor-pointer text-[12.5px] text-accent hover:underline">
           What is sent
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** Floating notice while a newer release is out; dismissed per version, so the next release asks again. */
+function UpdateBanner({
+  latest,
+  narrow,
+  onOpen,
+  onDismiss,
+}: {
+  latest: NonNullable<UpdateStatus["latest"]>;
+  narrow: boolean;
+  onOpen: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      role="region"
+      aria-label="Update available"
+      className={cx(
+        "fixed z-30 rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]",
+        narrow ? "inset-x-3 bottom-3" : "bottom-5 right-5 w-[380px]",
+      )}
+    >
+      <div className="flex items-start gap-1">
+        <p className="min-w-0 flex-1 text-[14px] font-semibold">Colonizer {latest.version} is available</p>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss this notice"
+          className="-mr-1 -mt-1 grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
+        >
+          <IconX size={15} />
+        </button>
+      </div>
+      <p className="mt-1.5 text-[12.5px] text-muted">
+        Updating restarts the Mothership; colonies keep their worktrees, chats and settings, and reconnect on their own.
+      </p>
+      <div className="mt-3 flex items-center gap-3">
+        <Button variant="primary" size="sm" onClick={onOpen}>
+          Review the update
+        </Button>
+        <a className="text-[12.5px] text-accent hover:underline" href={latest.url} target="_blank" rel="noreferrer">
+          Release on GitHub
+        </a>
       </div>
     </div>
   );

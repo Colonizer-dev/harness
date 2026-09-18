@@ -27,8 +27,11 @@ Then run `colonizer` and open <http://127.0.0.1:7878>.
 
 The installer picks the app for your machine from the latest
 [release](https://github.com/Colonizer-dev/harness/releases) and checks it against the release's
-`SHA256SUMS`. It installs the app to `~/.local/share/colonizer/app` and links `~/.local/bin/colonizer`.
-The script is `scripts/install-release.sh`, published with each release as `install.sh`.
+`SHA256SUMS`. It installs the app to `~/.local/share/colonizer/versions/<version>`, points the
+`~/.local/share/colonizer/app` symlink at it, and links `~/.local/bin/colonizer` through the symlink.
+Every release keeps its own directory; updating repoints the symlink rather than replacing what is
+running ([docs/updates.md](updates.md)). The script is `scripts/install-release.sh`, published with
+each release as `install.sh`.
 
 A release contains no Anthropic code, which isn't ours to redistribute. So the installer fetches two
 things from Anthropic's own channels and checks each one:
@@ -37,7 +40,10 @@ things from Anthropic's own channels and checks each one:
   `package-lock.json`;
 - on a Mac, the Linux build of Claude Code that colonies run ([On a Mac](#on-a-mac)).
 
-Run the same command again to update. Two variations:
+Updating a release install is not done by running this again: the mothership checks for releases and
+applies them itself, from Settings or `colonizer update` ([docs/updates.md](updates.md)). The installer
+can still be run again — it installs alongside and repoints `app`, which is also how to pin an older
+release. Two variations:
 
 ```sh
 # install a particular release instead of the latest
@@ -67,8 +73,9 @@ Two options:
 
 - `--pull-image` downloads the default colony image, `node:24-bookworm`, at install time. The first
   colony then boots straight away instead of waiting on a download of several gigabytes.
-- `--install` copies the app to `~/.local/share/colonizer/app` and links `~/.local/bin/colonizer`, so
-  `colonizer` runs from anywhere. It is implemented but hasn't been run end to end yet.
+- `--install` installs the build as `~/.local/share/colonizer/versions/<version>`, points the `app`
+  symlink at it and links `~/.local/bin/colonizer`, so `colonizer` runs from anywhere. It is
+  implemented but hasn't been run end to end yet.
 
 ## First run
 
@@ -101,7 +108,20 @@ Every setting is listed under [Configuration](https://github.com/Colonizer-dev/h
 
 ## Updating
 
-For a release, run the install command again. For a build from source:
+A release install updates itself: the mothership tells you a newer release is out and applies it from
+Settings → Updates, or `colonizer update` does the same from a terminal. The new release is installed
+beside the running one, and colonies keep running through the swap: a directory being replaced is
+renamed aside rather than deleted — a bind mount follows the inode — and nothing still in use is ever
+removed, only parked under a dot-prefixed name until nothing holds it any more.
+[docs/updates.md](updates.md) has the whole story.
+
+Running the installer again still works, and is how to pin a particular release:
+
+```sh
+curl -fsSL https://colonizer.dev/install.sh | COLONIZER_VERSION=v0.1.0 sh
+```
+
+For a build from source:
 
 ```sh
 git pull

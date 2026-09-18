@@ -20,9 +20,11 @@ import type {
   OrgSettings,
   PullStatus,
   Question,
+  ReleaseInfo,
   Repo,
   Session,
   SessionStatus,
+  UpdateStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -757,6 +759,106 @@ let mockTelemetry: TelemetryStatus = {
   heartbeat: { install_id: null, version: "0.1.3", platform: "darwin-arm64", colonies: 1 },
 };
 
+// The self-update: a release is out, and applying it walks downloading → restarting over
+// a few seconds so the Settings pane and banner can be watched end to end. The other
+// states (up to date, kept off, cannot apply, check failed) are pinned with a second
+// query parameter: `?mock=1&update=off|blocked|no-apply|error`.
+const UPDATE_TOTAL = 28_311_542;
+const UPDATE_STEPS: { state: UpdateStatus["apply"]["state"]; secs: number }[] = [
+  { state: "downloading", secs: 4 },
+  { state: "verifying", secs: 1.2 },
+  { state: "unpacking", secs: 1.2 },
+  { state: "installing", secs: 1 },
+  { state: "restarting", secs: 1.4 },
+];
+
+const MOCK_RELEASE: ReleaseInfo = {
+  version: "v0.1.4",
+  name: "v0.1.4",
+  notes: [
+    "Colonies now survive a Mothership restart: worktrees, chats and settings are kept, and running colonies reconnect on their own.",
+    "## Highlights",
+    "- **Restart-safe updates.** `POST /api/update/apply` swaps the release in and re-execs; nothing else about your setup changes.",
+    "- **Mesh names keep working** across a restart, so `colony-<id>.mesh` addresses stay valid.",
+    "- **Faster cold starts.** The colony image is pulled while the sandbox is set up, about 30% off the first launch.",
+    "### Fixes",
+    "- The watchdog no longer nudges colonies that are waiting for your answer",
+    "- `colonizer status` shows the right port when `COLONIZER_PORT` is set",
+    "- Publishing a colony with no changes reports `no_changes` instead of failing",
+    "See the [full changelog](https://github.com/Colonizer-dev/harness/compare/v0.1.3...v0.1.4) for everything in between.",
+  ].join("\n"),
+  url: "https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4",
+  published_at: ago(95),
+};
+
+let mockUpdate: UpdateStatus = {
+  enabled: true,
+  blocked_by: null,
+  repo: "Colonizer-dev/harness",
+  installed: {
+    version: "v0.1.3",
+    release: "v0.1.3",
+    commit: "9f2c1ab7d3e54f0a1b2c3d4e5f6a7b8c9d0e1f2a",
+    dirty: false,
+    built_at: ago(2870),
+    development: false,
+  },
+  last_checked_at: ago(9),
+  last_error: null,
+  latest: MOCK_RELEASE,
+  available: true,
+  can_apply: true,
+  blocked_reason: null,
+  busy: [],
+  apply: { state: "idle", version: null, bytes: 0, total: null, started_at: null, finished_at: null, error: null },
+};
+
+switch (new URLSearchParams(location.search).get("update")) {
+  case "off":
+    mockUpdate = { ...mockUpdate, latest: null, available: false };
+    break;
+  case "blocked":
+    mockUpdate = { ...mockUpdate, enabled: false, blocked_by: "COLONIZER_NO_UPDATE_CHECK" };
+    break;
+  case "no-apply":
+    mockUpdate = {
+      ...mockUpdate,
+      can_apply: false,
+      blocked_reason: "This Mothership runs from a source checkout; pull the repository and rebuild instead.",
+    };
+    break;
+  case "error":
+    mockUpdate = { ...mockUpdate, last_checked_at: ago(2), last_error: "checking GitHub failed: dial api.github.com:443: no such host" };
+    break;
+}
+
+/** Moves a running self-update along by the clock, the way the real one reports; finalises it once the walk is over. */
+function elapseUpdate(status: UpdateStatus): UpdateStatus {
+  const apply = status.apply;
+  if (apply.state === "idle" || apply.state === "failed" || !apply.started_at) return status;
+  const elapsed = (Date.now() - Date.parse(apply.started_at)) / 1000;
+  let at = 0;
+  for (const step of UPDATE_STEPS) {
+    at += step.secs;
+    if (elapsed < at) {
+      const bytes =
+        step.state === "downloading" ? Math.min(UPDATE_TOTAL, Math.round((1 - (at - elapsed) / step.secs) * UPDATE_TOTAL)) : UPDATE_TOTAL;
+      return { ...status, apply: { ...apply, state: step.state, bytes } };
+    }
+  }
+  // The walk is done: the Mothership is back, running the new release.
+  const version = apply.version ?? status.installed.version;
+  return {
+    ...status,
+    installed: { ...status.installed, version, release: version, built_at: now(), commit: null },
+    latest: null,
+    available: false,
+    last_checked_at: now(),
+    last_error: null,
+    apply: { ...apply, state: "idle", bytes: UPDATE_TOTAL, finished_at: now() },
+  };
+}
+
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
   const demo = new MockSession({
@@ -1132,6 +1234,11 @@ export function createMockApi(): Api {
     await sleep(ms);
     return clone(value());
   };
+  // An update is refused while a colony is mid-publish, the same refusal the real Mothership makes.
+  const updateBusy = () =>
+    [...sessions.values()]
+      .filter((s) => s.session.status === "publishing")
+      .map((s) => `the colony for ${s.session.repo} is publishing its pull request`);
 
   return {
     mock: true,
@@ -1205,6 +1312,39 @@ export function createMockApi(): Api {
         heartbeat: { ...mockTelemetry.heartbeat, install_id },
       };
       return clone(mockTelemetry);
+    },
+    version: async () => {
+      mockUpdate = elapseUpdate(mockUpdate);
+      return clone(mockUpdate.installed);
+    },
+    updates: async () => {
+      mockUpdate = elapseUpdate(mockUpdate);
+      return clone({ ...mockUpdate, busy: updateBusy() });
+    },
+    setUpdates: async (enabled) => {
+      await sleep(250);
+      if (mockUpdate.blocked_by) throw new ApiError(`the update check is kept off by ${mockUpdate.blocked_by}`, 409);
+      mockUpdate = { ...mockUpdate, enabled };
+      return clone({ ...mockUpdate, busy: updateBusy() });
+    },
+    checkUpdates: async () => {
+      await sleep(900);
+      if (!mockUpdate.enabled || mockUpdate.blocked_by) throw new ApiError("the update check is switched off", 409);
+      mockUpdate = { ...mockUpdate, last_checked_at: now(), last_error: null };
+      return clone({ ...mockUpdate, busy: updateBusy() });
+    },
+    applyUpdate: async () => {
+      await sleep(250);
+      const busy = updateBusy();
+      if (busy.length > 0) throw new ApiError(busy[0], 409);
+      if (!mockUpdate.available || !mockUpdate.latest) throw new ApiError("already up to date", 409);
+      if (!mockUpdate.can_apply) throw new ApiError(mockUpdate.blocked_reason ?? "this install cannot update itself", 409);
+      if (mockUpdate.apply.state !== "idle" && mockUpdate.apply.state !== "failed") throw new ApiError("an update is already running", 409);
+      mockUpdate = {
+        ...mockUpdate,
+        apply: { state: "downloading", version: mockUpdate.latest.version, bytes: 0, total: UPDATE_TOTAL, started_at: now(), finished_at: null, error: null },
+      };
+      return clone(mockUpdate);
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),

@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  BuildInfo,
   HarnessStatus,
   Issue,
   LoginView,
@@ -22,6 +23,7 @@ import type {
   SaveProviderRequest,
   Session,
   TelemetryStatus,
+  UpdateStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -57,6 +59,14 @@ export interface Api {
   headroomDownload(): Promise<HeadroomStatus>;
   telemetry(): Promise<TelemetryStatus>;
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
+  /** The Mothership's own build (GET /api/version) and its self-update (GET/PUT /api/update, POST /api/update/check|apply). */
+  version(): Promise<BuildInfo>;
+  updates(): Promise<UpdateStatus>;
+  setUpdates(enabled: boolean): Promise<UpdateStatus>;
+  /** Asks GitHub now; 409 when the check is switched off. */
+  checkUpdates(): Promise<UpdateStatus>;
+  /** Starts the self-update; 409 with a message when it is refused (busy, nothing to apply, cannot apply). */
+  applyUpdate(): Promise<UpdateStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   sessions(): Promise<Session[]>;
@@ -143,6 +153,11 @@ export const httpApi: Api = {
   headroomDownload: () => post("/api/headroom/download"),
   telemetry: () => request("/api/telemetry"),
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
+  version: () => request("/api/version"),
+  updates: () => request("/api/update"),
+  setUpdates: (enabled) => put("/api/update", { enabled }),
+  checkUpdates: () => post("/api/update/check"),
+  applyUpdate: () => post("/api/update/apply"),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

@@ -58,8 +58,21 @@ jobs:
       - name: Build inside rust:1-alpine
         env:
           ARCH: ${{ matrix.arch }}
+          # The version the release is named by, passed to the harness build: the checkout is shallow
+          # and has no tags, so a build inside it cannot git describe itself. The variable is named for
+          # what crates/colonizer/build.rs reads, because a bare `-e NAME` copies the host variable of
+          # that name into the container. The commit travels the same way, since the container has no
+          # git for build.rs to ask. scripts/install.sh writes the same value to dist/VERSION.
+          COLONIZER_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
+          COLONIZER_BUILD_COMMIT: ${{ github.sha }}
         run: |
-          docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e OWNER="$(id -u):$(id -g)" \
+          # SOURCE_DATE_EPOCH pins the build to the commit's date. The shallow checkout still has this
+          # one commit, so its date is cheap to read and identical on both architectures.
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e COLONIZER_BUILD_VERSION \
+            -e COLONIZER_BUILD_COMMIT -e SOURCE_DATE_EPOCH \
+            -e OWNER="$(id -u):$(id -g)" \
             -v "$PWD:/src" -w /src rust:1-alpine sh -euc '
               apk add --no-cache musl-dev file >/dev/null
               scripts/build-agentd.sh
@@ -118,6 +131,12 @@ jobs:
 
       - name: Build the app
         run: |
+          # The same pin the linux-binaries job sets: without it the harness build's built_at would be
+          # this runner's wall clock. install.sh's cargo build inherits it, and
+          # crates/colonizer/build.rs reads it. The Linux bundle's harness arrives prebuilt, so for
+          # that leg this is a no-op.
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
           chmod 755 prebuilt/*
           COLONIZER_PREBUILT="$PWD/prebuilt" scripts/install.sh --bundle
 
