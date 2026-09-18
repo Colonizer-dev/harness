@@ -478,14 +478,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let issue = match s.issue {
         Some(number) => {
             log.info(format!("fetching issue {}#{number}", s.repo)).await;
-            Some(github::fetch_issue(app, &s.repo, number).await?)
+            match github::fetch_issue(app, &s.repo, number).await {
+                Ok(issue) => Some(issue),
+                Err(e) => return Err(github::access_error(app, &s.repo, e).await),
+            }
         }
         None => None,
     };
     // A resumed colony keeps the base it started from; its branch already exists on top of it.
     let base = match s.base.clone().filter(|_| resume) {
         Some(base) => base,
-        None => github::default_branch(app, &s.repo).await?,
+        None => match github::default_branch(app, &s.repo).await {
+            Ok(base) => base,
+            Err(e) => return Err(github::access_error(app, &s.repo, e).await),
+        },
     };
     let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
     app.update_session(id, |x| {
