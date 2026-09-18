@@ -54,7 +54,7 @@ import {
   type IconProps,
 } from "./icons";
 import { SkillsetField } from "./Skillsets";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, useMediaQuery, type Tone } from "./ui";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, inputClass, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
@@ -553,8 +553,77 @@ function Code({ children }: { children: ReactNode }) {
 
 const IDLE_LOGIN: LoginView = { state: "idle", url: null, message: null };
 
+/**
+ * A remote account avatar, next to the login row. Same tile as a provider mark; the
+ * panel background keeps it a quiet square if the image is missing or fails to load.
+ * Decorative: `alt=""`, the login is already shown as text.
+ */
+function Avatar({ src }: { src: string }) {
+  return (
+    <img
+      src={src}
+      alt=""
+      width={32}
+      height={32}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      className="size-8 shrink-0 select-none rounded-lg bg-panel-2 object-cover"
+    />
+  );
+}
+
+/**
+ * The saved Claude credential's provenance, under the login buttons: why the account
+ * may not be identified, and when the token dies. Anthropic does not report an expiry,
+ * so an estimated one says "about"; past, or within 30 days, it turns into a warning.
+ */
+function ClaudeCredential({ claude }: { claude: HarnessStatus["claude"] }) {
+  const asDate = (ts: string | null | undefined) => {
+    if (!ts) return null;
+    const date = new Date(ts);
+    return isNaN(date.getTime()) ? null : date;
+  };
+  const savedAt = asDate(claude.saved_at);
+  const expiresAt = asDate(claude.expires_at);
+  const msLeft = expiresAt ? expiresAt.getTime() - Date.now() : null;
+  const expired = msLeft != null && msLeft <= 0;
+  const daysLeft = msLeft != null && msLeft > 0 ? msLeft / 86_400_000 : null;
+  const expiringSoon = daysLeft != null && daysLeft <= 30;
+  return (
+    <div className="space-y-1 text-[12.5px] [overflow-wrap:anywhere]">
+      {claude.account_note && <p className="text-muted">{claude.account_note}</p>}
+      {(savedAt || expiresAt) && (
+        <p className="text-muted">
+          {savedAt && <span>Saved {savedAt.toLocaleDateString()}</span>}
+          {savedAt && expiresAt && " · "}
+          {expiresAt &&
+            (expired ? (
+              <span className="text-err">
+                {claude.expires_estimated ? "estimated expiry passed " : "expired "}
+                {timeAgo(claude.expires_at)}
+              </span>
+            ) : (
+              <span className={cx(expiringSoon && "text-warn")}>
+                expires {claude.expires_estimated ? "about " : ""}
+                {expiresAt.toLocaleDateString()}
+              </span>
+            ))}
+        </p>
+      )}
+      {expiringSoon && daysLeft != null && (
+        <div>
+          <Badge tone="warn">
+            Expires in {Math.ceil(daysLeft)} day{Math.ceil(daysLeft) === 1 ? "" : "s"}
+          </Badge>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConnectionCard({
   name,
+  mark,
   connected,
   detail,
   detailTone,
@@ -562,6 +631,8 @@ function ConnectionCard({
   children,
 }: {
   name: string;
+  /** Optional tile at the front of the header row, e.g. an account avatar. */
+  mark?: ReactNode;
   connected: boolean | null;
   detail?: string;
   detailTone?: "err";
@@ -571,6 +642,7 @@ function ConnectionCard({
   return (
     <div className="rounded-xl border border-border">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3">
+        {mark}
         <span className="flex items-center gap-1 text-[14px] font-semibold">
           {name}
           <InfoButton label={name}>{info}</InfoButton>
@@ -682,6 +754,7 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"
+          mark={github?.connected && github.avatar_url ? <Avatar src={github.avatar_url} /> : undefined}
           connected={github ? github.connected : null}
           detail={github?.connected ? `@${github.login} · ${github.source}` : github?.error?.split("\n")[0]}
           detailTone={github && !github.connected ? "err" : undefined}
@@ -707,13 +780,16 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
         <ConnectionCard
           name="Claude"
           connected={claude ? claude.configured : null}
-          detail={claude?.configured ? claude.source ?? undefined : undefined}
+          detail={claude?.configured ? [claude.account ?? "account not identified", claude.source].filter(Boolean).join(" · ") : undefined}
           info={
             <>
               <p>
                 Log in runs <Code>claude setup-token</Code> on the Mothership (this machine) and saves a 1-year token here.
               </p>
               <p className="text-muted">microVMs only ever see a placeholder; the real token is swapped in for requests to api.anthropic.com.</p>
+              <p className="text-muted">
+                Anthropic does not report an expiry, so the harness shows the documented 1-year lifetime as an estimate.
+              </p>
             </>
           }
         >
@@ -725,6 +801,8 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
               Remove saved token
             </Button>
           </div>
+
+          {claude && claude.configured && <ClaudeCredential claude={claude} />}
 
           {login.state !== "idle" && (
             <div role="status" className="space-y-3 rounded-lg border border-dashed border-border-strong p-3.5">
@@ -1963,7 +2041,7 @@ function ClaudeRow({ claude, models, onOpenConnections }: { claude: HarnessStatu
           {claude && <Badge tone={claude.configured ? "ok" : "err"}>{claude.configured ? "Connected" : "Not connected"}</Badge>}
         </div>
         <div className="mt-0.5 text-[12px] text-muted">
-          {claude?.configured ? `${claude.source ?? "Connected"} · managed in Connections` : "Managed in Connections"}
+          {claude?.configured ? [claude.account, claude.source ?? "Connected", "managed in Connections"].filter(Boolean).join(" · ") : "Managed in Connections"}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
           {own.length === 0 ? (

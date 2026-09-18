@@ -5,15 +5,17 @@
 use crate::{
     client_error, resolve_host_claude_bin,
     util::{shell_quote, truncate, write_secret},
-    ApiResult, Shared,
+    ApiResult, App, ClaudeCred, Shared,
 };
 use anyhow::Context;
 use axum::{extract::State, http::StatusCode, Json};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -22,6 +24,13 @@ use tokio::{
 };
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Asks which account an OAuth credential belongs to. A `claude setup-token` only carries the
+/// `user:inference` scope, so a 403 here is the expected answer for a subscription token.
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+/// Both answers and failures are kept this long, so the status poll (every 30 s per open tab)
+/// never hammers Anthropic with a lookup that is going to fail again.
+const ACCOUNT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Serialize)]
 pub struct LoginView {
@@ -313,9 +322,198 @@ fn redact(message: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Claude account identity for the status payload
+// ---------------------------------------------------------------------------
+
+/// The last Anthropic profile lookup, cached on `App` so the status poll does not repeat it. Keyed on
+/// a fingerprint of the token — the token itself is never stored, logged or sent to the browser.
+#[derive(Clone)]
+pub struct AccountStatus {
+    fingerprint: String,
+    looked_up_at: Instant,
+    /// The identity to show (an email when Anthropic names one).
+    account: Option<String>,
+    /// Set when `account` is None, saying plainly why, so the UI never shows an empty row.
+    account_note: Option<String>,
+    /// A real expiry the profile response carried, if any (the response shape is not documented).
+    profile_expires_at: Option<String>,
+}
+
+/// Why the profile lookup did not produce an account.
+enum ProfileError {
+    /// 403: the token's scope (`user:inference`) does not include the profile's `user:profile`.
+    Forbidden,
+    /// 401: the token was rejected — expired or revoked.
+    Unauthorized,
+    /// Anything else, with a short reason (routed through `redact` before it leaves this module).
+    Other(String),
+}
+
+/// The `claude` object of `GET /api/status`. These field names are the JSON contract the web UI is
+/// written against. With nothing configured the identity fields are null and `expires_estimated` false.
+pub async fn claude_status(app: &App, cred: Option<&ClaudeCred>) -> Value {
+    let Some(cred) = cred else {
+        return json!({
+            "configured": false, "source": null, "kind": null, "account": null,
+            "account_note": null, "saved_at": null, "expires_at": null, "expires_estimated": false,
+        });
+    };
+    let saved = saved_at(app, cred);
+    let status = account_status(app, cred).await;
+    // A saved subscription token is valid for a year from the moment it was minted, and nothing
+    // records that moment, so the best honest estimate is saving time plus 365 days.
+    let (expires_at, expires_estimated) = match (&status.profile_expires_at, saved) {
+        (Some(at), _) => (Some(at.clone()), false),
+        (None, Some(saved)) if !is_api_key(cred) => (Some(estimated_expiry(saved).to_rfc3339()), true),
+        (None, _) => (None, false),
+    };
+    json!({
+        "configured": true,
+        "source": cred.source,
+        "kind": cred.env,
+        "account": status.account,
+        "account_note": status.account_note,
+        "saved_at": saved.map(|at| at.to_rfc3339()),
+        "expires_at": expires_at,
+        "expires_estimated": expires_estimated,
+    })
+}
+
+fn is_api_key(cred: &ClaudeCred) -> bool {
+    cred.value.starts_with("sk-ant-api")
+}
+
+/// The cached lookup. The cache lock is held across the request so concurrent status polls share one
+/// lookup instead of stacking several; the request itself is bounded by `fetch_profile`'s timeout.
+async fn account_status(app: &App, cred: &ClaudeCred) -> AccountStatus {
+    let fingerprint = fingerprint(&cred.value);
+    if is_api_key(cred) {
+        // An API key carries no account identity and there is no endpoint to ask, so don't.
+        return AccountStatus {
+            fingerprint,
+            looked_up_at: Instant::now(),
+            account: None,
+            account_note: Some("an API key does not identify an account".into()),
+            profile_expires_at: None,
+        };
+    }
+    let mut cache = app.claude_account.lock().await;
+    if let Some(cached) = cache.as_ref()
+        && cached.fingerprint == fingerprint
+        && cached.looked_up_at.elapsed() < ACCOUNT_CACHE_TTL
+    {
+        return cached.clone();
+    }
+    let fresh = match fetch_profile(&cred.value).await {
+        Ok(profile) => {
+            let account = account_label(&profile);
+            let note = account.is_none().then(|| "Anthropic answered, but the profile did not name an account".into());
+            AccountStatus { fingerprint, looked_up_at: Instant::now(), account, account_note: note, profile_expires_at: profile_expires_at(&profile) }
+        }
+        Err(ProfileError::Forbidden) => AccountStatus {
+            fingerprint,
+            looked_up_at: Instant::now(),
+            account: None,
+            account_note: Some("this token is only allowed to make model requests, so Anthropic will not say which account it belongs to".into()),
+            profile_expires_at: None,
+        },
+        Err(ProfileError::Unauthorized) => AccountStatus {
+            fingerprint,
+            looked_up_at: Instant::now(),
+            account: None,
+            account_note: Some("the token was rejected — it may have expired or been revoked".into()),
+            profile_expires_at: None,
+        },
+        Err(ProfileError::Other(reason)) => AccountStatus {
+            fingerprint,
+            looked_up_at: Instant::now(),
+            account: None,
+            account_note: Some(format!("could not reach Anthropic to check ({})", redact(&truncate(&reason, 200)))),
+            profile_expires_at: None,
+        },
+    };
+    *cache = Some(fresh.clone());
+    fresh
+}
+
+/// Asks Anthropic which account the token belongs to. Bounded to five seconds so `/api/status`, which
+/// is polled, can never hang on it.
+async fn fetch_profile(token: &str) -> Result<Value, ProfileError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| ProfileError::Other(format!("could not build an HTTP client: {e}")))?;
+    let response = client
+        .get(PROFILE_URL)
+        .bearer_auth(token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await
+        .map_err(|e| ProfileError::Other(format!("{e}")))?;
+    match response.status().as_u16() {
+        200 => response.json().await.map_err(|e| ProfileError::Other(format!("unreadable profile: {e}"))),
+        403 => Err(ProfileError::Forbidden),
+        401 => Err(ProfileError::Unauthorized),
+        code => Err(ProfileError::Other(format!("Anthropic answered {code}"))),
+    }
+}
+
+/// Pulls a display identity out of the profile response. The exact shape is not documented, so try the
+/// likely paths and fall back to the organisation's name; none of them match, there is no identity.
+fn account_label(profile: &Value) -> Option<String> {
+    [
+        profile["account"]["email_address"].as_str(),
+        profile["account"]["email"].as_str(),
+        profile["email_address"].as_str(),
+        profile["email"].as_str(),
+        profile["organization"]["name"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|s| !s.is_empty())
+    .map(String::from)
+}
+
+/// An expiry the profile response happens to carry, as a string. The shape is not documented, so try
+/// the likely fields and otherwise say there is none rather than guess.
+fn profile_expires_at(profile: &Value) -> Option<String> {
+    [profile["expires_at"].as_str(), profile["account"]["expires_at"].as_str()]
+        .into_iter()
+        .flatten()
+        .next()
+        .map(String::from)
+}
+
+/// When this harness saved the credential: the token file's mtime. The token itself carries no dates,
+/// and a credential from the environment has no file, so there is nothing to show for one.
+fn saved_at(app: &App, cred: &ClaudeCred) -> Option<DateTime<Utc>> {
+    if !matches!(cred.source, "saved API key" | "Claude subscription") {
+        return None;
+    }
+    let modified = std::fs::metadata(app.claude_token_file()).ok()?.modified().ok()?;
+    Some(DateTime::from(modified))
+}
+
+/// `claude setup-token` mints a token that is valid for one year.
+fn estimated_expiry(saved: DateTime<Utc>) -> DateTime<Utc> {
+    saved + chrono::Duration::days(365)
+}
+
+/// A short, non-reversible fingerprint of the token, used as the cache key so a new credential
+/// invalidates the cached lookup. The token itself must never be recoverable from it.
+fn fingerprint(token: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
+    let hex: String = digest.as_ref().iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("len={}:sha256={hex}", token.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn extracts_sign_in_url_from_terminal_output() {
@@ -346,5 +544,66 @@ mod tests {
     #[test]
     fn redacts_tokens_in_messages() {
         assert_eq!(redact("failed near sk-ant-oat01-secret"), "failed near sk-ant-…");
+    }
+
+    #[test]
+    fn account_label_reads_email_from_the_nested_account_object() {
+        let profile = serde_json::json!({"account": {"email_address": "ada@example.com"}});
+        assert_eq!(account_label(&profile).as_deref(), Some("ada@example.com"));
+        let profile = serde_json::json!({"account": {"email": "ada@example.com"}});
+        assert_eq!(account_label(&profile).as_deref(), Some("ada@example.com"));
+    }
+
+    #[test]
+    fn account_label_reads_email_from_the_top_level() {
+        let profile = serde_json::json!({"email_address": "ada@example.com"});
+        assert_eq!(account_label(&profile).as_deref(), Some("ada@example.com"));
+        let profile = serde_json::json!({"email": "ada@example.com"});
+        assert_eq!(account_label(&profile).as_deref(), Some("ada@example.com"));
+    }
+
+    #[test]
+    fn account_label_falls_back_to_the_organization_name() {
+        let profile = serde_json::json!({"organization": {"name": "Acme Rockets"}});
+        assert_eq!(account_label(&profile).as_deref(), Some("Acme Rockets"));
+        // An email wins when both are present.
+        let profile = serde_json::json!({"email": "ada@example.com", "organization": {"name": "Acme Rockets"}});
+        assert_eq!(account_label(&profile).as_deref(), Some("ada@example.com"));
+    }
+
+    #[test]
+    fn account_label_gives_up_on_an_unrecognised_shape() {
+        assert_eq!(account_label(&serde_json::json!({})), None);
+        assert_eq!(account_label(&serde_json::json!({"account": {"name": "Ada"}})), None);
+        assert_eq!(account_label(&serde_json::json!({"email": ""})), None);
+        assert_eq!(account_label(&serde_json::json!({"email": 42})), None);
+    }
+
+    #[test]
+    fn profile_expiry_is_read_from_either_level() {
+        let profile = serde_json::json!({"expires_at": "2027-09-17T00:00:00Z"});
+        assert_eq!(profile_expires_at(&profile).as_deref(), Some("2027-09-17T00:00:00Z"));
+        let profile = serde_json::json!({"account": {"expires_at": "2027-09-17T00:00:00Z"}});
+        assert_eq!(profile_expires_at(&profile).as_deref(), Some("2027-09-17T00:00:00Z"));
+        assert_eq!(profile_expires_at(&serde_json::json!({"sub": "abc"})), None);
+        assert_eq!(profile_expires_at(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn estimated_expiry_is_one_year_after_saving() {
+        let saved = Utc.with_ymd_and_hms(2026, 9, 17, 12, 0, 0).unwrap();
+        assert_eq!(estimated_expiry(saved), Utc.with_ymd_and_hms(2027, 9, 17, 12, 0, 0).unwrap());
+        // It is 365 days, not the calendar anniversary: a leap day inside the window pulls the
+        // estimate back a day, which is the honest reading of "valid for 1 year" at 365 days.
+        let saved = Utc.with_ymd_and_hms(2023, 3, 1, 0, 0, 0).unwrap();
+        assert_eq!(estimated_expiry(saved), Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_never_carries_the_token() {
+        let token = "sk-ant-oat01-ABCDEF0123456789abcdef";
+        assert_eq!(fingerprint(token), fingerprint(token));
+        assert_ne!(fingerprint(token), fingerprint("sk-ant-oat01-ABCDEF0123456789abcdeg"));
+        assert!(!fingerprint(token).contains("ABCDEF"));
     }
 }

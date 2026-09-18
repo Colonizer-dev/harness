@@ -79,8 +79,8 @@ export interface Issue {
 }
 
 export interface HarnessStatus {
-  github: { connected: boolean; login?: string; name?: string | null; source?: string; error?: string };
-  claude: { configured: boolean; source: string | null; kind: string | null };
+  github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
+  claude: { configured: boolean; source: string | null; kind: string | null; account?: string | null; account_note?: string | null; saved_at?: string | null; expires_at?: string | null; expires_estimated?: boolean };
   sandbox: {
     msb_version: string | null;
     image: string;

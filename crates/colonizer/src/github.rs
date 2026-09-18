@@ -81,7 +81,7 @@ pub async fn viewer(app: &App) -> Result<Value> {
         .await
         .context("GitHub API timed out")??;
     let v: Value = serde_json::from_str(&out)?;
-    Ok(json!({"login": v["login"], "id": v["id"], "name": v["name"]}))
+    Ok(json!({"login": v["login"], "id": v["id"], "name": v["name"], "avatar_url": v["avatar_url"]}))
 }
 
 pub fn token_source(app: &App) -> &'static str {
