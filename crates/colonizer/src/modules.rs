@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 10] = [
     "source",
     "sandbox",
     "mesh",
@@ -24,6 +24,7 @@ pub const KINDS: [&str; 9] = [
     "memory",
     "watchdog",
     "autonomy",
+    "notify",
 ];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
@@ -232,6 +233,19 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 }}),
             ),
         ],
+        "notify" => vec![p(
+            "default",
+            "Notify",
+            "Tells you when a colony needs an answer, stalls, fails or opens a pull request",
+            json!({"type": "object", "properties": {
+                "on_question": {"type": "boolean", "title": "When a colony asks a question", "description": "A colony that stopped to ask is often the one that most needs you", "default": true},
+                "on_attention": {"type": "boolean", "title": "When the watchdog flags a colony", "description": "A colony that stalled or ran out of nudges — the watchdog's flags, not autopilot's", "default": true},
+                "on_failed": {"type": "boolean", "title": "When a colony fails", "default": true},
+                "on_pull_request": {"type": "boolean", "title": "When a colony opens a pull request", "default": true},
+                "desktop": {"type": "boolean", "title": "Desktop notifications", "description": "Notify the desktop the mothership runs on. Does nothing over SSH or on a headless machine, and says so once in the log", "default": false},
+                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — colony, event and time only — and it is unsigned unless a signing secret is set in Settings", "default": ""}
+            }}),
+        )],
         _ => Vec::new(),
     }
 }
@@ -284,12 +298,17 @@ fn yes() -> bool {
     true
 }
 
+/// The kinds a harness is not a harness without; every other kind may be switched off.
+fn is_required(kind: &str) -> bool {
+    matches!(kind, "source" | "sandbox" | "agent" | "publish")
+}
+
 pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(req): Json<UpdateModule>) -> ApiResult<Value> {
     let providers = providers(&kind, &app.agents);
     let Some(provider) = providers.iter().find(|p| p.id == req.provider) else {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown module kind or provider"));
     };
-    if matches!(kind.as_str(), "source" | "sandbox" | "agent" | "publish") && !req.enabled {
+    if is_required(&kind) && !req.enabled {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "this module kind is required and can't be disabled",
@@ -434,5 +453,12 @@ mod tests {
     fn schemas_are_normalized() {
         assert!(normalize_schema(&json!({"model": {"type": "string"}}))["properties"]["model"].is_object());
         assert!(normalize_schema(&Value::Null)["properties"].is_object());
+    }
+
+    #[test]
+    fn notify_is_a_kind_and_it_stays_disablable() {
+        assert!(KINDS.contains(&"notify"));
+        assert!(!is_required("notify"), "announcing colonies to the world is opt-in by design");
+        assert!(is_required("source") && is_required("publish"));
     }
 }
