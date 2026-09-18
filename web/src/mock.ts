@@ -1301,6 +1301,21 @@ export function createMockApi(): Api {
       },
     },
     {
+      kind: "autonomy",
+      provider: "off",
+      providers: [
+        { id: "off", name: "Off", description: "Questions wait for you, however long that takes" },
+        {
+          id: "judge",
+          name: "Judge model",
+          description: "A model answers a colony's questions when nobody does, choosing only among the options the agent offered",
+        },
+      ],
+      enabled: true,
+      settings: {},
+      schema: { type: "object", properties: {} },
+    },
+    {
       kind: "watchdog",
       provider: "default",
       providers: [{ id: "default", name: "Watchdog", description: "Nudges colonies that stop making progress and flags the ones that need you" }],
