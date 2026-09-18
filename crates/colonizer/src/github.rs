@@ -3,7 +3,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     publish::record_publish_stage,
-    sessions::{PublishStage, Session, SessionLogger},
+    sessions::{PublishStage, Session, SessionLogger, SessionStatus},
     util::{env_nonempty, exec, exec_status, fingerprint, read_trimmed, truncate, valid_repo, write_secret},
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -295,7 +295,19 @@ pub async fn remove_worktree(app: &App, s: &Session) -> Result<()> {
     Ok(())
 }
 
-pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: bool) -> String {
+/// One line per colony working the same repository right now, for the prompt's `<siblings>` block.
+pub fn siblings_of(sessions: &[Session], s: &Session) -> Vec<String> {
+    sessions
+        .iter()
+        .filter(|o| o.id != s.id && o.repo == s.repo && (o.status.is_live() || o.status == SessionStatus::Queued))
+        .map(|o| match o.issue {
+            Some(n) => format!("#{n} {} (branch {})", o.issue_title, o.branch),
+            None => format!("an open session (branch {})", o.branch),
+        })
+        .collect()
+}
+
+pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: bool, siblings: &[String]) -> String {
     use std::fmt::Write;
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
 
@@ -331,6 +343,29 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
             "This colony was resumed after its microVM stopped, so nothing from the earlier session is in your \
              context, but the worktree is as it was left. Run `git status` and `git diff` first and continue from \
              there rather than starting the task over. `/harness/out/pr.md` may already exist.\n"
+        );
+    }
+    if !siblings.is_empty() {
+        // Four colonies once wrote four different `crates/module-documents` for FindsYou, each a
+        // complete module, because none of them knew the others existed. They cannot see each
+        // other's branches — only `origin/BASE` — so the merges after the first one are conflicts
+        // in shared scaffolding. Knowing who else is out there is enough to keep the footprint
+        // small and to leave someone else's shared file alone.
+        let _ = writeln!(
+            p,
+            "<siblings>\nOther colonies are working in this repository right now, from the same `origin/{base}` \
+             you started from. You cannot see their branches and they cannot see yours, and whichever lands \
+             first makes the rest stale:\n"
+        );
+        for line in siblings {
+            let _ = writeln!(p, "- {line}");
+        }
+        let _ = writeln!(
+            p,
+            "\nSo: keep to the files your own task needs. If your task needs shared scaffolding that does not \
+             exist yet — a new crate, a module registration, a migration — write the smallest version that \
+             carries your work rather than the complete one you would write if you were alone, and say in \
+             `/harness/out/pr.md` what you added and where, so the person merging can see the overlap coming.\n             </siblings>\n"
         );
     }
     if let Some(issue) = issue {
@@ -1009,7 +1044,83 @@ mod tests {
     }
 
     use super::*;
+    use crate::sessions::tests::colony;
     use crate::util::short_id;
+
+    /// A colony on this repo, with the id and issue the test needs.
+    fn sibling(id: &str, issue: Option<u64>, title: &str, status: SessionStatus) -> Session {
+        let mut s = colony("acme", status);
+        s.id = id.into();
+        s.issue = issue;
+        s.issue_title = title.into();
+        s.branch = match issue {
+            Some(n) => format!("colonizer/issue-{n}-{id}"),
+            None => format!("colonizer/session-{id}"),
+        };
+        s
+    }
+
+    #[test]
+    fn a_colony_is_told_who_else_is_in_the_repository() {
+        let me = sibling("mine", Some(14), "PDF rendering on Workers", SessionStatus::Starting);
+        let others = vec![
+            me.clone(),
+            sibling("other", Some(12), "Cover letter per listing", SessionStatus::Running),
+            sibling("waiting", Some(11), "Tailored CV per listing", SessionStatus::Queued),
+            sibling("open", None, "", SessionStatus::Idle),
+        ];
+        let lines = siblings_of(&others, &me);
+        assert_eq!(lines.len(), 3, "everyone but me: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("#12 Cover letter per listing")), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("#11") && l.contains("colonizer/issue-11-waiting")),
+            "a queued colony counts: it will be working from the same base. {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("an open session")), "{lines:?}");
+
+        let prompt = build_prompt(&me, None, "main", false, &lines);
+        assert!(prompt.contains("<siblings>") && prompt.contains("</siblings>"));
+        assert!(
+            prompt.contains("#12 Cover letter per listing"),
+            "the prompt names them: {prompt}"
+        );
+        assert!(
+            prompt.contains("smallest version that carries your work"),
+            "and says what to do about it: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_finished_colony_is_not_a_sibling_and_a_lone_colony_gets_no_block() {
+        let me = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
+        for done in [
+            SessionStatus::Merged,
+            SessionStatus::Closed,
+            SessionStatus::NoChanges,
+            SessionStatus::Stopped,
+            SessionStatus::Failed,
+            SessionStatus::PrOpened,
+        ] {
+            let others = vec![me.clone(), sibling("done", Some(12), "Cover letter", done)];
+            assert!(
+                siblings_of(&others, &me).is_empty(),
+                "{} is no longer writing code, so it is not competing for the same files",
+                done.as_str()
+            );
+        }
+        let mut elsewhere = sibling("elsewhere", Some(12), "Cover letter", SessionStatus::Running);
+        elsewhere.repo = "acme/other".into();
+        assert!(
+            siblings_of(&[me.clone(), elsewhere], &me).is_empty(),
+            "another repository is not a sibling"
+        );
+        assert!(
+            !build_prompt(&me, None, "main", false, &[]).contains("<siblings>"),
+            "a colony working alone is told nothing about siblings"
+        );
+    }
 
     #[test]
     fn publishes_only_the_colonys_own_branch() {

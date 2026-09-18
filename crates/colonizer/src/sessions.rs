@@ -87,6 +87,24 @@ impl SessionStatus {
     pub fn is_live(self) -> bool {
         matches!(self, Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle)
     }
+
+    /// The name the API serialises, for messages that name a colony's state back to a person.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::WaitingForAnswer => "waiting_for_answer",
+            Self::Idle => "idle",
+            Self::Publishing => "publishing",
+            Self::PrOpened => "pr_opened",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+            Self::NoChanges => "no_changes",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 impl Session {
@@ -482,6 +500,37 @@ pub struct NewSession {
     /// Omitted uses the publish module's `autopilot` setting.
     #[serde(default)]
     autopilot: Option<bool>,
+    /// Start a colony on an issue another colony already holds. Off by default: see `issue_held_by`.
+    #[serde(default)]
+    allow_duplicate: bool,
+}
+
+/// A colony that makes a second one on the same issue a mistake rather than a retry: one still
+/// live or queued, or one whose pull request is open and waiting to be read.
+///
+/// On 2026-09-16/17 `FindsYou-Work/app` issue #7 drew **four** colonies — two of them ten seconds
+/// apart, a double submission — and issue #13 drew two. Three of the four wrote a complete,
+/// working implementation of the same feature; one was merged and the rest were closed unread.
+/// Nothing here refuses the retry that matters: a colony that stopped, failed, found no changes,
+/// or whose pull request is merged or closed leaves the issue free.
+fn issue_held_by(sessions: &[Session], repo: &str, issue: u64) -> Option<Session> {
+    sessions
+        .iter()
+        .find(|s| {
+            s.repo == repo
+                && s.issue == Some(issue)
+                && matches!(
+                    s.status,
+                    SessionStatus::Queued
+                        | SessionStatus::Starting
+                        | SessionStatus::Running
+                        | SessionStatus::WaitingForAnswer
+                        | SessionStatus::Idle
+                        | SessionStatus::Publishing
+                        | SessionStatus::PrOpened
+                )
+        })
+        .cloned()
 }
 
 /// Whether colonies may file validated findings as issues. On unless switched off in Settings.
@@ -527,6 +576,22 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     }
     if let Err(e) = app.cfg.asset("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
+    }
+    if let (Some(issue), false) = (req.issue, req.allow_duplicate)
+        && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
+    {
+        let where_it_is = match held.pr_url.as_deref() {
+            Some(url) => format!("its pull request is open at {url}"),
+            None => format!("it is {}", held.status.as_str()),
+        };
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "colony {} is already on #{issue} and {where_it_is}. Starting a second one duplicates its \
+                 work: read that colony first, or pass allow_duplicate to start another anyway.",
+                held.id
+            ),
+        ));
     }
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
@@ -727,7 +792,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
     let out_dir = dir.join("out");
-    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume);
+    let siblings = github::siblings_of(&app.sessions.read().await, &s);
+    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let org_settings = app.org_settings(&s.org);
     let mut runner_env = agent_env(&agent, &orgs::effective_agent(&modules, &org_settings));
@@ -1906,6 +1972,104 @@ pub(crate) mod tests {
         );
         drop(logs);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony on the issue, in a state where a second one duplicates its work.
+    fn on_issue(id: &str, issue: u64, status: SessionStatus) -> Session {
+        let mut s = colony("acme", status);
+        s.id = id.into();
+        s.issue = Some(issue);
+        s
+    }
+
+    #[test]
+    fn a_live_or_published_colony_holds_its_issue_against_a_second_one() {
+        // FindsYou-Work/app #7 drew four colonies and #13 drew two, because nothing asked.
+        for status in [
+            SessionStatus::Queued,
+            SessionStatus::Starting,
+            SessionStatus::Running,
+            SessionStatus::WaitingForAnswer,
+            SessionStatus::Idle,
+            SessionStatus::Publishing,
+            SessionStatus::PrOpened,
+        ] {
+            let sessions = vec![on_issue("first", 7, status)];
+            let held = issue_held_by(&sessions, "acme/repo", 7);
+            assert_eq!(
+                held.map(|s| s.id),
+                Some("first".to_string()),
+                "a colony that is {} still holds #7",
+                status.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_colony_leaves_its_issue_free_to_try_again() {
+        for status in [
+            SessionStatus::Merged,
+            SessionStatus::Closed,
+            SessionStatus::NoChanges,
+            SessionStatus::Stopped,
+            SessionStatus::Failed,
+        ] {
+            let sessions = vec![on_issue("first", 7, status)];
+            assert!(
+                issue_held_by(&sessions, "acme/repo", 7).is_none(),
+                "{} is done with #7, so a retry is not a duplicate",
+                status.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_hold_is_per_repository_and_per_issue() {
+        let sessions = vec![
+            on_issue("other-repo", 7, SessionStatus::Running),
+            on_issue("other-issue", 8, SessionStatus::Running),
+        ];
+        let mut elsewhere = sessions.clone();
+        elsewhere[0].repo = "acme/different".into();
+        assert!(
+            issue_held_by(&elsewhere, "acme/repo", 7).is_none(),
+            "the same issue number in another repository is a different issue"
+        );
+        assert!(
+            issue_held_by(&sessions, "acme/repo", 9).is_none(),
+            "an untouched issue is free"
+        );
+        assert_eq!(
+            issue_held_by(&sessions, "acme/repo", 7).map(|s| s.id),
+            Some("other-repo".to_string()),
+            "the colony on this repo's #7 is the one that holds it"
+        );
+    }
+
+    #[test]
+    fn every_status_name_matches_what_the_api_serialises() {
+        // The message names the state back to a person, so it must be the name they see in the UI.
+        for status in [
+            SessionStatus::Queued,
+            SessionStatus::Starting,
+            SessionStatus::Running,
+            SessionStatus::WaitingForAnswer,
+            SessionStatus::Idle,
+            SessionStatus::Publishing,
+            SessionStatus::PrOpened,
+            SessionStatus::Merged,
+            SessionStatus::Closed,
+            SessionStatus::NoChanges,
+            SessionStatus::Stopped,
+            SessionStatus::Failed,
+        ] {
+            let wire = serde_json::to_value(status).unwrap();
+            assert_eq!(
+                wire.as_str(),
+                Some(status.as_str()),
+                "as_str drifted from serde for {status:?}"
+            );
+        }
     }
 
     #[tokio::test]
