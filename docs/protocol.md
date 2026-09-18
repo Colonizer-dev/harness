@@ -184,7 +184,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart. Also carries `runtime` (below): whether this machine can boot a colony at all, cached for 10 s, `?fresh=1` to re-probe |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
@@ -429,6 +429,44 @@ prompt injection steering the agent into work nobody asked for.
 It runs inside the colony and never on the mothership: repository content is attacker-controlled, and
 the mothership holds every credential. A scanner that cannot start, or that runs past its timeout, is
 reported and treated as no findings: a broken scanner must not be able to halt every colony.
+
+### `GET /api/status`
+
+The table row above describes most of the payload. The `runtime` key is the other half: whether this
+machine can actually boot a colony — the checks the installer makes, answered whenever you ask.
+
+```json
+{
+  "platform": "linux-x86_64",
+  "kvm": {"ok": true, "error": null},
+  "git": {"ok": true, "version": "2.45.0", "error": null},
+  "gh": {"ok": true, "version": "2.60.0", "error": null},
+  "host_claude_bin": "/Users/me/.local/bin/claude",
+  "host_claude_bin_error": null
+}
+```
+
+`platform` is the released platform name, the same string the live map heartbeat sends:
+`linux-x86_64`, `darwin-arm64` or `other`. `kvm` is Linux-only — colonies are KVM microVMs, so on a
+Mac the field is `null` and there is nothing to fix. On Linux, `ok` is true only when `/dev/kvm` is
+both readable and writable by the user running the mothership; otherwise `error` names that user, in
+the installer's own words. Colonizer reports the problem and stops there — applying the fix (adding
+yourself to the `kvm` group) is yours to do.
+
+`git` and `gh` are probed with `--version` and trimmed to the bare version number. A command that is
+missing or fails sets `ok: false` with an `error` sentence; output that does not have the expected
+shape still sets `ok`, but `version` falls back to the first line it printed. Each probe is bounded
+to a couple of seconds, so a command that hangs answers the same `ok: false` with a timeout in
+`error` instead of stalling the poll every open tab is waiting on.
+
+`host_claude_bin` is the native Claude Code binary the mothership runs itself for subscription
+sign-in — never the Linux binary mounted into colonies, which is `sandbox.claude_bin`. When there is
+none, `host_claude_bin_error` says why; the search is bounded too, so a binary that hangs on
+`--version` reports a timeout there rather than hanging the endpoint.
+
+The probes spawn subprocesses, and every open tab polls this endpoint every 30 s, so answers are
+cached for 10 s. Add `?fresh=1` to skip the cache and re-probe now; the "Check again" button sends
+it, so it always reports what is true at the moment you clicked.
 
 ### `GET /api/version`
 
