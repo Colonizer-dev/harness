@@ -843,7 +843,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
     let out_dir = dir.join("out");
-    let siblings = github::siblings_of(&app.sessions.read().await, &s);
+    // Cloned out of the lock before the awaits below: `touched_files` shells out to git per
+    // sibling, and the sessions guard must not be held across that.
+    let colonies = app.sessions.read().await.clone();
+    let touched = github::touched_files(app, &colonies, &s).await;
+    let siblings = github::siblings_of(&colonies, &s, &touched);
     let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let org_settings = app.org_settings(&s.org);
@@ -2249,6 +2253,7 @@ pub(crate) mod tests {
                 instructions: String::new(),
                 autopilot: None,
                 allow_duplicate: false,
+                model_tier: None,
             }),
         )
         .await
@@ -2321,6 +2326,7 @@ pub(crate) mod tests {
                 instructions: String::new(),
                 autopilot: None,
                 allow_duplicate: false,
+                model_tier: None,
             }),
         )
         .await
