@@ -129,10 +129,12 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             json!({"type": "object", "properties": {
                 "preset": {
                     "type": "string", "title": "Stack",
-                    "description": "Picks the image and machine size for a colony. Every preset is glibc-based, which the agent binary requires. Choose 'custom' to set the fields below yourself; anything you set explicitly wins over the preset either way.",
-                    "enum": crate::presets::ids(), "default": "node"
+                    "description": "Picks the image and machine size for a colony. Every preset is glibc-based, which the agent binary requires. Automatic reads the stack off each repository's own marker files when the colony's worktree is checked out (a 'Cargo.toml' makes it Rust), a marker at the repository root beats one in a subdirectory, and a repository that names no stack falls back to Node. Choose 'custom' to set the fields below yourself; anything you set explicitly wins over the preset either way.",
+                    "enum": crate::presets::ids(), "default": crate::presets::AUTO
                 },
-                "image": {"type": "string", "title": "Image", "description": "glibc-based OCI image with the tools your projects need, pinned by digest. Set by the stack unless you change it.", "default": crate::presets::pinned_image("node")},
+                // The schema default is what an install boots before any repository is in hand, so
+                // `auto` lands on its fallback here; detection is a per-colony decision made later.
+                "image": {"type": "string", "title": "Image", "description": "glibc-based OCI image with the tools your projects need, pinned by digest. Set by the stack unless you change it.", "default": crate::presets::pinned_image(crate::presets::AUTO_FALLBACK)},
                 "cpus": {"type": "integer", "title": "vCPUs", "minimum": 1, "maximum": 64, "default": 4},
                 "memory": {"type": "string", "title": "Memory", "description": "e.g. 8G", "default": "8G"},
                 "root_disk": {"type": "string", "title": "Root disk", "default": "16G"},

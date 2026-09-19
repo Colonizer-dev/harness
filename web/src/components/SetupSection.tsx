@@ -11,10 +11,10 @@ import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { IconCheck, IconChevron } from "./icons";
 import { Badge, Button, Spinner, Switch, cx, seconds } from "./ui";
 
-/** The stacks a sandbox preset can name; "custom" and anything unknown has no chip. */
-const STACKS = ["node", "python", "rust", "go"] as const;
+/** The stacks a sandbox preset can name, the automatic default first; "custom" and anything unknown has no chip. */
+const STACKS = ["auto", "node", "python", "rust", "go"] as const;
 
-const stackLabel = (id: string) => id.charAt(0).toUpperCase() + id.slice(1);
+const stackLabel = (id: string) => (id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1));
 
 /** Setup as the Settings dialog renders it. Everything but the rendering happened in setup.ts. */
 export function SetupSection({
@@ -91,6 +91,7 @@ export function SetupSection({
   };
 
   const currentPreset = stackPresetOf(sandbox?.settings);
+  const automatic = (currentPreset ?? "auto") === "auto";
   const pulling = pull.status?.state === "pulling";
 
   const pickStack = async (preset: string) => {
@@ -161,11 +162,11 @@ export function SetupSection({
           key={id}
           type="button"
           disabled={picking}
-          aria-pressed={(currentPreset ?? "node") === id}
+          aria-pressed={(currentPreset ?? "auto") === id}
           onClick={() => void pickStack(id)}
           className={cx(
             "cursor-pointer rounded-full border px-2.5 py-1 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-            (currentPreset ?? "node") === id
+            (currentPreset ?? "auto") === id
               ? "border-accent bg-accent-soft text-accent"
               : "border-border bg-panel text-muted hover:bg-panel-2 hover:text-text",
           )}
@@ -202,7 +203,8 @@ export function SetupSection({
         {stackChips}
         {(pullStatus === null || pullStatus.state === "idle" || pullStatus.state === "failed") && (
           <Button size="sm" onClick={() => void pull.start()} disabled={picking || pulling}>
-            {picking || pulling ? <Spinner /> : null} Download {stackLabel(currentPreset ?? "node")} image
+            {picking || pulling ? <Spinner /> : null}{" "}
+            {automatic ? "Download image" : `Download ${stackLabel(currentPreset ?? "auto")} image`}
           </Button>
         )}
         {notes(row)}

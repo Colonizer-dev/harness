@@ -161,11 +161,14 @@ pub struct PullStatus {
     pub generation: u64,
 }
 
-/// The image the sandbox module is configured to boot, after the stack preset.
+/// The image the sandbox module is configured to boot, after the stack preset. The Setup pane's
+/// pre-pull runs before any colony exists, so there is no repository to detect from and `auto`
+/// resolves to its fallback here — the per-repository answer happens when a colony's worktree is
+/// checked out, and by then this download has to be done or waiting on.
 fn configured_image(app: &crate::App, modules: &crate::config::ModulesConfig) -> String {
     let schema = crate::modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let preset = crate::config::setting_str(&modules.sandbox, &schema, "preset");
-    let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
+    let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(crate::presets::resolved(&preset)));
     crate::config::setting_str(&settings, &schema, "image")
 }
 

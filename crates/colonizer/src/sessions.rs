@@ -561,14 +561,66 @@ pub(crate) fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
         .unwrap_or(true)
 }
 
-/// The container image a colony boots: the stack preset's, unless modules.json names one. Takes the
-/// agent list rather than the app, so usage.rs can resolve the same image for its
+/// The container image a colony boots: what the given stack's preset names, unless modules.json sets
+/// an image of its own. The stack may be the configured one rather than a detected one, so it goes
+/// through [`crate::presets::resolved`] — a no-op for callers holding a repository in hand, and the
+/// fallback for the ones (the Setup pane, telemetry) that pass `auto` with nothing to detect from.
+/// Takes the agent list rather than the app, so usage.rs can resolve the same image for its
 /// changed-from-default check without an `App`.
-pub(crate) fn colony_image(agents: &[AgentModule], modules: &ModulesConfig) -> String {
+pub(crate) fn colony_image(agents: &[AgentModule], modules: &ModulesConfig, stack: &str) -> String {
     let schema = schema_for("sandbox", &modules.sandbox.provider, agents);
-    let preset = setting_str(&modules.sandbox, &schema, "preset");
-    let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
+    let settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(crate::presets::resolved(stack)));
     setting_str(&settings, &schema, "image")
+}
+
+/// The stack a colony boots and the line that explains the choice. An explicit preset or an org pin
+/// is the operator's decision and needs no explaining, so it comes back with no message; the two
+/// detection outcomes both carry one, because a wrong guess has to be diagnosable from the session
+/// log alone. Pure, so the rule is testable apart from the directory read and the logging that
+/// [`resolve_stack`] wraps around it — the way `queue::has_room` and `watchdog::decide` are written.
+fn stack_choice(configured: &str, detected: Option<&crate::presets::Detected>) -> (String, Option<String>) {
+    if configured != crate::presets::AUTO {
+        return (configured.to_string(), None);
+    }
+    match detected {
+        Some(found) => {
+            let image = crate::presets::find(found.stack).map(|p| p.image).unwrap_or_default();
+            (
+                found.stack.to_string(),
+                Some(format!("detected {} from {}, using {}", found.stack, found.marker, image)),
+            )
+        }
+        None => (
+            crate::presets::AUTO_FALLBACK.to_string(),
+            Some(format!(
+                "no stack marker found in the repository; using the {} stack",
+                crate::presets::AUTO_FALLBACK
+            )),
+        ),
+    }
+}
+
+/// The stack one colony boots: the configured one, or, when that is `auto`, what the repository's own
+/// marker files say. The answer is always concrete — `auto` never comes back out of this — and both
+/// detection branches log, because a wrong guess has to be diagnosable from the session log alone,
+/// without re-running anything.
+async fn resolve_stack(
+    modules: &ModulesConfig,
+    schema: &Value,
+    org: &orgs::OrgSettings,
+    worktree: &std::path::Path,
+    log: &SessionLogger,
+) -> String {
+    let configured = orgs::effective_stack(modules, schema, org);
+    // Only an `auto` install pays for the directory listing.
+    let detected = (configured == crate::presets::AUTO)
+        .then(|| crate::presets::detect_in(worktree))
+        .flatten();
+    let (stack, message) = stack_choice(&configured, detected.as_ref());
+    if let Some(message) = message {
+        log.info(message).await;
+    }
+    stack
 }
 
 /// Whether new colonies publish automatically: the publish module's `autopilot` setting. Takes the
@@ -838,6 +890,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     let s = ensure_starting(app, id).await?;
 
+    // The worktree exists by now — freshly checked out or kept from before — so a configured `auto`
+    // reads the repository this colony will actually work in, and the choice is on the session log
+    // before the VM boots. `org_settings` reads the orgs file with blocking IO; it moves up with the
+    // resolution because the org's own pin decides what detection is even asked.
+    let org_settings = app.org_settings(&s.org);
+    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    let stack = resolve_stack(&modules, &sandbox_schema, &org_settings, &wt, &log).await;
+
     timing.mark("git");
 
     let dir = app.session_dir(id);
@@ -846,14 +906,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let siblings = github::siblings_of(&app.sessions.read().await, &s);
     let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
-    let org_settings = app.org_settings(&s.org);
     let agent_choice = orgs::effective_agent(&modules, &org_settings);
     let mut runner_env = agent_env(&agent, &agent_choice);
-    // Resolved here rather than at the boot spec below: whether the sandbox preset is one the harness
-    // knows is one of the routing signals (an unknown preset never routes down to the cheapest tier),
-    // and the boot spec builds on the same two values.
-    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
-    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.
@@ -876,7 +930,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &s.issue_title,
         issue.as_ref().and_then(|i| i["body"].as_str()).unwrap_or(&s.instructions),
         &task_labels,
-        crate::presets::find(&preset).is_some(),
+        // The RESOLVED stack, not the configured preset: `auto` is not a preset the harness
+        // knows, so asking `find` about it would call every auto-detected repository unknown
+        // and refuse it the cheapest tier — including the ones detection identified exactly.
+        crate::presets::find(&stack).is_some(),
     );
     let tier_decision = crate::routing::decide(&route_settings, &task_signals);
     let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
@@ -962,8 +1019,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
     }
-    // What the colony can and cannot run is part of the agent's brief (runner.mjs).
-    runner_env.insert("COLONIZER_IMAGE".into(), Value::String(colony_image(&app.agents, &modules)));
+    // What the colony can and cannot run is part of the agent's brief (runner.mjs), so it names the
+    // image this colony actually boots — the resolved stack's, not the configured one — or an agent
+    // in a repository detected as Rust would brief itself for a Node machine.
+    runner_env.insert(
+        "COLONIZER_IMAGE".into(),
+        Value::String(colony_image(&app.agents, &modules, &stack)),
+    );
 
     // The private mesh needs the three vendored binaries. Without them a colony is reached on a
     // loopback port rather than failing to boot.
@@ -1219,10 +1281,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         net_profiles.push("host".into());
     }
 
-    // The chosen stack fills in image and machine size; anything set explicitly
-    // in modules.json still wins. See crates/colonizer/src/presets.rs. `sandbox_schema` and the
-    // preset id were resolved above, where model routing reads the preset.
-    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
+    // The chosen stack fills in image and machine size — detected from the
+    // repository when the configured preset was `auto`, otherwise the one the
+    // operator or the org pinned — and anything set explicitly in modules.json
+    // still wins. See crates/colonizer/src/presets.rs.
+    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&stack));
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
@@ -2337,5 +2400,67 @@ pub(crate) mod tests {
              must never ask about it later"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A pin is the operator's decision: an explicit preset and `custom` both come back unchanged,
+    /// with nothing to explain, even when the repository carries a marker that would have detected.
+    #[test]
+    fn a_pinned_stack_skips_detection_and_logs_nothing() {
+        let detected = crate::presets::Detected {
+            stack: "node",
+            marker: "package.json".to_string(),
+        };
+        for configured in ["rust", crate::presets::CUSTOM] {
+            let (stack, message) = stack_choice(configured, Some(&detected));
+            assert_eq!(stack, configured, "the pin decides, not the repository");
+            assert!(message.is_none(), "{configured} has nothing to explain");
+        }
+    }
+
+    /// `auto` over a repository with markers takes the detected stack, and the log line names both
+    /// the file that decided and the image that will boot.
+    #[test]
+    fn auto_uses_the_detected_stack_and_names_the_marker_and_image() {
+        let detected = crate::presets::Detected {
+            stack: "rust",
+            marker: "Cargo.toml".to_string(),
+        };
+        let (stack, message) = stack_choice(crate::presets::AUTO, Some(&detected));
+        assert_eq!(stack, "rust");
+        assert_eq!(
+            message.as_deref(),
+            Some("detected rust from Cargo.toml, using rust:1-bookworm"),
+            "the log names the stack, the marker that chose it, and the image"
+        );
+    }
+
+    /// A marker in a subdirectory keeps its repo-relative path in the log, so the log says which
+    /// file decided.
+    #[test]
+    fn a_subdirectory_marker_names_the_file_that_decided() {
+        let detected = crate::presets::Detected {
+            stack: "node",
+            marker: "web/package.json".to_string(),
+        };
+        let (stack, message) = stack_choice(crate::presets::AUTO, Some(&detected));
+        assert_eq!(stack, "node");
+        let message = message.expect("detection logs what it saw");
+        assert!(
+            message.contains("web/package.json"),
+            "the log should carry the subdirectory path, got {message:?}"
+        );
+    }
+
+    /// `auto` over a repository with no markers falls back, and says so rather than silently
+    /// picking one.
+    #[test]
+    fn auto_with_no_marker_found_falls_back_and_says_so() {
+        let (stack, message) = stack_choice(crate::presets::AUTO, None);
+        assert_eq!(stack, crate::presets::AUTO_FALLBACK);
+        assert_eq!(
+            message.as_deref(),
+            Some("no stack marker found in the repository; using the node stack"),
+            "the fallback is logged, not silent"
+        );
     }
 }
