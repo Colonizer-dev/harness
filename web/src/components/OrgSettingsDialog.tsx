@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
+import { orgEnabled } from "../orgs";
 import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
-import { IconOrg, IconX } from "./icons";
+import { Avatar } from "./Avatar";
+import { IconX } from "./icons";
 import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
 import { Button, ModelInput, Spinner, Switch, cx, inputClass } from "./ui";
 
@@ -209,6 +211,16 @@ function withSkillsets(settings: OrgSettings, skillsets: Record<string, boolean>
   return { ...settings, agent: { ...settings.agent, skillsets: Object.keys(sorted).length ? sorted : null } };
 }
 
+/**
+ * The workspace switch is not an inherit/override field, but it still rides in the same settings
+ * payload: off is an explicit `false`; on is `null` — inherit, which resolves to on — so an org
+ * nobody has touched carries no opinion of its own. Only this switch writes `enabled`, so
+ * "Inherit all" (the module-setting overrides) never re-enables a switched-off org.
+ */
+function withEnabled(settings: OrgSettings, enabled: boolean): OrgSettings {
+  return { ...settings, enabled: enabled ? null : false };
+}
+
 /** The skillsets switched on in Settings → Modules, which every org inherits. */
 function globalSkillsets(modules: ModuleInfo[] | null): string[] | null {
   const agent = modules?.find((m) => m.kind === "agent");
@@ -270,8 +282,15 @@ function OrgSettingsForm({
   const { listing } = usePlugins();
   const [draft, setDraft] = useState<Draft>(() => toDraft(info?.settings ?? {}, null));
   const [skillsets, setSkillsets] = useState(() => sortedSkillsets(info?.settings?.agent?.skillsets));
+  // Absent and null mean on; only an explicit false opens with the switch off.
+  const [enabled, setEnabled] = useState(() => orgEnabled(info?.settings));
   const [initial, setInitial] = useState(() =>
-    JSON.stringify(withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {})),
+    JSON.stringify(
+      withEnabled(
+        withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
+        orgEnabled(info?.settings),
+      ),
+    ),
   );
   const [saving, setSaving] = useState(false);
 
@@ -298,7 +317,7 @@ function OrgSettingsForm({
   }, [api]);
 
   const { settings: fields, error } = fromDraft(draft);
-  const settings = withSkillsets(fields, skillsets);
+  const settings = withEnabled(withSkillsets(fields, skillsets), enabled);
   const overrides = FIELDS.filter((spec) => draft[spec.key].override).length + Object.keys(skillsets).length;
   const inheritedSkillsets = globalSkillsets(modules);
   // Every installed skillset, plus any this org still names that is no longer installed.
@@ -343,9 +362,7 @@ function OrgSettingsForm({
   return (
     <div className="flex max-h-[calc(100dvh-24px)] flex-col">
       <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
-        <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
-          <IconOrg size={18} />
-        </div>
+        <Avatar name={org} src={info?.avatar_url} size={36} rounded="xl" />
         <div className="min-w-0 flex-1">
           <h2 id="org-settings-title" className="text-[16px] font-semibold [overflow-wrap:anywhere]">
             {org} workspace
@@ -365,6 +382,24 @@ function OrgSettingsForm({
       </div>
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
+        <section className="border-b border-border py-3">
+          <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Workspace</h3>
+          <div className="divide-y divide-border">
+            <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
+              <div className="min-w-0 flex-1 basis-44">
+                <div className="text-[13.5px] font-medium">Include in the workspace list</div>
+                <div className="text-[12px] text-muted">
+                  Off hides {org} from the workspace list and stops new colonies starting there. Its existing colonies stay listed
+                  and resumable, and you can switch it back on here at any time.
+                </div>
+              </div>
+              <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-[270px]">
+                <Switch checked={enabled} onChange={setEnabled} label={`Include ${org} as a workspace`} />
+                <span className="text-[13px]">{enabled ? "On" : "Off"}</span>
+              </div>
+            </div>
+          </div>
+        </section>
         {groups.map((group) => (
           <Fragment key={group}>
             <section className="border-b border-border py-3 last:border-b-0">

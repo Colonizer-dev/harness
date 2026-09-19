@@ -248,7 +248,8 @@ function OptionCard({
   );
 }
 
-function Indicator({ multi, checked }: { multi: boolean; checked: boolean }) {
+/** The radio/checkbox circle an option row starts with. Shared with the mothership's org prompt card. */
+export function Indicator({ multi, checked }: { multi: boolean; checked: boolean }) {
   return (
     <span
       aria-hidden="true"

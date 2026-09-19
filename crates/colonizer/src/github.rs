@@ -1,7 +1,7 @@
 //! GitHub source and publish modules: repositories, issues, worktrees and pull requests.
 
 use crate::{
-    ApiResult, App, Shared, client_error,
+    ApiResult, App, Shared, client_error, orgs,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
     util::{env_nonempty, exec, exec_status, fingerprint, read_trimmed, truncate, valid_repo, write_secret},
@@ -15,6 +15,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
     time::{Duration, Instant},
@@ -974,8 +975,14 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
     Ok(Json(repos))
 }
 
-/// Adds the signed-in user and every GitHub org they belong to to the known owners, so org workspaces
-/// show orgs whose repositories haven't been listed yet. Refreshes at most every five minutes.
+/// Refreshes the signed-in account's orgs: adopts the ones already on record as workspaces, drops
+/// the ones the account has left or the operator switched off, records avatars, and parks orgs that
+/// are new since the last look in `new_orgs` for the operator to decide on. The first refresh after
+/// an install — no `known-orgs.json` yet — adopts everything at once and says how many workspaces it
+/// added, so an upgrade never asks about orgs the account always had. A successful refresh is
+/// throttled to once every five minutes; a failing `gh` returns silently without recording the
+/// attempt — the list still answers from the record, so a failed refresh must not empty the
+/// workspace list — and is retried on the next call.
 pub async fn refresh_orgs(app: &App) {
     if app
         .orgs_refreshed
@@ -985,19 +992,79 @@ pub async fn refresh_orgs(app: &App) {
     {
         return;
     }
-    let Ok(orgs) = exec(&mut app.gh(["api", "--paginate", "/user/orgs?per_page=100", "--jq", ".[].login"])).await else {
+    let Ok(out) = exec(&mut app.gh([
+        "api",
+        "--paginate",
+        "/user/orgs?per_page=100",
+        "--jq",
+        ".[] | {login, avatar_url}",
+    ]))
+    .await
+    else {
         return;
     };
-    let mut owners: Vec<String> = orgs
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-    if let Ok(login) = exec(&mut app.gh(["api", "user", "--jq", ".login"])).await {
-        owners.push(login.trim().to_string());
+    let mut fetched: BTreeMap<String, Option<String>> = out.lines().filter_map(orgs::parse_org_line).collect();
+    // The signed-in login comes from the cached viewer — its TTL is the point, one `gh api user`
+    // serving every poll — with a plain lookup as the fallback, and neither failing aborts the
+    // refresh; it just proceeds without a login of its own.
+    let own = match viewer(app).await {
+        Ok(user) => user["login"]
+            .as_str()
+            .map(|login| (login.to_string(), user["avatar_url"].as_str().map(String::from))),
+        Err(_) => exec(&mut app.gh(["api", "user", "--jq", ".login"]))
+            .await
+            .ok()
+            .map(|login| (login.trim().to_string(), None)),
+    };
+    if let Some((login, avatar)) = own.as_ref() {
+        fetched.insert(login.clone(), avatar.clone());
     }
-    app.repo_owners.write().await.extend(owners);
+    let known_before = app.known_orgs();
+    let first_run = known_before.is_none();
+    let plan = orgs::reconcile_orgs(
+        &fetched,
+        known_before.as_ref(),
+        &app.all_org_settings(),
+        own.as_ref().map(|(login, _)| login.as_str()).unwrap_or_default(),
+    );
+    // Update the seen-set and the avatar cache, but only touch the disk when something actually
+    // changed: a quiet five-minute refresh writes nothing. A first run records everything seen —
+    // switched-off orgs included, they are still orgs the operator belongs to — and after that every
+    // decided org is re-recorded with whatever face the fetch brought, switched-off and declined
+    // ones included: an avatar belongs to the org, not to its workspace status. The line the
+    // recording may not cross — an org still awaiting an answer — is
+    // [`orgs::recordable_sightings`]'s to hold, since writing that sighting would make the next
+    // refresh adopt the org without ever asking. A first run writes even when it saw nothing: the
+    // record's existence is what marks the first run done.
+    let mut known = known_before.unwrap_or_default();
+    let mut known_changed = first_run;
+    for login in orgs::recordable_sightings(&fetched, &plan) {
+        if orgs::merge_known(&mut known, login, fetched.get(login).and_then(|avatar| avatar.as_deref())) {
+            known_changed = true;
+        }
+    }
+    if known_changed && let Err(e) = app.save_known_orgs(&known) {
+        eprintln!("orgs: could not save {}: {e:#}", app.known_orgs_file().display());
+    }
+    // Owners of repositories the account merely collaborates on come from `list_repos` and are not
+    // ours to prune, so only this refresh's adoptions and drops are applied.
+    {
+        let mut owners = app.repo_owners.write().await;
+        for org in &plan.adopted {
+            owners.insert(org.clone());
+        }
+        for org in &plan.dropped {
+            owners.remove(org);
+        }
+    }
+    *app.new_orgs.write().await = plan.awaiting;
+    if plan.first_run_adopted > 0 {
+        eprintln!(
+            "orgs: adopted {} workspace{} from the signed-in GitHub account; each can be switched off in its org settings",
+            plan.first_run_adopted,
+            if plan.first_run_adopted == 1 { "" } else { "s" }
+        );
+    }
     *app.orgs_refreshed.lock().await = Some(std::time::Instant::now());
 }
 
