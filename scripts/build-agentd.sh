@@ -6,9 +6,19 @@
 #   scripts/build-agentd.sh           build
 #   scripts/build-agentd.sh --smoke   build, then run it inside a node:24-bookworm microVM
 #
-# COLONIZER_BUILD_HERE=1 builds in the current environment instead of a microVM. The release workflow
-# sets it when it is already running inside rust:1-alpine, where no microVM can start.
+# COLONIZER_BUILD_HERE=1 builds in the current environment instead of a microVM, which has to be
+# Linux, since this binary runs in a Linux colony; on a non-musl Linux the result links against the
+# host's libc, which may be newer than the colony image's (Debian bookworm, glibc 2.36) and fail to
+# start there. The release workflow sets it when it is already running inside rust:1-alpine, where no
+# microVM can start.
 set -eu
+
+# Here mode follows the host, so off Linux it would silently produce a binary no colony can exec, and
+# every colony would die on it at the readiness timeout. Refuse before anything is built or moved.
+if [ "${COLONIZER_BUILD_HERE:-}" = 1 ] && [ "$(uname -s)" != Linux ]; then
+  echo "COLONIZER_BUILD_HERE=1 builds colonizer-agentd for the current environment, but the binary has to run in a Linux colony; unset COLONIZER_BUILD_HERE to build it in the rust:1-alpine microVM instead" >&2
+  exit 1
+fi
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 MSB=${MSB:-$HOME/.local/bin/msb}
@@ -46,6 +56,17 @@ else
     -w /src \
     rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release -p colonizer-agentd --target-dir /build-target'
 fi
+
+# Either branch must produce a Linux binary, and rust:1-alpine ships no file(1) to say so, so compare
+# the ELF magic directly, which needs only the head and printf busybox always has, before a
+# wrong-host artefact can land in dist/bin.
+elf_or_die() {
+  [ "$(head -c 4 "$1")" = "$(printf '\177ELF')" ] || {
+    echo "$1 is not an ELF binary, so it cannot run in a colony" >&2
+    exit 1
+  }
+}
+elf_or_die "$REPO/target/alpine/release/colonizer-agentd"
 
 install -m 755 "$REPO/target/alpine/release/colonizer-agentd" "$OUT"
 file "$OUT"
