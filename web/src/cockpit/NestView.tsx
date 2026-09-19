@@ -9,6 +9,7 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 
 import { AntAvatar, type AntState } from "../components/AntAvatar";
+import { Avatar } from "../components/Avatar";
 import { SESSION_STATUS, type Tone } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { SubagentView } from "../sessionStream";
@@ -82,6 +83,7 @@ export function NestView({
   mothershipSelected,
   settlers,
   backlogCount,
+  avatarFor,
   onSelect,
   onOpen,
   onSelectMothership,
@@ -95,6 +97,8 @@ export function NestView({
   settlers: SubagentView[];
   /** Open issues across the workspace's repositories; the frontier's badge. */
   backlogCount: number;
+  /** The org's avatar, for the chamber's own badge; null when nothing knows one. */
+  avatarFor: (org: string) => string | null;
   onSelect: (id: string) => void;
   onOpen: (id: string) => void;
   onSelectMothership: () => void;
@@ -371,6 +375,10 @@ export function NestView({
                   animation: "ck-grow 0.7s cubic-bezier(.2,.9,.3,1.15)",
                 }}
               >
+                {/* Below ~112px the chamber only has room for the label, the status and the ants. */}
+                {diameter >= 112 && (
+                  <Avatar name={session.repo.split("/")[0]} src={avatarFor(session.repo.split("/")[0])} size={22} rounded="md" />
+                )}
                 <span className="max-w-full truncate font-mono text-[11px] font-medium text-text">
                   {chamberLabel(session, diameter)}
                 </span>

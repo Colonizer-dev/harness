@@ -8,7 +8,7 @@ import type { ReactElement } from "react";
 import { AntAvatar } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
-import { SESSION_STATUS, type Tone, canPublish, isLive, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, isLive, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { SubagentView } from "../sessionStream";
 import type { HarnessStatus, Session, UpdateStatus } from "../types";
@@ -46,6 +46,7 @@ const money = (amount: number | null | undefined) => (amount == null ? "—" : `
 
 export function Inspector({
   target,
+  avatarUrl,
   settlers,
   status,
   liveCount,
@@ -62,6 +63,8 @@ export function Inspector({
   onOpenSettings,
 }: {
   target: InspectorTarget;
+  /** The colony's org avatar; null when nothing knows one and the initial stands in. */
+  avatarUrl: string | null;
   /** Real settlers, present only while this colony's stream is open; empty otherwise. */
   settlers: SubagentView[];
   status: HarnessStatus | null;
@@ -124,7 +127,7 @@ export function Inspector({
             </svg>
           </span>
         ) : (
-          session && <Avatar name={session.repo.split("/")[0]} size={34} rounded="lg" />
+          session && <Avatar name={session.repo.split("/")[0]} src={avatarUrl} size={34} rounded="lg" />
         )}
         <div className="min-w-0 flex-1">
           <div className="truncate font-mono text-[11.5px] text-muted">
@@ -318,7 +321,9 @@ export function Inspector({
                   stop
                 </button>
               )}
-              {session.status === "stopped" && canPublish(session) && (
+              {/* The same condition the colony view's Resume button uses, so the two cannot disagree
+                  about whether a colony can be picked back up. */}
+              {!isLive(session.status) && !session.cleaned_up && (session.status === "stopped" || session.status === "failed") && (
                 <button
                   type="button"
                   onClick={() => onResume(session.id)}

@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useApi } from "../context";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
+import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { HarnessStatus, OrgInfo, Repo, Session, UpdateStatus } from "../types";
@@ -130,6 +131,11 @@ export function Cockpit({
     };
   }, [api, status?.github.connected]);
 
+  // orgEntries decides what counts as a workspace: an org still awaiting a decision is not one yet
+  // (the prompt card is where that is answered), and a switched-off one is hidden. The rail and the
+  // switcher must agree with the sidebar about that, so they read the same function.
+  const workspaces = useMemo(() => orgEntries(orgs, sessions).visible, [orgs, sessions]);
+
   const inOrg = useMemo(
     () => sortSessions(selectedOrg ? sessions.filter((s) => sameOrg(orgOf(s), selectedOrg)) : sessions),
     [sessions, selectedOrg],
@@ -143,6 +149,13 @@ export function Cockpit({
   const backlogCount = repos
     .filter((r) => !selectedOrg || sameOrg(r.full_name.split("/")[0], selectedOrg))
     .reduce((total, r) => total + r.open_issues_count, 0);
+
+  // Avatars come from /api/orgs, which keys them by org; a colony whose owner is not a workspace
+  // (or an older mothership that sends none) falls back to the initial the Avatar draws.
+  const avatarFor = useCallback(
+    (org: string) => workspaces.find((w) => sameOrg(w.org, org))?.avatar ?? null,
+    [workspaces],
+  );
 
   // Only one stream at a time: the colony view opens its own, so the nest only listens while it is
   // the view on screen. Without this the open colony would carry two sockets.
@@ -233,6 +246,7 @@ export function Cockpit({
             mothershipSelected={inspector?.kind === "mothership"}
             settlers={settlers}
             backlogCount={backlogCount}
+            avatarFor={avatarFor}
             onSelect={(id) => {
               const session = sessions.find((s) => s.id === id);
               if (session) {
@@ -251,7 +265,7 @@ export function Cockpit({
   return (
     <div className="cockpit grid h-full min-h-0 grid-cols-[56px_minmax(0,1fr)] bg-bg text-text">
       <Rail
-        orgs={orgs}
+        orgs={workspaces}
         selectedOrg={selectedOrg}
         onSelectOrg={(org) => {
           onSelectOrg(org);
@@ -267,7 +281,7 @@ export function Cockpit({
       />
       <div className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
         <Header
-          orgs={orgs}
+          orgs={workspaces}
           selectedOrg={selectedOrg}
           onSelectOrg={(org) => {
             onSelectOrg(org);
@@ -287,6 +301,7 @@ export function Cockpit({
           {view === "home" && inspector && (
             <Inspector
               target={inspector}
+              avatarUrl={inspector.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
               settlers={inspector.kind === "colony" ? settlers : []}
               status={status}
               liveCount={liveCount}

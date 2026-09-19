@@ -2,7 +2,8 @@ import { useState } from "react";
 import type { ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
-import type { OrgInfo, UpdateStatus } from "../types";
+import type { OrgEntry } from "../orgs";
+import type { UpdateStatus } from "../types";
 
 // Chip text and its tooltip are derived together so they can never disagree.
 function versionChip(update: UpdateStatus): string {
@@ -20,7 +21,8 @@ function updateTitle(update: UpdateStatus): string {
 }
 
 export function Header(props: {
-  orgs: OrgInfo[];
+  /** Workspaces only: orgEntries() has already dropped the undecided and the switched-off. */
+  orgs: OrgEntry[];
   selectedOrg: string | null;
   onSelectOrg: (org: string) => void;
   /** Colonies of that org waiting on an answer — not the same thing as its pending memory notes. */
@@ -60,7 +62,7 @@ export function Header(props: {
           onClick={() => setMenuOpen((open) => !open)}
           className="-ml-2 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-semibold text-text transition-colors hover:bg-panel-2"
         >
-          <Avatar name={orgName} src={current?.avatar_url} size={18} rounded="md" />
+          <Avatar name={orgName} src={current?.avatar} size={18} rounded="md" />
           {orgName}
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-faint">
             <path d="m6 9 6 6 6-6" />
@@ -88,10 +90,10 @@ export function Header(props: {
                     onClick={() => pickOrg(o.org)}
                     className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left transition-colors ${active ? "bg-accent-soft" : "hover:bg-panel-2"}`}
                   >
-                    <Avatar name={o.org} src={o.avatar_url} size={28} rounded="md" />
+                    <Avatar name={o.org} src={o.avatar} size={28} rounded="md" />
                     <span className="min-w-0">
                       <span className="block truncate text-[13.5px] font-semibold text-text">{o.org}</span>
-                      <span className="block font-mono text-[11px] text-faint">{o.colonies.total} colonies · {o.colonies.live} live</span>
+                      <span className="block font-mono text-[11px] text-faint">{o.total} colonies · {o.live} live</span>
                     </span>
                     {/* Silent when nothing waits: the row should only speak up when it has something to ask for. */}
                     <span className="font-mono text-[11px] tabular-nums text-warn">{need > 0 ? `${need} need you` : ""}</span>

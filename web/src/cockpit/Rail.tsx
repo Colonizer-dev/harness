@@ -2,7 +2,7 @@ import type { ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { LogoMark } from "../components/Sidebar";
-import type { OrgInfo } from "../types";
+import type { OrgEntry } from "../orgs";
 
 export type CockpitView = "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory";
 
@@ -13,7 +13,8 @@ const SQUARE = "grid h-9 w-9 shrink-0 place-items-center rounded-[10px] transiti
 const viewTone = (active: boolean) => (active ? "text-accent" : "text-muted");
 
 export function Rail(props: {
-  orgs: OrgInfo[];
+  /** Workspaces only: orgEntries() has already dropped the undecided and the switched-off. */
+  orgs: OrgEntry[];
   selectedOrg: string | null;
   onSelectOrg: (org: string) => void;
   view: CockpitView;
@@ -56,7 +57,7 @@ export function Rail(props: {
             onClick={() => onSelectOrg(o.org)}
             className={`${SQUARE} relative hover:bg-panel-2 ${active ? "ring-2 ring-accent" : ""}`}
           >
-            <Avatar name={o.org} src={o.avatar_url} size={26} rounded="md" />
+            <Avatar name={o.org} src={o.avatar} size={26} rounded="md" />
             {need > 0 && (
               // Panel-coloured ring keeps the dot legible over any avatar image.
               <span
