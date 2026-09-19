@@ -116,7 +116,8 @@ pub struct Terminal {
 /// The sandbox stack, without the image string itself, which is user free text.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Sandbox {
-    /// The stack preset's id, or `unknown` if the configured preset is not one the harness knows.
+    /// The stack as configured: `auto` when detection is in use, a preset id otherwise, or `unknown`
+    /// if the configured preset is not one the harness knows.
     pub preset: &'static str,
     /// Whether the image a colony actually boots differs from the one the resolved stack names.
     pub image_changed_from_default: bool,
@@ -161,11 +162,14 @@ fn bucket_ms(ms: u64) -> &'static str {
     }
 }
 
-/// The sandbox stack as a closed label: a preset id from the table, or `unknown` when a hand-edited
+/// The sandbox stack as a closed label: `auto` when detection is in use — reported as configured,
+/// never resolved to the stack it would fall back to, since showing whether detection is in use is
+/// the whole point of the field — a preset id from the table, or `unknown` when a hand-edited
 /// modules.json names a preset the harness has never heard of.
 fn preset_label(preset: &str) -> &'static str {
     match presets::find(preset) {
         Some(found) => found.id,
+        None if preset == presets::AUTO => presets::AUTO,
         None if preset == presets::CUSTOM => presets::CUSTOM,
         None => "unknown",
     }
@@ -177,7 +181,9 @@ fn image_baseline(preset: &str, schema: &Value) -> String {
     // `presets::defaults` and not `presets::find(..).image`: a preset's image is pinned by digest
     // from vendor.lock before a colony boots, so the bare tag never equals what `colony_image`
     // resolves and every default install would otherwise report its image as changed.
-    match presets::defaults(preset)["image"].as_str() {
+    // `resolved` first: on an install left on `auto` there is no per-colony answer to compare
+    // against, so the baseline is the fallback's rather than whatever the schema default is.
+    match presets::defaults(presets::resolved(preset))["image"].as_str() {
         Some(image) => image.to_string(),
         None => schema["properties"]["image"]["default"]
             .as_str()
@@ -310,8 +316,11 @@ fn build(
         },
         sandbox: Sandbox {
             preset: preset_label(&preset),
-            // Only the comparison is sent: the image string itself is user free text.
-            image_changed_from_default: sessions::colony_image(agents, modules) != image_baseline(&preset, &sandbox_schema),
+            // Only the comparison is sent: the image string itself is user free text. The configured
+            // preset, not any colony's detected one — telemetry reports what the install does, and
+            // this code has no repository in hand to detect from.
+            image_changed_from_default: sessions::colony_image(agents, modules, &preset)
+                != image_baseline(&preset, &sandbox_schema),
         },
         autopilot: Autopilot {
             enabled: sessions::autopilot_default(agents, modules),
@@ -738,7 +747,9 @@ mod tests {
         "5-15s",
         "15-60s",
         "60s+",
-        // Sandbox stacks: the preset ids, plus the label for one the harness does not know.
+        // Sandbox stacks: `auto` (detection in use, reported as configured), the preset ids, plus
+        // the label for one the harness does not know.
+        "auto",
         "node",
         "python",
         "rust",
@@ -1238,6 +1249,11 @@ mod tests {
         assert_eq!(preset_label("node"), "node");
         assert_eq!(preset_label("rust"), "rust");
         assert_eq!(preset_label("custom"), "custom");
+        assert_eq!(
+            preset_label("auto"),
+            "auto",
+            "detection is what this field exists to show, so it is never resolved to its fallback"
+        );
         assert_eq!(preset_label("acme-private-stack"), "unknown");
     }
 
@@ -1248,9 +1264,13 @@ mod tests {
         assert_eq!(
             batch.sandbox,
             Sandbox {
-                preset: "node",
+                preset: "auto",
                 image_changed_from_default: false
             }
+        );
+        assert!(
+            !batch.sandbox.image_changed_from_default,
+            "a fresh install on auto boots the fallback image and must not be reported as changed"
         );
 
         let mut pinned = ModulesConfig::default();

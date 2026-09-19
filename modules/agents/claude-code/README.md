@@ -7,7 +7,8 @@ lines on stdout, diagnostics on stderr.
 - Streaming-input session: every `user_message` command becomes a turn (or joins the current one).
 - Questions: Claude is told to ask only via `AskUserQuestion`. The call is routed through `canUseTool`
   and surfaced as a `question` event keyed by the tool-use id; the matching `answer` command resolves
-  it. All other tools are allowed (the microVM is the sandbox).
+  it. Under the default `delegate = enforce` the orchestrator itself is limited to planning, asking
+  and delegating; every other tool stays with its subagents (the microVM is the sandbox).
 - Text streams as `assistant_text_delta` and settles as `assistant_text`; tool calls, tool results
   (capped at 20 000 characters) and `turn_end` (cost, duration) follow the protocol.
 

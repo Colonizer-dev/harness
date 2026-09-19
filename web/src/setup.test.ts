@@ -83,7 +83,7 @@ const input = (over: Partial<SetupInput> = {}): SetupInput => ({
   status: status(),
   pull: pull("cached"),
   telemetry: telemetry(true),
-  stackPreset: "node",
+  stackPreset: "auto",
   sessionCount: 0,
   now: NOW,
   ...over,
@@ -261,8 +261,21 @@ describe("setupRows", () => {
       expect(stack.notes.join(" ")).toContain("when it boots");
     });
 
-    it("defaults to the Node stack when no preset is saved", () => {
-      expect(row(input({ stackPreset: null }), "stack").detail).toContain("Node");
+    it("defaults to the automatic stack when no preset is saved, and says the repository decides", () => {
+      const stack = row(input({ stackPreset: null }), "stack");
+      expect(stack.detail).toContain("Automatic");
+      expect(stack.notes.join(" ")).toContain("repository");
+    });
+
+    it("reads an explicit auto the same way: Automatic, with the per-repository note", () => {
+      const stack = row(input({ stackPreset: "auto" }), "stack");
+      expect(stack.detail).toContain("Automatic");
+      expect(stack.notes.join(" ")).toContain("repository");
+    });
+
+    it("adds no per-repository note once a stack is picked by hand", () => {
+      expect(row(input({ stackPreset: "node" }), "stack").notes).toEqual([]);
+      expect(row(input({ stackPreset: "node" }), "stack").detail).toContain("Node");
     });
   });
 
@@ -542,7 +555,7 @@ describe("errorDetail", () => {
 });
 
 describe("stackPresetOf", () => {
-  it("reads a saved preset and reads nothing as the default Node stack", () => {
+  it("reads a saved preset and reads blank, missing or non-string as null — what null means (automatic) is stackLabel's to say", () => {
     expect(stackPresetOf({ preset: "python", image: "x" })).toBe("python");
     expect(stackPresetOf({ preset: "  " })).toBeNull();
     expect(stackPresetOf({})).toBeNull();

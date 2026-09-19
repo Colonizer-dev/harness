@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { buildOptions, DELEGATE_PROMPT_APPEND, delegationDecision } from '../runner.mjs';
+import { buildOptions, DELEGATE_PROMPT_APPEND, delegationDecision, ENFORCE_PROMPT_APPEND } from '../runner.mjs';
 
 const ORCHESTRATOR = {};
 const SUBAGENT = { agent_id: 'agent_01' };
 
 test('the orchestrator keeps planning, asking and delegating', () => {
-  for (const tool of ['Task', 'Agent', 'AskUserQuestion', 'TodoWrite', 'ExitPlanMode']) {
+  for (const tool of ['Task', 'Agent', 'AskUserQuestion', 'TodoWrite', 'EnterPlanMode', 'ExitPlanMode']) {
     assert.equal(delegationDecision(tool, {}, ORCHESTRATOR), null, tool);
   }
   // Shared memory is the orchestrator's own context, not work handed to a subagent.
   assert.equal(delegationDecision('mcp__colonizer_memory__memory_search', {}, ORCHESTRATOR), null);
+});
+
+// Regression guard for issue #182, where the gate refused 98.5% of SendMessage calls: the Agent tool's
+// result text hands back an agentId to continue with SendMessage, ListAgents is the directory that
+// resolves that id, and TaskStop retires a background agent, so the harness was inviting exactly what
+// its own gate refused.
+test('the directing tools the harness\'s own text points the orchestrator at are allowed', () => {
+  for (const tool of ['SendMessage', 'ListAgents', 'TaskStop']) {
+    assert.equal(delegationDecision(tool, {}, ORCHESTRATOR), null, tool);
+  }
 });
 
 test('waiting passes the gate for the orchestrator and its subagents alike', () => {
@@ -22,7 +32,7 @@ test('waiting passes the gate for the orchestrator and its subagents alike', () 
 });
 
 test('the orchestrator is refused the work itself, by name', () => {
-  for (const tool of ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'WebFetch']) {
+  for (const tool of ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'WebFetch', 'TaskOutput']) {
     const reason = delegationDecision(tool, {}, ORCHESTRATOR);
     assert.ok(reason, `${tool} should be refused`);
     assert.match(reason, new RegExp(`^${tool} belongs to your subagents`));
@@ -63,6 +73,18 @@ test('both delegating modes tell the agent, and off says nothing', () => {
   assert.ok(!appendOf({ COLONIZER_DELEGATE: 'off' }).includes(DELEGATE_PROMPT_APPEND));
   assert.ok(appendOf({ COLONIZER_DELEGATE: 'encourage' }).includes(DELEGATE_PROMPT_APPEND));
   assert.ok(appendOf({ COLONIZER_DELEGATE: 'enforce' }).includes(DELEGATE_PROMPT_APPEND));
+});
+
+test('the enforced boundary is named in the prompt under enforce, and only there', () => {
+  const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude' };
+  const appendOf = (env) => buildOptions({ ...base, ...env }).options.systemPrompt.append;
+  assert.ok(appendOf({ COLONIZER_DELEGATE: 'enforce' }).includes(ENFORCE_PROMPT_APPEND));
+  assert.ok(appendOf({}).includes(ENFORCE_PROMPT_APPEND), 'the default is enforce');
+  assert.ok(!appendOf({ COLONIZER_DELEGATE: 'encourage' }).includes(ENFORCE_PROMPT_APPEND), 'encourage has no gate, so the text would be false');
+  assert.ok(!appendOf({ COLONIZER_DELEGATE: 'off' }).includes(ENFORCE_PROMPT_APPEND), 'off has no gate either');
+  for (const tool of ['SendMessage', 'Bash']) {
+    assert.ok(ENFORCE_PROMPT_APPEND.includes(tool), `${tool} is named so the model need not rediscover it`);
+  }
 });
 
 test('the installed hook denies with the reason the model will read', async () => {

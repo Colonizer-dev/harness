@@ -31,6 +31,17 @@ export const DELEGATE_PROMPT_APPEND = [
 ].join('\n');
 
 /**
+ * The enforced boundary, in the model's own words. Claude Code derives a Task subagent's tool pool
+ * from the session's own, so the tools the gate refuses cannot be removed from the orchestrator's
+ * list without removing them from the subagents doing the work; naming the boundary here is what
+ * stops the model rediscovering it one refused call at a time.
+ */
+export const ENFORCE_PROMPT_APPEND = [
+  '- Delegation is enforced in this colony: the only tools you may call yourself are Task (or Agent) to start a subagent, SendMessage, ListAgents and TaskStop to direct the ones you started, AskUserQuestion, TodoWrite, EnterPlanMode and ExitPlanMode, the colony\'s mcp__colonizer_* tools, and Write to /harness/out/pr.md.',
+  '- Every other tool you can see — Bash and Read included — belongs to your subagents. Calling one yourself is refused and costs a turn, so hand that work to a subagent instead.',
+].join('\n');
+
+/**
  * What the colony can and cannot reach, so no model spends a turn discovering it. `image` is the container image the
  * mothership booted (COLONIZER_IMAGE).
  */
@@ -154,8 +165,27 @@ export function endsWithQuestion(text) {
 export const MAX_TOOL_OUTPUT = 20_000;
 const ASK_TOOL = 'AskUserQuestion';
 
-/** Tools the orchestrator keeps when delegation is enforced: planning, asking, delegating, memory. */
-const ORCHESTRATOR_TOOLS = new Set(['Task', 'Agent', ASK_TOOL, 'TodoWrite', 'ExitPlanMode']);
+/**
+ * Tools the orchestrator keeps when delegation is enforced, grouped by why each is not subagent work.
+ * Everything else is refused by delegationDecision, including tools the harness's own text invites.
+ */
+const ORCHESTRATOR_TOOLS = new Set([
+  // Delegating: `Task` is Claude Code's legacy alias for `Agent`, and sessions use both spellings.
+  'Task',
+  'Agent',
+  // Directing the subagents it already started. The harness's own prompt and the Agent tool's result
+  // text hand back an agentId to continue with SendMessage, so while the gate refused them SendMessage
+  // failed 98.5% of its calls (issue #182) — the invitation and the gate have to agree.
+  'SendMessage',
+  'ListAgents',
+  'TaskStop',
+  // Asking the user and keeping its own plan visible.
+  ASK_TOOL,
+  'TodoWrite',
+  // Planning: ExitPlanMode was allowed without EnterPlanMode, which was an oversight.
+  'EnterPlanMode',
+  'ExitPlanMode',
+]);
 
 /** The one thing the orchestrator writes itself; the harness reads it to open the pull request. */
 const OUT_DIR = '/harness/out';
@@ -166,6 +196,14 @@ const OUT_DIR = '/harness/out';
  * Only the main thread is constrained: a subagent's own calls carry `agent_id` in the hook input, and
  * subagents doing the work is the entire point. Unknown tools are refused rather than allowed, so a
  * tool added later cannot quietly become an orchestrator shortcut.
+ *
+ * The notable refusals stay refused on purpose. Read, Grep, Glob, WebFetch and WebSearch are not
+ * beyond the orchestrator, but everything they return stays in its context for the rest of the
+ * colony, and a subagent's focused report is the cheaper way in — DELEGATE_PROMPT_APPEND already
+ * makes that argument. Bash, Edit, Write and NotebookEdit are the work itself, which is what
+ * subagents are for (Write, Edit and Read under /harness/out stay allowed for the pull request
+ * description). TaskOutput returns a subagent's raw transcript, the same context blow-up by another
+ * route, and a background subagent reports on its own.
  */
 export function delegationDecision(toolName, toolInput = {}, hookInput = {}) {
   if (hookInput.agent_id) return null;
@@ -297,6 +335,8 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
+  // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
+  if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
   // Keyed on the skill file, not the directory name, so an operator's own copy of superpowers switches on too.
   for (const dir of pluginDirs) {
     const skill = readText(join(dir, SUPERPOWERS_SKILL));
