@@ -4,7 +4,7 @@ import { Avatar } from "../components/Avatar";
 import { LogoMark } from "../components/Sidebar";
 import type { OrgEntry } from "../orgs";
 
-export type CockpitView = "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory";
+export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory";
 
 // Shared geometry for the 36px squares so every rail button reads as one family.
 const SQUARE = "grid h-9 w-9 shrink-0 place-items-center rounded-[10px] transition-colors";
@@ -52,12 +52,13 @@ export function Rail(props: {
       aria-label="rail"
       className="relative z-20 flex w-14 shrink-0 flex-col items-center gap-1.5 border-r border-border bg-panel py-3"
     >
-      <RailItem label="colonizer · base">
+      <RailItem label="overview · every colony">
         <button
           type="button"
-          aria-label="colonizer · base"
-          onClick={() => onNavigate("home")}
-          className={`${SQUARE} hover:bg-panel-2`}
+          aria-label="overview · every colony"
+          aria-pressed={view === "overview"}
+          onClick={() => onNavigate("overview")}
+          className={`${SQUARE} hover:bg-panel-2 ${view === "overview" ? "bg-accent-soft" : ""}`}
         >
           <LogoMark size={26} />
         </button>

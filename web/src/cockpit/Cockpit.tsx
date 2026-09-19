@@ -19,13 +19,14 @@ import { InboxView } from "./InboxView";
 import { Inspector, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
+import { OverviewView } from "./OverviewView";
 import { Rail, type CockpitView } from "./Rail";
 import { needCountByOrg } from "./feed";
 
 const VIEW_KEY = "colonizer.cockpitView";
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["home", "colony", "launch", "inbox", "history", "settings", "memory"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -38,6 +39,7 @@ function storedTheme(): "light" | "dark" | null {
 }
 
 const CRUMB: Record<CockpitView, string> = {
+  overview: "overview",
   home: "nest",
   colony: "colony",
   launch: "launch",
@@ -220,6 +222,20 @@ export function Cockpit({
         return memory;
       case "settings":
         return settings(() => setView("home"));
+      case "overview":
+        return (
+          <OverviewView
+            sessions={sessions}
+            orgs={workspaces}
+            cost={sessions.length ? sessions.reduce((t, x) => t + (x.cost_usd ?? 0) + (x.routed_cost_usd ?? 0), 0) : null}
+            onOpenOrg={(org) => {
+              onSelectOrg(org);
+              setView("home");
+              setInspector(null);
+            }}
+            onOpenColony={openColonyById}
+          />
+        );
       case "launch":
         return (
           <LaunchView

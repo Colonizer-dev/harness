@@ -157,3 +157,12 @@ export function needCountByOrg(sessions: Session[]): Record<string, number> {
   }
   return counts;
 }
+
+/**
+ * The overview's one-line summary: what wants a person first, then what is simply running.
+ * Here rather than in the view because it is the only prose in it that has rules.
+ */
+export function headlineFor(need: number, live: number): string {
+  if (need > 0) return `${need} ${need === 1 ? "colony needs" : "colonies need"} you · ${live} working`;
+  return live > 0 ? `All quiet · ${live} working` : "All quiet";
+}

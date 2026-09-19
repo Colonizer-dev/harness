@@ -22,6 +22,7 @@ import {
   slotAt,
   surfaceGrass,
   tunnelPath,
+  tunnelSeed,
   type NestBox,
 } from "./nest";
 
@@ -134,7 +135,10 @@ export function NestView({
   const placed = chambers.map((session, index) => {
     const slot = slotAt(index, box);
     const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
-    return { session, slot, index, edge: TONE_VAR[tone], path: tunnelPath(slot, box) };
+    const seed = tunnelSeed(session.repo, session.issue);
+    // Steps are only known for the colony whose stream is open, so only its branches are dug.
+    const branches = branchPaths(slot, session.id === selectedId ? selectedSteps : 0, box, seed);
+    return { session, slot, index, edge: TONE_VAR[tone], path: tunnelPath(slot, box, seed), branches };
   });
 
   return (
@@ -205,51 +209,44 @@ export function NestView({
           >
             <line x1="0" y1={SURFACE_Y} x2={box.width} y2={SURFACE_Y} stroke="var(--border-strong)" strokeWidth="1.5" />
 
-            {placed.flatMap(({ session, slot }) =>
-              branchPaths(slot, session.id === selectedId ? selectedSteps : 0, box).map((branch, k) => (
-                <path
-                  key={`${session.id}-b${k}`}
-                  d={branch.d}
-                  fill="none"
-                  stroke="var(--border-strong)"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                  strokeDasharray="100"
-                  pathLength={100}
-                  opacity="0.7"
-                  style={{ animation: "ck-dig 1.8s ease-out both" }}
-                />
+            {/* Side tunnels, dug the same way as the main corridor but narrower. */}
+            {placed.flatMap(({ session, branches }) =>
+              branches.map((branch, k) => (
+                <g key={`${session.id}-b${k}`} style={{ animation: "ck-dig 1.8s ease-out both" }}>
+                  <path d={branch.d} fill="none" stroke="var(--tunnel-wall)" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d={branch.d} fill="none" stroke="var(--tunnel-floor)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+                </g>
               )),
             )}
 
             {placed.map(({ session, path, edge }) => {
               const hot = isBusy(session.status) || needsYou(session);
+              const busy = isBusy(session.status);
               const digging = session.status === "starting";
               return (
                 <g key={session.id}>
+                  {/* Three passes make a corridor rather than a line: the earth it is cut through,
+                      the floor worn into it, and a thin line of traffic along the middle. */}
+                  <g style={{ animation: digging ? "ck-dig 3s ease-out both" : undefined }}>
+                    <path d={path} fill="none" stroke="var(--tunnel-wall)" strokeWidth="16" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d={path} fill="none" stroke="var(--tunnel-floor)" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" />
+                  </g>
                   <path
                     d={path}
                     fill="none"
                     stroke={hot ? edge : "var(--border-strong)"}
-                    strokeWidth={hot ? 2.5 : 1.5}
+                    strokeWidth="1.5"
                     strokeLinecap="round"
-                    strokeDasharray={digging ? "100" : hot ? "3 4" : "2 5"}
-                    pathLength={100}
-                    opacity={hot ? 0.55 : 0.4}
-                    style={{
-                      animation: digging
-                        ? "ck-dig 2.4s ease-out both"
-                        : isBusy(session.status)
-                          ? "ck-flow 1.4s linear infinite"
-                          : undefined,
-                    }}
+                    strokeDasharray={busy ? "3 6" : "2 7"}
+                    opacity={hot ? 0.7 : 0.35}
+                    style={{ animation: busy && !digging ? "ck-flow 1.6s linear infinite" : undefined }}
                   />
                   {/* A fat transparent copy so the tunnel itself is a target, not just the chamber. */}
                   <path
                     d={path}
                     fill="none"
                     stroke="transparent"
-                    strokeWidth="18"
+                    strokeWidth="22"
                     className="pointer-events-stroke cursor-pointer"
                     onClick={() => onSelect(session.id)}
                   />
@@ -258,35 +255,56 @@ export function NestView({
             })}
           </svg>
 
-          {/* Carriers: one ant per working colony, riding its own tunnel. */}
+          {/* Every working settler is out in a tunnel: the first hauls to the mothership and back,
+              the rest work the side branches their own steps dug. A colony whose stream is not open
+              has no settler list, so it sends the one ant that stands for the colony itself. */}
           {placed
             .filter(({ session }) => isBusy(session.status))
-            .map(({ session, path, slot, index }) => {
+            .flatMap(({ session, path, slot, index, branches }) => {
               const facingLeft = slot.x < mothershipX;
-              return (
-                <div
-                  key={`carry-${session.id}`}
-                  className="absolute left-0 top-0 z-[3]"
-                  style={{
-                    offsetPath: `path("${path}")`,
-                    offsetRotate: "0deg",
-                    offsetDistance: "0%",
-                    animation: `ck-carry ${7 + index * 1.3}s ease-in-out ${-index * 2.3}s infinite alternate`,
-                  } as CSSProperties}
-                >
-                  <button
-                    type="button"
-                    onClick={() => onSelect(session.id)}
-                    title={`${chamberLabel(session, 112)} · working`}
-                    aria-label={`${chamberLabel(session, 112)}, working`}
-                    className="block -translate-x-1/2 -translate-y-1/2 cursor-pointer"
+              const mine = session.id === selectedId ? settlers : [];
+              const active = mine.filter((a) => a.state === "working" || a.state === "thinking");
+              const crew = active.length ? active : mine.slice(0, 1);
+              // No real crew to show: one nameless ant for the colony.
+              const riders: (SubagentView | null)[] = crew.length ? crew : [null];
+              return riders.map((settler, k) => {
+                const branch = k > 0 && branches.length ? branches[(k - 1) % branches.length] : null;
+                const ride = branch ? branch.d : path;
+                const seconds = branch ? 12 + ((index * 7 + k * 5) % 6) : 26 + index * 3 + k * 4;
+                const doing = settler?.current?.name ?? settler?.last?.name ?? "working";
+                const who = settler ? `${settler.name} · ${doing}` : `${chamberLabel(session, 112)} · working`;
+                return (
+                  <div
+                    key={`carry-${session.id}-${settler?.agent.id ?? "solo"}`}
+                    className="absolute left-0 top-0 z-[3]"
+                    style={{
+                      offsetPath: `path("${ride}")`,
+                      offsetRotate: "0deg",
+                      offsetDistance: "0%",
+                      animation: `ck-carry ${seconds}s ease-in-out ${-((index * 5.3 + k * 7.1) % seconds)}s infinite`,
+                    } as CSSProperties}
                   >
-                    <span className="block" style={{ transform: `scaleX(${facingLeft ? -1 : 1})` }}>
-                      <AntAvatar state="working" size={26} phase={index} ground={false} framed={false} />
-                    </span>
-                  </button>
-                </div>
-              );
+                    <button
+                      type="button"
+                      onClick={() => onSelect(session.id)}
+                      title={who}
+                      aria-label={who}
+                      className="block -translate-x-1/2 -translate-y-1/2 cursor-pointer"
+                    >
+                      <span className="block" style={{ transform: `scaleX(${facingLeft ? -1 : 1})` }}>
+                        <AntAvatar
+                          state={settler?.state ?? "working"}
+                          role={settler?.role}
+                          size={26}
+                          phase={index + k}
+                          ground={false}
+                          framed={false}
+                        />
+                      </span>
+                    </button>
+                  </div>
+                );
+              });
             })}
 
           {/* The surface: colonies that returned a pull request walk it home, queued ones wait by the entrance. */}
