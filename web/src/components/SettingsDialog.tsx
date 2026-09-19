@@ -13,6 +13,7 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
+import { Avatar } from "./Avatar";
 import type {
   HarnessStatus,
   HeadroomStatus,
@@ -682,25 +683,8 @@ function Code({ children }: { children: ReactNode }) {
 // Connections: GitHub and Claude
 // ---------------------------------------------------------------------------
 
-/**
- * A remote account avatar, next to the login row. Same tile as a provider mark; the
- * panel background keeps it a quiet square if the image is missing or fails to load.
- * Decorative: `alt=""`, the login is already shown as text.
- */
-function Avatar({ src }: { src: string }) {
-  return (
-    <img
-      src={src}
-      alt=""
-      width={32}
-      height={32}
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      className="size-8 shrink-0 select-none rounded-lg bg-panel-2 object-cover"
-    />
-  );
-}
-
+// The account avatar beside the GitHub login row is the shared Avatar (`alt=""` — the login is
+// already shown as text), on the same quiet tile as a provider mark.
 function ConnectionCard({
   name,
   mark,
@@ -745,7 +729,7 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"
-          mark={github?.connected && github.avatar_url ? <Avatar src={github.avatar_url} /> : undefined}
+          mark={github?.connected && github.avatar_url ? <Avatar name={github.login || "GitHub"} src={github.avatar_url} /> : undefined}
           connected={github ? github.connected : null}
           detail={github?.connected ? `@${github.login} · ${github.source}` : github?.error?.split("\n")[0]}
           detailTone={github && !github.connected ? "err" : undefined}

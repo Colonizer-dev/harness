@@ -585,6 +585,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if !valid_repo(&repo) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
     }
+    // A switched-off workspace refuses new work but nothing else: colonies it already has stay
+    // listed, queueable and resumable, and its settings survive for the day it is switched back on.
+    let owner = repo.split('/').next().unwrap_or_default();
+    if !orgs::org_enabled(&app.org_settings(owner)) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("the {owner} workspace is switched off; turn it back on in its org settings to start a colony there"),
+        ));
+    }
     let modules = app.modules.read().await.clone();
     let agent = app
         .agents
@@ -734,6 +743,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     } else {
         tokio::spawn(boot(app.clone(), id, false));
     }
+    // Adoption by use: a colony started here is the operator's answer to "do you want this org?", so
+    // the org counts as seen and no prompt later asks about one they are already working in. The
+    // avatar from the pending sighting is recorded with it, so the org does not fall back to its
+    // initial for the minutes until the next refresh re-records it.
+    let pending_avatar = app.new_orgs.read().await.get(owner).cloned().flatten();
+    app.mark_org_known(owner, pending_avatar.as_deref());
     Ok(Json(session))
 }
 
@@ -2201,6 +2216,123 @@ pub(crate) mod tests {
         assert!(
             app.storage_alert.read().await.is_none(),
             "a colony that has never emitted an event has no events.jsonl, and that is not a failure"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- org workspaces on and off --------------------------------------------------------------
+
+    /// A throwaway App whose config switches the `acme` workspace off, the way an old install's
+    /// `orgs.json` plus one settings save leaves it.
+    async fn app_with_org_switched_off(id: &str, status: SessionStatus) -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = test_app(&root);
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        std::fs::write(app.cfg.config_dir.join("orgs.json"), r#"{"acme": {"enabled": false}}"#).unwrap();
+        let mut s = colony("acme", status);
+        s.id = id.to_string();
+        s.git_admin_dir = Some("git".into());
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        (app, root)
+    }
+
+    #[tokio::test]
+    async fn a_switched_off_org_refuses_new_colonies_and_names_the_way_back_on() {
+        let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
+        let err = create(
+            State(app.clone()),
+            Json(NewSession {
+                repo: "acme/app".into(),
+                issue: None,
+                title: String::new(),
+                instructions: String::new(),
+                autopilot: None,
+                allow_duplicate: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let message = err.1.to_string();
+        assert!(message.contains("acme"), "{message}");
+        assert!(message.contains("switched off"), "{message}");
+        assert!(
+            message.contains("org settings"),
+            "the message says what to do about it: {message}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn colonies_of_a_switched_off_org_stay_listed_and_resume() {
+        let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
+        let listed = list(State(app.clone())).await.0;
+        let kept = listed.iter().find(|s| s.id == "kept").unwrap();
+        assert_eq!(kept.org, "acme", "the colony is still in the list");
+        // The real resume path, not just its gate: the org's switch does not make `resume` refuse
+        // the colony — it is claimed and handed to a fresh boot like any other. The boot itself
+        // never runs here: the spawned task is dropped with the one-thread test runtime before it
+        // is polled, so nothing reaches for GitHub or a microVM.
+        let resumed = resume(State(app.clone()), Path("kept".into()))
+            .await
+            .unwrap_or_else(|e| panic!("resume refused a colony of a switched-off org: {:#}", e.1))
+            .0;
+        assert_eq!(resumed.id, "kept");
+        assert_eq!(
+            resumed.status,
+            SessionStatus::Starting,
+            "the resume claimed the colony and started a boot"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_about_it() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        // The smallest install `create` insists on: an agent module matching the configured provider
+        // and a guest binary that claims to be an ELF.
+        let assets = root.join("assets");
+        let dir = assets.join("modules/agents/claude-code");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
+        std::fs::create_dir_all(assets.join("bin")).unwrap();
+        std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
+        let agent = AgentModule {
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
+            description: String::new(),
+            dir,
+            entry: vec!["run".into()],
+            needs_claude: false,
+            schema: json!({}),
+        };
+        let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
+        // The org is still awaiting an answer when the colony starts, sighting and avatar both.
+        *app.new_orgs.write().await =
+            std::collections::BTreeMap::from([("acme".to_string(), Some("https://a/acme.png".to_string()))]);
+
+        let created = create(
+            State(app.clone()),
+            Json(NewSession {
+                repo: "acme/app".into(),
+                issue: None,
+                title: String::new(),
+                instructions: String::new(),
+                autopilot: None,
+                allow_duplicate: false,
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
+        assert_eq!(created.org, "acme");
+        assert_eq!(
+            app.known_orgs().unwrap().get("acme").cloned(),
+            Some(crate::orgs::KnownOrg {
+                avatar_url: Some("https://a/acme.png".into()),
+            }),
+            "working in an org is an answer, and the sighting's avatar is recorded with it; the prompt \
+             must never ask about it later"
         );
         let _ = std::fs::remove_dir_all(root);
     }
