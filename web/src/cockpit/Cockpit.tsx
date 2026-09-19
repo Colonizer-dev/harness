@@ -328,6 +328,7 @@ export function Cockpit({
               target={inspector}
               avatarUrl={inspector.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
               settlers={inspector.kind === "colony" ? settlers : []}
+              sessions={sessions}
               status={status}
               liveCount={liveCount}
               queuedCount={queuedCount}

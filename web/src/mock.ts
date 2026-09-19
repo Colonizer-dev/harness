@@ -809,6 +809,7 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
     status: "starting",
     branch: `colonizer/${slug}`,
     base: "main",
+    parent: null,
     worktree: `/home/you/.local/share/colonizer/worktrees/${repo}/${slug}`,
     git_admin_dir: `/home/you/.local/share/colonizer/repos/${repo}.git/worktrees/${slug}`,
     sandbox: `colony-${id}`,
@@ -1008,11 +1009,15 @@ export function createMockApi(): Api {
   failed.seedFailedHistory();
   failed.session.updated_at = ago(93);
   // A colony whose publish failed after committing (issue #85): "Finish PR" completes it on the
-  // existing worktree, no resume needed.
+  // existing worktree, no resume needed. It sits on a stack two deep — the demo checkout colony
+  // below the stalled one — so the stacked-on chip and the "N stacked on this" count have a chain
+  // to show without a mothership.
   const stuck = new MockSession({
     ...baseSession("stuck2468", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
     status: "failed",
     mesh: null,
+    parent: "stall5678",
+    base: "colonizer/issue-43-stall5678",
     error: "publish failed: git push was rejected by the remote",
     publish_stage: "committed",
     created_at: ago(50),
@@ -1127,11 +1132,14 @@ export function createMockApi(): Api {
     },
   ];
 
-  // A running colony the watchdog nudged, and a colony in a second org.
+  // A running colony the watchdog nudged, stacked on the demo checkout colony (its base is the
+  // demo branch, not main), and a colony in a second org.
   const stalled = new MockSession({
     ...baseSession("stall5678", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
     status: "running",
     mesh: { name: "colony-stall5678", ip: "100.64.0.7" },
+    parent: "demo1234",
+    base: "colonizer/issue-42-demo1234",
     created_at: ago(28),
   });
   stalled.seedStalled(proposals[0]);
@@ -1149,10 +1157,14 @@ export function createMockApi(): Api {
   sessions.set(octo.session.id, octo);
 
   // The rest of the lifecycle: a launch waiting for a slot, and a PR that was merged or closed.
+  // The queued one is stacked on the failed colony above it, so the queue reads as waiting for the
+  // parent colony rather than for a parallelism slot.
   const queued = new MockSession({
     ...baseSession("queue1357", "acme/webshop", 51, "Rate-limit the checkout API"),
     status: "queued",
     mesh: null,
+    parent: "stuck2468",
+    base: "colonizer/issue-43-stuck2468",
     created_at: ago(2),
   });
   queued.session.updated_at = ago(2);
@@ -1612,8 +1624,16 @@ export function createMockApi(): Api {
       const issueNumber = body.issue ?? null;
       const issue = ISSUES[body.repo]?.find((i) => i.number === issueNumber);
       const title = issueNumber == null ? "Open colony" : (body.title ?? issue?.title ?? `Issue #${issueNumber}`);
+      // `after` stacks the new colony on another's branch: `parent` records it and `base` moves to
+      // the parent's branch, which is what the mothership does. Creating a stack is API-only.
+      const after = body.after ? sessions.get(body.after)?.session ?? null : null;
       const session = new MockSession(
-        { ...baseSession(id, body.repo, issueNumber, title), autopilot: body.autopilot ?? true },
+        {
+          ...baseSession(id, body.repo, issueNumber, title),
+          autopilot: body.autopilot ?? true,
+          parent: after?.id ?? null,
+          base: after?.branch ?? "main",
+        },
         false,
         body.instructions ?? null,
       );

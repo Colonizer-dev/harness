@@ -4,7 +4,10 @@
 //! Whether a colony fits is a pure function (`has_room`), so the admission rule can be tested
 //! apart from the loop that applies it.
 
-use crate::{Shared, orgs};
+use crate::{
+    Shared, orgs,
+    stack::{self, Stacked},
+};
 use chrono::Utc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -41,8 +44,9 @@ pub(crate) async fn with_slot<T>(
     claim(&mut guard, room)
 }
 
-/// Starts queued colonies as slots free up, oldest first. A colony whose org is at its own limit doesn't
-/// hold up the ones behind it.
+/// Starts queued colonies as slots free up, oldest first. A colony whose org is at its own limit
+/// doesn't hold up the ones behind it, and neither does one waiting for the branch of the colony it
+/// is stacked on.
 pub async fn run_queue(app: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -58,9 +62,42 @@ pub async fn run_queue(app: Shared) {
 enum Claim {
     /// The colony is admitted: it is `Starting`, and the caller boots it.
     Start(Session),
-    /// The colony can never start, so the claim has taken it out of the queue; the caller says so and
-    /// moves on to the colonies behind it.
-    Retire(Session),
+    /// The colony can never start, so the claim has taken it out of the queue; the message says why
+    /// and the caller says so before moving on to the colonies behind it.
+    Retire(Session, String),
+}
+
+/// What holds a queued colony back before the slot rules even apply, decided on the snapshot: the
+/// stacking rule (`stack::stacked_on`) is the decision, and this is the queue's reading of it.
+enum Gate {
+    /// Nothing holds it back; the slot rules decide, as for any colony.
+    Admit,
+    /// Its parent has not pushed a branch yet. Look past it this tick — a child waiting on a slow
+    /// parent must not stall the colonies behind it — and look again next tick.
+    Hold,
+    /// Its parent can never provide a branch; the message names the parent and says why.
+    Retire(String),
+}
+
+fn gate(s: &Session, sessions: &[Session]) -> Gate {
+    // A colony with a kept worktree came from Resume, and resuming reuses the base it recorded at
+    // its first boot: `boot_inner` never consults its parent again, because the branch already
+    // exists on top of that base. The parent rule below is for fresh boots only — applied to a
+    // resume it would fail a colony for a branch it does not need, typically one whose parent's
+    // publish failed after the child had already built on it. `start_queued` reads the same flag to
+    // decide that the boot it spawns is a resume.
+    if s.git_admin_dir.is_some() {
+        return Gate::Admit;
+    }
+    let Some(parent_id) = s.parent.as_deref() else {
+        return Gate::Admit;
+    };
+    let parent = sessions.iter().find(|p| p.id == parent_id);
+    match stack::stacked_on(parent_id, parent) {
+        Stacked::Ready(_) => Gate::Admit,
+        Stacked::Wait => Gate::Hold,
+        Stacked::Refuse(reason) => Gate::Retire(reason),
+    }
 }
 
 /// The queue's decision for one colony, made while the admission lock is held. A colony that is still
@@ -82,11 +119,49 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         s.status = SessionStatus::Failed;
         s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
         s.updated_at = Utc::now();
-        return Some(Claim::Retire(s.clone()));
+        return Some(Claim::Retire(
+            s.clone(),
+            "was cleaned up while it waited in the queue, so it can never start".into(),
+        ));
     }
     s.status = SessionStatus::Starting;
     s.updated_at = Utc::now();
     Some(Claim::Start(s.clone()))
+}
+
+/// A queued colony stacked on a parent that can never provide a branch is failed with the reason, out
+/// of the queue: retired, not merely skipped, or it would sit `Queued` at the head of the queue
+/// forever. Retiring takes no slot, so it does not wait for one.
+fn claim_refused(s: &mut Session, reason: &str) -> Option<Claim> {
+    if s.status != SessionStatus::Queued {
+        return None; // claimed by something else between the snapshot and the lock
+    }
+    s.status = SessionStatus::Failed;
+    s.error = Some(reason.to_string());
+    s.updated_at = Utc::now();
+    Some(Claim::Retire(s.clone(), format!("can never start: {reason}")))
+}
+
+/// The queued colony this tick acts on, oldest first: the first one nothing holds back and that fits.
+/// A colony still waiting for its stacked-on parent's branch is looked past, so a slow parent cannot
+/// stall the colonies behind it, and the first one whose parent can never provide a branch stops the
+/// walk — it is retired where it stands, which needs no slot. `None` when nothing in the queue can
+/// move this tick.
+fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<(&Session, Option<String>)> {
+    let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
+    waiting.sort_by_key(|s| s.created_at);
+    for candidate in waiting {
+        match gate(candidate, sessions) {
+            Gate::Hold => continue,
+            Gate::Retire(reason) => return Some((candidate, Some(reason))),
+            Gate::Admit => {
+                if room(candidate) {
+                    return Some((candidate, None));
+                }
+            }
+        }
+    }
+    None
 }
 
 pub(crate) async fn start_queued(app: &Shared) {
@@ -95,20 +170,14 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
         let sessions = app.sessions.read().await.clone();
-        let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
-        waiting.sort_by_key(|s| s.created_at);
-        let Some(next) = waiting
-            .into_iter()
-            .find(|s| {
-                has_room(
-                    &sessions,
-                    &s.org,
-                    max_parallel,
-                    orgs::org_max_parallel(&app.org_settings(&s.org)),
-                )
-            })
-            .cloned()
-        else {
+        let Some((next, refuse)) = next_queued(&sessions, |s| {
+            has_room(
+                &sessions,
+                &s.org,
+                max_parallel,
+                orgs::org_max_parallel(&app.org_settings(&s.org)),
+            )
+        }) else {
             return;
         };
         // Re-checked and claimed under one write lock, so neither another tick nor a concurrent create or
@@ -116,19 +185,17 @@ pub(crate) async fn start_queued(app: &Shared) {
         let org_limit = orgs::org_max_parallel(&app.org_settings(&next.org));
         let claimed = with_slot(&app.sessions, &next.org, max_parallel, org_limit, |sessions, room| {
             let s = sessions.iter_mut().find(|s| s.id == next.id)?;
-            claim_queued(s, room)
+            match refuse.as_deref() {
+                Some(reason) => claim_refused(s, reason),
+                None => claim_queued(s, room),
+            }
         })
         .await;
         match claimed {
             None => return,
-            Some(Claim::Retire(retired)) => {
+            Some(Claim::Retire(retired, message)) => {
                 app.persist_and_broadcast(&retired).await;
-                app.session_log(
-                    &retired.id,
-                    "warn",
-                    "was cleaned up while it waited in the queue, so it can never start".into(),
-                )
-                .await;
+                app.session_log(&retired.id, "warn", message).await;
                 continue;
             }
             Some(Claim::Start(starting)) => {
@@ -191,7 +258,7 @@ mod tests {
         s.cleaned_up = true;
         let claim = claim_queued(&mut s, true);
         assert!(
-            matches!(claim, Some(Claim::Retire(_))),
+            matches!(claim, Some(Claim::Retire(..))),
             "a cleaned-up colony is retired, not started"
         );
         assert_eq!(
@@ -212,6 +279,162 @@ mod tests {
             "a queued colony with everything intact starts"
         );
         assert_eq!(waiting.status, SessionStatus::Starting);
+    }
+
+    /// A parent another colony could be stacked on, with the id and branch the tests need.
+    fn parent_colony(id: &str, status: SessionStatus, branch: &str) -> Session {
+        let mut p = colony("acme", status);
+        p.id = id.into();
+        p.branch = branch.into();
+        p
+    }
+
+    /// A queued colony stacked on `parent_id`, in the queue ahead of anything created later.
+    fn queued_child(id: &str, parent_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = colony("acme", SessionStatus::Queued);
+        s.id = id.into();
+        s.parent = Some(parent_id.into());
+        s.created_at = created_at;
+        s
+    }
+
+    #[test]
+    fn a_child_waits_while_its_parent_is_running() {
+        let sessions = vec![
+            queued_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::Running, "colonizer/issue-1-parent"),
+        ];
+        assert!(
+            next_queued(&sessions, |_| true).is_none(),
+            "the parent has not pushed a branch yet, so the child keeps waiting"
+        );
+    }
+
+    #[test]
+    fn a_child_waiting_on_its_parent_does_not_block_an_unrelated_colony_behind_it() {
+        let sessions = vec![
+            queued_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::Running, "colonizer/issue-1-parent"),
+            {
+                let mut unrelated = colony("acme", SessionStatus::Queued);
+                unrelated.id = "unrelated".into();
+                unrelated.created_at = Utc::now() + chrono::Duration::minutes(1);
+                unrelated
+            },
+        ];
+        let (picked, refuse) = next_queued(&sessions, |_| true).expect("something in the queue can move");
+        assert_eq!(picked.id, "unrelated", "the child waiting on its parent is looked past");
+        assert!(refuse.is_none(), "the unrelated colony starts, it is not retired");
+    }
+
+    #[test]
+    fn a_child_whose_parent_has_pushed_its_branch_starts_like_any_other_colony() {
+        let sessions = vec![
+            queued_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::PrOpened, "colonizer/issue-1-parent"),
+        ];
+        let (picked, refuse) =
+            next_queued(&sessions, |_| true).expect("the parent's branch is on the remote, so the child starts");
+        assert_eq!(picked.id, "child");
+        assert!(refuse.is_none());
+        // But it still waits for a slot like everyone else.
+        assert!(next_queued(&sessions, |_| false).is_none(), "no room, nothing moves");
+    }
+
+    #[test]
+    fn a_child_whose_parent_failed_is_retired_with_a_message_naming_the_parent() {
+        let sessions = vec![
+            queued_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::Failed, "colonizer/issue-1-parent"),
+        ];
+        let Some((picked, refuse)) = next_queued(&sessions, |_| true) else {
+            panic!("the child is retired, not left sitting at the head of the queue");
+        };
+        assert_eq!(picked.id, "child", "the child is what this tick acts on");
+        let reason = refuse.expect("the retirement says why");
+        assert!(reason.contains("parent"), "the parent is named: {reason}");
+        assert!(reason.contains("failed"), "and the reason is named: {reason}");
+
+        // The claim takes the child out of the queue with that reason as its error.
+        let mut queued = queued_child("child", "parent", Utc::now());
+        let claim = claim_refused(&mut queued, &reason);
+        assert!(matches!(claim, Some(Claim::Retire(..))), "retired, not started");
+        assert_eq!(queued.status, SessionStatus::Failed, "out of the queue for good");
+        assert_eq!(queued.error.as_deref(), Some(reason.as_str()));
+        // A colony claimed in the meantime is left alone.
+        let mut starting = colony("acme", SessionStatus::Starting);
+        assert!(claim_refused(&mut starting, &reason).is_none());
+        assert_eq!(starting.status, SessionStatus::Starting);
+    }
+
+    /// A queued colony that is resuming: a kept worktree means `boot_inner` will reuse the base it
+    /// recorded at its first boot and never ask its parent for a branch.
+    fn queued_resume(id: &str, parent_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = stopped_colony_with_worktree("acme", id.into());
+        s.status = SessionStatus::Queued;
+        s.parent = Some(parent_id.into());
+        s.base = Some("colonizer/issue-1-parent".into());
+        s.created_at = created_at;
+        s
+    }
+
+    #[test]
+    fn a_queued_resume_starts_even_when_its_parent_cannot_lend_a_branch() {
+        // A child booted from its parent's branch, was stopped, and was queued for resume while the
+        // slots were full; the parent's publish then failed. Retiring the child for a branch it does
+        // not need would silently cancel the operator's resume — doubly wrong, since the parent did
+        // push and the child is not asking for anything.
+        let sessions = vec![
+            queued_resume("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::Failed, "colonizer/issue-1-parent"),
+        ];
+        let (picked, refuse) = next_queued(&sessions, |_| true).expect("a resume-capable colony moves whatever its parent did");
+        assert_eq!(picked.id, "child");
+        assert!(
+            refuse.is_none(),
+            "the parent's failure is not this colony's: it starts, it is not retired"
+        );
+    }
+
+    #[test]
+    fn a_queued_resume_is_not_held_while_its_parent_is_still_running() {
+        // Held, a resumed colony would sit in the queue forever behind a parent whose branch it
+        // never looks at.
+        let sessions = vec![
+            queued_resume("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::Running, "colonizer/issue-1-parent"),
+        ];
+        let (picked, refuse) = next_queued(&sessions, |_| true).expect("the resume does not wait on its parent");
+        assert_eq!(picked.id, "child");
+        assert!(refuse.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_queue_holds_a_waiting_child_and_retires_one_whose_parent_is_gone() {
+        let root = std::env::temp_dir().join(format!("colonizer-queue-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut waiting = queued_child("waits", "live-parent", Utc::now());
+        waiting.created_at = Utc::now() - chrono::Duration::minutes(2);
+        let mut doomed = queued_child("doomed", "dead-parent", Utc::now());
+        doomed.created_at = Utc::now() - chrono::Duration::minutes(1);
+        let sessions = vec![
+            parent_colony("live-parent", SessionStatus::Running, "colonizer/issue-1-live"),
+            parent_colony("dead-parent", SessionStatus::Failed, ""),
+            waiting,
+            doomed,
+        ];
+        *app.sessions.write().await = sessions;
+        // No colony here can start, so nothing is booted and nothing reaches for GitHub or a microVM.
+        start_queued(&app).await;
+        let sessions = app.sessions.read().await;
+        let held = sessions.iter().find(|s| s.id == "waits").unwrap();
+        assert_eq!(held.status, SessionStatus::Queued, "its parent is still running");
+        let retired = sessions.iter().find(|s| s.id == "doomed").unwrap();
+        assert_eq!(retired.status, SessionStatus::Failed, "its parent can never provide a branch");
+        let error = retired.error.as_deref().unwrap_or_default();
+        assert!(error.contains("dead-parent") && error.contains("failed"), "{error}");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

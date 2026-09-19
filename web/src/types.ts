@@ -34,6 +34,8 @@ export interface Session {
   status: SessionStatus;
   branch: string;
   base: string | null;
+  /** The colony this one is stacked on: it branched from that colony's branch instead of the default one, which is what `base` then holds. null for an unstacked colony — absent in live data, since the backend omits the field when there is no parent. */
+  parent?: string | null;
   worktree: string;
   /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
   git_admin_dir: string | null;
@@ -649,4 +651,6 @@ export interface NewSessionRequest {
   autopilot?: boolean;
   /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
   allow_duplicate?: boolean;
+  /** Stack the new colony on another's branch: the parent session's id, which becomes `parent` and whose branch becomes `base`. Launching a stack is API-only; no form picker yet. */
+  after?: string;
 }

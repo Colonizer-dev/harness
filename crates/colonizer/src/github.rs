@@ -395,7 +395,14 @@ pub async fn touched_files(app: &App, sessions: &[Session], s: &Session) -> Hash
     touched
 }
 
-pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: bool, siblings: &[String]) -> String {
+pub fn build_prompt(
+    s: &Session,
+    issue: Option<&Value>,
+    base: &str,
+    resumed: bool,
+    siblings: &[String],
+    stacked_on: Option<&str>,
+) -> String {
     use std::fmt::Write;
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
 
@@ -431,6 +438,19 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
             "This colony was resumed after its microVM stopped, so nothing from the earlier session is in your \
              context, but the worktree is as it was left. Run `git status` and `git diff` first and continue from \
              there rather than starting the task over. `/harness/out/pr.md` may already exist.\n"
+        );
+    }
+    if let Some(branch) = stacked_on {
+        // Without this the agent sees unfamiliar unmerged code in its tree and reads it as a problem
+        // to fix. It is the task: the colony was created with `after`, and this is whose branch it
+        // starts from.
+        let _ = writeln!(
+            p,
+            "This colony is stacked on another colony's work: its branch starts from `{branch}`, that colony's \
+             not-yet-merged branch, so the worktree already contains changes you did not make. Build on them \
+             rather than undoing them, and don't treat them as something to fix. Your pull request will be a \
+             diff against `{branch}` rather than against the default branch, and it can only be merged once \
+             that colony's own work is.\n"
         );
     }
     if !siblings.is_empty() {
@@ -581,6 +601,21 @@ pub async fn pr_state(app: &App, url: &str) -> Result<PrState> {
     .context("GitHub API timed out")??;
     let view: PrView = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
     pr_state_from(&view.state, view.merged).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
+}
+
+/// Points an open pull request at a different base branch: the moment a colony's stack resolves. A
+/// stacked colony's pull request was opened against the branch it was stacked on, and once that
+/// colony's work merges the child belongs on that colony's own base. GitHub retargets on its own
+/// only when the base branch is deleted, which never happens here, so the watcher calls this
+/// explicitly.
+pub async fn retarget_pr(app: &App, pr_url: &str, base: &str) -> Result<()> {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "edit", pr_url, "--base", base])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    Ok(())
 }
 
 const COLONIZER_CO_AUTHOR: &str = "Co-Authored-By: Colonizer <noreply@colonizer.dev>";
@@ -1244,7 +1279,7 @@ mod tests {
         );
         assert!(lines.iter().any(|l| l.contains("an open session")), "{lines:?}");
 
-        let prompt = build_prompt(&me, None, "main", false, &lines);
+        let prompt = build_prompt(&me, None, "main", false, &lines, None);
         assert!(prompt.contains("<siblings>") && prompt.contains("</siblings>"));
         assert!(
             prompt.contains("#12 Cover letter per listing"),
@@ -1281,7 +1316,7 @@ mod tests {
             "another repository is not a sibling"
         );
         assert!(
-            !build_prompt(&me, None, "main", false, &[]).contains("<siblings>"),
+            !build_prompt(&me, None, "main", false, &[], None).contains("<siblings>"),
             "a colony working alone is told nothing about siblings"
         );
     }
@@ -1315,7 +1350,7 @@ mod tests {
             "no entry in the map at all reads exactly like before: {quiet}"
         );
 
-        let prompt = build_prompt(&me, None, "main", false, &lines);
+        let prompt = build_prompt(&me, None, "main", false, &lines, None);
         assert!(
             prompt.contains("— touching crates/colonizer/src/github.rs, web/src/app.tsx"),
             "the file lists reach the prompt's <siblings> block: {prompt}"
@@ -1350,7 +1385,7 @@ mod tests {
     #[test]
     fn the_prompt_states_the_pull_request_size_budget() {
         let me = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
-        let prompt = build_prompt(&me, None, "main", false, &[]);
+        let prompt = build_prompt(&me, None, "main", false, &[], None);
         assert!(
             prompt.contains(&format!(
                 "a soft ceiling of {PR_LINE_BUDGET} changed lines across {PR_FILE_BUDGET} files"
@@ -1426,6 +1461,53 @@ mod tests {
             assert!(check_publish_branch(branch, "main").is_err(), "{branch}");
         }
         assert!(check_publish_branch("colonizer/release", "Colonizer/Release").is_err());
+    }
+
+    #[test]
+    fn a_stacked_colony_publishes_onto_another_colonys_branch_but_never_onto_its_own_base() {
+        // A stacked colony's base is another colony's colonizer/ branch, which is a legal base to
+        // publish against; no change to the guard was needed for stacking to work.
+        assert!(check_publish_branch("colonizer/issue-10-b1b2c3d4", "colonizer/issue-9-a1a2a3a4").is_ok());
+        assert!(
+            check_publish_branch("colonizer/issue-9-a1a2a3a4", "colonizer/issue-9-a1a2a3a4").is_err(),
+            "a branch and its base may not coincide, whatever kind of branch the base is"
+        );
+        assert!(
+            check_publish_branch("main", "main").is_err(),
+            "the default branch is still refused, as a branch or as a base"
+        );
+    }
+
+    #[test]
+    fn a_stacked_colony_is_told_what_its_work_builds_on() {
+        let mut me = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
+        me.parent = Some("source".into());
+        let prompt = build_prompt(
+            &me,
+            None,
+            "colonizer/issue-12-source",
+            false,
+            &[],
+            Some("colonizer/issue-12-source"),
+        );
+        assert!(
+            prompt.contains("`colonizer/issue-12-source`"),
+            "the branch is named: {prompt}"
+        );
+        assert!(
+            prompt.contains("diff against `colonizer/issue-12-source`"),
+            "and the prompt says what the pull request will target: {prompt}"
+        );
+        // A colony that ends up on the default branch — its parent merged before it started — is
+        // told nothing: there is no unmerged work in its tree to explain.
+        let plain = build_prompt(&me, None, "main", false, &[], None);
+        assert!(!plain.contains("stacked"), "{plain}");
+        // Nor is one that was never stacked at all.
+        me.parent = None;
+        assert!(
+            !build_prompt(&me, None, "main", false, &[], None).contains("stacked"),
+            "an ordinary colony's prompt does not mention stacking"
+        );
     }
 
     #[test]

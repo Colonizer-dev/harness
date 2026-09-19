@@ -614,6 +614,7 @@ function SessionList({
                 {(session.cost_usd != null || (session.routed_cost_usd ?? 0) > 0) && (
                   <span>· ${((session.cost_usd ?? 0) + (session.routed_cost_usd ?? 0)).toFixed(2)}</span>
                 )}
+                {session.parent && <span>· stacked</span>}
                 {session.cleaned_up && <span>· cleaned up</span>}
                 <AttentionBadge attention={session.attention} />
               </div>
