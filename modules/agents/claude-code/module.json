@@ -72,7 +72,7 @@
       "delegate": {
         "type": "string",
         "title": "Delegation",
-        "description": "Enforce (the default): the orchestrator may only plan, ask and delegate — reading, editing and running commands are refused, so the work happens in subagents on the subagent model. Encourage: it is asked to hand implementation to subagents. Off: the orchestrator does the work itself. Encourage: it is asked to hand implementation to subagents. Enforce: it may only plan, ask and delegate — reading, editing and running commands are refused, so the work happens in subagents on the subagent model.",
+        "description": "Enforce (the default): the orchestrator may only plan, ask and delegate — reading, editing and running commands are refused, so the work happens in subagents on the subagent model. Encourage: it is asked to hand implementation to subagents. Off: the orchestrator does the work itself.",
         "enum": ["off", "encourage", "enforce"],
         "default": "enforce",
         "env": "COLONIZER_DELEGATE"
