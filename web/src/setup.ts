@@ -49,7 +49,7 @@ export interface SetupInput {
   pull: PullStatus | null;
   /** GET /api/telemetry; null while the first fetch is still in the air — the same as unanswered. */
   telemetry: TelemetryStatus | null;
-  /** `modules.sandbox.settings.preset`; null or blank selects the default Node stack. */
+  /** `modules.sandbox.settings.preset`; null or blank selects the automatic stack, read off each repository when the colony boots. */
   stackPreset: string | null;
   /** How many sessions exist, any status. */
   sessionCount: number;
@@ -120,7 +120,8 @@ export function errorDetail(error: string, source?: string | null): { head: stri
 
 /**
  * The stack a sandbox module names, as `SetupInput` wants it: null unless `preset` is a
- * non-blank string, which reads as the default Node stack. Settings arrive untyped off the wire.
+ * non-blank string, and null — no longer the Node stack — is the automatic one, chosen per
+ * repository when the colony boots. Settings arrive untyped off the wire.
  */
 export function stackPresetOf(settings: Record<string, unknown> | null | undefined): string | null {
   const preset = settings?.preset;
@@ -271,10 +272,10 @@ function machineRow(status: HarnessStatus): SetupRow {
 // Row 2 — Stack
 // ---------------------------------------------------------------------------
 
-const STACK_LABELS: Record<string, string> = { node: "Node", python: "Python", rust: "Rust", go: "Go" };
+const STACK_LABELS: Record<string, string> = { auto: "Automatic", node: "Node", python: "Python", rust: "Rust", go: "Go" };
 
 const stackLabel = (preset: string | null | undefined): string => {
-  const key = preset?.trim() || "node";
+  const key = preset?.trim() || "auto";
   return STACK_LABELS[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
 };
 
@@ -288,6 +289,14 @@ function stackRow(input: SetupInput): SetupRow {
   let error: string | undefined;
   let fix: string | undefined;
   const notes: string[] = [];
+
+  // The row tracks the pre-pull image; the stack it serves is the repository's to decide once a
+  // colony boots, so under automatic — unset, blank or an explicit "auto" — say where the
+  // decision happens instead of implying Node.
+  const preset = input.stackPreset?.trim();
+  if (!preset || preset === "auto") {
+    notes.push("Each colony's stack is read off its repository when it boots; this image is the Node fallback.");
+  }
 
   switch (pull?.state) {
     case "cached":

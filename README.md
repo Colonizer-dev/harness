@@ -208,7 +208,7 @@ mothership also tells you when a newer release is out, and can install it.
 | Kind | Providers today | Next |
 | :--- | :--- | :--- |
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
-| `sandbox` | microsandbox (KVM microVMs), with presets for Node, Python, Rust and Go, each image pinned by digest | other VMMs `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
 | `agent` | Claude Code, with the orchestrator or its subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
@@ -219,7 +219,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request. Off until configured, and the webhook carries no repository content — colony, event and time only | Slack or email relays `PLANNED` |
 
 Every GitHub org is a workspace with its own overrides for models, the parallel limit, the per-colony
-budget and host-disk quota, memory, the watchdog and notifications. Model providers (DeepSeek, a server on your LAN or
+budget and host-disk quota, the sandbox stack, memory, the watchdog and notifications. Model providers (DeepSeek, a server on your LAN or
 tailnet, any Anthropic-compatible endpoint)
 are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
 keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to

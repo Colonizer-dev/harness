@@ -63,9 +63,30 @@ pub const PRESETS: &[Preset] = &[
 
 pub const CUSTOM: &str = "custom";
 
-/// The preset ids offered in Settings, in order, with `custom` last.
+/// The id meaning "detect the stack from the repository" instead of naming one.
+/// It is offered first in Settings; wherever there is no repository to look at,
+/// it resolves through [`resolved`] to [`AUTO_FALLBACK`].
+pub const AUTO: &str = "auto";
+
+/// What `auto` falls back to when a repository names no stack: exactly what
+/// colonies booted before detection existed.
+pub const AUTO_FALLBACK: &str = "node";
+
+/// The preset ids offered in Settings, in order: `auto` first so detection is
+/// the visible default, then every preset, then `custom` last.
 pub fn ids() -> Vec<&'static str> {
-    PRESETS.iter().map(|p| p.id).chain(std::iter::once(CUSTOM)).collect()
+    std::iter::once(AUTO)
+        .chain(PRESETS.iter().map(|p| p.id))
+        .chain(std::iter::once(CUSTOM))
+        .collect()
+}
+
+/// The stack an id names when there is no repository to look at: `auto` has
+/// nothing to detect from, so it means its fallback, and any other id names
+/// itself. This exists because the Setup pane's image pre-pull and the
+/// telemetry baseline run with no worktree in hand.
+pub fn resolved(id: &str) -> &str {
+    if id == AUTO { AUTO_FALLBACK } else { id }
 }
 
 pub fn find(id: &str) -> Option<&'static Preset> {
@@ -122,6 +143,99 @@ pub fn defaults(id: &str) -> Value {
         }),
         None => json!({}),
     }
+}
+
+/// The file names that name a stack, and the preset each one means.
+///
+/// The ORDER here is the tie-break at equal depth, and it is chosen by what a
+/// wrong guess costs: a compiled toolchain is the expensive one to add to a
+/// running colony, while a Node toolchain is an apt-get away from any of the
+/// others, and the reverse is not true. So when a repository is both, it is
+/// treated as the compiled one.
+const MARKERS: &[(&str, &str)] = &[
+    ("Cargo.toml", "rust"),
+    ("go.mod", "go"),
+    ("pyproject.toml", "python"),
+    ("requirements.txt", "python"),
+    ("setup.py", "python"),
+    ("Pipfile", "python"),
+    ("package.json", "node"),
+];
+
+/// A detection result: not just the answer but the file that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Detected {
+    /// The preset id the marker names.
+    pub stack: &'static str,
+    /// The marker that chose it, repo-relative, so a wrong guess is diagnosable
+    /// from the log.
+    pub marker: String,
+}
+
+/// The stack a set of files names, or `None` when none of them is a marker, in
+/// which case the caller keeps its configured stack rather than guessing.
+///
+/// `paths` are repo-relative and `/`-separated. A path matches when its last
+/// `/`-separated segment equals a marker name. A marker at the root beats one
+/// in a subdirectory, so a Rust service with a `web/package.json` front end is
+/// Rust; at equal depth the one earlier in [`MARKERS`] wins.
+///
+/// Matches rank by `(is_not_root, marker_index, path)` and the minimum wins,
+/// so the answer never depends on the order `paths` arrives in.
+pub fn detect<S: AsRef<str>>(paths: &[S]) -> Option<Detected> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let path = path.as_ref();
+            let name = match path.rsplit_once('/') {
+                Some((_dir, name)) => name,
+                None => path,
+            };
+            MARKERS
+                .iter()
+                .position(|(marker, _)| *marker == name)
+                .map(|index| (path.contains('/'), index, path))
+        })
+        .min()
+        .map(|(_not_root, index, path)| Detected {
+            stack: MARKERS[index].1,
+            marker: path.to_string(),
+        })
+}
+
+/// [`detect`] over a real repository: markers at the root, and one level below,
+/// where a monorepo's `web/package.json` sits. Only marker file names are
+/// collected, never a whole listing, and dot-directories and build output are
+/// skipped on the way down.
+///
+/// An unreadable directory yields no markers rather than an error: the caller
+/// falls back to its configured stack when detection finds nothing, so a tree
+/// that cannot be read must never stop a colony booting.
+pub fn detect_in(root: &std::path::Path) -> Option<Detected> {
+    // VCS state and build output say nothing about the stack, and `target/`
+    // alone can hold tens of thousands of entries.
+    const SKIP: &[&str] = &["node_modules", "target", "dist", "build", "vendor"];
+
+    fn collect(dir: &std::path::Path, prefix: &str, depth: usize, paths: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else { continue };
+            if file_type.is_dir() {
+                // The walk covers the root and one level below it, no deeper.
+                if depth == 0 && !name.starts_with('.') && !SKIP.contains(&name) {
+                    collect(&dir.join(name), &format!("{prefix}{name}/"), depth + 1, paths);
+                }
+            } else if MARKERS.iter().any(|(marker, _)| *marker == name) {
+                paths.push(format!("{prefix}{name}"));
+            }
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect(root, "", 0, &mut paths);
+    detect(&paths)
 }
 
 #[cfg(test)]
@@ -222,8 +336,9 @@ golang    1-bookworm    any  binary 3333  golang:1-bookworm
     }
 
     #[test]
-    fn ids_offer_every_preset_and_custom_last() {
+    fn ids_offer_auto_first_then_presets_then_custom_last() {
         let ids = ids();
+        assert_eq!(ids.first(), Some(&AUTO), "auto should be the visible default");
         assert_eq!(ids.last(), Some(&CUSTOM));
         for p in PRESETS {
             assert!(ids.contains(&p.id), "{} missing from the picker", p.id);
@@ -237,5 +352,87 @@ golang    1-bookworm    any  binary 3333  golang:1-bookworm
             assert!(p.memory.ends_with('G'), "{} memory {} is not a size", p.id, p.memory);
             assert!(p.root_disk.ends_with('G'), "{} root disk {} is not a size", p.id, p.root_disk);
         }
+    }
+
+    #[test]
+    fn a_root_marker_beats_a_front_end_in_a_subdirectory() {
+        let d = detect(&["Cargo.toml", "src/main.rs", "web/package.json", "README.md"]).expect("Cargo.toml is a marker");
+        assert_eq!(d.stack, "rust", "the root Cargo.toml should win over web/package.json");
+        assert_eq!(d.marker, "Cargo.toml");
+    }
+
+    #[test]
+    fn no_markers_means_no_guess() {
+        assert_eq!(detect(&["README.md", "src/main.rs", "docker-compose.yml"]), None);
+    }
+
+    #[test]
+    fn a_root_marker_beats_a_deeper_one_of_any_kind() {
+        let d = detect(&["backend/Cargo.toml", "package.json"]).expect("package.json is a marker");
+        assert_eq!(d.stack, "node", "the root package.json should win over backend/Cargo.toml");
+        assert_eq!(d.marker, "package.json");
+    }
+
+    #[test]
+    fn a_marker_only_in_a_subdirectory_is_still_found() {
+        let d = detect(&["backend/pyproject.toml"]).expect("pyproject.toml is a marker");
+        assert_eq!(d.stack, "python");
+        assert_eq!(d.marker, "backend/pyproject.toml");
+    }
+
+    #[test]
+    fn two_root_markers_tie_break_by_table_order_not_argument_order() {
+        let first = detect(&["package.json", "go.mod"]).expect("go.mod is a marker");
+        let second = detect(&["go.mod", "package.json"]).expect("package.json is a marker");
+        assert_eq!(first.stack, "go", "go.mod is earlier in MARKERS than package.json");
+        assert_eq!(first, second, "the answer must not depend on the order paths arrive in");
+    }
+
+    #[test]
+    fn every_python_marker_names_python() {
+        let names: Vec<&str> = MARKERS
+            .iter()
+            .filter(|(_, stack)| *stack == "python")
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(!names.is_empty(), "MARKERS no longer names python at all");
+        for name in names {
+            let d = detect(&[name]).unwrap_or_else(|| panic!("{name} is a marker"));
+            assert_eq!(d.stack, "python", "{name} should map to python");
+            assert_eq!(d.marker, name);
+        }
+    }
+
+    #[test]
+    fn resolved_maps_auto_to_the_fallback_and_everything_else_to_itself() {
+        assert_eq!(resolved(AUTO), AUTO_FALLBACK);
+        assert_eq!(resolved("rust"), "rust");
+        assert_eq!(resolved(CUSTOM), CUSTOM);
+    }
+
+    #[test]
+    fn every_marker_stack_and_the_auto_fallback_is_a_real_preset() {
+        for (name, stack) in MARKERS {
+            assert!(find(stack).is_some(), "{name} names {stack}, which is not a preset");
+        }
+        assert!(find(AUTO_FALLBACK).is_some(), "the auto fallback must be a preset");
+    }
+
+    #[test]
+    fn detect_in_reads_the_root_and_one_level_below() {
+        let root = std::env::temp_dir().join(format!("colonizer-presets-detect-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("web")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"detect-in-test\"\n").unwrap();
+        std::fs::write(root.join("web/package.json"), "{}").unwrap();
+        let d = detect_in(&root).expect("a rust repo with a web front end");
+        assert_eq!(d.stack, "rust", "the root Cargo.toml should win over web/package.json");
+        assert_eq!(d.marker, "Cargo.toml");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn detect_in_yields_none_for_a_tree_it_cannot_read() {
+        let nowhere = std::env::temp_dir().join(format!("colonizer-presets-absent-{}", crate::util::short_id()));
+        assert_eq!(detect_in(&nowhere), None);
     }
 }

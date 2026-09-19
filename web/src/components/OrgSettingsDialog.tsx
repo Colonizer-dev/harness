@@ -13,6 +13,7 @@ type FieldKey =
   | "max_parallel"
   | "budget_usd"
   | "host_disk"
+  | "stack"
   | "memory_enabled"
   | "watchdog_enabled"
   | "stall_minutes"
@@ -23,7 +24,7 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "size" | "boolean";
+  kind: "model" | "number" | "size" | "boolean" | "choice";
   min?: number;
   max?: number;
   unit?: string;
@@ -35,6 +36,7 @@ const FIELDS: FieldSpec[] = [
   { key: "model", group: "Models", label: "Orchestrator", hint: "The main agent in each colony", kind: "model" },
   { key: "subagent_model", group: "Models", label: "Subagents", hint: "Agents the orchestrator starts for side tasks", kind: "model" },
   { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
+  { key: "stack", group: "Colonies", label: "Stack", hint: "The sandbox stack for this org's colonies; Automatic reads each repository's own", kind: "choice" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
@@ -60,6 +62,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "host_disk":
       // `""` and `"0"` both mean unlimited on the server; show the canonical spelling.
       return settings.host_disk === "" ? "0" : settings.host_disk;
+    case "stack":
+      return settings.stack;
     case "memory_enabled":
       return settings.memory?.enabled;
     case "watchdog_enabled":
@@ -93,6 +97,8 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
       return setting("sandbox", "budget_usd");
     case "host_disk":
       return setting("sandbox", "host_disk");
+    case "stack":
+      return setting("sandbox", "preset");
     case "memory_enabled":
       return toggle("memory");
     case "watchdog_enabled":
@@ -109,6 +115,9 @@ function describe(spec: FieldSpec, value: Value): string {
   // 0 — or nothing set at all, on the server's quota fields — is how unlimited is written.
   if (spec.key === "budget_usd" && value === 0) return "unlimited";
   if (spec.kind === "size" && (value === "" || value === "0")) return "unlimited";
+  if (spec.kind === "choice" && typeof value === "string")
+    // A blank `preset` reads as automatic too, the same as in Setup.
+    return value.trim() === "" || value === "auto" ? "Automatic" : value.charAt(0).toUpperCase() + value.slice(1);
   if (value === "") return spec.key === "model" ? "Claude Code default" : "same as orchestrator";
   return spec.unit ? `${value} ${spec.unit}` : String(value);
 }
@@ -151,6 +160,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     const spec = FIELDS.find((f) => f.key === key)!;
     if (!field.override) return null;
     if (spec.kind === "boolean") return Boolean(field.value);
+    if (spec.kind === "choice") return String(field.value).trim() || null;
     if (spec.kind === "model") return String(field.value).trim() || null;
     if (spec.kind === "size") {
       const text = parseSize(String(field.value));
@@ -173,6 +183,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     max_parallel: pick("max_parallel") as number | null,
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
+    stack: pick("stack") as string | null,
     memory: { enabled: pick("memory_enabled") as boolean | null },
     watchdog: {
       enabled: pick("watchdog_enabled") as boolean | null,
@@ -423,6 +434,22 @@ function OrgSettingsForm({
                           parseSize(String(draft[spec.key].value)) === null && "border-err focus:border-err",
                         )}
                       />
+                    )}
+                    {spec.kind === "choice" && (
+                      <select
+                        value={String(draft[spec.key].value)}
+                        onChange={(e) => set(spec.key, { value: e.target.value })}
+                        aria-label={`${spec.label} for ${org}`}
+                        className={cx(inputClass, "w-40")}
+                      >
+                        {(modules?.find((m) => m.kind === "sandbox")?.schema?.properties?.preset?.enum?.map(String) ?? []).map(
+                          (id) => (
+                            <option key={id} value={id}>
+                              {id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1)}
+                            </option>
+                          ),
+                        )}
+                      </select>
                     )}
                     {spec.kind === "boolean" && (
                       <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">

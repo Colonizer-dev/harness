@@ -57,7 +57,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | Kind | Providers (v1) | Responsibility |
 | --- | --- | --- |
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
-| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; explicit settings override it |
+| `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; `auto`, the default, reads the stack off the repository's marker files when the colony's worktree is checked out and falls back to Node when a repository names none; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
@@ -78,7 +78,7 @@ Two settings layers sit next to the modules:
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
-  per-colony budget and host-disk quota, memory, the watchdog and notifications. A colony belongs to its repository
+  per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and notifications. A colony belongs to its repository
   owner's org.
 
 ## Session lifecycle
@@ -147,6 +147,10 @@ Three sandbox module settings bound one colony, each with a per-org override tha
 - `host_disk` caps what a colony leaves on the host (its worktree plus its session directory), measured
   every five minutes. It does not cover the microVM's root filesystem, which `root_disk` bounds. A colony
   past the quota is stopped and its worktree kept: removing a colony's work is the operator's call.
+
+A fourth sandbox setting carries a per-org override without bounding anything: the org's `stack` pins the
+sandbox stack for its colonies, shadowing what the global `preset` would otherwise choose — `auto` by
+default, which reads each repository's marker files at boot. `null` inherits.
 
 `max_parallel` defaults to 3. The other two default to unlimited: there is no dollar figure or byte
 count that suits every deployment, and a default that silently stopped running colonies on upgrade would
