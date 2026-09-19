@@ -682,6 +682,8 @@ mod tests {
             routed_cost_usd: None,
             host_disk_bytes: None,
             model_usage: None,
+            model_tier: None,
+            model_routing: None,
             cleaned_up: false,
             attention: None,
             last_activity_at: Some(now),

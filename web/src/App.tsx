@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "./context";
 import { IconMenu, IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
+import { OrgPromptCard } from "./components/OrgPromptCard";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
-import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
+import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
+import { Cockpit } from "./cockpit/Cockpit";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
 import {
   NOTIFICATIONS_KEY,
@@ -23,9 +25,20 @@ import {
   type NotificationPrefs,
   type SessionSnapshot,
 } from "./notifications";
+import { pendingOrgPrompt } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
-import type { HarnessStatus, ModuleInfo, OrgInfo, Session, StorageHealth, TelemetryStatus, UsageStatus } from "./types";
+import type {
+  HarnessStatus,
+  ModuleInfo,
+  OrgInfo,
+  OrgSettings,
+  Session,
+  StorageHealth,
+  TelemetryStatus,
+  UpdateStatus,
+  UsageStatus,
+} from "./types";
 
 export function App() {
   const api = useApi();
@@ -47,6 +60,9 @@ export function App() {
   const [view, setView] = useState<MainView>(() => (stored("colonizer.view") === "memory" ? "memory" : "colonies"));
   const [pendingMemory, setPendingMemory] = useState(0);
   const [orgSettingsFor, setOrgSettingsFor] = useState<string | null>(null);
+  // Orgs answered this session: the PUT has marked them decided server-side, but until the 15 s
+  // poll confirms, this is what keeps a just-answered prompt card from flashing back in.
+  const [answeredOrgs, setAnsweredOrgs] = useState<ReadonlySet<string>>(() => new Set());
   const [notifyPrefs, setNotifyPrefs] = useState<NotificationPrefs>(() => parseNotificationPrefs(stored(NOTIFICATIONS_KEY)));
   // The mothership's storage alert is sticky, so dismissal is client-side, keyed on the alert's ts
   // (or its message when an older mothership omits the ts): a newer failure shows the card again.
@@ -56,6 +72,9 @@ export function App() {
   // "has been shown" retires the standalone live-map prompt. Neither is ever persisted.
   const setupDismissed = useRef(false);
   const [setupShown, setSetupShown] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [launchRequests, setLaunchRequests] = useState(0);
+  const [settingsRequests, setSettingsRequests] = useState(0);
   // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
   // (colonizer.sidebar-tab stays the sidebar's own memory of itself.)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
@@ -126,6 +145,14 @@ export function App() {
     }
   }, [api]);
 
+  const loadUpdate = useCallback(async () => {
+    try {
+      setUpdateStatus(await api.update());
+    } catch {
+      /* older mothership: no update endpoint, so the cockpit shows no version chip */
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadStatus();
     void loadSessions();
@@ -133,15 +160,18 @@ export function App() {
     void loadUsage();
     void loadOrgs();
     void loadPendingMemory();
+    void loadUpdate();
     api.modules().then(applyModules).catch(() => {});
     const timers = [
       setInterval(loadSessions, 4000),
       setInterval(loadStatus, 30_000),
       setInterval(loadOrgs, 15_000),
       setInterval(loadPendingMemory, 10_000),
+      // A release check is a request to github.com, so it runs far more slowly than the rest.
+      setInterval(loadUpdate, 900_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, applyModules]);
+  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -192,17 +222,28 @@ export function App() {
     [status, pull.status, telemetry, sandboxModule, sessions.length],
   );
 
+  /**
+   * Settings has two frames: a dialog on a narrow window, and a cockpit view on a wide one. Both are
+   * opened through here so a caller — the rail, the version chip, an inspector row, Setup's auto-open —
+   * never has to know which is on screen.
+   */
+  const openSettings = useCallback(
+    (section?: SectionId) => {
+      setSettingsSection(section);
+      if (narrow) setSettingsOpen(true);
+      else setSettingsRequests((n) => n + 1);
+    },
+    [narrow],
+  );
+
   // Replaces the old `!github.connected || !claude.configured` auto-open: `setup.autoOpen` is
   // "a row that gates launch is unmet", which also catches runtime failures. Fires at most once
   // per page load, and "Not now" (setupDismissed) holds it closed until the next one.
   useEffect(() => {
     if (promptedForSettings.current || !setup) return;
     promptedForSettings.current = true;
-    if (setup.autoOpen && !setupDismissed.current) {
-      setSettingsSection("setup");
-      setSettingsOpen(true);
-    }
-  }, [setup]);
+    if (setup.autoOpen && !setupDismissed.current) openSettings("setup");
+  }, [setup, openSettings]);
 
   /** "Not now": in-memory only, so the next page load asks again. */
   const dismissSetup = useCallback(() => {
@@ -216,6 +257,9 @@ export function App() {
     setSidebarTab("new");
     setView("colonies");
     setSidebarOpen(true);
+    // The cockpit has no sidebar to open. Setup lives in the dialog App owns, so this counter is how
+    // its launch row reaches across and asks the cockpit for the launch view.
+    setLaunchRequests((n) => n + 1);
   }, []);
 
   const removeSession = useCallback((id: string) => {
@@ -302,6 +346,15 @@ export function App() {
     setSidebarOpen(false);
   }, []);
 
+  // The one newly-appeared org to ask about now, if any; several pending are asked one at a time.
+  const pendingOrg = useMemo(() => pendingOrgPrompt(orgs, answeredOrgs), [orgs, answeredOrgs]);
+
+  /** The prompt card's answer, folded back so the sidebar moves at once; the 15 s poll confirms it. */
+  const answerPendingOrg = useCallback((org: string, settings: OrgSettings) => {
+    setAnsweredOrgs((answered) => new Set(answered).add(org));
+    setOrgs((list) => list.map((info) => (sameOrg(info.org, org) ? { ...info, awaiting_decision: false, settings } : info)));
+  }, []);
+
   const current = sessions.find((s) => s.id === selectedId) ?? null;
 
   const storage = status?.storage;
@@ -350,45 +403,127 @@ export function App() {
     />
   );
 
+  // Both layouts show the same two panes; only the chrome around them differs, so they are built
+  // once here and handed to whichever shell is on screen.
+  const memoryPane = (
+    <MemoryView
+      narrow={narrow}
+      selectedOrg={selectedOrg}
+      orgs={orgs}
+      onOpenSidebar={() => setSidebarOpen(true)}
+      onChanged={() => {
+        void loadPendingMemory();
+        void loadOrgs();
+      }}
+    />
+  );
+
+  const colonyPane = current ? (
+    <SessionView
+      key={current.id}
+      sessionId={current.id}
+      fallback={current}
+      interfaces={interfaces}
+      narrow={narrow}
+      showOrg={!selectedOrg}
+      onSessionChanged={upsertSession}
+      onSessionDeleted={removeSession}
+      onOpenSidebar={() => setSidebarOpen(true)}
+      onOpenMemory={openMemory}
+      onMemoryProposed={loadPendingMemory}
+    />
+  ) : (
+    <EmptyState narrow={narrow} org={selectedOrg} onOpenSidebar={() => setSidebarOpen(true)} />
+  );
+
+  // Same body the dialog renders, in the cockpit's own column. Keyed on the request count so an
+  // external jump ("open providers") re-seeds the section; clicking around inside it does not remount.
+  const settingsPane = (close: () => void) => (
+    <SettingsBody
+      key={settingsRequests}
+      embedded
+      status={status}
+      onStatusChanged={loadStatus}
+      onModulesChanged={applyModules}
+      telemetry={telemetry}
+      onTelemetryChanged={setTelemetry}
+      usage={usage}
+      onUsageChanged={setUsage}
+      notifications={notifyPrefs}
+      onNotificationsChanged={setNotifyPrefs}
+      initialSection={settingsSection}
+      setup={setup}
+      pull={pull}
+      onLaunch={openLauncher}
+      onSetupShown={() => setSetupShown(true)}
+      onSetupDismissed={() => {
+        setupDismissed.current = true;
+        close();
+      }}
+      onClose={close}
+    />
+  );
+
+  const orgPrompt = pendingOrg && (
+    // A standalone card at the top of the pane: seen without hunting for it, but nothing
+    // behind it is blocked while the decision waits.
+    <div className="shrink-0 border-b border-border px-4 py-3 sm:px-6">
+      <div className="mx-auto w-full max-w-xl">
+        <OrgPromptCard org={pendingOrg.org} avatarUrl={pendingOrg.avatar_url} onAnswered={answerPendingOrg} />
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex h-full min-h-0">
-      {!narrow && <aside className="h-full w-[320px] shrink-0 border-r border-border bg-panel">{sidebar}</aside>}
-      {narrow && sidebarOpen && (
-        <div className="fixed inset-0 z-40 flex">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setSidebarOpen(false)} aria-hidden="true" />
-          <aside className="relative h-full w-[min(340px,88vw)] border-r border-border bg-panel shadow-[var(--shadow)]">{sidebar}</aside>
+      {narrow ? (
+        <>
+          {sidebarOpen && (
+            <div className="fixed inset-0 z-40 flex">
+              <div className="absolute inset-0 bg-black/40" onClick={() => setSidebarOpen(false)} aria-hidden="true" />
+              <aside className="relative h-full w-[min(340px,88vw)] border-r border-border bg-panel shadow-[var(--shadow)]">
+                {sidebar}
+              </aside>
+            </div>
+          )}
+          <main className="flex h-full min-w-0 flex-1 flex-col">
+            {orgPrompt}
+            <div className="min-h-0 flex-1">{view === "memory" ? memoryPane : colonyPane}</div>
+          </main>
+        </>
+      ) : (
+        // The cockpit is a desktop shell — a rail, a nest and a 360px inspector need the width —
+        // so a narrow window keeps the sidebar layout above rather than folding the nest up.
+        <div className="flex h-full min-w-0 flex-1 flex-col">
+          {orgPrompt}
+          <div className="min-h-0 flex-1">
+            <Cockpit
+              sessions={sessions}
+              orgs={orgs}
+              selectedOrg={selectedOrg}
+              onSelectOrg={selectOrg}
+              selectedId={selectedId}
+              onSelectSession={setSelectedId}
+              onOpenColony={openColony}
+              status={status}
+              update={updateStatus}
+              autopilotDefault={autopilotDefault}
+              launchRequests={launchRequests}
+              settingsRequests={settingsRequests}
+              settings={settingsPane}
+              onSessionChanged={upsertSession}
+              onCreated={(session) => {
+                upsertSession(session);
+                select(session.id);
+                void loadOrgs();
+              }}
+              onOpenSettings={openSettings}
+              colony={colonyPane}
+              memory={memoryPane}
+            />
+          </div>
         </div>
       )}
-      <main className="h-full min-w-0 flex-1">
-        {view === "memory" ? (
-          <MemoryView
-            narrow={narrow}
-            selectedOrg={selectedOrg}
-            orgs={orgs}
-            onOpenSidebar={() => setSidebarOpen(true)}
-            onChanged={() => {
-              void loadPendingMemory();
-              void loadOrgs();
-            }}
-          />
-        ) : current ? (
-          <SessionView
-            key={current.id}
-            sessionId={current.id}
-            fallback={current}
-            interfaces={interfaces}
-            narrow={narrow}
-            showOrg={!selectedOrg}
-            onSessionChanged={upsertSession}
-            onSessionDeleted={removeSession}
-            onOpenSidebar={() => setSidebarOpen(true)}
-            onOpenMemory={openMemory}
-            onMemoryProposed={loadPendingMemory}
-          />
-        ) : (
-          <EmptyState narrow={narrow} org={selectedOrg} onOpenSidebar={() => setSidebarOpen(true)} />
-        )}
-      </main>
       <SettingsDialog
         open={settingsOpen}
         onClose={() => {

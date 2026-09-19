@@ -13,6 +13,7 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
+import { Avatar } from "./Avatar";
 import type {
   HarnessStatus,
   HeadroomStatus,
@@ -179,7 +180,12 @@ export function SettingsDialog({
   );
 }
 
-function SettingsBody({
+/**
+ * The settings screen itself: the grouped section nav and whichever pane it points at. The dialog
+ * above is one frame for it; the cockpit's settings view is the other, which is what `embedded` picks.
+ */
+export function SettingsBody({
+  embedded = false,
   status,
   onStatusChanged,
   onModulesChanged,
@@ -197,6 +203,8 @@ function SettingsBody({
   onSetupDismissed,
   onClose,
 }: {
+  /** Rendered inside the cockpit rather than a dialog: no title bar of its own, and it fills its column. */
+  embedded?: boolean;
   status: HarnessStatus | null;
   onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   onModulesChanged: (modules: ModuleInfo[]) => void;
@@ -427,20 +435,23 @@ function SettingsBody({
   }
 
   return (
-    <div className="flex h-[min(680px,calc(100dvh-24px))] flex-col">
-      <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="settings-title" className="min-w-0 flex-1 text-[16px] font-semibold">
-          Settings
-        </h2>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close settings"
-          className="grid size-8 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
-        >
-          <IconX size={17} />
-        </button>
-      </div>
+    <div className={cx("flex flex-col", embedded ? "h-full min-h-0" : "h-[min(680px,calc(100dvh-24px))]")}>
+      {/* The cockpit has its own header and crumb, so the embedded frame does not repeat them. */}
+      {!embedded && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-3">
+          <h2 id="settings-title" className="min-w-0 flex-1 text-[16px] font-semibold">
+            Settings
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close settings"
+            className="grid size-8 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
+          >
+            <IconX size={17} />
+          </button>
+        </div>
+      )}
       {narrow ? (
         active === null ? (
           <SectionNav layout="list" groups={groups} active={null} onSelect={select} initialFocus={lastSection.current} />
@@ -682,25 +693,8 @@ function Code({ children }: { children: ReactNode }) {
 // Connections: GitHub and Claude
 // ---------------------------------------------------------------------------
 
-/**
- * A remote account avatar, next to the login row. Same tile as a provider mark; the
- * panel background keeps it a quiet square if the image is missing or fails to load.
- * Decorative: `alt=""`, the login is already shown as text.
- */
-function Avatar({ src }: { src: string }) {
-  return (
-    <img
-      src={src}
-      alt=""
-      width={32}
-      height={32}
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      className="size-8 shrink-0 select-none rounded-lg bg-panel-2 object-cover"
-    />
-  );
-}
-
+// The account avatar beside the GitHub login row is the shared Avatar (`alt=""` — the login is
+// already shown as text), on the same quiet tile as a provider mark.
 function ConnectionCard({
   name,
   mark,
@@ -745,7 +739,7 @@ function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessSta
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"
-          mark={github?.connected && github.avatar_url ? <Avatar src={github.avatar_url} /> : undefined}
+          mark={github?.connected && github.avatar_url ? <Avatar name={github.login || "GitHub"} src={github.avatar_url} /> : undefined}
           connected={github ? github.connected : null}
           detail={github?.connected ? `@${github.login} · ${github.source}` : github?.error?.split("\n")[0]}
           detailTone={github && !github.connected ? "err" : undefined}
@@ -2428,6 +2422,8 @@ const MODEL_SETTING_LABEL: Record<ModelSetting, string> = {
   model: "Orchestrator model",
   subagent_model: "Subagent model",
   background_model: "Background model",
+  model_low: "Model for small tasks",
+  model_high: "Model for large tasks",
 };
 
 /**
@@ -2438,8 +2434,11 @@ const MODEL_SETTING_LABEL: Record<ModelSetting, string> = {
  */
 function idleWiringNote(usedBy: ModelSetting[]): string | null {
   if (usedBy.length === 0 || usedBy.includes("model")) return null;
-  const [first, second] = usedBy.map((setting) => MODEL_SETTING_LABEL[setting]);
-  const settings = second ? `the ${first} and ${second} settings` : `the ${first} setting`;
+  const names = usedBy.map((setting) => MODEL_SETTING_LABEL[setting]);
+  const settings =
+    names.length === 1
+      ? `the ${names[0]} setting`
+      : `the ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} settings`;
   return `only wired to ${settings} — the Orchestrator model does nearly all of a colony's work, so it can look idle`;
 }
 

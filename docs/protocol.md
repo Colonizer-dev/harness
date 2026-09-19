@@ -188,7 +188,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
@@ -657,7 +657,7 @@ Runner environment set by the mothership:
 
 | Variable | Meaning |
 | --- | --- |
-| `COLONIZER_MODEL` | Orchestrator (main thread) model; nearly all of a colony's model traffic |
+| `COLONIZER_MODEL` | Orchestrator (main thread) model; nearly all of a colony's model traffic. With per-task routing on (§6.1b) the mothership may substitute the tier's model here, chosen from the agent module's tier settings — those settings exist only on the mothership, and their variables are stripped from this environment once the tier is chosen, so only the provider actually in use is probed at boot |
 | `COLONIZER_SUBAGENT_MODEL` | Model for subagents; only used when the agent delegates to one, which colonies rarely do (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model (Claude Code's built-in Explore is `inherit`) use it too) |
 | `COLONIZER_IMAGE` | The container image the colony booted; the runner tells the agent what it can and cannot run |
 | `COLONIZER_BACKGROUND_MODEL` | Model for small auxiliary background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
@@ -682,6 +682,48 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   credential, drop Anthropic OAuth betas from `anthropic-beta`, stream the response back unchanged.
   If the upstream has no `count_tokens`, answer `{"input_tokens": ceil(chars / 4)}`.
 - Everything else: forward to `https://api.anthropic.com` with headers unchanged.
+
+### 6.1b Per-task model tiers (mothership)
+
+What §6.1 describes transports a request to a model you named; per-task routing is the part that
+names it. With the agent module's `route_per_task` setting on (the default), the mothership picks a
+tier for each colony at boot — `low`, `medium` or `high` — from the issue in front of it, with a
+pure heuristic over the task's own signals (`crates/colonizer/src/routing.rs`): the issue's labels
+(`chore`, `copy`, `docs`, `documentation`, `typo` pull toward `low`; `breaking-change`, `epic`,
+`migration`, `refactor` pull toward `high`, and a high label wins over a low one), the task text's
+length, its markdown checklist items, how many file paths it names and whether they all sit in one
+directory, and whether the colony's sandbox preset is one the harness knows — an unknown preset
+never routes down to the cheapest tier. These add to a score, and the score picks the tier. No
+model call, no network, no new dependency: the same shape as the other pure decision functions,
+`watchdog::decide` and `queue::has_room`.
+
+| Setting | Default | |
+| --- | --- | --- |
+| `route_per_task` | true | Off: every colony without its own `model_tier` runs on `model` |
+| `model_low` | none | Model for the `low` tier: a Claude alias or ID, or `<provider>/<model>`, in the same forms as `model` |
+| `model_high` | none | Model for the `high` tier, in the same forms as `model` |
+
+`medium` runs on the existing `model` setting. A tier whose setting is blank falls back to `model`,
+so with neither tier model set nothing changes about which model a colony runs on. Only the
+orchestrator model is routed — `subagent_model` and `background_model` are untouched — and the tier
+models resolve through the same provider routes as `model` (§6.5's `used_by` counts them). Their
+env variables are stripped from the colony's environment once the tier is chosen, so only the
+provider actually in use is probed at boot.
+
+The decision is recorded three ways:
+
+- an `info` line in the colony's session log (`model routing: low tier, score 0: a 180-character
+  body, no checklist items, 1 path named`), naming the model when it differs from `model`, and the
+  rule's tier when an override disagrees;
+- a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
+  misroute, signals}`, where `source` is `off`/`rule`/`override`, `model` is set only when the tier
+  changed it, `misroute` is true when an operator override lands somewhere the rule did not want,
+  and `signals` is what the rule read off the issue;
+- one JSON line per boot appended to `routing.jsonl` in the mothership's data directory — the
+  recorded set a future replacement for the heuristic could be evaluated against.
+
+An operator override is §4's `model_tier` on `POST /api/sessions`; it wins over the rule for that
+colony, whether or not routing is on.
 
 ### 6.2 Shared memory (runner ⇄ mothership)
 
@@ -788,8 +830,8 @@ strings; UIs offer `GET /api/models` as suggestions).
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings}]` for every org seen in repositories, colonies or saved settings |
-| `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value |
+| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings, avatar_url?, awaiting_decision?}]` for every org that has a reason to be a workspace — saved settings, colonies, repository owners — plus the orgs still awaiting an answer, which appear only so a UI can ask about them. Switched-off orgs are still listed, so a UI can offer them back |
+| `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value. A save is also the answer to a pending "do you want this org?" prompt for that org |
 
 The PUT is a merge, not a replace. A field of `settings` the body does not name keeps its saved value; a
 field it names always wins, `null` included: an explicit `null` is how a client inherits the global
@@ -798,6 +840,13 @@ module setting. The merge reaches one level deeper for two nested fields: an `ag
 its saved value (the web form never sends `waiting_minutes`, and a save from a client that predates a
 field must not quietly clear it). So a body naming only `max_parallel` changes just that, where a plain
 replace would have cleared everything it left out.
+
+`settings.enabled` ([#176](https://github.com/Colonizer-dev/harness/issues/176)) is the on/off switch
+per org: absent or `true` the org is offered as a workspace, `false` — or a form save that names it
+`false` — takes the workspace off the list and refuses new colonies for it ("the acme workspace is
+switched off; turn it back on in its org settings to start a colony there") while keeping its settings
+and its existing colonies: a colony of a switched-off org is still listed and resumable, and an
+`orgs.json` written before the switch existed reads as every org on.
 
 `agent.skillsets` is a map of plugin directory name to `true` or `false`: those skillsets are switched on
 or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
@@ -817,6 +866,7 @@ something is pinned above it). `null` inherits.
 
 ```json
 {"settings": {
+  "enabled": true,
   "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
             "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
@@ -827,6 +877,33 @@ something is pinned above it). `null` inherits.
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
 }}
 ```
+
+Avatars and the new-org prompt. The mothership fetches the orgs the signed-in GitHub account belongs
+to, together with their avatars, and keeps what it saw in `config/known-orgs.json` — login to
+`avatar_url`, written only when something changed. A successful fetch is throttled to once every five
+minutes; a failed `gh` records nothing and is retried on the next poll. Avatars are refreshed for
+every org the fetch reports, workspace or not (a switched-off org keeps its face for the Hidden list
+and its settings dialog), except the ones still awaiting an answer: the record doubles as the
+seen-set, so an unanswered sighting stays out of it, avatar and all, until the `PUT` that answers
+records both.
+`GET /api/orgs` carries `avatar_url` only where it knows one (the saved record, or the sighting that
+is still waiting for an answer); an org that only shows up in the colony list has none, and a UI falls
+back to an initial. The same record is the seen-set behind the prompt:
+
+- The **first** fetch after an install — no record yet — adopts every org the account belongs to and
+  records them all without asking; the count of workspaces added is logged. That is what keeps an
+  upgrade from asking about orgs the account always had.
+- After that, an org the record has never heard of is **not** adopted: it appears in the list with
+  `"awaiting_decision": true` until a `PUT` answers for it —
+  `enabled: true` adds it, `enabled: false` declines it, and either way it is never asked about again.
+- An org GitHub stops reporting (the account left it) is dropped from the workspace list by the fetch
+  that no longer reports it — unless it has settings of its own saved: a switched-off or declined org
+  keeps its `orgs.json` entry on purpose, so it stays listed and reachable. Starting a colony for an
+  org with no record also marks it known, because working in an org is an answer. The signed-in
+  account's own login is never asked about, but its switch is respected like any other org's:
+  switching it off takes its workspace off the list and stops new colonies on its own repositories.
+  The prompt itself is in-memory only: after a restart the next fetch rebuilds it from
+  `known-orgs.json`.
 
 **Shared memory.** `scope` is `global`, `org` (key = org) or `repo` (key = `owner/repo`).
 
@@ -1051,7 +1128,8 @@ by a background task every 5 s when they changed and once more at shutdown, so a
 of the tally and a restart carries on where it left off; `DELETE /api/providers/{id}` also removes the
 provider's tally.
 
-`used_by` names the model settings (`model`, `subagent_model`, `background_model`) whose resolved value
+`used_by` names the model settings (`model`, `subagent_model`, `background_model`, and per-task
+routing's `model_low`/`model_high`, whose env vars a colony's environment never sees) whose resolved value
 (schema default, global setting or org override) routes to this provider as `<provider>/<model>`, across
 the global agent env and every org override, e.g. `["subagent_model"]`. Empty means the provider is
 configured but no model setting points at it: wired only to `subagent_model`, say, on a harness whose

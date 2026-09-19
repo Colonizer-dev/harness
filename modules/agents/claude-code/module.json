@@ -49,6 +49,26 @@
         "default": "",
         "env": "COLONIZER_BACKGROUND_MODEL"
       },
+      "route_per_task": {
+        "type": "boolean",
+        "title": "Route the model per task",
+        "description": "The orchestrator model is picked from the issue in front of the colony — its labels, length, checklist and the paths it names — instead of every colony running on the same one. With neither tier model set below, this changes nothing.",
+        "default": true
+      },
+      "model_low": {
+        "type": "string",
+        "title": "Model for small tasks",
+        "description": "Model for small tasks such as a typo fix, copy and one-line config changes: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_MODEL_LOW"
+      },
+      "model_high": {
+        "type": "string",
+        "title": "Model for large tasks",
+        "description": "Model for large tasks such as cross-cutting changes, migrations and new subsystems: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_MODEL_HIGH"
+      },
       "delegate": {
         "type": "string",
         "title": "Delegation",

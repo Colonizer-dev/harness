@@ -255,8 +255,17 @@ export interface ProviderUsage {
   last_request_at: string | null;
 }
 
-/** The model settings whose resolved value can route to a provider. */
-export type ModelSetting = "model" | "subagent_model" | "background_model";
+/**
+ * The model settings whose resolved value can route to a provider. The two tier settings are the
+ * Mothership's per-task model routing: it reads them itself and strips their env vars from a
+ * colony's environment, so only the tier actually in use is probed at boot.
+ */
+export type ModelSetting =
+  | "model"
+  | "subagent_model"
+  | "background_model"
+  | "model_low"
+  | "model_high";
 
 export interface SaveProviderRequest {
   name: string;
@@ -441,6 +450,11 @@ export interface OrgSettings {
   stack?: string | null;
   memory?: { enabled?: boolean | null } | null;
   watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;
+  /**
+   * Off keeps the org out of the workspace list and stops new colonies starting there; its existing
+   * colonies stay listed and resumable. Absent and null mean on, like every field above.
+   */
+  enabled?: boolean | null;
 }
 
 export interface OrgInfo {
@@ -448,6 +462,13 @@ export interface OrgInfo {
   colonies: { live: number; total: number };
   pending_memory: number;
   settings: OrgSettings;
+  /** The org's GitHub avatar. Absent when unknown — an org that only appears in the colony list has none. */
+  avatar_url?: string;
+  /**
+   * True for a newly-appeared org the operator has not decided about yet; it is not a workspace
+   * until then. Optional so an older mothership that never sends it simply has no pending orgs.
+   */
+  awaiting_decision?: boolean;
 }
 
 // ---------------------------------------------------------------------------

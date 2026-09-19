@@ -172,6 +172,13 @@ pub struct Session {
     /// cache_write_tokens}}` — every model the colony used, priced or not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<Value>,
+    /// The tier this colony was started on, when the operator named one instead of letting the rule choose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_tier: Option<String>,
+    /// The routing decision this colony booted with: the tier, the tier the rule would have chosen, and
+    /// the signals behind it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<Value>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
@@ -224,6 +231,8 @@ impl Default for Session {
             error: None,
             cost_usd: None,
             model_usage: None,
+            model_tier: None,
+            model_routing: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
@@ -388,6 +397,13 @@ impl App {
         self.cfg.data_dir.join("sessions.json")
     }
 
+    /// Every per-task model routing decision, one JSON line each. Kept in the data dir rather than a
+    /// session's directory: the record has to outlive cleanup, so the rule can be judged across
+    /// colonies instead of disappearing with each one.
+    fn routing_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("routing.jsonl")
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.cfg.data_dir.join("sessions").join(id)
     }
@@ -503,6 +519,10 @@ pub struct NewSession {
     /// Start a colony on an issue another colony already holds. Off by default: see `issue_held_by`.
     #[serde(default)]
     allow_duplicate: bool,
+    /// Run this colony on a named model tier — `low`, `medium` or `high` — instead of the one the
+    /// routing rule picks for the task.
+    #[serde(default)]
+    model_tier: Option<String>,
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -617,6 +637,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if !valid_repo(&repo) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
     }
+    // A switched-off workspace refuses new work but nothing else: colonies it already has stay
+    // listed, queueable and resumable, and its settings survive for the day it is switched back on.
+    let owner = repo.split('/').next().unwrap_or_default();
+    if !orgs::org_enabled(&app.org_settings(owner)) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("the {owner} workspace is switched off; turn it back on in its org settings to start a colony there"),
+        ));
+    }
     let modules = app.modules.read().await.clone();
     let agent = app
         .agents
@@ -629,6 +658,20 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if let Err(e) = app.cfg.linux_binary("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
+    // A tier the rule does not know would silently fall back to the rule's own choice, which is not
+    // what an operator naming one asked for — refuse the launch instead.
+    let model_tier = match req.model_tier.as_deref() {
+        None => None,
+        Some(raw) => match crate::routing::Tier::parse(raw) {
+            Some(tier) => Some(tier.as_str().to_string()),
+            None => {
+                return Err(client_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("unknown model tier \"{raw}\"; use low, medium or high"),
+                ));
+            }
+        },
+    };
     if let (Some(issue), false) = (req.issue, req.allow_duplicate)
         && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
     {
@@ -691,6 +734,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         error: None,
         cost_usd: None,
         model_usage: None,
+        model_tier,
+        model_routing: None,
         routed_cost_usd: None,
         host_disk_bytes: None,
         cleaned_up: false,
@@ -750,6 +795,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     } else {
         tokio::spawn(boot(app.clone(), id, false));
     }
+    // Adoption by use: a colony started here is the operator's answer to "do you want this org?", so
+    // the org counts as seen and no prompt later asks about one they are already working in. The
+    // avatar from the pending sighting is recorded with it, so the org does not fall back to its
+    // initial for the minutes until the next refresh re-records it.
+    let pending_avatar = app.new_orgs.read().await.get(owner).cloned().flatten();
+    app.mark_org_known(owner, pending_avatar.as_deref());
     Ok(Json(session))
 }
 
@@ -855,7 +906,84 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let siblings = github::siblings_of(&app.sessions.read().await, &s);
     let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
-    let mut runner_env = agent_env(&agent, &orgs::effective_agent(&modules, &org_settings));
+    let agent_choice = orgs::effective_agent(&modules, &org_settings);
+    let mut runner_env = agent_env(&agent, &agent_choice);
+    // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
+    // unless the operator named one at launch, and the tier's model replaces the module's own when
+    // that tier has one. Read off the effective settings, so an org override is honoured.
+    let route_settings = crate::routing::RoutingSettings {
+        enabled: setting(&agent_choice, &agent.schema, "route_per_task")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
+    };
+    let task_labels: Vec<String> = issue
+        .as_ref()
+        .and_then(|i| i["labels"].as_array())
+        .map(|ls| {
+            ls.iter()
+                .map(|l| l["name"].as_str().unwrap_or_default().trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let task_signals = crate::routing::signals(
+        &s.issue_title,
+        issue.as_ref().and_then(|i| i["body"].as_str()).unwrap_or(&s.instructions),
+        &task_labels,
+        // The RESOLVED stack, not the configured preset: `auto` is not a preset the harness
+        // knows, so asking `find` about it would call every auto-detected repository unknown
+        // and refuse it the cheapest tier — including the ones detection identified exactly.
+        crate::presets::find(&stack).is_some(),
+    );
+    let tier_decision = crate::routing::decide(&route_settings, &task_signals);
+    let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
+    let model = setting_str(&agent_choice, &agent.schema, "model");
+    let model_high = setting_str(&agent_choice, &agent.schema, "model_high");
+    let routed_model = crate::routing::model_for(tier_decision.tier, &model_low, &model, &model_high);
+    let module_model = runner_env
+        .get("COLONIZER_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !routed_model.is_empty() {
+        runner_env.insert("COLONIZER_MODEL".into(), Value::String(routed_model.into()));
+    }
+    // The runner reads only COLONIZER_MODEL: the tier settings are for the mothership's provider
+    // tally, and leaving them in would make the boot probe check providers this colony is not using.
+    runner_env.remove("COLONIZER_MODEL_LOW");
+    runner_env.remove("COLONIZER_MODEL_HIGH");
+    let model_changed = !routed_model.is_empty() && routed_model != module_model;
+    let mut message = format!("model routing: {}", tier_decision.reason);
+    if model_changed {
+        message.push_str(&format!("; running on {routed_model}"));
+    }
+    if tier_decision.misroute() {
+        message.push_str(&format!("; misroute: the rule wants {}", tier_decision.rule.as_str()));
+    }
+    log.info(message).await;
+    let record = json!({
+        "tier": tier_decision.tier,
+        "rule": tier_decision.rule,
+        "source": tier_decision.source,
+        "score": tier_decision.score,
+        "reason": tier_decision.reason,
+        "model": if model_changed { json!(routed_model) } else { Value::Null },
+        "misroute": tier_decision.misroute(),
+        "signals": task_signals,
+    });
+    app.update_session(id, |x| x.model_routing = Some(record.clone())).await;
+    let line = json!({
+        "ts": Utc::now(),
+        "session": id,
+        "repo": s.repo.clone(),
+        "issue": s.issue,
+        "decision": record,
+    })
+    .to_string();
+    // A lost routing record is a lost measurement, not a failed boot: say so and carry on.
+    if let Err(e) = append_line(&app.routing_file(), &line).await {
+        log.error(format!("could not save the routing decision: {e:#}")).await;
+    }
     let gateway_token = random_token();
     write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
     let routing = providers::colony_routes(app, &gateway_token);
@@ -1742,6 +1870,8 @@ pub(crate) mod tests {
             error: None,
             cost_usd: None,
             model_usage: None,
+            model_tier: None,
+            model_routing: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
@@ -2149,6 +2279,125 @@ pub(crate) mod tests {
         assert!(
             app.storage_alert.read().await.is_none(),
             "a colony that has never emitted an event has no events.jsonl, and that is not a failure"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- org workspaces on and off --------------------------------------------------------------
+
+    /// A throwaway App whose config switches the `acme` workspace off, the way an old install's
+    /// `orgs.json` plus one settings save leaves it.
+    async fn app_with_org_switched_off(id: &str, status: SessionStatus) -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = test_app(&root);
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        std::fs::write(app.cfg.config_dir.join("orgs.json"), r#"{"acme": {"enabled": false}}"#).unwrap();
+        let mut s = colony("acme", status);
+        s.id = id.to_string();
+        s.git_admin_dir = Some("git".into());
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        (app, root)
+    }
+
+    #[tokio::test]
+    async fn a_switched_off_org_refuses_new_colonies_and_names_the_way_back_on() {
+        let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
+        let err = create(
+            State(app.clone()),
+            Json(NewSession {
+                repo: "acme/app".into(),
+                issue: None,
+                title: String::new(),
+                instructions: String::new(),
+                autopilot: None,
+                allow_duplicate: false,
+                model_tier: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let message = err.1.to_string();
+        assert!(message.contains("acme"), "{message}");
+        assert!(message.contains("switched off"), "{message}");
+        assert!(
+            message.contains("org settings"),
+            "the message says what to do about it: {message}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn colonies_of_a_switched_off_org_stay_listed_and_resume() {
+        let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
+        let listed = list(State(app.clone())).await.0;
+        let kept = listed.iter().find(|s| s.id == "kept").unwrap();
+        assert_eq!(kept.org, "acme", "the colony is still in the list");
+        // The real resume path, not just its gate: the org's switch does not make `resume` refuse
+        // the colony — it is claimed and handed to a fresh boot like any other. The boot itself
+        // never runs here: the spawned task is dropped with the one-thread test runtime before it
+        // is polled, so nothing reaches for GitHub or a microVM.
+        let resumed = resume(State(app.clone()), Path("kept".into()))
+            .await
+            .unwrap_or_else(|e| panic!("resume refused a colony of a switched-off org: {:#}", e.1))
+            .0;
+        assert_eq!(resumed.id, "kept");
+        assert_eq!(
+            resumed.status,
+            SessionStatus::Starting,
+            "the resume claimed the colony and started a boot"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_about_it() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        // The smallest install `create` insists on: an agent module matching the configured provider
+        // and a guest binary that claims to be an ELF.
+        let assets = root.join("assets");
+        let dir = assets.join("modules/agents/claude-code");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
+        std::fs::create_dir_all(assets.join("bin")).unwrap();
+        std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
+        let agent = AgentModule {
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
+            description: String::new(),
+            dir,
+            entry: vec!["run".into()],
+            needs_claude: false,
+            schema: json!({}),
+        };
+        let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
+        // The org is still awaiting an answer when the colony starts, sighting and avatar both.
+        *app.new_orgs.write().await =
+            std::collections::BTreeMap::from([("acme".to_string(), Some("https://a/acme.png".to_string()))]);
+
+        let created = create(
+            State(app.clone()),
+            Json(NewSession {
+                repo: "acme/app".into(),
+                issue: None,
+                title: String::new(),
+                instructions: String::new(),
+                autopilot: None,
+                allow_duplicate: false,
+                model_tier: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
+        assert_eq!(created.org, "acme");
+        assert_eq!(
+            app.known_orgs().unwrap().get("acme").cloned(),
+            Some(crate::orgs::KnownOrg {
+                avatar_url: Some("https://a/acme.png".into()),
+            }),
+            "working in an org is an answer, and the sighting's avatar is recorded with it; the prompt \
+             must never ask about it later"
         );
         let _ = std::fs::remove_dir_all(root);
     }

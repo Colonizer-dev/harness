@@ -29,6 +29,7 @@ mod protocol;
 mod providers;
 mod publish;
 mod queue;
+mod routing;
 mod runtime;
 mod sandbox;
 mod sessions;
@@ -57,7 +58,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sessions::Session;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     path::{Path as FsPath, PathBuf},
     process::ExitCode,
@@ -112,6 +113,10 @@ pub struct App {
     pub gateway: gateway::Gateway,
     /// Owners seen in the repository list, so org workspaces can be offered before any colony exists.
     pub repo_owners: RwLock<BTreeSet<String>>,
+    /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
+    /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
+    /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
+    pub new_orgs: RwLock<BTreeMap<String, Option<String>>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
     /// The last Anthropic profile lookup for the Claude credential, cached so the status poll does not
@@ -820,6 +825,7 @@ async fn serve() -> Result<()> {
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
         gateway: gateway::Gateway::new(&cfg.data_dir)?,
         repo_owners: RwLock::new(BTreeSet::new()),
+        new_orgs: RwLock::new(BTreeMap::new()),
         orgs_refreshed: Mutex::new(None),
         claude_account: Mutex::new(None),
         github_viewer: Mutex::new(None),
@@ -1005,6 +1011,16 @@ pub(crate) mod tests {
     /// The same App, with a hook to adjust the settings before it is built: `Settings` lives
     /// inside an `Arc<App>`, so a test that needs its own `claude_bin` cannot patch one afterwards.
     pub(crate) fn test_app_with(root: &FsPath, settings: impl FnOnce(&mut Settings)) -> Shared {
+        test_app_full(root, Vec::new(), settings)
+    }
+
+    /// The same App, with agent modules installed: `create` refuses to start a colony when no agent
+    /// matches the configured provider, so a test that runs it needs one to find.
+    pub(crate) fn test_app_with_agents(root: &FsPath, agents: Vec<AgentModule>, settings: impl FnOnce(&mut Settings)) -> Shared {
+        test_app_full(root, agents, settings)
+    }
+
+    fn test_app_full(root: &FsPath, agents: Vec<AgentModule>, settings: impl FnOnce(&mut Settings)) -> Shared {
         std::fs::create_dir_all(root.join("data")).unwrap();
         let mut cfg = Settings {
             bind: "127.0.0.1:0".into(),
@@ -1021,7 +1037,7 @@ pub(crate) mod tests {
         Arc::new(App {
             cfg,
             modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
-            agents: Vec::new(),
+            agents,
             sessions: RwLock::new(Vec::new()),
             session_persist: Mutex::new(()),
             storage_alert: RwLock::new(None),
@@ -1041,6 +1057,7 @@ pub(crate) mod tests {
             updater: update::Updater::new(),
             gateway: gateway::Gateway::new(&root.join("data")).unwrap(),
             repo_owners: RwLock::new(BTreeSet::new()),
+            new_orgs: RwLock::new(BTreeMap::new()),
             orgs_refreshed: Mutex::new(None),
             pull: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),

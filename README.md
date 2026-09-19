@@ -218,9 +218,11 @@ mothership also tells you when a newer release is out, and can install it.
 | `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request. Off until configured, and the webhook carries no repository content — colony, event and time only | Slack or email relays `PLANNED` |
 
-Every GitHub org is a workspace with its own overrides for models, the parallel limit, the per-colony
-budget and host-disk quota, the sandbox stack, memory, the watchdog and notifications. Model providers (DeepSeek, a server on your LAN or
-tailnet, any Anthropic-compatible endpoint)
+Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
+parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
+notifications. An org is offered the first time the account shows it — you choose which become workspaces;
+a first install adopts the ones it already had ([#176](https://github.com/Colonizer-dev/harness/issues/176)).
+Model providers (DeepSeek, a server on your LAN or tailnet, any Anthropic-compatible endpoint)
 are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
 keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
 Claude when a provider is down or busy.

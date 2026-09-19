@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
+import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
 import { type ImagePull } from "../useImagePull";
+import { Avatar } from "./Avatar";
 import {
   IconCheck,
   IconChevron,
@@ -133,7 +135,7 @@ export function Sidebar({
       </div>
 
       <div className="mx-3 mb-1 flex items-center gap-1.5">
-        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} />
+        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} onOpenSettings={onOpenOrgSettings} />
         {selectedOrg && (
           <button
             type="button"
@@ -230,35 +232,6 @@ function SidebarTab({ active, onClick, children }: { active: boolean; onClick: (
   );
 }
 
-interface OrgEntry {
-  org: string;
-  live: number;
-  queued: number;
-  total: number;
-  pending: number;
-}
-
-/** Orgs from GET /api/orgs plus any org that only appears in the colony list; counts come from the live list. */
-function orgEntries(orgs: OrgInfo[], sessions: Session[]): OrgEntry[] {
-  const byKey = new Map<string, OrgEntry>();
-  const entry = (org: string) => {
-    const key = org.toLowerCase();
-    let found = byKey.get(key);
-    if (!found) byKey.set(key, (found = { org, live: 0, queued: 0, total: 0, pending: 0 }));
-    return found;
-  };
-  for (const info of orgs) entry(info.org).pending = info.pending_memory ?? 0;
-  for (const session of sessions) {
-    const org = orgOf(session);
-    if (!org) continue;
-    const e = entry(org);
-    e.total += 1;
-    if (session.status === "queued") e.queued += 1;
-    else if (occupiesSlot(session.status)) e.live += 1;
-  }
-  return [...byKey.values()].sort((a, b) => a.org.localeCompare(b.org));
-}
-
 function colonyCount(n: number): string {
   return `${n} ${n === 1 ? "colony" : "colonies"}`;
 }
@@ -273,13 +246,17 @@ function OrgSwitcher({
   sessions,
   selected,
   onSelect,
+  onOpenSettings,
 }: {
   orgs: OrgInfo[];
   sessions: Session[];
   selected: string | null;
   onSelect: (org: string | null) => void;
+  /** A hidden org is not a workspace choice, but its settings dialog must stay reachable — this is how. */
+  onOpenSettings: (org: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -298,8 +275,9 @@ function OrgSwitcher({
     };
   }, [open]);
 
-  const entries = orgEntries(orgs, sessions);
-  const current = selected ? entries.find((e) => sameOrg(e.org, selected)) : null;
+  const { visible, hidden } = orgEntries(orgs, sessions);
+  // A hidden org still answers "where am I" if it was selected when it was switched off.
+  const current = selected ? [...visible, ...hidden].find((e) => sameOrg(e.org, selected)) : null;
   const totalLive = sessions.filter((s) => occupiesSlot(s.status)).length;
   const totalQueued = sessions.filter((s) => s.status === "queued").length;
   const live = current ? current.live : totalLive;
@@ -320,42 +298,87 @@ function OrgSwitcher({
         aria-label="Switch organisation"
         className="flex h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-border bg-panel px-2.5 text-left hover:bg-panel-2"
       >
-        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-panel-3 text-muted">
-          <IconOrg size={12} />
-        </span>
+        {current ? (
+          <Avatar name={current.org} src={current.avatar} size={20} rounded="md" />
+        ) : (
+          <span className="grid size-5 shrink-0 place-items-center rounded-md bg-panel-3 text-muted">
+            <IconOrg size={12} />
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{current?.org ?? selected ?? "All orgs"}</span>
         {counts && <span className="shrink-0 text-[11.5px] text-info">{counts}</span>}
         <IconChevronDown size={14} className={cx("shrink-0 text-faint transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <ul
-          role="listbox"
-          aria-label="Organisations"
-          className="scroll-thin absolute inset-x-0 top-[calc(100%+4px)] z-30 max-h-80 overflow-y-auto rounded-xl border border-border bg-panel p-1 shadow-[var(--shadow)]"
-        >
-          <OrgOption
-            label="All orgs"
-            meta={colonyCount(sessions.length)}
-            live={totalLive}
-            queued={totalQueued}
-            pending={0}
-            active={!selected}
-            onClick={() => choose(null)}
-          />
-          {entries.length > 0 && <li role="separator" className="my-1 border-t border-border" />}
-          {entries.map((e) => (
+        <div className="scroll-thin absolute inset-x-0 top-[calc(100%+4px)] z-30 max-h-80 overflow-y-auto rounded-xl border border-border bg-panel p-1 shadow-[var(--shadow)]">
+          <ul role="listbox" aria-label="Organisations">
             <OrgOption
-              key={e.org}
-              label={e.org}
-              meta={colonyCount(e.total)}
-              live={e.live}
-              queued={e.queued}
-              pending={e.pending}
-              active={sameOrg(selected, e.org)}
-              onClick={() => choose(e.org)}
+              label="All orgs"
+              meta={colonyCount(sessions.length)}
+              live={totalLive}
+              queued={totalQueued}
+              pending={0}
+              active={!selected}
+              icon={
+                <span className="grid size-5 shrink-0 place-items-center rounded-md bg-panel-3 text-muted">
+                  <IconOrg size={12} />
+                </span>
+              }
+              onClick={() => choose(null)}
             />
-          ))}
-        </ul>
+            {visible.length > 0 && <li role="separator" className="my-1 border-t border-border" />}
+            {visible.map((e) => (
+              <OrgOption
+                key={e.org}
+                label={e.org}
+                meta={colonyCount(e.total)}
+                live={e.live}
+                queued={e.queued}
+                pending={e.pending}
+                avatar={e.avatar}
+                active={sameOrg(selected, e.org)}
+                onClick={() => choose(e.org)}
+              />
+            ))}
+          </ul>
+          {hidden.length > 0 && (
+            <div className="mt-1 border-t border-border pt-1">
+              <button
+                type="button"
+                onClick={() => setShowHidden((v) => !v)}
+                aria-expanded={showHidden}
+                className="flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-muted hover:bg-panel-2 hover:text-text"
+              >
+                <IconChevron size={12} className={cx("shrink-0 transition-transform", showHidden && "rotate-90")} />
+                Hidden ({hidden.length})
+              </button>
+              {showHidden && (
+                <ul className="pb-1">
+                  {hidden.map((e) => (
+                    <li key={e.org} className="flex items-center gap-2 rounded-lg px-2.5 py-1.5">
+                      <Avatar name={e.org} src={e.avatar} size={20} rounded="md" />
+                      <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{e.org}</span>
+                      <Badge tone="neutral">Off</Badge>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpen(false);
+                          onOpenSettings(e.org);
+                        }}
+                        aria-label={`Settings for ${e.org}`}
+                        title={`Settings for ${e.org}`}
+                        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-3 hover:text-text"
+                      >
+                        <IconSettings size={14} />
+                      </button>
+                    </li>
+                  ))}
+                  <li className="px-2.5 pt-0.5 text-[11.5px] text-faint">Switched off in their settings; their colonies stay listed.</li>
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -367,6 +390,8 @@ function OrgOption({
   live,
   queued,
   pending,
+  avatar,
+  icon,
   active,
   onClick,
 }: {
@@ -375,6 +400,9 @@ function OrgOption({
   live: number;
   queued: number;
   pending: number;
+  avatar?: string | null;
+  /** A fixed tile for the row that is not one org ("All orgs"). */
+  icon?: ReactNode;
   active: boolean;
   onClick: () => void;
 }) {
@@ -386,6 +414,7 @@ function OrgOption({
         onClick={onClick}
         className={cx("flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left", active ? "bg-accent-soft" : "hover:bg-panel-2")}
       >
+        {icon ?? <Avatar name={label} src={avatar} size={20} rounded="md" />}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13.5px] font-medium">{label}</span>
           <span className="block text-[11.5px] text-faint">
@@ -600,7 +629,8 @@ function SectionLabel({ children }: { children: ReactNode }) {
   return <div className="px-1 text-[11.5px] font-semibold uppercase tracking-wide text-faint">{children}</div>;
 }
 
-function NewSession({
+/** The colony launcher: pick a repository, pick issues, send them out. The cockpit's launch view renders it too. */
+export function NewSession({
   org,
   githubConnected,
   statusKnown,

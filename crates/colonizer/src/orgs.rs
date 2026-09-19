@@ -73,6 +73,11 @@ pub struct NotifyOverrides {
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
+    /// Whether this org is offered as a workspace. `None` or `Some(true)` means yes, so an existing
+    /// install keeps every org it already had. `Some(false)` hides it from the workspace list and
+    /// refuses to start new colonies for it, while keeping its settings and its existing colonies.
+    #[serde(default)]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
@@ -101,6 +106,16 @@ pub fn valid_org(org: &str) -> bool {
     !org.is_empty() && org.len() <= 39 && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// One org the mothership has seen on the signed-in GitHub account, keyed by login. The record
+/// (`known-orgs.json`, beside `orgs.json`) is what keeps a refresh from asking about orgs it has
+/// already offered, and where an avatar comes from; its absence is a first run, which adopts
+/// everything at once.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct KnownOrg {
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
 impl App {
     fn orgs_file(&self) -> PathBuf {
         self.cfg.config_dir.join("orgs.json")
@@ -125,6 +140,150 @@ impl App {
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
+
+    pub(crate) fn known_orgs_file(&self) -> PathBuf {
+        self.cfg.config_dir.join("known-orgs.json")
+    }
+
+    /// The orgs this harness has already seen on the signed-in GitHub account, or `None` when there
+    /// is no record: a first run, or a file that will not parse. Both read as "adopt whatever turns
+    /// up", which is what keeps an upgrade from asking about every org the account already had — and
+    /// which makes a corrupt record quiet rather than loud: it adopts everything without asking, so
+    /// the worst it can cost is a prompt that is never asked, never a prompt asked twice.
+    pub fn known_orgs(&self) -> Option<BTreeMap<String, KnownOrg>> {
+        std::fs::read(self.known_orgs_file())
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+    }
+
+    /// Crate-private rather than module-private because `github::refresh_orgs` applies its
+    /// reconciliation's record update through it.
+    pub(crate) fn save_known_orgs(&self, all: &BTreeMap<String, KnownOrg>) -> anyhow::Result<()> {
+        std::fs::create_dir_all(&self.cfg.config_dir)?;
+        let path = self.known_orgs_file();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(all)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// Records an org as seen, refreshing its avatar when the sighting carries one. Best effort: the
+    /// record exists so the operator is asked once and the list has avatars, so a failed write is
+    /// logged rather than escalated, and an unchanged record is not written again.
+    pub fn mark_org_known(&self, org: &str, avatar_url: Option<&str>) {
+        let mut all = self.known_orgs().unwrap_or_default();
+        if !merge_known(&mut all, org, avatar_url) {
+            return;
+        }
+        if let Err(e) = self.save_known_orgs(&all) {
+            eprintln!("orgs: could not save {}: {e:#}", self.known_orgs_file().display());
+        }
+    }
+}
+
+/// Records one sighting of an org in a known-orgs map, saying whether the map changed. A sighting
+/// without an avatar never erases one already saved — GitHub answering without the field is not
+/// evidence the org lost its picture — and an unchanged map is not a write.
+pub(crate) fn merge_known(map: &mut BTreeMap<String, KnownOrg>, org: &str, avatar_url: Option<&str>) -> bool {
+    let fresh = avatar_url.map(String::from);
+    match map.get(org) {
+        Some(existing) if fresh.is_none() || existing.avatar_url.as_deref() == fresh.as_deref() => false,
+        _ => {
+            map.insert(org.to_string(), KnownOrg { avatar_url: fresh });
+            true
+        }
+    }
+}
+
+/// What a refresh of the signed-in account's orgs means for the workspace list: which orgs to offer,
+/// which to stop offering, and which to ask about. Pure on purpose, so
+/// [`crate::github::refresh_orgs`] is only the IO around it and every rule here can be tested
+/// without GitHub.
+pub(crate) struct OrgReconciliation {
+    /// Orgs to offer as workspaces.
+    pub adopted: BTreeSet<String>,
+    /// Orgs tracked before that GitHub no longer reports, or that are switched off: drop them.
+    pub dropped: BTreeSet<String>,
+    /// New orgs to ask the operator about.
+    pub awaiting: BTreeMap<String, Option<String>>,
+    /// On a first run, everything adopted silently — the count the operator is told about.
+    pub first_run_adopted: usize,
+}
+
+/// Works out what a refresh means. `known` is the `known-orgs.json` record, and `None` is a first
+/// run: everything fetched is adopted at once, because an install that predates the record has been
+/// offering those orgs all along and must not suddenly start asking about them. After that, an org
+/// the record has never heard of goes to `awaiting` and stays out of the workspace list until a
+/// settings save answers for it. `dropped` is everything not adopted — an org the account left, one
+/// switched off, one still awaiting. The signed-in login is never asked about — there is no point
+/// prompting someone about themselves — but its switch is respected like any other org's, the way
+/// `sessions::create` already treats it.
+pub(crate) fn reconcile_orgs(
+    fetched: &BTreeMap<String, Option<String>>,
+    known: Option<&BTreeMap<String, KnownOrg>>,
+    settings: &BTreeMap<String, OrgSettings>,
+    own_login: &str,
+) -> OrgReconciliation {
+    let first_run = known.is_none();
+    let empty = BTreeMap::new();
+    let known = known.unwrap_or(&empty);
+    let mut plan = OrgReconciliation {
+        adopted: BTreeSet::new(),
+        dropped: BTreeSet::new(),
+        awaiting: BTreeMap::new(),
+        first_run_adopted: 0,
+    };
+    for (login, avatar) in fetched {
+        let seen = first_run || login == own_login || known.contains_key(login);
+        let enabled = settings.get(login).is_none_or(org_enabled);
+        if seen && enabled {
+            plan.adopted.insert(login.clone());
+            if first_run {
+                plan.first_run_adopted += 1;
+            }
+        } else if seen {
+            // Switched off: the workspace goes, the settings and its existing colonies stay.
+            plan.dropped.insert(login.clone());
+        } else {
+            // Never seen before: park it for the operator rather than adopt it silently.
+            plan.awaiting.insert(login.clone(), avatar.clone());
+            plan.dropped.insert(login.clone());
+        }
+    }
+    // What GitHub no longer reports is what the account has left.
+    for login in known.keys() {
+        if !fetched.contains_key(login) {
+            plan.dropped.insert(login.clone());
+        }
+    }
+    plan
+}
+
+/// Which of a refresh's sightings belong in the known-orgs record: every org the fetch reported
+/// except the ones still awaiting an answer. The record doubles as the seen-set, so writing an
+/// awaiting sighting would make the next refresh treat the org as an old one and adopt it without
+/// ever asking — its avatar travels in `new_orgs` until the answer records it. Everything decided
+/// is recorded whatever its workspace status, so a switched-off or declined org keeps a face for
+/// the Hidden list and its settings dialog.
+pub(crate) fn recordable_sightings<'a>(
+    fetched: &'a BTreeMap<String, Option<String>>,
+    plan: &OrgReconciliation,
+) -> impl Iterator<Item = &'a String> {
+    let awaiting = &plan.awaiting;
+    fetched.keys().filter(move |login| !awaiting.contains_key(*login))
+}
+
+/// One line of `gh api /user/orgs --jq '.[] | {login, avatar_url}'`: a login and, when GitHub has
+/// one, its avatar. `gh` prints each jq result as one compact JSON line (`--paginate` concatenates
+/// the pages' lines, the same shape [`crate::github::list_repos`] reads its repository rows as), so
+/// the refresh parses line by line and skips whatever does not parse instead of losing the batch.
+pub(crate) fn parse_org_line(line: &str) -> Option<(String, Option<String>)> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let login = v["login"].as_str()?;
+    if !valid_org(login) {
+        return None;
+    }
+    Some((login.to_string(), v["avatar_url"].as_str().map(String::from)))
 }
 
 /// The agent module choice with the org's model and skillset overrides applied.
@@ -160,6 +319,12 @@ pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoi
 pub fn global_max_parallel(modules: &ModulesConfig) -> u64 {
     let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
     setting_u64(&modules.sandbox, &schema, "max_parallel").max(1)
+}
+
+/// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
+/// yes, so an `orgs.json` written before the switch existed reads as every org still on.
+pub fn org_enabled(org: &OrgSettings) -> bool {
+    org.enabled != Some(false)
 }
 
 /// An org's own colony limit, if it sets one. The global limit always applies as well.
@@ -360,10 +525,18 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     crate::github::refresh_orgs(&app).await;
     let saved = app.all_org_settings();
+    let known = app.known_orgs().unwrap_or_default();
+    let new_orgs = app.new_orgs.read().await.clone();
     let sessions = app.sessions.read().await.clone();
+    // The workspace set: orgs with settings of their own (a switched-off or declined one keeps its
+    // entry, so it stays reachable), orgs with colonies, orgs the account belongs to, and orgs still
+    // awaiting an answer, which have to be answerable. The known-orgs record is deliberately *not* a
+    // source here: it is a seen-set and avatar cache that nothing is ever removed from, so reading
+    // it as a list would keep an org the account has left a workspace forever.
     let mut orgs: BTreeSet<String> = saved.keys().cloned().collect();
     orgs.extend(sessions.iter().map(|s| s.org.clone()));
     orgs.extend(app.repo_owners.read().await.iter().cloned());
+    orgs.extend(new_orgs.keys().cloned());
     let proposals = app.memory.proposals().await;
     Json(
         orgs.into_iter()
@@ -379,12 +552,27 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                         _ => false,
                     })
                     .count();
-                json!({
+                // The avatar only where the mothership knows one — a known org's saved one, else the
+                // sighting that is waiting for an answer; an org that only shows up in the colony
+                // list has none, and the UI falls back to an initial.
+                let avatar = known
+                    .get(&org)
+                    .and_then(|k| k.avatar_url.clone())
+                    .or_else(|| new_orgs.get(&org).cloned().flatten());
+                let awaiting = new_orgs.contains_key(&org) && !known.contains_key(&org);
+                let mut entry = json!({
                     "org": org,
                     "colonies": {"live": live, "total": total},
                     "pending_memory": pending,
                     "settings": saved.get(&org).cloned().unwrap_or_default(),
-                })
+                });
+                if let Some(avatar_url) = avatar {
+                    entry["avatar_url"] = Value::String(avatar_url);
+                }
+                if awaiting {
+                    entry["awaiting_decision"] = Value::Bool(true);
+                }
+                entry
             })
             .collect(),
     )
@@ -408,6 +596,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
             .and_then(|object| object.get(field))
             .is_none()
     };
+    if !named("enabled") {
+        incoming.enabled = saved.enabled;
+    }
     if !named("agent") {
         incoming.agent = saved.agent.clone();
     } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut())
@@ -471,6 +662,19 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
         all.insert(org.clone(), req.settings.clone());
     }
     app.save_org_settings(&all)?;
+    // Any explicit save is the answer to "do you want this org?" — "add it" and "no" alike — so the
+    // org counts as seen and no pending prompt for it comes back over a decision just made. The
+    // avatar from the sighting that posed the question goes with the answer: refreshes keep the
+    // avatars of decided orgs up to date, but a declined one is never fetched as adopted again, so
+    // this is its picture's only ride across.
+    let pending_avatar = app.new_orgs.read().await.get(&org).cloned().flatten();
+    app.mark_org_known(&org, pending_avatar.as_deref());
+    app.new_orgs.write().await.remove(&org);
+    if org_enabled(&req.settings) {
+        app.repo_owners.write().await.insert(org.clone());
+    } else {
+        app.repo_owners.write().await.remove(&org);
+    }
     Ok(Json(json!({"org": org, "settings": req.settings})))
 }
 
@@ -791,6 +995,7 @@ mod tests {
     #[test]
     fn a_settings_save_only_replaces_the_fields_the_client_names() {
         let saved = OrgSettings {
+            enabled: Some(false),
             agent: Some(AgentOverrides {
                 model: Some("opus".into()),
                 skillsets: Some(BTreeMap::from([("ecc".to_string(), true)])),
@@ -821,6 +1026,11 @@ mod tests {
         });
         let mut incoming: OrgSettings = serde_json::from_value(old_build.clone()).unwrap();
         keep_unnamed_fields(&mut incoming, &saved, Some(&old_build));
+        assert_eq!(
+            incoming.enabled,
+            Some(false),
+            "a switch the client never heard of keeps the org switched off"
+        );
         assert_eq!(
             incoming.budget_usd,
             Some(20.0),
@@ -867,6 +1077,20 @@ mod tests {
         assert_eq!(blank.stack, saved.stack);
         assert_eq!(blank.agent, saved.agent);
         assert_eq!(blank.watchdog, saved.watchdog);
+
+        // A build that knows the switch treats it like any other field: a named null inherits, a
+        // named false switches the workspace off.
+        let named = |body: Value| {
+            let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+            keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+            incoming.enabled
+        };
+        assert_eq!(
+            named(json!({"enabled": null})),
+            None,
+            "a named null is a real request to inherit"
+        );
+        assert_eq!(named(json!({"enabled": false})), Some(false));
     }
 
     #[test]
@@ -901,5 +1125,372 @@ mod tests {
                 .get("plugins"),
             Some(&json!("superpowers"))
         );
+    }
+
+    #[test]
+    fn an_orgs_json_written_before_enabled_existed_still_loads_and_the_org_is_enabled() {
+        // What an install from before the switch wrote: no `enabled` key anywhere.
+        let saved = r#"{"acme": {"max_parallel": 2, "budget_usd": 5.5}}"#;
+        let all: BTreeMap<String, OrgSettings> = serde_json::from_str(saved).unwrap();
+        let org = all.get("acme").unwrap();
+        assert_eq!(org.max_parallel, Some(2));
+        assert_eq!(org.budget_usd, Some(5.5));
+        assert_eq!(org.enabled, None);
+        assert!(org_enabled(org), "an org the switch has never heard of stays on");
+    }
+
+    #[test]
+    fn a_switched_off_org_survives_a_settings_round_trip() {
+        let org = OrgSettings {
+            enabled: Some(false),
+            max_parallel: Some(3),
+            watchdog: Some(WatchdogOverrides {
+                stall_minutes: Some(9),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let back: OrgSettings = serde_json::from_str(&serde_json::to_string(&org).unwrap()).unwrap();
+        assert_eq!(back, org, "a declined org keeps every setting it has");
+        assert!(!org_enabled(&back));
+        assert!(org_enabled(&OrgSettings {
+            enabled: Some(true),
+            ..Default::default()
+        }));
+    }
+
+    // -- reconciliation -------------------------------------------------------------------------
+
+    fn fetched(orgs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+        orgs.iter()
+            .map(|(login, avatar)| (login.to_string(), avatar.map(String::from)))
+            .collect()
+    }
+
+    fn known(orgs: &[&str]) -> BTreeMap<String, KnownOrg> {
+        orgs.iter().map(|login| (login.to_string(), KnownOrg::default())).collect()
+    }
+
+    #[test]
+    fn a_first_run_adopts_every_org_silently_and_counts_what_it_added() {
+        let plan = reconcile_orgs(
+            &fetched(&[("acme", Some("https://a/acme.png")), ("own", Some("https://a/own.png"))]),
+            None,
+            &BTreeMap::new(),
+            "own",
+        );
+        assert_eq!(plan.adopted, BTreeSet::from(["acme".to_string(), "own".to_string()]));
+        assert!(plan.awaiting.is_empty(), "nobody is asked about orgs they already had");
+        assert_eq!(plan.first_run_adopted, 2);
+        assert!(plan.dropped.is_empty());
+    }
+
+    #[test]
+    fn an_org_new_since_the_first_run_awaits_an_answer_and_is_not_adopted() {
+        let plan = reconcile_orgs(
+            &fetched(&[("acme", None), ("fresh", Some("https://a/fresh.png")), ("own", None)]),
+            Some(&known(&["acme"])),
+            &BTreeMap::new(),
+            "own",
+        );
+        assert_eq!(
+            plan.awaiting,
+            BTreeMap::from([("fresh".to_string(), Some("https://a/fresh.png".to_string()))]),
+            "the new org is asked about, avatar and all"
+        );
+        assert_eq!(plan.adopted, BTreeSet::from(["acme".to_string(), "own".to_string()]));
+        assert_eq!(plan.first_run_adopted, 0);
+        assert!(plan.dropped.contains("fresh"), "an unanswered org is not a workspace yet");
+    }
+
+    #[test]
+    fn a_declined_org_is_never_awaiting_again() {
+        let settings = BTreeMap::from([(
+            "nope".to_string(),
+            OrgSettings {
+                enabled: Some(false),
+                max_parallel: Some(2),
+                ..Default::default()
+            },
+        )]);
+        let plan = reconcile_orgs(
+            &fetched(&[("acme", None), ("nope", None), ("own", None)]),
+            Some(&known(&["acme", "nope"])),
+            &settings,
+            "own",
+        );
+        assert!(
+            !plan.awaiting.contains_key("nope"),
+            "a decision already made is not asked about a second time"
+        );
+        assert!(!plan.adopted.contains("nope"));
+        assert!(plan.dropped.contains("nope"), "the workspace goes, the settings stay");
+        assert!(plan.adopted.contains("acme"));
+    }
+
+    #[test]
+    fn an_org_github_stops_reporting_is_dropped_from_the_workspace_list() {
+        let plan = reconcile_orgs(
+            &fetched(&[("acme", None), ("own", None)]),
+            Some(&known(&["acme", "gone"])),
+            &BTreeMap::new(),
+            "own",
+        );
+        assert!(plan.dropped.contains("gone"), "the account has left it");
+        assert!(!plan.adopted.contains("gone"));
+        assert!(plan.adopted.contains("acme"));
+    }
+
+    #[test]
+    fn a_refresh_records_the_avatar_of_every_decided_org_but_never_an_awaiting_one() {
+        let fetched = fetched(&[
+            ("acme", Some("https://a/acme-new.png")),
+            ("off", Some("https://a/off.png")),
+            ("fresh", Some("https://a/fresh.png")),
+            ("own", None),
+        ]);
+        let settings = BTreeMap::from([(
+            "off".to_string(),
+            OrgSettings {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )]);
+        let plan = reconcile_orgs(&fetched, Some(&known(&["acme", "off"])), &settings, "own");
+        // The record takes every sighting except the one still waiting for an answer: it is the
+        // seen-set too, so writing `fresh` would adopt the org without ever asking.
+        let mut record = BTreeMap::from([(
+            "off".to_string(),
+            KnownOrg {
+                avatar_url: Some("https://a/off-old.png".into()),
+            },
+        )]);
+        for login in recordable_sightings(&fetched, &plan) {
+            merge_known(&mut record, login, fetched.get(login).and_then(|a| a.as_deref()));
+        }
+        assert_eq!(
+            record.get("off").unwrap().avatar_url.as_deref(),
+            Some("https://a/off.png"),
+            "a switched-off org's avatar is refreshed even though its workspace is gone"
+        );
+        assert_eq!(
+            record.get("acme").unwrap().avatar_url.as_deref(),
+            Some("https://a/acme-new.png")
+        );
+        assert!(
+            !record.contains_key("fresh"),
+            "an unanswered sighting stays out of the record, avatar and all"
+        );
+    }
+
+    #[test]
+    fn the_signed_in_login_is_never_awaiting_but_respects_the_workspace_switch() {
+        // There is no point prompting someone about themselves, so the login is never asked about —
+        // but the switch works on it like on any other org, the way `sessions::create` treats it.
+        let off = BTreeMap::from([(
+            "own".to_string(),
+            OrgSettings {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )]);
+        let plan = reconcile_orgs(&fetched(&[("own", None)]), Some(&known(&[])), &off, "own");
+        assert!(plan.awaiting.is_empty(), "never asked about, switched off or not");
+        assert!(plan.adopted.is_empty(), "the switch takes the own login's workspace away too");
+        assert_eq!(plan.dropped, BTreeSet::from(["own".to_string()]));
+
+        // With no switch, the account itself is a workspace as always.
+        let plan = reconcile_orgs(&fetched(&[("own", None)]), Some(&known(&[])), &BTreeMap::new(), "own");
+        assert_eq!(plan.adopted, BTreeSet::from(["own".to_string()]));
+        assert!(plan.dropped.is_empty());
+    }
+
+    #[test]
+    fn org_lines_parse_one_object_per_line_and_odd_lines_are_skipped() {
+        let out = concat!(
+            r#"{"login":"acme","avatar_url":"https://avatars.githubusercontent.com/u/1?v=4"}"#,
+            "\n",
+            "\n",
+            "gh: this line is not json\n",
+            r#"{"login":"team","avatar_url":null}"#,
+            "\n",
+            "[1, 2, 3]\n",
+            r#"{"avatar_url":"https://a.png"}"#,
+            "\n",
+            r#"{"login":"../etc/passwd","avatar_url":null}"#,
+            "\n",
+        );
+        let parsed: Vec<(String, Option<String>)> = out.lines().filter_map(parse_org_line).collect();
+        assert_eq!(
+            parsed,
+            vec![
+                (
+                    "acme".to_string(),
+                    Some("https://avatars.githubusercontent.com/u/1?v=4".to_string())
+                ),
+                ("team".to_string(), None),
+            ],
+            "a blank, a non-object, an avatarless object and an invalid login are all skipped"
+        );
+    }
+
+    // -- the known-orgs record ------------------------------------------------------------------
+
+    fn org_app() -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-orgs-{}", crate::util::short_id()));
+        (crate::tests::test_app(&root), root)
+    }
+
+    #[test]
+    fn marking_an_org_known_keeps_a_saved_avatar_when_the_next_sighting_has_none() {
+        let (app, root) = org_app();
+        assert!(app.known_orgs().is_none(), "no record yet is what a first run is");
+        app.mark_org_known("acme", Some("https://a/acme.png"));
+        let known = app.known_orgs().unwrap();
+        assert_eq!(known.get("acme").unwrap().avatar_url.as_deref(), Some("https://a/acme.png"));
+
+        // GitHub answering without the field is not evidence the org lost its picture.
+        app.mark_org_known("acme", None);
+        let known = app.known_orgs().unwrap();
+        assert_eq!(known.get("acme").unwrap().avatar_url.as_deref(), Some("https://a/acme.png"));
+
+        // A new avatar replaces an old one; a brand-new org is recorded without one.
+        app.mark_org_known("acme", Some("https://a/newer.png"));
+        app.mark_org_known("team", None);
+        let known = app.known_orgs().unwrap();
+        assert_eq!(known.get("acme").unwrap().avatar_url.as_deref(), Some("https://a/newer.png"));
+        assert_eq!(known.get("team").unwrap().avatar_url, None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marking_an_org_known_writes_nothing_when_the_record_is_already_current() {
+        let (app, root) = org_app();
+        app.mark_org_known("acme", Some("https://a/acme.png"));
+        let before = app.known_orgs().unwrap();
+        assert!(
+            !merge_known(&mut before.clone(), "acme", Some("https://a/acme.png")),
+            "the same sighting twice changes nothing, so writes nothing"
+        );
+        assert!(!merge_known(&mut before.clone(), "acme", None));
+        assert!(
+            merge_known(&mut before.clone(), "acme", Some("https://a/other.png")),
+            "a genuinely new avatar does"
+        );
+        assert_eq!(
+            app.known_orgs().unwrap(),
+            before,
+            "the skipped sightings left the record alone"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_corrupt_known_orgs_file_reads_as_a_first_run_rather_than_an_error() {
+        let (app, root) = org_app();
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        std::fs::write(app.known_orgs_file(), b"this is not json").unwrap();
+        assert_eq!(app.known_orgs(), None);
+        // And writing the record again heals it.
+        app.mark_org_known("acme", None);
+        assert!(app.known_orgs().unwrap().contains_key("acme"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- the workspace list ----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn an_org_the_account_has_left_leaves_the_workspace_list_and_kept_ones_stay() {
+        use crate::sessions::{SessionStatus, tests::colony};
+
+        let (app, root) = org_app();
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        // Three sightings on record: one the account has since left, one switched off, one adopted.
+        let seen = |login: &str| KnownOrg {
+            avatar_url: Some(format!("https://a/{login}.png")),
+        };
+        app.save_known_orgs(&BTreeMap::from([
+            ("left".to_string(), seen("left")),
+            ("off".to_string(), seen("off")),
+            ("acme".to_string(), seen("acme")),
+        ]))
+        .unwrap();
+        // Only the switched-off org has settings of its own; the left one has nothing to hold its
+        // place. The refresh prunes both from the owners, and only `off` is meant to survive that.
+        std::fs::write(app.orgs_file(), r#"{"off": {"enabled": false, "max_parallel": 2}}"#).unwrap();
+        app.repo_owners.write().await.insert("acme".into());
+        let mut s = colony("acme", SessionStatus::Idle);
+        s.id = "busy".into();
+        app.sessions.write().await.push(s);
+        // Skip the refresh outright: on this hand-set state it is exactly what the list is built
+        // from, and a refresh that cannot reach GitHub changes nothing in any case.
+        *app.orgs_refreshed.lock().await = Some(std::time::Instant::now());
+
+        let listed: BTreeSet<String> = list(State(app.clone()))
+            .await
+            .0
+            .into_iter()
+            .map(|entry| entry["org"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !listed.contains("left"),
+            "an org the account left is not a workspace any more, however well the record remembers it"
+        );
+        assert!(
+            listed.contains("off"),
+            "a switched-off org keeps its saved entry and stays reachable"
+        );
+        assert!(listed.contains("acme"), "an org with colonies stays listed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- answering the prompt --------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn answering_the_prompt_records_the_pending_avatar_with_the_answer() {
+        let (app, root) = org_app();
+        *app.new_orgs.write().await = BTreeMap::from([("fresh".to_string(), Some("https://a/fresh.png".to_string()))]);
+
+        // "Add as a workspace": the save answers the prompt, and the answer takes the avatar with it
+        // rather than leaving the org faceless until the next refresh.
+        let _ = put(
+            State(app.clone()),
+            Path("fresh".into()),
+            Json(json!({"settings": {"enabled": true}})),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(
+            app.known_orgs().unwrap().get("fresh").unwrap().avatar_url.as_deref(),
+            Some("https://a/fresh.png")
+        );
+        assert!(
+            !app.new_orgs.read().await.contains_key("fresh"),
+            "the answered sighting is not left pending"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn declining_the_prompt_keeps_the_avatar_that_sighting_had() {
+        let (app, root) = org_app();
+        *app.new_orgs.write().await = BTreeMap::from([("nope".to_string(), Some("https://a/nope.png".to_string()))]);
+
+        // "Not this one": the org is never fetched as adopted again, so this sighting is its
+        // avatar's only ride into the record.
+        let _ = put(
+            State(app.clone()),
+            Path("nope".into()),
+            Json(json!({"settings": {"enabled": false}})),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(
+            app.known_orgs().unwrap().get("nope").unwrap().avatar_url.as_deref(),
+            Some("https://a/nope.png"),
+            "a declined org keeps the face the prompt showed"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

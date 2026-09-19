@@ -150,8 +150,18 @@ fn valid_preset(preset: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// The runner reads these to decide which routes a colony actually uses.
-const MODEL_VARS: [&str; 3] = ["COLONIZER_MODEL", "COLONIZER_SUBAGENT_MODEL", "COLONIZER_BACKGROUND_MODEL"];
+/// The model env vars a colony can be pointed at, matched against the configured providers. The
+/// first three reach the runner as is; the two tier models are the mothership's per-task routing and
+/// are stripped from the runner env before launch, so only `used_by` reads them — counting the tier
+/// settings in the module's configured env, while a colony booted onto a tier meets the tier's
+/// provider through the substituted `COLONIZER_MODEL`. Order matches the settings array in [`used_by`].
+const MODEL_VARS: [&str; 5] = [
+    "COLONIZER_MODEL",
+    "COLONIZER_SUBAGENT_MODEL",
+    "COLONIZER_BACKGROUND_MODEL",
+    "COLONIZER_MODEL_LOW",
+    "COLONIZER_MODEL_HIGH",
+];
 
 impl App {
     fn providers_file(&self) -> PathBuf {
@@ -298,15 +308,16 @@ pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
     ColonyRoutes { routes, providers }
 }
 
-/// The model settings (`model`, `subagent_model`, `background_model`) whose resolved value — schema
-/// default, global setting or org override — routes to this provider as `<provider-id>/<model>`, named
-/// for a human, e.g. `["subagent_model"]`. Empty means no model setting points at it. A bare alias or a
-/// partial id prefix is Claude's or another provider's model, so it doesn't match, same rule as
-/// [`ColonyRoutes::used`].
+/// The model settings (`model`, `subagent_model`, `background_model`, `model_low`, `model_high`)
+/// whose resolved value — schema default, global setting or org override — routes to this provider as
+/// `<provider-id>/<model>`, named for a human, e.g. `["subagent_model"]`. Empty means no model setting
+/// points at it. A bare alias or a partial id prefix is Claude's or another provider's model, so it
+/// doesn't match, same rule as [`ColonyRoutes::used`].
 fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> {
     let mut used: Vec<&'static str> = Vec::new();
+    let settings = ["model", "subagent_model", "background_model", "model_low", "model_high"];
     for env in envs {
-        for (var, setting) in MODEL_VARS.iter().zip(["model", "subagent_model", "background_model"]) {
+        for (var, setting) in MODEL_VARS.iter().zip(settings) {
             let points_here = env
                 .get(*var)
                 .and_then(Value::as_str)
