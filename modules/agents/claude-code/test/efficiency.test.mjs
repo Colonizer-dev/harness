@@ -93,8 +93,9 @@ test('the colony environment is described only when the mothership names the ima
   assert.ok(!buildOptions({ ...base }).options.systemPrompt.append.includes('no gh CLI'));
 });
 
-test('the orchestrator asks for focused reports and does not idle with placeholder commands', () => {
+test('the orchestrator asks for focused reports and waits instead of idling', () => {
   assert.match(DELEGATE_PROMPT_APPEND, /file:line references/);
   assert.match(DELEGATE_PROMPT_APPEND, /Do not ask for exhaustive, verbatim or "in full" dumps/);
-  assert.match(DELEGATE_PROMPT_APPEND, /never run placeholder commands such as sleep or echo/);
+  assert.match(DELEGATE_PROMPT_APPEND, /mcp__colonizer_wait__wait holds the turn/);
+  assert.match(DELEGATE_PROMPT_APPEND, /never a placeholder command such as sleep or echo/);
 });
