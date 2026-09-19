@@ -29,6 +29,7 @@ mod protocol;
 mod providers;
 mod publish;
 mod queue;
+mod routing;
 mod runtime;
 mod sandbox;
 mod sessions;

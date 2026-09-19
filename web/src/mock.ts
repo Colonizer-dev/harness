@@ -1192,9 +1192,10 @@ export function createMockApi(): Api {
       ...DEFAULT_LIMITS,
       in_flight: 0,
       queued: 0,
-      // Wired only to the subagent model, and no colony has ever delegated: the issue #39 state.
+      // Wired only to the subagent model and the small-task tier, and no colony has ever
+      // delegated: the issue #39 state.
       usage: zeroUsage(),
-      used_by: ["subagent_model"],
+      used_by: ["subagent_model", "model_low"],
     },
     {
       id: "strix",
