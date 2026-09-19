@@ -68,6 +68,32 @@ With `COLONIZER_MEMORY_DIR` set, the agent gets two auto-allowed tools from an i
 (`colonizer_memory`): `memory_search` searches `{repo,org,global}/notes/*.md`, and `memory_propose`
 emits a `memory_proposal` event for review on the mothership. Nothing is written inside the colony.
 
+## Waiting
+
+Every colony also gets `mcp__colonizer_wait__wait` from an in-process MCP server (`colonizer_wait`),
+with no setting to switch it on: a colony that cannot block burns model turns polling. It takes a
+one-line `reason` (so the transcript says what the wait was for) and exactly one of: `seconds`, to
+sleep; `file` and `pattern` (a JavaScript regex), to return as soon as a line of the file matches —
+the file need not exist yet, it is read incrementally from the last byte offset, and the read starts
+over when the file shrinks or its inode changes under the same path (truncated, or rotated by
+rename). The watcher assumes the file is appended to: a same-inode rewrite that leaves the file at
+least as long as the offset already read cannot be detected. A path that exists but is not a regular
+file — directory, FIFO, socket, device — is refused as plain text, because opening a FIFO with no
+writer blocks inside the threadpool and would never reach the timeout or an abort. A final line with
+no trailing newline still matches, and is flagged as unterminated. Or `pid`, to return when that
+process is gone (a disappearance, not an exit status — the colony cannot reap a process it did not
+spawn, and an unreaped zombie still answers the liveness check, so a wait on one reports it as still
+running). `seconds` and the `pid`/`file` timeout (default 300 s) cap at 1800 s and clamp with a note
+rather than erroring. A timeout on a file wait returns the file's last lines, read from at most its
+final 64 KiB, so one call is enough to see where a stuck build is. The tool description itself
+carries the "use this instead of a grep poll loop or `Bash true`" guidance, because subagents see
+descriptions but not the system prompt.
+
+One honest limit on the `pattern`: it is evaluated by the runner's own event loop, so the timeout
+bounds the waiting, not the regex evaluation. A pathological pattern — catastrophic backtracking,
+the classic `(a+)+$` against a long line — can freeze the runner for far longer than any timeout.
+Keep patterns simple: a literal substring or a simple regex.
+
 ## Develop
 
 ```sh
