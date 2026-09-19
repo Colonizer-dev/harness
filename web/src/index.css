@@ -916,3 +916,121 @@ body {
     opacity: 0.7;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   The nest (cockpit home): the plot the colonies are dug into, and its motion.
+   Only four tokens are new; everything else reuses the palette above.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --ground: #e8ecf2;
+  --plot: #ffffff;
+  --plot-edge: #c3cbd7;
+  --dots: rgb(18 23 34 / 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0c0f15;
+    --plot: #12151d;
+    --plot-edge: rgb(255 255 255 / 0.12);
+    --dots: rgb(255 255 255 / 0.07);
+  }
+}
+
+/* An explicit choice beats the OS setting; unset follows it. */
+:root[data-theme="light"] {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --panel-3: #e3e8ef;
+  --border: #dde2ea;
+  --border-strong: #c3cbd7;
+  --text: #121722;
+  --muted: #5b6577;
+  --faint: #8a93a3;
+  --accent: #c8440f;
+  --accent-hover: #ad3a0c;
+  --accent-soft: #fdece4;
+  --accent-ring: rgb(200 68 15 / 0.35);
+  --on-accent: #ffffff;
+  --ok: #15803d;
+  --ok-soft: #e3f4e8;
+  --warn: #a15c07;
+  --warn-soft: #fdf2dc;
+  --err: #b91c1c;
+  --err-soft: #fce8e7;
+  --info: #1d4ed8;
+  --info-soft: #e5ecfd;
+  --term-bg: #0b0e14;
+  --term-fg: #dfe5ee;
+  --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 4px 16px rgb(18 23 34 / 0.07);
+  --ground: #e8ecf2;
+  --plot: #ffffff;
+  --plot-edge: #c3cbd7;
+  --dots: rgb(18 23 34 / 0.08);
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #07090e;
+  --panel: #0e121a;
+  --panel-2: #151a24;
+  --panel-3: #1c2330;
+  --border: #212938;
+  --border-strong: #323c4f;
+  --text: #e6ebf3;
+  --muted: #97a1b3;
+  --faint: #677185;
+  --accent: #ff6b35;
+  --accent-hover: #ff8455;
+  --accent-soft: #2e1a12;
+  --accent-ring: rgb(255 107 53 / 0.4);
+  --on-accent: #1a0903;
+  --ok: #4ade80;
+  --ok-soft: #10251a;
+  --warn: #fbbf24;
+  --warn-soft: #2a2110;
+  --err: #f87171;
+  --err-soft: #2e1618;
+  --info: #93c5fd;
+  --info-soft: #132036;
+  --term-bg: #05070b;
+  --term-fg: #dfe5ee;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.35);
+  --ground: #0c0f15;
+  --plot: #12151d;
+  --plot-edge: rgb(255 255 255 / 0.12);
+  --dots: rgb(255 255 255 / 0.07);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-plot: var(--plot);
+  --color-plot-edge: var(--plot-edge);
+  --color-dots: var(--dots);
+}
+
+@keyframes ck-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes ck-pulse { 50% { opacity: 0.35; } }
+@keyframes ck-beacon { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); } 50% { box-shadow: 0 0 0 14px transparent; } }
+@keyframes ck-walk { from { transform: translateX(0); } to { transform: translateX(140px); } }
+@keyframes ck-caret { 50% { opacity: 0; } }
+@keyframes ck-carry { to { offset-distance: 100%; } }
+@keyframes ck-dig { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes ck-flow { to { stroke-dashoffset: -20; } }
+@keyframes ck-grow { from { opacity: 0; transform: scale(0.2); } }
+@keyframes ck-slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* The ck-* animations are applied inline or as arbitrary utilities (durations and offsets are computed
+   per colony), so there is no per-animation class to switch off. The guard works off the cockpit root
+   instead, which covers the nest's ants and tunnels as well as the panels that slide and fade. */
+@media (prefers-reduced-motion: reduce) {
+  .cockpit,
+  .cockpit * {
+    animation: none !important;
+    transition: none !important;
+    offset-distance: 0 !important;
+  }
+}
