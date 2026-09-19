@@ -5,7 +5,7 @@ import { MemoryView } from "./components/MemoryView";
 import { OrgPromptCard } from "./components/OrgPromptCard";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
-import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
+import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
 import { Cockpit } from "./cockpit/Cockpit";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
@@ -74,6 +74,7 @@ export function App() {
   const [setupShown, setSetupShown] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [launchRequests, setLaunchRequests] = useState(0);
+  const [settingsRequests, setSettingsRequests] = useState(0);
   // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
   // (colonizer.sidebar-tab stays the sidebar's own memory of itself.)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
@@ -221,17 +222,28 @@ export function App() {
     [status, pull.status, telemetry, sandboxModule, sessions.length],
   );
 
+  /**
+   * Settings has two frames: a dialog on a narrow window, and a cockpit view on a wide one. Both are
+   * opened through here so a caller — the rail, the version chip, an inspector row, Setup's auto-open —
+   * never has to know which is on screen.
+   */
+  const openSettings = useCallback(
+    (section?: SectionId) => {
+      setSettingsSection(section);
+      if (narrow) setSettingsOpen(true);
+      else setSettingsRequests((n) => n + 1);
+    },
+    [narrow],
+  );
+
   // Replaces the old `!github.connected || !claude.configured` auto-open: `setup.autoOpen` is
   // "a row that gates launch is unmet", which also catches runtime failures. Fires at most once
   // per page load, and "Not now" (setupDismissed) holds it closed until the next one.
   useEffect(() => {
     if (promptedForSettings.current || !setup) return;
     promptedForSettings.current = true;
-    if (setup.autoOpen && !setupDismissed.current) {
-      setSettingsSection("setup");
-      setSettingsOpen(true);
-    }
-  }, [setup]);
+    if (setup.autoOpen && !setupDismissed.current) openSettings("setup");
+  }, [setup, openSettings]);
 
   /** "Not now": in-memory only, so the next page load asks again. */
   const dismissSetup = useCallback(() => {
@@ -424,6 +436,34 @@ export function App() {
     <EmptyState narrow={narrow} org={selectedOrg} onOpenSidebar={() => setSidebarOpen(true)} />
   );
 
+  // Same body the dialog renders, in the cockpit's own column. Keyed on the request count so an
+  // external jump ("open providers") re-seeds the section; clicking around inside it does not remount.
+  const settingsPane = (close: () => void) => (
+    <SettingsBody
+      key={settingsRequests}
+      embedded
+      status={status}
+      onStatusChanged={loadStatus}
+      onModulesChanged={applyModules}
+      telemetry={telemetry}
+      onTelemetryChanged={setTelemetry}
+      usage={usage}
+      onUsageChanged={setUsage}
+      notifications={notifyPrefs}
+      onNotificationsChanged={setNotifyPrefs}
+      initialSection={settingsSection}
+      setup={setup}
+      pull={pull}
+      onLaunch={openLauncher}
+      onSetupShown={() => setSetupShown(true)}
+      onSetupDismissed={() => {
+        setupDismissed.current = true;
+        close();
+      }}
+      onClose={close}
+    />
+  );
+
   const orgPrompt = pendingOrg && (
     // A standalone card at the top of the pane: seen without hunting for it, but nothing
     // behind it is blocked while the decision waits.
@@ -469,16 +509,15 @@ export function App() {
               update={updateStatus}
               autopilotDefault={autopilotDefault}
               launchRequests={launchRequests}
+              settingsRequests={settingsRequests}
+              settings={settingsPane}
               onSessionChanged={upsertSession}
               onCreated={(session) => {
                 upsertSession(session);
                 select(session.id);
                 void loadOrgs();
               }}
-              onOpenSettings={(section) => {
-                setSettingsSection(section ?? (setup?.autoOpen ? "setup" : undefined));
-                setSettingsOpen(true);
-              }}
+              onOpenSettings={openSettings}
               colony={colonyPane}
               memory={memoryPane}
             />

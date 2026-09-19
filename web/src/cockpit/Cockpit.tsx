@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useApi } from "../context";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
+import { needsYou } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -28,7 +29,7 @@ const VIEWS: readonly CockpitView[] = ["home", "colony", "launch", "inbox", "his
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
-  return VIEWS.includes(saved as CockpitView) && saved !== "settings" ? (saved as CockpitView) : "home";
+  return VIEWS.includes(saved as CockpitView) ? (saved as CockpitView) : "home";
 }
 
 function storedTheme(): "light" | "dark" | null {
@@ -58,6 +59,8 @@ export function Cockpit({
   update,
   autopilotDefault,
   launchRequests,
+  settingsRequests,
+  settings,
   onSessionChanged,
   onCreated,
   onOpenSettings,
@@ -76,8 +79,12 @@ export function Cockpit({
   status: HarnessStatus | null;
   update: UpdateStatus | null;
   autopilotDefault: boolean;
-  /** Bumped by Setup's launch row, which lives in the settings dialog App owns. */
+  /** Bumped by Setup's launch row, which lives in the settings body App owns. */
   launchRequests: number;
+  /** Bumped whenever something outside the cockpit asks for settings, with the section already set. */
+  settingsRequests: number;
+  /** The settings body, given the way back out — the cockpit owns the view, so it owns the exit. */
+  settings: (close: () => void) => ReactNode;
   onSessionChanged: (session: Session) => void;
   onCreated: (session: Session) => void;
   onOpenSettings: (section?: SectionId) => void;
@@ -92,7 +99,7 @@ export function Cockpit({
   const [repos, setRepos] = useState<Repo[]>([]);
 
   useEffect(() => {
-    if (view !== "settings") store(VIEW_KEY, view);
+    store(VIEW_KEY, view);
   }, [view]);
 
   // An explicit choice is written on the root, where index.css's :root[data-theme] blocks pick it
@@ -107,6 +114,10 @@ export function Cockpit({
   useEffect(() => {
     if (launchRequests > 0) setView("launch");
   }, [launchRequests]);
+
+  useEffect(() => {
+    if (settingsRequests > 0) setView("settings");
+  }, [settingsRequests]);
 
   const toggleTheme = useCallback(() => {
     setTheme((current) => {
@@ -142,7 +153,12 @@ export function Cockpit({
   );
 
   const needByOrg = useMemo(() => needCountByOrg(sessions), [sessions]);
-  const needCount = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  // Two different counts, and mixing them up is what makes a header say "1 need you" over a
+  // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
+  // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
+  // spend, which are this workspace's.
+  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  const needHere = useMemo(() => inOrg.filter(needsYou).length, [inOrg]);
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
   const spend = inOrg.reduce((total, s) => total + (s.cost_usd ?? 0) + (s.routed_cost_usd ?? 0), 0);
@@ -173,16 +189,7 @@ export function Cockpit({
     });
   }, [sessions]);
 
-  const navigate = useCallback(
-    (next: CockpitView) => {
-      if (next === "settings") {
-        onOpenSettings();
-        return;
-      }
-      setView(next);
-    },
-    [onOpenSettings],
-  );
+  const navigate = useCallback((next: CockpitView) => setView(next), []);
 
   const openColonyById = useCallback(
     (id: string) => {
@@ -211,6 +218,8 @@ export function Cockpit({
         return colony;
       case "memory":
         return memory;
+      case "settings":
+        return settings(() => setView("home"));
       case "launch":
         return (
           <LaunchView
@@ -229,7 +238,7 @@ export function Cockpit({
       case "inbox":
         return (
           <InboxView
-            sessions={inOrg}
+            sessions={sessions}
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
           />
@@ -274,7 +283,7 @@ export function Cockpit({
         }}
         view={view}
         onNavigate={navigate}
-        needCount={needCount}
+        needCount={needAnywhere}
         needByOrg={needByOrg}
         theme={theme}
         onToggleTheme={toggleTheme}
@@ -291,7 +300,7 @@ export function Cockpit({
           needByOrg={needByOrg}
           crumb={CRUMB[view]}
           liveCount={liveCount}
-          needCount={needCount}
+          needCount={needHere}
           cost={spend > 0 ? spend : null}
           update={update}
           onOpenUpdates={() => onOpenSettings("updates")}
@@ -306,7 +315,7 @@ export function Cockpit({
               status={status}
               liveCount={liveCount}
               queuedCount={queuedCount}
-              needCount={needCount}
+              needCount={needHere}
               spend={spend > 0 ? spend : null}
               maxParallel={status?.sandbox.max_parallel ?? null}
               update={update}
