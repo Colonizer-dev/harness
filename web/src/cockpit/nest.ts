@@ -74,30 +74,91 @@ export function slotAt(index: number, box: NestBox): Slot {
   };
 }
 
-/** The quadratic from the mothership's mouth down to the top edge of a chamber. */
-export function tunnelPath(slot: Slot, box: NestBox): string {
-  const mx = Math.round(box.width / 2);
-  const my = SURFACE_Y;
-  const cx = (mx + slot.x) / 2 + (slot.x - mx) * 0.22;
-  const cy = (my + 26 + slot.y) / 2 - 10;
-  return `M${mx} ${my + 26} Q${cx.toFixed(0)} ${cy.toFixed(0)} ${slot.x} ${slot.y - slot.r * 0.55}`;
+/**
+ * A colony's own seed. Tunnels are dug, not drawn: each one wobbles its own way, and this is what
+ * makes that shape the colony's — the same every render, different from its neighbour's.
+ * An open colony has no issue number, so it digs from 0.
+ */
+export function tunnelSeed(repo: string, issue: number | null): number {
+  return ((issue ?? 0) * 9301 + repo.length * 49297) % 233280;
 }
 
-/** Side tunnels grow with the work done: one per 5 steps, at most 4, splaying away from the centre. */
-export function branchPaths(slot: Slot, totalSteps: number, box: NestBox): Branch[] {
+/** The seeded fract hash the wobble draws every offset from. */
+function rndFor(seed: number): (n: number) => number {
+  return (n) => {
+    const v = Math.sin(seed + n * 12.9898) * 43758.5453;
+    return v - Math.floor(v);
+  };
+}
+
+/**
+ * A corridor from (ax, ay) to (bx, by) in `segs` quadratic hops, each knocked off the straight line
+ * by up to `amp`. The last hop always lands exactly on the target, so a tunnel still meets its
+ * chamber however much the middle wanders.
+ */
+function wobble(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  segs: number,
+  amp: number,
+  rnd: (n: number) => number,
+): string {
+  let d = `M${ax.toFixed(0)} ${ay.toFixed(0)}`;
+  let px = ax;
+  let py = ay;
+  for (let q = 1; q <= segs; q++) {
+    const t = q / segs;
+    const nx = ax + (bx - ax) * t;
+    const ny = ay + (by - ay) * t;
+    const ex = q === segs ? bx : nx + (rnd(q) - 0.5) * amp;
+    const ey = q === segs ? by : ny + (rnd(q + 40) - 0.5) * amp * 0.7;
+    const cx = (px + ex) / 2 + (rnd(q + 80) - 0.5) * amp;
+    const cy = (py + ey) / 2 + (rnd(q + 120) - 0.5) * amp * 0.6;
+    d += ` Q${cx.toFixed(0)} ${cy.toFixed(0)} ${ex.toFixed(0)} ${ey.toFixed(0)}`;
+    px = ex;
+    py = ey;
+  }
+  return d;
+}
+
+/** The corridor from the mothership's mouth down to the top edge of a chamber. */
+export function tunnelPath(slot: Slot, box: NestBox, seed: number): string {
+  const rnd = rndFor(seed);
+  const mx = Math.round(box.width / 2);
+  return wobble(
+    mx,
+    SURFACE_Y + 26,
+    slot.x,
+    slot.y - slot.r * 0.55,
+    4 + Math.floor(rnd(1) * 3),
+    34 + rnd(2) * 30,
+    rnd,
+  );
+}
+
+/**
+ * Side tunnels grow with the work done: one per 5 steps, at most 4, each dug off at its own angle.
+ * They are kept clear of the bottom edge so a deep chamber's branches stay on the plot.
+ */
+export function branchPaths(slot: Slot, totalSteps: number, box: NestBox, seed: number): Branch[] {
+  const rnd = rndFor(seed);
   const mx = Math.round(box.width / 2);
   const count = Math.min(4, Math.floor(totalSteps / 5));
   const branches: Branch[] = [];
   for (let k = 0; k < count; k++) {
-    const ang = (k % 2 ? -1 : 1) * (0.6 + k * 0.5) + (slot.x < mx ? Math.PI : 0);
-    const len = slot.r * (0.9 + k * 0.25);
+    const ang =
+      rnd(k + 200) * 1.9 -
+      0.95 +
+      (k % 2 ? Math.PI * 0.5 : -Math.PI * 0.5) * (rnd(k + 260) > 0.5 ? 1 : 0.3) +
+      (slot.x < mx ? Math.PI : 0);
+    const len = slot.r * (0.7 + rnd(k + 300) * 0.9);
     const ex = slot.x + Math.cos(ang) * (slot.r + len);
-    const ey = slot.y + Math.sin(ang) * 0.6 * (slot.r + len) + 8;
-    const sx = (slot.x + Math.cos(ang) * slot.r).toFixed(0);
-    const sy = (slot.y + Math.sin(ang) * slot.r * 0.9).toFixed(0);
-    const qx = ((slot.x + ex) / 2 + 10).toFixed(0);
-    const qy = ((slot.y + ey) / 2 + 14).toFixed(0);
-    branches.push({ d: `M${sx} ${sy} Q${qx} ${qy} ${ex.toFixed(0)} ${ey.toFixed(0)}` });
+    const ey = Math.min(box.height - 12, slot.y + Math.abs(Math.sin(ang)) * 0.6 * (slot.r + len) + 12);
+    branches.push({
+      d: wobble(slot.x + Math.cos(ang) * slot.r * 0.85, slot.y + Math.sin(ang) * slot.r * 0.75, ex, ey, 3, 22, rnd),
+    });
   }
   return branches;
 }

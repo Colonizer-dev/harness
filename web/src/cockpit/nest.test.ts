@@ -3,7 +3,7 @@
 // against hand-computed values for the default 880×470 plot.
 import { describe, expect, it } from "vitest";
 
-import { MAX_CHAMBERS, SURFACE_Y, branchPaths, normalizeBox, scaleFor, slotAt, surfaceGrass, tunnelPath } from "./nest";
+import { MAX_CHAMBERS, SURFACE_Y, branchPaths, normalizeBox, scaleFor, slotAt, surfaceGrass, tunnelPath, tunnelSeed } from "./nest";
 
 const DEFAULT = normalizeBox(880, 470);
 
@@ -58,41 +58,83 @@ describe("slotAt", () => {
   });
 });
 
+describe("tunnelSeed", () => {
+  it("gives a colony the same seed every time", () => {
+    expect(tunnelSeed("acme/webshop", 42)).toBe(tunnelSeed("acme/webshop", 42));
+  });
+
+  it("gives neighbours different ones, so their tunnels are not the same shape", () => {
+    expect(tunnelSeed("acme/webshop", 42)).not.toBe(tunnelSeed("acme/webshop", 43));
+    expect(tunnelSeed("acme/webshop", 42)).not.toBe(tunnelSeed("acme/design-system", 42));
+  });
+
+  it("digs from 0 for a colony started without an issue", () => {
+    expect(tunnelSeed("acme/webshop", null)).toBe(tunnelSeed("acme/webshop", 0));
+  });
+});
+
 describe("tunnelPath", () => {
+  const seed = tunnelSeed("acme/webshop", 42);
+
   it("starts at the mothership's mouth for every slot", () => {
     for (let i = 0; i < MAX_CHAMBERS; i++) {
-      expect(tunnelPath(slotAt(i, DEFAULT), DEFAULT).startsWith("M440 104 Q")).toBe(true);
+      expect(tunnelPath(slotAt(i, DEFAULT), DEFAULT, seed).startsWith("M440 104 ")).toBe(true);
     }
   });
 
-  it("keeps the design's control point for a central and a side chamber", () => {
-    // slot 0 sits dead centre, so the curve drops straight; slot 1 bows out to the left.
-    const centre = tunnelPath(slotAt(0, DEFAULT), DEFAULT);
-    expect(centre.startsWith("M440 104 Q440 166 440 ")).toBe(true);
-    expect(Number(centre.slice(centre.lastIndexOf(" ") + 1))).toBeCloseTo(210.7, 1);
+  it("lands exactly on the chamber however much the middle wanders", () => {
+    for (let i = 0; i < MAX_CHAMBERS; i++) {
+      const slot = slotAt(i, DEFAULT);
+      const end = tunnelPath(slot, DEFAULT, seed).split(" ").slice(-2);
+      expect(Number(end[0])).toBe(slot.x);
+      expect(Number(end[1])).toBe(Number((slot.y - slot.r * 0.55).toFixed(0)));
+    }
+  });
 
-    const side = tunnelPath(slotAt(1, DEFAULT), DEFAULT);
-    expect(side.startsWith("M440 104 Q263 146 194 ")).toBe(true);
-    expect(Number(side.slice(side.lastIndexOf(" ") + 1))).toBeCloseTo(168.4, 1);
+  it("is the same corridor on every render", () => {
+    const slot = slotAt(2, DEFAULT);
+    expect(tunnelPath(slot, DEFAULT, seed)).toBe(tunnelPath(slot, DEFAULT, seed));
+  });
+
+  it("digs a different corridor for a different colony", () => {
+    const slot = slotAt(2, DEFAULT);
+    expect(tunnelPath(slot, DEFAULT, seed)).not.toBe(tunnelPath(slot, DEFAULT, tunnelSeed("acme/webshop", 43)));
+  });
+
+  it("wanders: more than the one hop a straight curve would need", () => {
+    const hops = tunnelPath(slotAt(0, DEFAULT), DEFAULT, seed).split("Q").length - 1;
+    expect(hops).toBeGreaterThanOrEqual(4);
+    expect(hops).toBeLessThanOrEqual(6);
   });
 });
 
 describe("branchPaths", () => {
+  const seed = tunnelSeed("acme/webshop", 42);
+
   it("grows no side tunnels before 5 steps", () => {
-    expect(branchPaths(slotAt(0, DEFAULT), 0, DEFAULT)).toEqual([]);
+    expect(branchPaths(slotAt(0, DEFAULT), 0, DEFAULT, seed)).toEqual([]);
   });
 
   it("grows one side tunnel per 5 steps", () => {
-    expect(branchPaths(slotAt(0, DEFAULT), 9, DEFAULT)).toHaveLength(1);
+    expect(branchPaths(slotAt(0, DEFAULT), 9, DEFAULT, seed)).toHaveLength(1);
   });
 
   it("stops at 4 side tunnels", () => {
-    expect(branchPaths(slotAt(0, DEFAULT), 100, DEFAULT)).toHaveLength(4);
+    expect(branchPaths(slotAt(0, DEFAULT), 100, DEFAULT, seed)).toHaveLength(4);
   });
 
   it("is stable across calls", () => {
     const slot = slotAt(3, DEFAULT);
-    expect(branchPaths(slot, 40, DEFAULT)).toEqual(branchPaths(slot, 40, DEFAULT));
+    expect(branchPaths(slot, 40, DEFAULT, seed)).toEqual(branchPaths(slot, 40, DEFAULT, seed));
+  });
+
+  it("stops a deep chamber's branches short of the bottom edge", () => {
+    // Slot 7 is the lowest, so its branches are the ones that would otherwise run off the plot.
+    // Only the end point is clamped — the corridor may bow past it on the way and that is fine.
+    for (const branch of branchPaths(slotAt(7, DEFAULT), 100, DEFAULT, seed)) {
+      const endY = Number(branch.d.split(" ").slice(-1)[0]);
+      expect(endY).toBeLessThanOrEqual(DEFAULT.height - 12);
+    }
   });
 });
 

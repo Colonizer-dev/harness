@@ -3,7 +3,7 @@
 // the local calendar rather than an elapsed count, and that the order holds between polls.
 import { describe, expect, it } from "vitest";
 
-import { dayLabel, feedEntries, feedKind, historyRows, matchesFilter, needCountByOrg } from "./feed";
+import { dayLabel, feedEntries, feedKind, headlineFor, historyRows, matchesFilter, needCountByOrg } from "./feed";
 import type { Session, SessionStatus } from "../types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -173,5 +173,23 @@ describe("needCountByOrg", () => {
 
   it("is empty when nothing waits", () => {
     expect(needCountByOrg([session({ status: "running" })])).toEqual({});
+  });
+});
+
+describe("headlineFor", () => {
+  it("leads with what is waiting on a person", () => {
+    expect(headlineFor(2, 3)).toBe("2 colonies need you · 3 working");
+  });
+
+  it("counts one colony in the singular", () => {
+    expect(headlineFor(1, 3)).toBe("1 colony needs you · 3 working");
+  });
+
+  it("says so when nothing is waiting", () => {
+    expect(headlineFor(0, 3)).toBe("All quiet · 3 working");
+  });
+
+  it("does not mention work that is not happening", () => {
+    expect(headlineFor(0, 0)).toBe("All quiet");
   });
 });

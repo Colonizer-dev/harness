@@ -927,6 +927,8 @@ body {
   --plot: #ffffff;
   --plot-edge: #c3cbd7;
   --dots: rgb(18 23 34 / 0.08);
+  --tunnel-wall: #b89a78;
+  --tunnel-floor: #dcc3a2;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -935,6 +937,8 @@ body {
     --plot: #12151d;
     --plot-edge: rgb(255 255 255 / 0.12);
     --dots: rgb(255 255 255 / 0.07);
+    --tunnel-wall: #241a12;
+    --tunnel-floor: #3a2b1c;
   }
 }
 
@@ -969,6 +973,8 @@ body {
   --plot: #ffffff;
   --plot-edge: #c3cbd7;
   --dots: rgb(18 23 34 / 0.08);
+  --tunnel-wall: #b89a78;
+  --tunnel-floor: #dcc3a2;
   color-scheme: light;
 }
 
@@ -1002,6 +1008,8 @@ body {
   --plot: #12151d;
   --plot-edge: rgb(255 255 255 / 0.12);
   --dots: rgb(255 255 255 / 0.07);
+  --tunnel-wall: #241a12;
+  --tunnel-floor: #3a2b1c;
   color-scheme: dark;
 }
 
@@ -1010,6 +1018,8 @@ body {
   --color-plot: var(--plot);
   --color-plot-edge: var(--plot-edge);
   --color-dots: var(--dots);
+  --color-tunnel-wall: var(--tunnel-wall);
+  --color-tunnel-floor: var(--tunnel-floor);
 }
 
 @keyframes ck-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
@@ -1017,7 +1027,11 @@ body {
 @keyframes ck-beacon { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); } 50% { box-shadow: 0 0 0 14px transparent; } }
 @keyframes ck-walk { from { transform: translateX(0); } to { transform: translateX(140px); } }
 @keyframes ck-caret { 50% { opacity: 0; } }
-@keyframes ck-carry { to { offset-distance: 100%; } }
+@keyframes ck-carry {
+  0%, 6% { offset-distance: 100%; }
+  44%, 56% { offset-distance: 0%; }
+  94%, 100% { offset-distance: 100%; }
+}
 @keyframes ck-dig { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
 @keyframes ck-flow { to { stroke-dashoffset: -20; } }
 @keyframes ck-grow { from { opacity: 0; transform: scale(0.2); } }

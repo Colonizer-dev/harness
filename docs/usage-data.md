@@ -46,7 +46,7 @@ number leaves the machine; every other string but three comes from a closed, com
 | `platform` | string | `linux-x86_64`, `darwin-arm64` or `other` — the same closed set the live map sends. |
 | `colonies.parallel_now` | count bucket | Colonies with a running microVM right now. Queued ones hold none, so they are not counted. |
 | `colonies.terminal` | 4 count buckets | How finished colonies ended up: `pr_opened`, `no_changes`, `stopped`, `failed`. |
-| `sandbox.preset` | closed label | The stack preset's id: `node`, `python`, `rust`, `go` or `custom` — or `unknown` if a hand-edited `modules.json` names a preset the harness has never heard of. |
+| `sandbox.preset` | closed label | The stack preset's id: `auto`, `node`, `python`, `rust`, `go` or `custom` — or `unknown` if a hand-edited `modules.json` names a preset the harness has never heard of. What is configured is what is sent: an install left on `auto` reports `auto`, not the stack it detected for each repository. |
 | `sandbox.image_changed_from_default` | boolean | Whether the image a colony actually boots differs from the one the resolved stack names. Only the comparison is sent; the image string itself is user free text and never is. |
 | `autopilot.enabled` | boolean | Whether new colonies publish automatically: the publish module's default for this install. |
 | `autopilot.held` | count bucket | Colonies autopilot is holding back from publishing. |
