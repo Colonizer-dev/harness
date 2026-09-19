@@ -431,6 +431,30 @@ mod tests {
     }
 
     #[test]
+    fn is_elf_judges_a_file_by_its_magic_bytes() {
+        let dir = temp_root("is-elf");
+        let elf = dir.join("agentd");
+        std::fs::write(&elf, b"\x7fELF and a little padding").unwrap();
+        assert!(is_elf(&elf), "the 4 magic bytes are the whole test");
+
+        // What a Mac build drops into dist/bin/, which a Linux colony cannot exec.
+        let macho = dir.join("agentd.macho");
+        std::fs::write(&macho, b"\xcf\xfa\xed\xfe and padding").unwrap();
+        assert!(!is_elf(&macho), "a Mach-O binary is not an ELF");
+
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, "plain words").unwrap();
+        assert!(!is_elf(&text));
+
+        let stub = dir.join("stub");
+        std::fs::write(&stub, b"\x7f").unwrap();
+        assert!(!is_elf(&stub), "shorter than the magic cannot match it");
+
+        assert!(!is_elf(&dir.join("nowhere")), "a path that names no file is not an ELF");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn disk_sizes_parse_with_their_suffixes_and_empty_or_zero_mean_unlimited() {
         assert_eq!(parse_disk_size("16G"), Some(16 * 1024 * 1024 * 1024));
         assert_eq!(

@@ -9,8 +9,18 @@
 #   scripts/build-rtk.sh           build (skipped when dist/bin/rtk is already built from this source)
 #   scripts/build-rtk.sh --smoke   build, then run it inside a node:24-bookworm microVM
 #
-# COLONIZER_BUILD_HERE=1 builds in the current environment instead of a microVM, as build-agentd.sh does.
+# COLONIZER_BUILD_HERE=1 builds in the current environment instead of a microVM, as build-agentd.sh does;
+# like there, that environment has to be Linux, since this binary runs in a Linux colony, and on a
+# non-musl one the result links against the host's libc, which may be newer than the colony image's
+# (Debian bookworm, glibc 2.36) and fail to start there.
 set -eu
+
+# Here mode follows the host, so off Linux it would silently produce a binary no colony can exec, and
+# every colony would die on it at the readiness timeout. Refuse before anything is built or moved.
+if [ "${COLONIZER_BUILD_HERE:-}" = 1 ] && [ "$(uname -s)" != Linux ]; then
+  echo "COLONIZER_BUILD_HERE=1 builds rtk for the current environment, but the binary has to run in a Linux colony; unset COLONIZER_BUILD_HERE to build it in the rust:1-alpine microVM instead" >&2
+  exit 1
+fi
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 MSB=${MSB:-$HOME/.local/bin/msb}
@@ -27,9 +37,24 @@ case "$(uname -m)" in
   arm64|aarch64) target="aarch64-unknown-linux-musl" ;;
   *) target="x86_64-unknown-linux-musl" ;;
 esac
-# The stamp names the source and the target, so a new pin or another machine rebuilds.
-stamp="$REPO/target/rtk-build/$sha-$target"
+# Either branch must produce a Linux binary, and rust:1-alpine ships no file(1) to say so, so compare
+# the ELF magic directly, which needs only the head and printf busybox always has, before a
+# wrong-host artefact is installed or stamped as built.
+elf_or_die() {
+  [ "$(head -c 4 "$1")" = "$(printf '\177ELF')" ] || {
+    echo "$1 is not an ELF binary, so it cannot run in a colony" >&2
+    exit 1
+  }
+}
+# The stamp names the source, the target and the build mode, so a new pin, another machine or a switch
+# between here mode and the microVM rebuilds instead of serving a binary built the other way.
+mode=microvm
+[ "${COLONIZER_BUILD_HERE:-}" != 1 ] || mode=here
+stamp="$REPO/target/rtk-build/$sha-$target-$mode"
 if [ -x "$OUT" ] && [ -f "$stamp" ]; then
+  # The stamp binds the source and the mode, not the bytes in $OUT, so an artefact that got there any
+  # other way is checked like a fresh build's would have been.
+  elf_or_die "$OUT"
   echo "rtk $version ($target) already built"
 else
   SRC="$REPO/target/rtk-src"
@@ -50,6 +75,7 @@ else
       -w /src \
       rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release --locked --target-dir /build-target'
   fi
+  elf_or_die "$REPO/target/alpine-rtk/release/rtk"
   install -m 755 "$REPO/target/alpine-rtk/release/rtk" "$OUT"
   rm -f "$REPO/target/rtk-build/"*
   touch "$stamp"
