@@ -44,6 +44,19 @@ function Section({ title, children }: { title: string; children: ReactElement | 
 
 const money = (amount: number | null | undefined) => (amount == null ? "—" : `$${amount.toFixed(2)}`);
 
+/** `#149` from a pull-request URL; null when it is not shaped like one. */
+function prNumber(url: string): string | null {
+  const match = /\/pull\/(\d+)/.exec(url);
+  return match ? `#${match[1]}` : null;
+}
+
+/** How far the last publish got, in the mothership's own words. */
+const STAGE: Record<string, string> = {
+  committed: "committed",
+  pushed: "pushed",
+  pr_opened: "opened",
+};
+
 export function Inspector({
   target,
   avatarUrl,
@@ -230,6 +243,34 @@ export function Inspector({
                 <Fact label="MESH" value={session.mesh?.name ?? "—"} />
                 <Fact label="AGENT" value={session.agent} />
               </div>
+
+              {session.pr_url && (
+                // What came back. The prototype lists per-file +/- counts; the API reports no diff
+                // stats, so this carries the address and the branch it came from instead of inventing them.
+                <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
+                  <div className="flex items-center justify-between gap-2.5">
+                    <span className="font-mono text-[10.5px] tracking-[0.12em] text-ok">PULL REQUEST</span>
+                    <span className="font-mono text-[11px] text-faint">
+                      {[prNumber(session.pr_url), session.publish_stage ? STAGE[session.publish_stage] : null]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </div>
+                  <div className="text-[13.5px] font-semibold leading-snug">{session.issue_title || "no title yet"}</div>
+                  <div className="truncate font-mono text-[11.5px] text-muted">
+                    {session.branch}
+                    {session.base ? ` → ${session.base}` : ""}
+                  </div>
+                  <a
+                    href={session.pr_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[12.5px] font-semibold text-accent no-underline hover:underline"
+                  >
+                    open on github ↗
+                  </a>
+                </div>
+              )}
 
               {settlers.length > 0 && (
                 <Section title="SETTLERS">
