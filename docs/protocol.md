@@ -530,6 +530,13 @@ is the moment a stack is chosen. The image is the preset's reference pinned by d
 `crates/colonizer/images.lock` and compiled into the mothership, so the cache ends up with the exact
 bytes the release was tested with. An image set by hand with no lock row boots as written.
 
+Under `auto`, the preset's default, that image is the Node stack's — `auto`'s fallback — because the
+stack a colony actually boots is decided per repository, when its worktree is checked out: the
+repository's marker files name it (`Cargo.toml` Rust, `go.mod` Go, `pyproject.toml`,
+`requirements.txt`, `setup.py` or `Pipfile` Python, `package.json` Node), a marker at the repository
+root beats one in a subdirectory, and a repository with none falls back to Node. Anything set
+explicitly still wins.
+
 `POST` returns at once (a cold pull of `node:24-bookworm` measured 108 s, too long to hold a request
 open) and the download runs in the background. Calling it again while the same image is pulling
 returns the running pull rather than starting a second. `GET` returns the most recent status:
@@ -853,6 +860,10 @@ validation applies as at the module setting: a budget is `0` or more dollars, a 
 Past either limit the mothership stops the colony with its worktree kept (§6.5 covers the budget's
 gateway half).
 
+`stack` is not a limit, but it overrides the same way: the sandbox stack the org's colonies boot,
+shadowing the sandbox module's `preset` (`auto`, which reads each repository's stack at boot, unless
+something is pinned above it). `null` inherits.
+
 ```json
 {"settings": {
   "enabled": true,
@@ -861,6 +872,7 @@ gateway half).
   "max_parallel": 2,
   "budget_usd": 20,
   "host_disk": "32G",
+  "stack": "rust",
   "memory": {"enabled": true},
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
 }}

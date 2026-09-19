@@ -90,6 +90,10 @@ pub struct OrgSettings {
     /// out of a global quota; `None` inherits the sandbox module's `host_disk`.
     #[serde(default)]
     pub host_disk: Option<String>,
+    /// The sandbox stack this org's colonies boot, pinning what the global `preset` would otherwise
+    /// choose. `None` inherits the sandbox module's `preset`.
+    #[serde(default)]
+    pub stack: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryOverrides>,
     #[serde(default)]
@@ -385,6 +389,17 @@ pub fn host_disk_source(org: &OrgSettings) -> &'static str {
     }
 }
 
+/// The sandbox stack one of this org's colonies boots: the org's own pin when it set a non-blank one,
+/// else the sandbox module's `preset`. `auto` at either level still means detect the stack from the
+/// repository — a pin of `auto` is how an org opts into detection when the install is pinned to
+/// something concrete.
+pub fn effective_stack(modules: &ModulesConfig, schema: &Value, org: &OrgSettings) -> String {
+    match org.stack.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(stack) => stack.to_string(),
+        None => setting_str(&modules.sandbox, schema, "preset"),
+    }
+}
+
 pub fn effective_memory_enabled(modules: &ModulesConfig, org: &OrgSettings) -> bool {
     let global = modules.memory.enabled
         && modules
@@ -479,6 +494,15 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
     }
     if settings.host_disk.as_deref().is_some_and(|s| parse_disk_size(s).is_none()) {
         return Err("host disk must be a size like 512M or 16G (0 means no quota)".into());
+    }
+    // A blank stack is treated as not set, like the webhook URL's empty string: the resolver reads it
+    // as "inherit", so refusing it here would reject a value the harness would have honoured. An id
+    // the harness has never heard of, though, would only degrade to schema defaults at boot — say so
+    // while the operator is still looking at the form.
+    if let Some(stack) = settings.stack.as_deref().filter(|s| !s.trim().is_empty())
+        && !crate::presets::ids().contains(&stack)
+    {
+        return Err(format!("stack must be one of {}", crate::presets::ids().join(", ")));
     }
     if let Some(watchdog) = &settings.watchdog {
         if watchdog.stall_minutes.is_some_and(|n| !(1..=1440).contains(&n)) {
@@ -592,6 +616,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("host_disk") {
         incoming.host_disk = saved.host_disk.clone();
+    }
+    if !named("stack") {
+        incoming.stack = saved.stack.clone();
     }
     if !named("memory") {
         incoming.memory = saved.memory.clone();
@@ -762,6 +789,49 @@ mod tests {
     }
 
     #[test]
+    fn a_colonys_stack_is_the_orgs_own_pin_when_set_and_auto_still_means_detect() {
+        let modules = ModulesConfig::default();
+        let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+        // With nothing set anywhere, the stack is the sandbox module's own preset — `auto` now that
+        // detection is the visible default.
+        assert_eq!(
+            effective_stack(&modules, &schema, &OrgSettings::default()),
+            crate::presets::AUTO
+        );
+
+        let mut global = ModulesConfig::default();
+        global.sandbox.settings.insert("preset".into(), json!("rust"));
+        assert_eq!(
+            effective_stack(&global, &schema, &OrgSettings::default()),
+            "rust",
+            "an org without a pin inherits the sandbox module's preset"
+        );
+        let org = OrgSettings {
+            stack: Some("go".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_stack(&global, &schema, &org),
+            "go",
+            "the org's own pin beats the global preset"
+        );
+        let auto = OrgSettings {
+            stack: Some(crate::presets::AUTO.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_stack(&global, &schema, &auto),
+            crate::presets::AUTO,
+            "a pin of auto is how an org opts into detection over a pinned install"
+        );
+        let blank = OrgSettings {
+            stack: Some("  ".into()),
+            ..Default::default()
+        };
+        assert_eq!(effective_stack(&global, &schema, &blank), "rust", "a blank pin is no pin");
+    }
+
+    #[test]
     fn org_settings_are_validated() {
         assert!(
             validate(&OrgSettings {
@@ -815,6 +885,37 @@ mod tests {
             })
             .is_ok(),
             "0 is no quota"
+        );
+        assert!(
+            validate(&OrgSettings {
+                stack: Some("acme-private-stack".into()),
+                ..Default::default()
+            })
+            .is_err(),
+            "the stack must be one the harness knows"
+        );
+        assert!(
+            validate(&OrgSettings {
+                stack: Some("go".into()),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+        assert!(
+            validate(&OrgSettings {
+                stack: Some(crate::presets::AUTO.into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "auto is offered first in Settings, so it is a valid pin"
+        );
+        assert!(
+            validate(&OrgSettings {
+                stack: Some("".into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "an empty stack is not set, not an error"
         );
         let bad_model = OrgSettings {
             agent: Some(AgentOverrides {
@@ -905,6 +1006,7 @@ mod tests {
             max_parallel: Some(4),
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
+            stack: Some("go".into()),
             watchdog: Some(WatchdogOverrides {
                 waiting_minutes: Some(45),
                 ..Default::default()
@@ -942,6 +1044,11 @@ mod tests {
             "so does a host-disk quota it never heard of"
         );
         assert_eq!(
+            incoming.stack.as_deref(),
+            Some("go"),
+            "and a stack pin, or an older web build's save would silently clear the org's own"
+        );
+        assert_eq!(
             incoming.max_parallel, None,
             "a field the client names as null is a real request to inherit"
         );
@@ -969,6 +1076,7 @@ mod tests {
         keep_unnamed_fields(&mut blank, &saved, None);
         assert_eq!(blank.budget_usd, Some(20.0), "nothing named, nothing replaced");
         assert_eq!(blank.host_disk.as_deref(), Some("16G"));
+        assert_eq!(blank.stack, saved.stack);
         assert_eq!(blank.agent, saved.agent);
         assert_eq!(blank.watchdog, saved.watchdog);
 

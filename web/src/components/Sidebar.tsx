@@ -629,7 +629,8 @@ function SectionLabel({ children }: { children: ReactNode }) {
   return <div className="px-1 text-[11.5px] font-semibold uppercase tracking-wide text-faint">{children}</div>;
 }
 
-function NewSession({
+/** The colony launcher: pick a repository, pick issues, send them out. The cockpit's launch view renders it too. */
+export function NewSession({
   org,
   githubConnected,
   statusKnown,

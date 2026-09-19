@@ -4,7 +4,7 @@ use crate::{
     ApiResult, App, Shared, client_error, orgs,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
-    util::{env_nonempty, exec, exec_status, fingerprint, read_trimmed, truncate, valid_repo, write_secret},
+    util::{env_nonempty, exec, exec_status, exec_within, fingerprint, read_trimmed, truncate, valid_repo, write_secret},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -15,7 +15,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
     time::{Duration, Instant},
@@ -296,16 +296,103 @@ pub async fn remove_worktree(app: &App, s: &Session) -> Result<()> {
     Ok(())
 }
 
-/// One line per colony working the same repository right now, for the prompt's `<siblings>` block.
-pub fn siblings_of(sessions: &[Session], s: &Session) -> Vec<String> {
+/// A pull request a person can review in one sitting. Soft: a colony may exceed it, but must say so.
+const PR_LINE_BUDGET: usize = 400;
+const PR_FILE_BUDGET: usize = 10;
+
+/// How many of a sibling's in-flight paths one sibling line lists before `and N more`.
+const SIBLING_PATH_CAP: usize = 8;
+
+/// How long one sibling's `git status` may take before that sibling contributes no files. The
+/// probe is a best-effort hint, so it must not hold up the colony's boot on a wedged worktree.
+const SIBLING_PROBE_LIMIT: Duration = Duration::from_secs(2);
+
+/// The colonies competing for the same repository: everyone but `s`, on the same repo, that is live
+/// or still queued for it. The one filter both the line builder and the git probing go through.
+fn live_siblings<'a>(sessions: &'a [Session], s: &Session) -> Vec<&'a Session> {
     sessions
         .iter()
         .filter(|o| o.id != s.id && o.repo == s.repo && (o.status.is_live() || o.status == SessionStatus::Queued))
-        .map(|o| match o.issue {
-            Some(n) => format!("#{n} {} (branch {})", o.issue_title, o.branch),
-            None => format!("an open session (branch {})", o.branch),
+        .collect()
+}
+
+/// The `touching` half of a sibling line: the sibling's changed paths, sorted and capped. `None`
+/// leaves the line exactly as it was, so a sibling with nothing in flight gets no empty suffix.
+fn touching_suffix(files: &[String]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut sorted = files.to_vec();
+    sorted.sort();
+    let shown = sorted.len().min(SIBLING_PATH_CAP);
+    let mut list = sorted[..shown].join(", ");
+    if sorted.len() > shown {
+        list.push_str(&format!(" and {} more", sorted.len() - shown));
+    }
+    Some(list)
+}
+
+/// One line per colony working the same repository right now, for the prompt's `<siblings>` block.
+/// `touched` carries each sibling's in-flight files, as [`touched_files`] gathered them; a sibling
+/// without an entry, or with an empty one, is listed exactly as before.
+pub fn siblings_of(sessions: &[Session], s: &Session, touched: &HashMap<String, Vec<String>>) -> Vec<String> {
+    live_siblings(sessions, s)
+        .into_iter()
+        .map(|o| {
+            let line = match o.issue {
+                Some(n) => format!("#{n} {} (branch {})", o.issue_title, o.branch),
+                None => format!("an open session (branch {})", o.branch),
+            };
+            match touched.get(&o.id).and_then(|files| touching_suffix(files)) {
+                Some(files) => format!("{line} — touching {files}"),
+                None => line,
+            }
         })
         .collect()
+}
+
+/// The paths in one `git status --porcelain -z` output: NUL-separated entries of the form
+/// `XY PATH`, except a rename or copy, which carries its old path as a second field after the
+/// NUL (`XY NEW\0OLD`) — the NEW path is the one the sibling is moving towards, so that is what
+/// we keep. With `-z` nothing is quoted or escaped, so any name survives as git saw it. A
+/// truncated or otherwise unusable entry names no path.
+fn porcelain_paths(out: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut fields = out.split('\0');
+    while let Some(entry) = fields.next() {
+        let (Some(status), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue; // too short to be `XY PATH`: the output ended mid-entry, or this is noise
+        };
+        if status.contains('R') || status.contains('C') {
+            fields.next(); // a rename or copy names two paths; the second is the old one, dropped
+        }
+        if !path.is_empty() {
+            paths.push(path.to_string());
+        }
+    }
+    paths
+}
+
+/// Each live sibling's in-flight change set, keyed by session id: one read-only `git status
+/// --porcelain -z` against the sibling's worktree, run host-side the way publishing does. The
+/// probes run concurrently, each under [`SIBLING_PROBE_LIMIT`]. Best effort by design — a sibling
+/// whose git call fails or times out, whose worktree is gone, or that has no admin dir simply
+/// contributes no entry, and its line in the brief stays as it ever was.
+pub async fn touched_files(app: &App, sessions: &[Session], s: &Session) -> HashMap<String, Vec<String>> {
+    let probes = live_siblings(sessions, s).into_iter().filter_map(|o| {
+        let mut cmd = app.git(FsPath::new(o.git_admin_dir.as_deref()?));
+        cmd.arg("--work-tree").arg(&o.worktree).args(["status", "--porcelain", "-z"]);
+        Some(async move { (o.id.clone(), exec_within(SIBLING_PROBE_LIMIT, &mut cmd).await.ok()) })
+    });
+    let mut touched = HashMap::new();
+    for (id, out) in futures_util::future::join_all(probes).await {
+        let Some(out) = out else { continue };
+        let files = porcelain_paths(&out);
+        if !files.is_empty() {
+            touched.insert(id, files);
+        }
+    }
+    touched
 }
 
 pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: bool, siblings: &[String]) -> String {
@@ -366,8 +453,11 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
             "\nSo: keep to the files your own task needs. If your task needs shared scaffolding that does not \
              exist yet — a new crate, a module registration, a migration — write the smallest version that \
              carries your work rather than the complete one you would write if you were alone, and say in \
-             `/harness/out/pr.md` what you added and where, so the person merging can see the overlap coming.\n             </siblings>\n"
+             `/harness/out/pr.md` what you added and where, so the person merging can see the overlap coming. The \
+             files a sibling is touching are a snapshot from when this colony started, so a sibling may have \
+             moved on since."
         );
+        let _ = writeln!(p, "</siblings>\n");
     }
     if let Some(issue) = issue {
         let labels = issue["labels"]
@@ -425,15 +515,22 @@ pub fn build_prompt(s: &Session, issue: Option<&Value>, base: &str, resumed: boo
          1. Read the relevant code and understand the task (reproduce the problem, if there is one) before changing anything.\n\
          2. Make a focused change that accomplishes it, following the project's existing conventions. Add or \
             update tests where the project has them, and run the relevant tests, linters and type checkers.\n\
-         3. Do not run `git commit`, `git push` or create branches: git metadata is read-only in this sandbox \
+         3. Keep the pull request reviewable in one sitting: a soft ceiling of {PR_LINE_BUDGET} changed lines \
+            across {PR_FILE_BUDGET} files. Run `git diff --stat` before finishing so you know your actual size. \
+            A sibling touching many files is not evidence that your own task needs to; going over is allowed \
+            when the task genuinely needs it, but then say so in /harness/out/pr.md, with the actual numbers \
+            and the reason.\n\
+         4. If the change is growing because a second problem was found, that is a separate issue: file it \
+            with the findings tool rather than folding it into this change.\n\
+         5. Do not run `git commit`, `git push` or create branches: git metadata is read-only in this sandbox \
             (`git status`, `git diff` and `git log` work). The harness commits every working-tree change that \
             .gitignore doesn't exclude and opens the pull request.\n\
-         4. Don't leave build artifacts, logs or scratch files in /workspace unless .gitignore covers them.\n\
-         5. When you're done, write the pull request description to /harness/out/pr.md: the first line is a concise \
+         6. Don't leave build artifacts, logs or scratch files in /workspace unless .gitignore covers them.\n\
+         7. When you're done, write the pull request description to /harness/out/pr.md: the first line is a concise \
             PR title (no leading '#'), then a blank line, then a Markdown body covering what changed and why, how you \
             verified it, and anything reviewers should look at closely. Don't add attribution, \"Generated with\" or \
             co-author lines: Colonizer signs the commit and the pull request.\n\
-         6. If the task is unclear, already done, or shouldn't be changed, leave /workspace untouched and explain \
+         8. If the task is unclear, already done, or shouldn't be changed, leave /workspace untouched and explain \
             why in /harness/out/pr.md.\n"
     );
     p
@@ -1136,7 +1233,7 @@ mod tests {
             sibling("waiting", Some(11), "Tailored CV per listing", SessionStatus::Queued),
             sibling("open", None, "", SessionStatus::Idle),
         ];
-        let lines = siblings_of(&others, &me);
+        let lines = siblings_of(&others, &me, &HashMap::new());
         assert_eq!(lines.len(), 3, "everyone but me: {lines:?}");
         assert!(lines.iter().any(|l| l.contains("#12 Cover letter per listing")), "{lines:?}");
         assert!(
@@ -1172,7 +1269,7 @@ mod tests {
         ] {
             let others = vec![me.clone(), sibling("done", Some(12), "Cover letter", done)];
             assert!(
-                siblings_of(&others, &me).is_empty(),
+                siblings_of(&others, &me, &HashMap::new()).is_empty(),
                 "{} is no longer writing code, so it is not competing for the same files",
                 done.as_str()
             );
@@ -1180,13 +1277,146 @@ mod tests {
         let mut elsewhere = sibling("elsewhere", Some(12), "Cover letter", SessionStatus::Running);
         elsewhere.repo = "acme/other".into();
         assert!(
-            siblings_of(&[me.clone(), elsewhere], &me).is_empty(),
+            siblings_of(&[me.clone(), elsewhere], &me, &HashMap::new()).is_empty(),
             "another repository is not a sibling"
         );
         assert!(
             !build_prompt(&me, None, "main", false, &[]).contains("<siblings>"),
             "a colony working alone is told nothing about siblings"
         );
+    }
+
+    #[test]
+    fn a_siblings_touched_files_are_named_and_a_sibling_with_none_gets_no_touching_suffix() {
+        let me = sibling("mine", Some(14), "PDF rendering on Workers", SessionStatus::Starting);
+        let others = vec![
+            sibling("busy", Some(12), "Cover letter per listing", SessionStatus::Running),
+            sibling("idle", Some(11), "Tailored CV per listing", SessionStatus::Running),
+            sibling("quiet", Some(10), "Search facets", SessionStatus::Running),
+        ];
+        let mut touched = HashMap::new();
+        touched.insert(
+            "busy".into(),
+            vec!["web/src/app.tsx".to_string(), "crates/colonizer/src/github.rs".to_string()],
+        );
+        touched.insert("idle".into(), Vec::new());
+        let lines = siblings_of(&others, &me, &touched);
+
+        let busy = lines.iter().find(|l| l.contains("#12")).expect("the busy sibling is listed");
+        assert!(
+            busy.contains("— touching crates/colonizer/src/github.rs, web/src/app.tsx"),
+            "the files are named after the branch, sorted: {busy}"
+        );
+        let idle = lines.iter().find(|l| l.contains("#11")).expect("the idle sibling is listed");
+        assert!(!idle.contains("touching"), "an empty change set adds no empty suffix: {idle}");
+        let quiet = lines.iter().find(|l| l.contains("#10")).expect("the quiet sibling is listed");
+        assert!(
+            !quiet.contains("touching"),
+            "no entry in the map at all reads exactly like before: {quiet}"
+        );
+
+        let prompt = build_prompt(&me, None, "main", false, &lines);
+        assert!(
+            prompt.contains("— touching crates/colonizer/src/github.rs, web/src/app.tsx"),
+            "the file lists reach the prompt's <siblings> block: {prompt}"
+        );
+        assert!(
+            prompt.contains("a snapshot from when this colony started"),
+            "and the block says how fresh those lists are: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_siblings_file_list_is_capped_per_sibling_with_an_and_more_tail() {
+        let me = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
+        let others = vec![sibling("other", Some(12), "Cover letter", SessionStatus::Running)];
+        let mut touched = HashMap::new();
+        touched.insert(
+            "other".into(),
+            (0..10).map(|i| format!("src/file{i:02}.rs")).collect::<Vec<_>>(),
+        );
+        let lines = siblings_of(&others, &me, &touched);
+        let line = lines.first().expect("the sibling is listed");
+        for i in 0..8 {
+            assert!(
+                line.contains(&format!("src/file{i:02}.rs")),
+                "the first ones are named: {line}"
+            );
+        }
+        assert!(line.contains(" and 2 more"), "the tail says how many were left out: {line}");
+        assert!(!line.contains("src/file08.rs"), "past the cap a path is not named: {line}");
+    }
+
+    #[test]
+    fn the_prompt_states_the_pull_request_size_budget() {
+        let me = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
+        let prompt = build_prompt(&me, None, "main", false, &[]);
+        assert!(
+            prompt.contains(&format!(
+                "a soft ceiling of {PR_LINE_BUDGET} changed lines across {PR_FILE_BUDGET} files"
+            )),
+            "the budget is stated in changed lines and files, from the constants: {prompt}"
+        );
+        assert!(
+            prompt.contains("`git diff --stat`"),
+            "the colony measures its own size before finishing: {prompt}"
+        );
+        assert!(
+            prompt.contains("so you know your actual size"),
+            "the step addresses the reader, not the colony in the third person: {prompt}"
+        );
+        assert!(
+            prompt.contains("A sibling touching many files is not evidence that your own task needs to"),
+            "a sibling's footprint is no licence for this change's: {prompt}"
+        );
+        assert!(
+            prompt.contains("/harness/out/pr.md, with the actual numbers and the reason"),
+            "going over is allowed, but only when the colony says so: {prompt}"
+        );
+        assert!(
+            prompt.contains("4. If the change is growing because a second problem was found")
+                && prompt.contains("file it with the findings tool rather than folding it into this change"),
+            "filing a second problem elsewhere is its own step, numbered after the size ceiling: {prompt}"
+        );
+        assert!(
+            prompt.contains("8. If the task is unclear"),
+            "the list runs contiguously to eight steps: {prompt}"
+        );
+    }
+
+    #[test]
+    fn porcelain_paths_read_z_output_and_a_rename_keeps_only_the_new_path() {
+        assert_eq!(
+            porcelain_paths("M  crates/colonizer/src/github.rs\0"),
+            vec!["crates/colonizer/src/github.rs"],
+            "a plain modification names its file"
+        );
+        assert_eq!(
+            porcelain_paths("?? notes/draft.md\0"),
+            vec!["notes/draft.md"],
+            "an untracked file is still a file the sibling is touching"
+        );
+        assert_eq!(
+            porcelain_paths("R  new/name.txt\0old/name.txt\0"),
+            vec!["new/name.txt"],
+            "a rename keeps the new path and does not leak the old one"
+        );
+        assert_eq!(
+            porcelain_paths("C  copied.rs\0original.rs\0M  src/main.rs\0"),
+            vec!["copied.rs", "src/main.rs"],
+            "a copy also consumes its second field, and the entry after it still parses"
+        );
+        assert_eq!(
+            porcelain_paths("?? café/ünïcode.rs\0"),
+            vec!["café/ünïcode.rs"],
+            "with -z a non-ASCII name arrives unquoted and unescaped, and survives intact"
+        );
+        assert_eq!(
+            porcelain_paths("M  fine.rs\0??"),
+            vec!["fine.rs"],
+            "a truncated trailing entry is ignored rather than panicking"
+        );
+        assert!(porcelain_paths("").is_empty(), "no output, no paths");
     }
 
     #[test]

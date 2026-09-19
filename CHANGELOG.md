@@ -63,6 +63,12 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Changed
 
+- A colony's stack is detected from its repository by default. A new `auto`
+  preset, now the sandbox default, reads the repository's marker files when the
+  colony's worktree is checked out (`Cargo.toml`, `go.mod`, `pyproject.toml`,
+  `package.json`, …) and falls back to Node when none match; a preset picked by
+  hand still wins, and an org's workspace settings can pin its own stack over
+  the global one. ([#177])
 - The colony list is ordered by what it wants from you, shows the queue, and
   keeps following a pull request after it opens. ([#82])
 - An install now lives behind a symlink, so an install interrupted half-way
@@ -208,6 +214,7 @@ Macs. ([#74])
 [#127]: https://github.com/Colonizer-dev/harness/issues/127
 [#131]: https://github.com/Colonizer-dev/harness/pull/131
 [#172]: https://github.com/Colonizer-dev/harness/pull/172
+[#177]: https://github.com/Colonizer-dev/harness/issues/177
 [#184]: https://github.com/Colonizer-dev/harness/issues/184
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3

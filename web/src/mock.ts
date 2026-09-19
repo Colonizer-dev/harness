@@ -827,6 +827,9 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
 // The same digest pins the real backend boots (crates/colonizer/images.lock), so the mock
 // shows references in exactly the shape the app produces.
 const MOCK_PRESET_IMAGES: Record<string, string> = {
+  // auto has no image of its own: it reads each repository's stack at boot and falls back to Node,
+  // so the pre-pull resolves to the same pinned image node names.
+  auto: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0",
   node: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0",
   python: "python:3.13-bookworm@sha256:933b46a028fd786c9c3d426ebabc237e29a15912231ea8de576e95f0e4f41a4c",
   rust: "rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa",
@@ -1267,6 +1270,7 @@ export function createMockApi(): Api {
     acme: {
       agent: { model: "strix/ds4-flash", subagent_model: "deepseek/deepseek-flash", background_model: null },
       max_parallel: 2,
+      stack: "rust",
       memory: { enabled: true },
       watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
     },
@@ -1310,8 +1314,9 @@ export function createMockApi(): Api {
         type: "object",
         properties: {
           // Same enum the mothership's schema declares; a preset is a stack you pick instead of
-          // an image tag you type, and the pinned digests below are the lock's own.
-          preset: { type: "string", title: "Stack", enum: ["node", "python", "rust", "go", "custom"], default: "node", description: "Picks the image and machine size for a colony. Choose 'custom' to set the fields below yourself; anything you set explicitly wins over the preset either way." },
+          // an image tag you type — 'auto' reads it off each repository at boot — and the pinned
+          // digests below are the lock's own.
+          preset: { type: "string", title: "Stack", enum: ["auto", "node", "python", "rust", "go", "custom"], default: "auto", description: "Picks the image and machine size for a colony. 'auto', the default, reads the stack off each repository when the colony boots. Choose 'custom' to set the fields below yourself; anything you set explicitly wins over the preset either way." },
           image: { type: "string", title: "Image", description: "glibc-based OCI image", default: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0" },
           cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
           memory: { type: "string", title: "Memory", default: "8G" },
@@ -1509,7 +1514,7 @@ export function createMockApi(): Api {
     // seen going through pulling -> done against the mock backend.
     sandboxPull: async () => {
       const sandbox = modules.find((m) => m.kind === "sandbox");
-      const preset = String(sandbox?.settings?.preset ?? "node");
+      const preset = String(sandbox?.settings?.preset ?? "auto");
       const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0");
       if (mockPulled.has(image)) {
         mockPull = { image, state: "cached", started_at: null, finished_at: null, error: null };
