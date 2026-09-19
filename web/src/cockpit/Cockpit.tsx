@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useApi } from "../context";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
+import { needsYou } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -152,7 +153,12 @@ export function Cockpit({
   );
 
   const needByOrg = useMemo(() => needCountByOrg(sessions), [sessions]);
-  const needCount = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  // Two different counts, and mixing them up is what makes a header say "1 need you" over a
+  // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
+  // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
+  // spend, which are this workspace's.
+  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  const needHere = useMemo(() => inOrg.filter(needsYou).length, [inOrg]);
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
   const spend = inOrg.reduce((total, s) => total + (s.cost_usd ?? 0) + (s.routed_cost_usd ?? 0), 0);
@@ -232,7 +238,7 @@ export function Cockpit({
       case "inbox":
         return (
           <InboxView
-            sessions={inOrg}
+            sessions={sessions}
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
           />
@@ -277,7 +283,7 @@ export function Cockpit({
         }}
         view={view}
         onNavigate={navigate}
-        needCount={needCount}
+        needCount={needAnywhere}
         needByOrg={needByOrg}
         theme={theme}
         onToggleTheme={toggleTheme}
@@ -294,7 +300,7 @@ export function Cockpit({
           needByOrg={needByOrg}
           crumb={CRUMB[view]}
           liveCount={liveCount}
-          needCount={needCount}
+          needCount={needHere}
           cost={spend > 0 ? spend : null}
           update={update}
           onOpenUpdates={() => onOpenSettings("updates")}
@@ -309,7 +315,7 @@ export function Cockpit({
               status={status}
               liveCount={liveCount}
               queuedCount={queuedCount}
-              needCount={needCount}
+              needCount={needHere}
               spend={spend > 0 ? spend : null}
               maxParallel={status?.sandbox.max_parallel ?? null}
               update={update}
