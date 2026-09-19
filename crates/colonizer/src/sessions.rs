@@ -1012,8 +1012,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let colonies = app.sessions.read().await.clone();
     let touched = github::touched_files(app, &colonies, &s).await;
     let siblings = github::siblings_of(&colonies, &s, &touched);
-    let prompt =
-        github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
+    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let agent_choice = orgs::effective_agent(&modules, &org_settings);
     let mut runner_env = agent_env(&agent, &agent_choice);
