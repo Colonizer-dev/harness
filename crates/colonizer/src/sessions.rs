@@ -2249,6 +2249,7 @@ pub(crate) mod tests {
                 instructions: String::new(),
                 autopilot: None,
                 allow_duplicate: false,
+                model_tier: None,
             }),
         )
         .await
@@ -2321,6 +2322,7 @@ pub(crate) mod tests {
                 instructions: String::new(),
                 autopilot: None,
                 allow_duplicate: false,
+                model_tier: None,
             }),
         )
         .await
