@@ -35,6 +35,7 @@ import type {
   UsageStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
+import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, usageHealthTone } from "../providerHealth";
 import { useModels } from "../useModels";
 import { type ImagePull } from "../useImagePull";
 import { setupTone, type SetupView } from "../setup";
@@ -2373,7 +2374,7 @@ function KeyBadge({ provider }: { provider: ModelProvider }) {
 
 type HealthView = { state: "checking" } | { state: "done"; result: ProviderHealth } | { state: "failed"; message: string };
 
-function HealthStatus({ health }: { health: HealthView }) {
+function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boolean }) {
   if (health.state === "checking") {
     return (
       <span role="status" className="flex items-center gap-1.5 text-[12px] text-muted">
@@ -2399,7 +2400,8 @@ function HealthStatus({ health }: { health: HealthView }) {
       text = [`HTTP ${r.status}`, latency, r.error].filter(Boolean).join(" · ");
     } else {
       tone = "ok";
-      text = ["Reachable", latency, models].filter(Boolean).join(" · ");
+      // A passing probe is one request; say so next to a provider failing a share of its real traffic.
+      text = ["Reachable", latency, models, degraded ? "but failing real traffic" : null].filter(Boolean).join(" · ");
     }
     title = [r.models.length ? `Models: ${r.models.join(", ")}` : null, r.checked_at ? `Checked ${new Date(r.checked_at).toLocaleTimeString()}` : null]
       .filter(Boolean)
@@ -2442,6 +2444,11 @@ function idleWiringNote(usedBy: ModelSetting[]): string | null {
   return `only wired to ${settings} — the Orchestrator model does nearly all of a colony's work, so it can look idle`;
 }
 
+/** The failure-rate segment's tooltip: the Mothership owns the rule, the line only reports it. */
+const FAILURE_RATE_TITLE =
+  "Failures as a share of the requests counted at the gateway. The Mothership calls a provider degraded at 10% or more of at least 50 requests; below that the rate is shown without a verdict.";
+const AVG_LATENCY_TITLE = "Mean time of the requests dispatched to this provider, time spent queued excluded.";
+
 /**
  * The cumulative usage line on a provider card. Its most important job is telling "never used"
  * from "used and working" at a glance: `Reachable` alone once read as "in use" when it only meant
@@ -2457,14 +2464,26 @@ function UsageLine({ provider }: { provider: ModelProvider }) {
   const total = formatDuration(usage?.duration_ms ?? 0);
   const usedBy = provider.used_by;
   const wiring = idleWiringNote(usedBy ?? []);
+  const health = provider.health;
+  const tone = usageHealthTone(health);
+  const rate = failureRateText(health, requests);
+  const avg = avgLatencyText(health, requests);
+  const since = formatSince(usage?.since);
 
-  const segments: { text: string; title?: string; tone?: "warn" | "lift" }[] = [];
+  const segments: { text: string; title?: string; tone?: "warn" | "err" | "lift" }[] = [];
   if (!usage) {
     segments.push({ text: "No usage recorded — this Mothership doesn't report usage", tone: "lift" });
   } else if (requests === 0) {
     segments.push({ text: "Never used", tone: "lift" });
   } else {
-    segments.push({ text: `${requests.toLocaleString()} ${requests === 1 ? "request" : "requests"}` });
+    if (rate)
+      segments.push({
+        text: rate,
+        title: FAILURE_RATE_TITLE,
+        tone: tone === "err" ? "err" : undefined,
+      });
+    if (avg) segments.push({ text: avg, title: AVG_LATENCY_TITLE });
+    segments.push({ text: `${requests.toLocaleString()} ${requests === 1 ? "request" : "requests"}${since ? ` since ${since}` : ""}` });
     if (lastUsed) segments.push({ text: `last used ${lastUsed}` });
     if (failures > 0)
       segments.push({
@@ -2488,7 +2507,11 @@ function UsageLine({ provider }: { provider: ModelProvider }) {
           {index > 0 && " · "}
           <span
             title={segment.title}
-            className={cx(segment.tone === "warn" && "text-warn", segment.tone === "lift" && "font-medium text-muted")}
+            className={cx(
+              segment.tone === "warn" && "text-warn",
+              segment.tone === "err" && "font-medium text-err",
+              segment.tone === "lift" && "font-medium text-muted",
+            )}
           >
             {segment.text}
           </span>
@@ -2532,6 +2555,14 @@ function ProviderRow({
               {[running > 0 && `${running} running`, queued > 0 && `${queued} queued`].filter(Boolean).join(" · ")}
             </Badge>
           )}
+          {provider.health?.degraded && (
+            <Badge
+              tone="err"
+              title={`${formatFailureRate(provider.health.failure_pct)} of requests failed, ${formatAvgLatency(provider.health.avg_latency_ms)} on average. The Mothership rates a provider degraded past 10% failed.`}
+            >
+              Degraded
+            </Badge>
+          )}
         </div>
         <div className="mt-0.5 font-mono text-[12px] text-muted [overflow-wrap:anywhere]">{provider.base_url}</div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
@@ -2549,7 +2580,7 @@ function ProviderRow({
         <UsageLine provider={provider} />
         {health && (
           <div className="mt-2">
-            <HealthStatus health={health} />
+            <HealthStatus health={health} degraded={provider.health?.degraded} />
           </div>
         )}
       </div>
@@ -3011,7 +3042,7 @@ function ProviderForm({
               onChange={(v) => setLimit("max_concurrent", v)}
               placeholder="Unlimited"
               error={limits.max_concurrent.error}
-              help="Requests beyond this wait in a queue on the Mothership; a local server usually handles 1-2."
+              help="Requests beyond this wait in a queue on the Mothership; a local server usually handles 1-2. Left empty it is unlimited: the request rate is every running colony times its subagents."
             />
             <LimitField
               label="Context window (tokens)"

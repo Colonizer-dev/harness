@@ -940,8 +940,8 @@ autopilot colony whose turn ends with an error (not an interrupt) is not publish
 it sets itself.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
-`on_attention` = true, `on_failed` = true, `on_pull_request` = true, `desktop` = false,
-`webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
+`on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
+`desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
 announces colonies to the outside world, so it is off until asked for. Every thirty seconds the
 mothership diffs the session list against what it last saw, seeding new colonies without firing so a
 restart does not replay a backlog, and announces the edges once each: `status` became
@@ -951,20 +951,43 @@ event and `autopilot_held` is not the watchdog's, so neither announces here. The
 line naming the repository and issue (`acme/webshop #42 needs an answer`, `… has stalled`, `… is out
 of nudges`, `… failed`, `… opened a pull request`); colonies with no issue are just the repository.
 
+A provider failing under fan-out does not look like a failing provider from the colonies' side — it
+looks like every colony running slowly at once. So every thirty seconds the same loop also rates each
+configured model provider's cumulative usage by the one rule every surface shares (§6.5): at least 50
+requests to be rated, a failure rate of 10% or more to be degraded
+([#184](https://github.com/Colonizer-dev/harness/issues/184)). A provider crossing the line announces
+the `provider_degraded` event once — `zai is failing 29.4% of its requests` — and stays quiet while
+it holds; the announcement re-arms only when the rate falls clearly back, under 8%, so a rate
+hovering at the line does not announce every tick. Because those counters are cumulative for the
+life of the install, that re-arm is not routine, and it is worth saying so plainly: the lifetime
+rate only falls under 8% once healthy traffic has diluted the outage many times over — after the
+episode that prompted this (9,599 failures in 32,689 requests), a provider that never failed again
+would need roughly 120,000 cumulative requests to get there — so a long-lived tally may in practice
+never re-arm, and a second, separate outage months later announces nothing. A provider seen for the
+first time only seeds its state, so a restart does not announce the providers that were already
+failing before it. A provider
+has no colony and no org, so its settings are the notify module's own global ones — org overrides do
+not reach it, and `on_provider` has no per-org override — and the announcement carries no repository
+at all: only the id and name the operator chose, plus the counters behind the rate.
+
 The desktop channel runs `osascript -e 'display notification …'` on macOS or `notify-send` on Linux
 under a graphical session, with the text passed as an argument and escaped for AppleScript. Over SSH
 or headless it does nothing, logging the reason once rather than a line a tick. A non-empty
 `webhook_url` POSTs one JSON note per event:
 
 ```json
-{"event": "question|attention|failed|pull_request", "at": "2026-09-18T00:00:00+00:00",
+{"event": "question|attention|failed|pull_request|provider_degraded", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
- "pr_url": null}
+ "pr_url": null,
+ "provider": null}
 ```
 
 The note carries no repository content — no issue title, no question text, no branch, no error — and
 `pr_url` is the colony's pull request address only on the `pull_request` event, `null` otherwise.
+`provider` is `null` on every colony event; on `provider_degraded` it is the reverse — `colony` and
+`pr_url` are `null` and `provider` carries `{id, name, failure_pct, avg_latency_ms, requests}` — so
+a receiver reads one six-key shape either way.
 Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
 (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
 `X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
@@ -1101,14 +1124,18 @@ are estimates.
 
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
-`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes, because a fallback request goes to the API as is). `GET /api/providers` also returns `pricing`, `in_flight`,
-`queued`, `usage` and `used_by`.
+`fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes,
+because a fallback request goes to the API as is). Leaving `max_concurrent` unset really does mean unlimited: the
+provider gets asked for as many requests at once as are made of it. With `delegate = enforce` — the delegation
+default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
+of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
+`GET /api/providers` also returns `pricing`, `in_flight`, `queued`, `usage`, `health` and `used_by`.
 
 **Usage.** `usage` is the provider's cumulative counters: what says a request has ever actually gone to it,
 which the momentary `in_flight`/`queued` gauges cannot:
 
 ```json
-{"requests": 12, "failures": 2, "fallbacks": 1, "duration_ms": 48021, "last_request_at": "…"}
+{"requests": 12, "failures": 2, "fallbacks": 1, "duration_ms": 48021, "last_request_at": "…", "since": "…"}
 ```
 
 `requests` counts every request the gateway accepted for the provider, from the moment everything that can
@@ -1123,7 +1150,9 @@ gateway predicts will fall back to Claude: it answered with `x-colonizer-fallbac
 through the gateway, so this is a prediction, not an observation. `duration_ms` is the cumulative
 wall-clock of dispatched requests, streamed body included, timed from when a request's slot was acquired,
 so time spent queued is not. `last_request_at` is RFC 3339, `null` before
-the first request. The counters live in `provider-usage.json` in the mothership's data directory, written
+the first request. `since` is when this tally started — the first counted request — in the same form,
+`null` for a tally with no requests yet or one kept by an older build. The counters live in
+`provider-usage.json` in the mothership's data directory, written
 by a background task every 5 s when they changed and once more at shutdown, so a crash loses at most 5 s
 of the tally and a restart carries on where it left off; `DELETE /api/providers/{id}` also removes the
 provider's tally.
@@ -1135,6 +1164,23 @@ the global agent env and every org override, e.g. `["subagent_model"]`. Empty me
 configured but no model setting points at it: wired only to `subagent_model`, say, on a harness whose
 colonies never spawn subagents: unused so far, not broken. A bare alias or a partial id prefix is
 another provider's model and doesn't match, same rule as the "used" routes above.
+
+**Usage health.** `GET /api/providers` also carries each provider's `health`, the mothership's read on
+`usage`, computed by one rule shared with the notify module:
+
+```json
+{"failure_pct": 29.4, "avg_latency_ms": 480, "rated": true, "degraded": true}
+```
+
+`failure_pct` is `failures/requests` as a percentage rounded to one decimal place (`0` with no
+requests), `avg_latency_ms` is `duration_ms/requests` (`0` with no requests), `rated` is whether
+there are at least 50 requests — enough to judge a provider by its failure rate; a handful of early
+failures is noise — and `degraded` is `rated` with a `failure_pct` of 10% or more, so an unrated
+provider is never degraded. One rule, so a provider the fan-out is drowning looks the same
+everywhere: `GET /api/status` carries a `model_providers` array of
+`{id, name, requests, failure_pct, avg_latency_ms, degraded}`, so the status poll answers "is it the
+provider?" without opening the providers screen, and the notify module's `provider_degraded` event
+announces the same verdict when it first appears (§6.3).
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 

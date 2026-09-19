@@ -216,7 +216,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 | `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
-| `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request. Off until configured, and the webhook carries no repository content — colony, event and time only | Slack or email relays `PLANNED` |
+| `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
 
 Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
 parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and

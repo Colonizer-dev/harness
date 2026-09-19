@@ -6,7 +6,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error,
-    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS},
+    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, health},
     orgs::effective_agent,
     sessions::agent_env,
     util::{read_trimmed, write_secret},
@@ -346,6 +346,7 @@ async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
 
 fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Value {
     let (in_flight, queued) = app.gateway.load(&provider.id);
+    let usage = app.gateway.usage(&provider.id);
     json!({
         "id": provider.id,
         "name": provider.name,
@@ -363,7 +364,8 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "pricing": provider.pricing,
         "in_flight": in_flight,
         "queued": queued,
-        "usage": app.gateway.usage(&provider.id),
+        "usage": usage,
+        "health": health(&usage),
         "used_by": used_by(&provider.id, envs),
     })
 }

@@ -244,8 +244,9 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "on_attention": {"type": "boolean", "title": "When the watchdog flags a colony", "description": "A colony that stalled or ran out of nudges — the watchdog's flags, not autopilot's", "default": true},
                 "on_failed": {"type": "boolean", "title": "When a colony fails", "default": true},
                 "on_pull_request": {"type": "boolean", "title": "When a colony opens a pull request", "default": true},
+                "on_provider": {"type": "boolean", "title": "When a model provider starts failing", "description": "A provider failing under fan-out does not look like a failing provider — it looks like every colony running slowly, because they all wait on it at once. One line when a provider's failure rate reaches 10% of its requests; announced once, and again only after the rate clearly recovers", "default": true},
                 "desktop": {"type": "boolean", "title": "Desktop notifications", "description": "Notify the desktop the mothership runs on. Does nothing over SSH or on a headless machine, and says so once in the log", "default": false},
-                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — colony, event and time only — and it is unsigned unless a signing secret is set in Settings", "default": ""}
+                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and it is unsigned unless a signing secret is set in Settings", "default": ""}
             }}),
         )],
         _ => Vec::new(),
