@@ -65,7 +65,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
-| `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
+| `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, or a model provider starting to fail, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
 
 Two settings layers sit next to the modules:
 

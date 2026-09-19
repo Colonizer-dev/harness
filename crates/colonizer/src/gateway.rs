@@ -78,6 +78,8 @@ const USAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 ///   body. Timed from when a request's concurrency slot was acquired, so time spent queued is never counted.
 /// - `last_request_at`: when the last request was accepted (before any queue wait), RFC3339 like the other
 ///   timestamps here.
+/// - `since`: when the tally for this provider started — the first counted request, RFC3339 like the other
+///   timestamps here. Absent for a tally with no requests yet or one kept by an older build.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderUsage {
@@ -86,6 +88,45 @@ pub struct ProviderUsage {
     pub fallbacks: u64,
     pub duration_ms: u64,
     pub last_request_at: Option<DateTime<Utc>>,
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// Enough requests to judge a provider by its failure rate.
+pub const HEALTH_MIN_SAMPLE: u64 = 50;
+/// At or above this percentage of failed requests a provider is degraded.
+pub const DEGRADED_PCT: f64 = 10.0;
+
+/// What [`ProviderUsage`] says about a provider at a glance: its failure rate and latency, and whether
+/// there is enough data to judge it. One rule for every surface — the providers API, `/api/status` and
+/// notifications — so a provider the fan-out is drowning looks the same everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct UsageHealth {
+    /// `failures/requests * 100`, rounded to one decimal place; `0.0` when there are no requests.
+    pub failure_pct: f64,
+    /// `duration_ms/requests`; `0` when there are no requests.
+    pub avg_latency_ms: u64,
+    /// `requests >= HEALTH_MIN_SAMPLE` — enough data to judge by failure rate.
+    pub rated: bool,
+    /// `rated && failure_pct >= DEGRADED_PCT`. An unrated provider is never degraded: a handful of
+    /// early failures is noise, and the fan-out this reports on starts at tens of requests.
+    pub degraded: bool,
+}
+
+/// Rates a provider's cumulative usage by the one rule every surface shares. Pure: same usage in, same
+/// verdict out, whatever calls it.
+pub fn health(usage: &ProviderUsage) -> UsageHealth {
+    let failure_pct = if usage.requests == 0 {
+        0.0
+    } else {
+        (usage.failures as f64 / usage.requests as f64 * 1000.0).round() / 10.0
+    };
+    UsageHealth {
+        failure_pct,
+        // Zero requests took zero time per request; `checked_div` says so without a divide-by-zero.
+        avg_latency_ms: usage.duration_ms.checked_div(usage.requests).unwrap_or_default(),
+        rated: usage.requests >= HEALTH_MIN_SAMPLE,
+        degraded: usage.requests >= HEALTH_MIN_SAMPLE && failure_pct >= DEGRADED_PCT,
+    }
 }
 
 /// Counts up while alive; used for in-flight and queued requests.
@@ -145,6 +186,7 @@ struct UsageCounters {
     fallbacks: AtomicU64,
     duration_ms: AtomicU64,
     last_request_at: Mutex<Option<DateTime<Utc>>>,
+    since: Mutex<Option<DateTime<Utc>>>,
     /// Set by every change; `flush_usage` clears it and writes.
     dirty: AtomicBool,
 }
@@ -157,11 +199,22 @@ impl UsageCounters {
             fallbacks: AtomicU64::new(usage.fallbacks),
             duration_ms: AtomicU64::new(usage.duration_ms),
             last_request_at: Mutex::new(usage.last_request_at),
+            since: Mutex::new(usage.since),
             dirty: AtomicBool::new(false),
         }
     }
 
     fn add_request(&self) {
+        // The tally's start instant is set once, on the first counted request, and never moves. It is
+        // stamped before the counter increments, so a snapshot landing in between never persists
+        // `requests >= 1` with a `since` of `None` — a restart would then re-stamp the tally later
+        // than the truth.
+        {
+            let mut since = self.since.lock().unwrap();
+            if since.is_none() {
+                *since = Some(Utc::now());
+            }
+        }
         self.requests.fetch_add(1, Ordering::SeqCst);
         *self.last_request_at.lock().unwrap() = Some(Utc::now());
         self.dirty.store(true, Ordering::SeqCst);
@@ -192,6 +245,7 @@ impl UsageCounters {
             fallbacks: self.fallbacks.load(Ordering::SeqCst),
             duration_ms: self.duration_ms.load(Ordering::SeqCst),
             last_request_at: *self.last_request_at.lock().unwrap(),
+            since: *self.since.lock().unwrap(),
         }
     }
 }
@@ -991,7 +1045,7 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
     }
 }
 
-pub async fn health(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     let provider = app
         .providers()
         .into_iter()
@@ -1115,6 +1169,98 @@ mod tests {
         usage.add_failure_with_fallback(&provider("strix", None));
         assert_eq!(usage.snapshot().fallbacks, 3);
         assert_eq!(usage.snapshot().failures, 5);
+    }
+
+    /// A tally with no requests has no start instant, the first counted request sets it once, and the
+    /// instant survives a flush and reload — an older `provider-usage.json` without one loads as `None`.
+    #[test]
+    fn the_tally_starts_at_its_first_request_and_a_restart_keeps_that_instant() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        let usage = gateway.usage_counters("strix");
+        assert_eq!(usage.snapshot().since, None, "nothing counted yet, so no start instant");
+
+        usage.add_request();
+        let since = usage.snapshot().since.expect("the first counted request starts the tally");
+        usage.add_request();
+        assert_eq!(usage.snapshot().since, Some(since), "a later request does not move the start");
+
+        gateway.flush_usage();
+        let reopened = usage_gateway(&dir).usage("strix");
+        assert_eq!(reopened.since, Some(since), "the reload keeps the tally's start instant");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn usage_with(requests: u64, failures: u64, duration_ms: u64) -> ProviderUsage {
+        ProviderUsage {
+            requests,
+            failures,
+            fallbacks: 0,
+            duration_ms,
+            last_request_at: None,
+            since: None,
+        }
+    }
+
+    #[test]
+    fn a_provider_with_no_requests_is_not_rated_and_not_degraded() {
+        let health = health(&ProviderUsage::default());
+        assert_eq!(
+            health,
+            UsageHealth {
+                failure_pct: 0.0,
+                avg_latency_ms: 0,
+                rated: false,
+                degraded: false
+            }
+        );
+    }
+
+    /// A terrible rate on a handful of requests is noise — the fan-out this rule exists to catch starts
+    /// at tens of requests — so it never reads as degraded.
+    #[test]
+    fn a_terrible_rate_on_a_handful_of_requests_is_not_rated_and_therefore_not_degraded() {
+        let health = health(&usage_with(10, 9, 90_000));
+        assert_eq!(health.failure_pct, 90.0);
+        assert_eq!(health.avg_latency_ms, 9_000);
+        assert!(!health.rated, "10 requests is under HEALTH_MIN_SAMPLE");
+        assert!(
+            !health.degraded,
+            "an unrated provider is never degraded, however terrible its rate"
+        );
+    }
+
+    /// The numbers behind this rule: one provider taking 29.4% of 32 689 requests, at 12.8 s each.
+    #[test]
+    fn the_fanout_that_prompted_this_rule_reads_as_degraded_at_29_4_pct_and_12_800_ms() {
+        let health = health(&usage_with(32_689, 9_599, 418_419_200));
+        assert_eq!(health.failure_pct, 29.4);
+        assert_eq!(health.avg_latency_ms, 12_800);
+        assert!(health.rated);
+        assert!(health.degraded, "29.4% is far past DEGRADED_PCT on a large sample");
+    }
+
+    #[test]
+    fn a_provider_is_degraded_from_ten_percent_exactly_and_not_below_it() {
+        // 99 failures in 1 000 requests rounds to 9.9% — rated, but under the line.
+        let under = health(&usage_with(1_000, 99, 0));
+        assert_eq!(under.failure_pct, 9.9);
+        assert!(under.rated);
+        assert!(!under.degraded, "9.9% is just under DEGRADED_PCT");
+
+        // 5 failures in the minimum 50 requests is exactly 10% — and exactly the sample size.
+        let at = health(&usage_with(HEALTH_MIN_SAMPLE, 5, 0));
+        assert_eq!(at.failure_pct, 10.0);
+        assert!(at.rated);
+        assert!(at.degraded, "10.0% is at DEGRADED_PCT, on the smallest sample that rates");
+    }
+
+    #[test]
+    fn failure_pct_is_rounded_to_one_decimal_and_latency_is_whole_milliseconds() {
+        // 3/7 is 42.857…%, rounded to one decimal place.
+        let health = health(&usage_with(7, 3, 10_001));
+        assert_eq!(health.failure_pct, 42.9);
+        assert_eq!(health.avg_latency_ms, 1_428, "latency is duration_ms/requests, truncated");
     }
 
     /// A request that queues past `queue_timeout_secs` never reaches the provider: it still counts as a

@@ -114,6 +114,8 @@ export interface HarnessStatus {
   storage?: StorageHealth;
   /** The machine facts a colony's first minute depends on (issue #129); older mothership builds omit it. */
   runtime?: RuntimeInfo;
+  /** One entry per configured model provider, so the status poll can answer "is it the provider?" without the providers screen; older mothership builds omit it. */
+  model_providers?: ModelProviderStatus[];
 }
 
 /** GET /api/status `runtime` (issue #129): what kind of machine the mothership runs on, and what it can reach. The mothership re-probes all of it; the frontend only reads. */
@@ -141,6 +143,20 @@ export interface StorageHealth {
   ts?: string | null;
   /** Failed writes since the mothership started. */
   failures?: number | null;
+}
+
+/** GET /api/status `model_providers`: each configured model provider's cumulative requests and the health rule's verdict on it (§6.5) — the one rule the providers screen, the status poll and the notify module all share. */
+export interface ModelProviderStatus {
+  id: string;
+  name: string;
+  /** Cumulative requests counted at the gateway; the denominator of `failure_pct`. */
+  requests: number;
+  /** `failures / requests * 100`, one decimal; 0 with no requests. */
+  failure_pct: number;
+  /** Mean duration of dispatched requests, time queued excluded; 0 with no requests. */
+  avg_latency_ms: number;
+  /** Rated and at least 10% of requests failed — the verdict the notify module announces (§6.3). */
+  degraded: boolean;
 }
 
 export interface ModuleProviderInfo {
@@ -230,6 +246,8 @@ export interface ModelProvider extends ProviderLimits {
    * Mothership from before it kept tally sends neither this nor `used_by`.
    */
   usage?: ProviderUsage;
+  /** The Mothership's read on `usage`. Optional: a Mothership from before it computed health sends neither this nor `usage`. */
+  health?: ProviderUsageHealth;
   /** The model settings currently routed here; empty means none are, so it stays idle. */
   used_by?: ModelSetting[];
 }
@@ -253,6 +271,24 @@ export interface ProviderUsage {
   duration_ms: number;
   /** When the last request was dispatched; null if never. */
   last_request_at: string | null;
+  /** When the tally for this provider started; null when the Mothership doesn't say. */
+  since: string | null;
+}
+
+/**
+ * What the Mothership reads out of a provider's `usage`: the failure rate and average latency over
+ * that tally, and whether it rates the provider degraded. The rule lives on the Mothership, so the
+ * UI renders these as given instead of recomputing them from the raw counts.
+ */
+export interface ProviderUsageHealth {
+  /** `failures / requests * 100`, one decimal; 0.0 with no requests. */
+  failure_pct: number;
+  /** Mean duration of dispatched requests, time queued excluded; 0 with no requests. */
+  avg_latency_ms: number;
+  /** Enough data to judge: `requests >= 50`. */
+  rated: boolean;
+  /** `rated` and at least 10% of requests failed. */
+  degraded: boolean;
 }
 
 /**

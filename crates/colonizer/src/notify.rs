@@ -1,15 +1,18 @@
-//! The notify module: when a colony needs an answer, stalls, fails or opens a pull request, say so
-//! on the desktop the mothership runs on and, if a URL is set, at a webhook.
+//! The notify module: when a colony needs an answer, stalls, fails or opens a pull request, or a
+//! model provider starts failing, say so on the desktop the mothership runs on and, if a URL is set,
+//! at a webhook.
 //!
-//! Two choices shape it. Events are detected by diffing the session list in a poll loop, never by
-//! hooking the call sites — a notification must not be able to change what a colony does, and a new
-//! status change elsewhere cannot forget to tell it. And what leaves the mothership is one short
-//! line about the colony, never repository content: a webhook is a write to somewhere outside this
-//! machine, and repository content can carry instructions.
+//! Two choices shape it. Events are detected by diffing the session list — and the providers' usage
+//! tallies — in a poll loop, never by hooking the call sites — a notification must not be able to
+//! change what a colony does, and a new status change elsewhere cannot forget to tell it. And what
+//! leaves the mothership is one short line about the colony, never repository content: a webhook is
+//! a write to somewhere outside this machine, and repository content can carry instructions.
 
 use crate::{
     ApiResult, App, Shared, client_error,
-    orgs::effective_notify,
+    gateway::{ProviderUsage, UsageHealth, health},
+    orgs::{OrgSettings, effective_notify},
+    providers::Provider,
     sessions::{Session, SessionStatus},
     util::{env_nonempty, read_trimmed, truncate, write_secret},
 };
@@ -33,6 +36,9 @@ pub struct NotifySettings {
     pub on_attention: bool,
     pub on_failed: bool,
     pub on_pull_request: bool,
+    /// Whether a model provider crossing its failure threshold announces. Providers are not
+    /// org-scoped, so no org overrides this.
+    pub on_provider: bool,
     pub desktop: bool,
     pub webhook_url: String,
 }
@@ -49,6 +55,9 @@ pub enum Event {
     Failed,
     /// `status` became `pr_opened`.
     PullRequest,
+    /// A configured model provider's failure rate crossed the degraded line
+    /// ([`crate::gateway::DEGRADED_PCT`]). The one event with no colony behind it.
+    ProviderDegraded,
 }
 
 impl Event {
@@ -59,6 +68,7 @@ impl Event {
             Event::Attention(_) => "attention",
             Event::Failed => "failed",
             Event::PullRequest => "pull_request",
+            Event::ProviderDegraded => "provider_degraded",
         }
     }
 
@@ -71,12 +81,24 @@ impl Event {
             Event::Attention(_) => "has stalled",
             Event::Failed => "failed",
             Event::PullRequest => "opened a pull request",
+            // A provider names no colony, so this session-shaped path is never called with the
+            // provider event; its line is [`Event::provider_text`]'s to build.
+            Event::ProviderDegraded => {
+                unreachable!("provider events have no colony; build their line with Event::provider_text")
+            }
         };
         let subject = match issue {
             Some(number) => format!("{repo} #{number}"),
             None => repo.to_string(),
         };
         truncate(&format!("{subject} {what}"), MAX_TEXT)
+    }
+
+    /// The one line for [`Event::ProviderDegraded`]: the provider, and its failure rate. It carries
+    /// no repository content — the provider event carries no repository at all, only the id and name
+    /// the operator chose and the counters the gateway tallied.
+    pub fn provider_text(name: &str, failure_pct: f64) -> String {
+        truncate(&format!("{name} is failing {failure_pct:.1}% of its requests"), MAX_TEXT)
     }
 }
 
@@ -129,6 +151,53 @@ pub fn decide(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec
     events
 }
 
+/// Below this percentage a degraded provider is treated as recovered and the announcement re-arms.
+/// Deliberately under [`crate::gateway::DEGRADED_PCT`]: a provider's counters are cumulative for the
+/// life of the install, so its rate moves slowly, and one that hovers at the line would otherwise
+/// announce on every tick. That same cumulative tally makes re-arming expensive, and the cost should
+/// be said plainly: the lifetime rate only falls under this line once healthy traffic has diluted the
+/// outage many times over. After issue #184's episode (9,599 failures in 32,689 requests, 29.4%), a
+/// provider that never failed again would need roughly 120,000 cumulative requests to get here — so
+/// a tally that has lived long enough may in practice never re-arm, and a second, separate outage
+/// months later announces nothing.
+pub const RECOVER_PCT: f64 = 8.0;
+
+/// Whether a provider's health calls for the one [`Event::ProviderDegraded`] announcement, and the
+/// degraded state to keep. Pure, like [`decide`]. The hysteresis is the point: a crossing announces
+/// once, holding announces nothing, and re-arming waits for the rate to fall clearly back under the
+/// threshold, so a rate sitting between the two lines never flaps — though on a cumulative tally
+/// re-arming may in practice never come at all ([`RECOVER_PCT`]). A provider seen for the first time
+/// only seeds (`None`), the same convention [`decide`] follows for colonies: a restart must not
+/// announce every provider that was already failing before it, as if it had just broken. With the
+/// module off, or [`NotifySettings::on_provider`] off, nothing announces and the state is carried
+/// through untouched: a provider whose announcement was already spent stays spent, but one that
+/// crossed the line while the event was off is carried as not-degraded, so switching the event back
+/// on announces it as a fresh crossing. An unrated provider ([`UsageHealth::rated`]) is never
+/// degraded.
+pub fn decide_provider(
+    settings: &NotifySettings,
+    was_degraded: Option<bool>,
+    health: &UsageHealth,
+) -> (bool /* announce */, bool /* now degraded */) {
+    if !settings.enabled || !settings.on_provider {
+        return (false, was_degraded.unwrap_or(false));
+    }
+    if !health.rated {
+        return (false, false);
+    }
+    let Some(was) = was_degraded else {
+        return (false, health.degraded);
+    };
+    match (was, health.degraded) {
+        (false, true) => (true, true),
+        // Under the degraded line but not yet clearly under [`RECOVER_PCT`]: the announcement stays
+        // spent. Clearly under it re-arms, so the next crossing announces again.
+        (true, false) => (false, health.failure_pct >= RECOVER_PCT),
+        // Holding, on either side of the line, is not an edge.
+        (true, true) | (false, false) => (false, health.degraded),
+    }
+}
+
 /// Diffs the session list against what was last seen: the events to announce, and the state to keep.
 /// Entries for colonies that are gone are simply not carried over, so the map cannot grow forever.
 fn diff<'a>(
@@ -144,6 +213,42 @@ fn diff<'a>(
             events.push((session, event));
         }
         next.insert(session.id.clone(), now);
+    }
+    (events, next)
+}
+
+/// One degraded-provider announcement, carrying what both channels need: the provider and the usage
+/// that crossed the line.
+#[derive(Clone, Debug)]
+pub struct ProviderEvent {
+    pub provider: Provider,
+    pub usage: ProviderUsage,
+    pub health: UsageHealth,
+}
+
+/// Diffs the configured providers against what was last announced: the ones to announce, and the
+/// degraded state to keep. Entries for providers that no longer exist are simply not carried over,
+/// so the map cannot grow forever — the same rule the session diff follows.
+fn diff_providers(
+    providers: &[Provider],
+    degraded: &HashMap<String, bool>,
+    settings: &NotifySettings,
+    usage_of: impl Fn(&Provider) -> ProviderUsage,
+) -> (Vec<ProviderEvent>, HashMap<String, bool>) {
+    let mut next = HashMap::with_capacity(providers.len());
+    let mut events = Vec::new();
+    for provider in providers {
+        let usage = usage_of(provider);
+        let health = health(&usage);
+        let (announce, now) = decide_provider(settings, degraded.get(&provider.id).copied(), &health);
+        if announce {
+            events.push(ProviderEvent {
+                provider: provider.clone(),
+                usage,
+                health,
+            });
+        }
+        next.insert(provider.id.clone(), now);
     }
     (events, next)
 }
@@ -288,6 +393,29 @@ pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
         // The pull request address only on the event that is about one; the field stays present so
         // a receiver reads one shape.
         "pr_url": if event == Event::PullRequest { session.pr_url.clone() } else { None },
+        // Session events are never about a provider; the key stays present so a receiver reads one
+        // shape, the same reason `pr_url` is always here.
+        "provider": None::<Value>,
+    })
+}
+
+/// The webhook payload for [`Event::ProviderDegraded`]. One shape with [`payload`]: `colony` and
+/// `pr_url` are `null` here, and `provider` carries the id and name the operator chose plus the
+/// counters behind the announcement — still nothing of any repository.
+pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealth, at: DateTime<Utc>) -> Value {
+    json!({
+        "event": Event::ProviderDegraded.name(),
+        "at": at.to_rfc3339(),
+        "text": Event::provider_text(name, health.failure_pct),
+        "colony": None::<Value>,
+        "pr_url": None::<Value>,
+        "provider": {
+            "id": id,
+            "name": name,
+            "failure_pct": health.failure_pct,
+            "avg_latency_ms": health.avg_latency_ms,
+            "requests": requests,
+        },
     })
 }
 
@@ -390,9 +518,10 @@ pub async fn put_secret(State(app): State<Shared>, Json(req): Json<NotifySecret>
 /// the flag it reports rather than a minute behind it.
 const TICK: Duration = Duration::from_secs(30);
 
-/// Runs the notify module forever: every thirty seconds, diff the session list and announce the
-/// edges. When the module is off (or was never configured) the loop clears its bookkeeping and
-/// returns, so switching it on later announces only what happens from then on.
+/// Runs the notify module forever: every thirty seconds, diff the session list and the providers'
+/// usage tallies against what was last seen, and announce the edges. When the module is off (or was
+/// never configured) the loop clears its bookkeeping and returns, so switching it on later announces
+/// only what happens from then on.
 pub async fn run(app: Shared) {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -406,14 +535,16 @@ pub async fn run(app: Shared) {
         eprintln!("notify: could not build an HTTP client; the webhook channel is off");
     }
     let mut seen: HashMap<String, Seen> = HashMap::new();
-    // Reasons already reported, so a persistent problem is one log line, not one a tick.
-    let mut desktop_reason: Option<&'static str> = None;
-    let mut webhook_reason: Option<String> = None;
+    // Per provider: whether its failure rate has already been announced as degraded. A restart starts
+    // empty, so providers that were already failing seed instead of announcing a backlog.
+    let mut degraded: HashMap<String, bool> = HashMap::new();
+    let mut reasons = Reasons::default();
     loop {
         tick.tick().await;
         let modules = app.modules.read().await.clone();
         if !modules.notify.as_ref().is_some_and(|c| c.enabled) {
             seen.clear();
+            degraded.clear();
             continue;
         }
         let sessions = app.sessions.read().await.clone();
@@ -427,50 +558,83 @@ pub async fn run(app: Shared) {
         seen = next;
         for (session, event) in events {
             let Some(settings) = per_org.get(&session.org) else { continue };
-            announce(
-                &app,
-                client.as_ref(),
-                session,
-                event,
-                settings,
-                &mut desktop_reason,
-                &mut webhook_reason,
-            )
-            .await;
+            announce(&app, client.as_ref(), session, event, settings, &mut reasons).await;
+        }
+        // A provider is not org-scoped — no colony, no org to resolve — so its settings are the
+        // notify module's own global choice. `effective_notify` with a default org is exactly that:
+        // the module's settings, with the schema defaults for anything it leaves unset, org
+        // overrides absent.
+        let settings = effective_notify(&modules, &OrgSettings::default());
+        let (provider_events, next_degraded) =
+            diff_providers(&app.providers(), &degraded, &settings, |p| app.gateway.usage(&p.id));
+        degraded = next_degraded;
+        for event in &provider_events {
+            announce_provider(&app, client.as_ref(), event, &settings, &mut reasons).await;
         }
     }
 }
 
-/// Announces one event down whichever channels are on. Nothing here is fatal: a channel that cannot
-/// be reached is a line in the log, and the next event tries again.
+/// The channel failures already reported, so a persistent problem is one log line, not one a tick.
+#[derive(Default)]
+struct Reasons {
+    desktop: Option<&'static str>,
+    webhook: Option<String>,
+}
+
+/// Announces one colony event down whichever channels are on.
 async fn announce(
     app: &App,
     client: Option<&reqwest::Client>,
     session: &Session,
     event: Event,
     settings: &NotifySettings,
-    desktop_reason: &mut Option<&'static str>,
-    webhook_reason: &mut Option<String>,
+    reasons: &mut Reasons,
 ) {
     let text = event.text(&session.repo, session.issue);
+    let payload = payload(event, Utc::now(), session);
+    deliver(app, client, &text, &payload, Some(session), settings, reasons).await;
+}
+
+/// Announces one provider event down the same channels as [`announce`], with the same dedup. A
+/// provider has no colony, so there is no colony log to record a failed channel in and the line goes
+/// to stderr instead.
+async fn announce_provider(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    event: &ProviderEvent,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let name = &event.provider.name;
+    let text = Event::provider_text(name, event.health.failure_pct);
+    let payload = provider_payload(&event.provider.id, name, event.usage.requests, &event.health, Utc::now());
+    deliver(app, client, &text, &payload, None, settings, reasons).await;
+}
+
+/// The channels themselves: the desktop popup, and the signed webhook POST. Nothing here is fatal: a
+/// channel that cannot be reached is a line in a log, and the next event tries again. `session` is
+/// the colony the event is about — provider events have none, and their channel failures land on
+/// stderr instead of that colony's log.
+async fn deliver(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    text: &str,
+    payload: &Value,
+    session: Option<&Session>,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
     if settings.desktop {
         match desktop_tool(&DesktopEnv::this_host()) {
             Ok(tool) => {
-                *desktop_reason = None;
-                if let Some(what) = notify_desktop(tool, &text).await {
-                    // About this colony's event, so it belongs in this colony's log, where the
-                    // person it was meant for is looking — as the watchdog and autonomy log.
-                    app.session_log(
-                        &session.id,
-                        "warn",
-                        format!("notify: the desktop notification failed ({what})"),
-                    )
-                    .await;
+                reasons.desktop = None;
+                if let Some(what) = notify_desktop(tool, text).await {
+                    report_failure(app, session, format!("notify: the desktop notification failed ({what})")).await;
                 }
             }
-            Err(reason) if *desktop_reason != Some(reason) => {
+            Err(reason) if reasons.desktop != Some(reason) => {
                 eprintln!("notify: desktop notifications stay off: {reason}");
-                *desktop_reason = Some(reason);
+                reasons.desktop = Some(reason);
             }
             Err(_) => {}
         }
@@ -480,17 +644,17 @@ async fn announce(
         return;
     }
     if !webhook_valid(&settings.webhook_url) {
-        if webhook_reason.as_deref() != Some(settings.webhook_url.as_str()) {
+        if reasons.webhook.as_deref() != Some(settings.webhook_url.as_str()) {
             eprintln!(
                 "notify: the webhook stays off: {} is not an http:// or https:// address",
                 settings.webhook_url
             );
-            *webhook_reason = Some(settings.webhook_url.clone());
+            reasons.webhook = Some(settings.webhook_url.clone());
         }
         return;
     }
-    *webhook_reason = None;
-    let Ok(body) = serde_json::to_string(&payload(event, Utc::now(), session)) else {
+    reasons.webhook = None;
+    let Ok(body) = serde_json::to_string(payload) else {
         return;
     };
     // Read where it is used, so saving or removing the secret takes effect without a restart.
@@ -503,8 +667,17 @@ async fn announce(
     )
     .await
     {
-        app.session_log(&session.id, "warn", format!("notify: the webhook failed ({e:#})"))
-            .await;
+        report_failure(app, session, format!("notify: the webhook failed ({e:#})")).await;
+    }
+}
+
+/// Where a failed channel's line goes: into the colony's log when the event is about a colony, so it
+/// lands where the person it was meant for is looking — as the watchdog and autonomy log — or onto
+/// stderr when it is about a provider, which has no colony to log into.
+async fn report_failure(app: &App, session: Option<&Session>, what: String) {
+    match session {
+        Some(session) => app.session_log(&session.id, "warn", what).await,
+        None => eprintln!("{what}"),
     }
 }
 
@@ -520,8 +693,38 @@ mod tests {
             on_attention: true,
             on_failed: true,
             on_pull_request: true,
+            on_provider: true,
             desktop: false,
             webhook_url: String::new(),
+        }
+    }
+
+    /// A provider as `providers.json` holds one: an id and name the operator chose, plus defaults.
+    fn provider(id: &str, name: &str) -> Provider {
+        Provider {
+            id: id.into(),
+            name: name.into(),
+            base_url: "https://provider.test/v1".into(),
+            auth: "x-api-key".into(),
+            wire: Default::default(),
+            models: Vec::new(),
+            preset: String::new(),
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: None,
+            pricing: None,
+        }
+    }
+
+    /// Enough requests for the rule to speak: `failures/requests` at the named rate.
+    fn usage(requests: u64, failures: u64) -> ProviderUsage {
+        ProviderUsage {
+            requests,
+            failures,
+            duration_ms: requests * 100,
+            ..Default::default()
         }
     }
 
@@ -748,14 +951,18 @@ mod tests {
             keys.sort_unstable();
             assert_eq!(
                 keys,
-                ["at", "colony", "event", "pr_url", "text"],
-                "the payload is exactly five keys"
+                ["at", "colony", "event", "pr_url", "provider", "text"],
+                "the payload is exactly six keys, one shape for receivers"
             );
             let mut colony_keys: Vec<&str> = value["colony"].as_object().unwrap().keys().map(String::as_str).collect();
             colony_keys.sort_unstable();
             assert_eq!(colony_keys, ["id", "issue", "org", "repo", "status"]);
             assert_eq!(value["event"], json!(event.name()));
             assert_eq!(value["colony"]["status"], json!(status));
+            assert!(
+                value["provider"].is_null(),
+                "a session event is never about a provider: {body}"
+            );
             if event == Event::PullRequest {
                 assert_eq!(
                     value["pr_url"],
@@ -824,9 +1031,169 @@ mod tests {
     }
 
     #[test]
+    fn a_degraded_provider_announces_once_and_rearms_only_below_the_clear_line() {
+        let s = settings();
+        let degraded = UsageHealth {
+            failure_pct: 29.4,
+            avg_latency_ms: 1_200,
+            rated: true,
+            degraded: true,
+        };
+        let ok = UsageHealth {
+            failure_pct: 3.2,
+            avg_latency_ms: 900,
+            rated: true,
+            degraded: false,
+        };
+        // A provider seen for the first time only seeds, whatever its rate: a restart must not
+        // announce every provider that was already failing before it.
+        assert_eq!(decide_provider(&s, None, &degraded), (false, true));
+        // Holding is not an edge; the crossing announces once.
+        assert_eq!(decide_provider(&s, Some(true), &degraded), (false, true));
+        assert_eq!(decide_provider(&s, Some(false), &degraded), (true, true));
+        assert_eq!(decide_provider(&s, Some(false), &ok), (false, false));
+        // Between the lines is not recovered: 9% is under the degraded line but the announcement
+        // stays spent, so a rate hovering at the line does not flap.
+        let hovering = UsageHealth {
+            failure_pct: 9.0,
+            avg_latency_ms: 900,
+            rated: true,
+            degraded: false,
+        };
+        assert_eq!(decide_provider(&s, Some(true), &hovering), (false, true));
+        assert_eq!(decide_provider(&s, Some(false), &hovering), (false, false));
+        // Clearly under 8% re-arms, so the next crossing announces again.
+        let recovered = UsageHealth {
+            failure_pct: 7.9,
+            avg_latency_ms: 900,
+            rated: true,
+            degraded: false,
+        };
+        assert_eq!(decide_provider(&s, Some(true), &recovered), (false, false));
+        assert_eq!(decide_provider(&s, Some(false), &degraded), (true, true));
+    }
+
+    #[test]
+    fn provider_events_respect_the_switches_and_an_unrated_provider_is_never_degraded() {
+        let degraded = UsageHealth {
+            failure_pct: 29.4,
+            avg_latency_ms: 1_200,
+            rated: true,
+            degraded: true,
+        };
+        let mut s = settings();
+        s.enabled = false;
+        assert!(!decide_provider(&s, Some(false), &degraded).0);
+        assert_eq!(
+            decide_provider(&s, Some(true), &degraded),
+            (false, true),
+            "the state is carried through untouched, so re-enabling announces no backlog"
+        );
+        s = settings();
+        s.on_provider = false;
+        assert!(!decide_provider(&s, Some(false), &degraded).0);
+        // A provider with too few requests to judge is noise, never a degraded one.
+        let unrated = UsageHealth {
+            failure_pct: 40.0,
+            avg_latency_ms: 800,
+            rated: false,
+            degraded: false,
+        };
+        for was in [None, Some(false), Some(true)] {
+            assert_eq!(decide_provider(&settings(), was, &unrated), (false, false));
+        }
+    }
+
+    #[test]
+    fn diff_providers_seeds_new_ones_announces_crossings_and_prunes_gone_ones() {
+        let s = settings();
+        let zai = provider("zai", "zai");
+        let local = provider("local", "Local model");
+        let failing = usage(100, 30);
+        let healthy = usage(100, 1);
+        let table =
+            |zai_usage: ProviderUsage| HashMap::from([("zai".to_string(), zai_usage), ("local".to_string(), healthy.clone())]);
+        let read = |table: HashMap<String, ProviderUsage>| move |p: &Provider| table[&p.id].clone();
+
+        // First sight of both: nothing announces, both are seeded with their current state.
+        let (events, next) = diff_providers(
+            &[zai.clone(), local.clone()],
+            &HashMap::new(),
+            &s,
+            read(table(failing.clone())),
+        );
+        assert!(events.is_empty(), "first sight only seeds");
+        assert_eq!(next, HashMap::from([("zai".to_string(), true), ("local".to_string(), false)]));
+
+        // Holding is not an edge.
+        let (events, _) = diff_providers(&[zai.clone(), local.clone()], &next, &s, read(table(failing.clone())));
+        assert!(events.is_empty());
+
+        // Clearly recovered re-arms; the next crossing announces once, about the right provider.
+        let (_, armed) = diff_providers(&[zai.clone(), local.clone()], &next, &s, read(table(usage(100, 5))));
+        assert!(!armed["zai"]);
+        let (events, _) = diff_providers(&[zai.clone(), local.clone()], &armed, &s, read(table(failing.clone())));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].provider.id, "zai");
+        assert_eq!(events[0].provider.name, "zai");
+        assert_eq!(events[0].health.failure_pct, 30.0);
+        assert_eq!(events[0].usage.requests, 100);
+
+        // A provider no longer in providers.json leaves the map, so it cannot grow forever.
+        let (_, next) = diff_providers(std::slice::from_ref(&local), &armed, &s, read(table(failing.clone())));
+        assert!(!next.contains_key("zai"));
+    }
+
+    #[test]
+    fn the_provider_text_and_payload_carry_no_repository_content() {
+        assert_eq!(Event::provider_text("zai", 29.4), "zai is failing 29.4% of its requests");
+        let long_name: String = "z".repeat(MAX_TEXT + 50);
+        assert_eq!(
+            Event::provider_text(&long_name, 29.4).chars().count(),
+            MAX_TEXT + 1,
+            "capped, ellipsis included, like the session text"
+        );
+
+        let at = DateTime::from_timestamp(1_789_000_000, 0).unwrap();
+        let tallies = ProviderUsage {
+            requests: 1_000,
+            failures: 294,
+            duration_ms: 48_000_000,
+            ..Default::default()
+        };
+        let verdict = health(&tallies);
+        let body = serde_json::to_string(&provider_payload("zai", "zai", tallies.requests, &verdict, at)).unwrap();
+        assert_eq!(
+            Event::provider_text("zai", verdict.failure_pct),
+            "zai is failing 29.4% of its requests"
+        );
+        assert!(!body.contains("acme"), "a provider event carries no repository: {body}");
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["at", "colony", "event", "pr_url", "provider", "text"],
+            "one shape with the session payload"
+        );
+        assert!(value["colony"].is_null(), "no colony behind a provider event: {body}");
+        assert!(value["pr_url"].is_null());
+        assert_eq!(value["event"], "provider_degraded");
+        let mut provider_keys: Vec<&str> = value["provider"].as_object().unwrap().keys().map(String::as_str).collect();
+        provider_keys.sort_unstable();
+        assert_eq!(provider_keys, ["avg_latency_ms", "failure_pct", "id", "name", "requests"]);
+        assert_eq!(
+            value["provider"],
+            json!({
+                "id": "zai", "name": "zai", "failure_pct": 29.4, "avg_latency_ms": 48_000, "requests": 1_000
+            })
+        );
+    }
+
+    #[test]
     fn the_notify_module_schema_defaults_to_every_event_and_no_channel() {
         let schema = crate::modules::providers("notify", &[]).remove(0).schema;
-        for key in ["on_question", "on_attention", "on_failed", "on_pull_request"] {
+        for key in ["on_question", "on_attention", "on_failed", "on_pull_request", "on_provider"] {
             assert_eq!(schema["properties"][key]["default"], json!(true), "{key} is on by default");
         }
         assert_eq!(schema["properties"]["desktop"]["default"], json!(false));

@@ -449,6 +449,25 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
     let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
     let storage_alert = app.storage_alert.read().await.clone();
+    // One entry per configured model provider, so a provider the colony fan-out is degrading is visible
+    // from the status poll without opening the providers screen. Named `model_providers` because the
+    // `modules` section's `sandbox`/`source`/`mesh` entries are this status's other "providers".
+    let model_providers: Vec<Value> = app
+        .providers()
+        .iter()
+        .map(|p| {
+            let usage = app.gateway.usage(&p.id);
+            let health = gateway::health(&usage);
+            json!({
+                "id": p.id,
+                "name": p.name,
+                "requests": usage.requests,
+                "failure_pct": health.failure_pct,
+                "avg_latency_ms": health.avg_latency_ms,
+                "degraded": health.degraded,
+            })
+        })
+        .collect();
     Json(json!({
         "github": match user {
             Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
@@ -468,6 +487,7 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
         "mesh": mesh,
         "storage": storage_status(storage_alert),
         "runtime": runtime,
+        "model_providers": model_providers,
         "modules": {
             "source": modules.source.provider,
             "sandbox": modules.sandbox.provider,
@@ -867,7 +887,7 @@ async fn serve() -> Result<()> {
         .route("/api/plugins", get(plugins::list))
         .route("/api/providers", get(providers::list))
         .route("/api/providers/{id}", put(providers::put).delete(providers::delete))
-        .route("/api/providers/{id}/health", get(gateway::health))
+        .route("/api/providers/{id}/health", get(gateway::provider_health))
         .route("/api/models", get(providers::models))
         .route("/api/orgs", get(orgs::list))
         .route("/api/orgs/{org}", put(orgs::put))
