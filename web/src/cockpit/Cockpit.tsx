@@ -28,7 +28,7 @@ const VIEWS: readonly CockpitView[] = ["home", "colony", "launch", "inbox", "his
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
-  return VIEWS.includes(saved as CockpitView) && saved !== "settings" ? (saved as CockpitView) : "home";
+  return VIEWS.includes(saved as CockpitView) ? (saved as CockpitView) : "home";
 }
 
 function storedTheme(): "light" | "dark" | null {
@@ -58,6 +58,8 @@ export function Cockpit({
   update,
   autopilotDefault,
   launchRequests,
+  settingsRequests,
+  settings,
   onSessionChanged,
   onCreated,
   onOpenSettings,
@@ -76,8 +78,12 @@ export function Cockpit({
   status: HarnessStatus | null;
   update: UpdateStatus | null;
   autopilotDefault: boolean;
-  /** Bumped by Setup's launch row, which lives in the settings dialog App owns. */
+  /** Bumped by Setup's launch row, which lives in the settings body App owns. */
   launchRequests: number;
+  /** Bumped whenever something outside the cockpit asks for settings, with the section already set. */
+  settingsRequests: number;
+  /** The settings body, given the way back out — the cockpit owns the view, so it owns the exit. */
+  settings: (close: () => void) => ReactNode;
   onSessionChanged: (session: Session) => void;
   onCreated: (session: Session) => void;
   onOpenSettings: (section?: SectionId) => void;
@@ -92,7 +98,7 @@ export function Cockpit({
   const [repos, setRepos] = useState<Repo[]>([]);
 
   useEffect(() => {
-    if (view !== "settings") store(VIEW_KEY, view);
+    store(VIEW_KEY, view);
   }, [view]);
 
   // An explicit choice is written on the root, where index.css's :root[data-theme] blocks pick it
@@ -107,6 +113,10 @@ export function Cockpit({
   useEffect(() => {
     if (launchRequests > 0) setView("launch");
   }, [launchRequests]);
+
+  useEffect(() => {
+    if (settingsRequests > 0) setView("settings");
+  }, [settingsRequests]);
 
   const toggleTheme = useCallback(() => {
     setTheme((current) => {
@@ -173,16 +183,7 @@ export function Cockpit({
     });
   }, [sessions]);
 
-  const navigate = useCallback(
-    (next: CockpitView) => {
-      if (next === "settings") {
-        onOpenSettings();
-        return;
-      }
-      setView(next);
-    },
-    [onOpenSettings],
-  );
+  const navigate = useCallback((next: CockpitView) => setView(next), []);
 
   const openColonyById = useCallback(
     (id: string) => {
@@ -211,6 +212,8 @@ export function Cockpit({
         return colony;
       case "memory":
         return memory;
+      case "settings":
+        return settings(() => setView("home"));
       case "launch":
         return (
           <LaunchView

@@ -180,7 +180,12 @@ export function SettingsDialog({
   );
 }
 
-function SettingsBody({
+/**
+ * The settings screen itself: the grouped section nav and whichever pane it points at. The dialog
+ * above is one frame for it; the cockpit's settings view is the other, which is what `embedded` picks.
+ */
+export function SettingsBody({
+  embedded = false,
   status,
   onStatusChanged,
   onModulesChanged,
@@ -198,6 +203,8 @@ function SettingsBody({
   onSetupDismissed,
   onClose,
 }: {
+  /** Rendered inside the cockpit rather than a dialog: no title bar of its own, and it fills its column. */
+  embedded?: boolean;
   status: HarnessStatus | null;
   onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   onModulesChanged: (modules: ModuleInfo[]) => void;
@@ -428,20 +435,23 @@ function SettingsBody({
   }
 
   return (
-    <div className="flex h-[min(680px,calc(100dvh-24px))] flex-col">
-      <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="settings-title" className="min-w-0 flex-1 text-[16px] font-semibold">
-          Settings
-        </h2>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close settings"
-          className="grid size-8 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
-        >
-          <IconX size={17} />
-        </button>
-      </div>
+    <div className={cx("flex flex-col", embedded ? "h-full min-h-0" : "h-[min(680px,calc(100dvh-24px))]")}>
+      {/* The cockpit has its own header and crumb, so the embedded frame does not repeat them. */}
+      {!embedded && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-3">
+          <h2 id="settings-title" className="min-w-0 flex-1 text-[16px] font-semibold">
+            Settings
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close settings"
+            className="grid size-8 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
+          >
+            <IconX size={17} />
+          </button>
+        </div>
+      )}
       {narrow ? (
         active === null ? (
           <SectionNav layout="list" groups={groups} active={null} onSelect={select} initialFocus={lastSection.current} />
