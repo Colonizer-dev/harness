@@ -28,12 +28,15 @@ export function Header(props: {
   crumb: string;
   liveCount: number;
   needCount: number;
-  costToday: number | null;
+  /**
+   * What this workspace's colonies have spent in total. Not a daily figure: the API reports a
+   * running total per colony and no history, so there is nothing to slice a day out of.
+   */
+  cost: number | null;
   update: UpdateStatus | null;
   onOpenUpdates: () => void;
 }): ReactElement {
-  const { orgs, selectedOrg, onSelectOrg, needByOrg, crumb, liveCount, needCount, costToday, update, onOpenUpdates } =
-    props;
+  const { orgs, selectedOrg, onSelectOrg, needByOrg, crumb, liveCount, needCount, cost, update, onOpenUpdates } = props;
   const [menuOpen, setMenuOpen] = useState(false);
 
   const current = orgs.find((o) => o.org === selectedOrg) ?? null;
@@ -114,7 +117,11 @@ export function Header(props: {
           <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${needCount > 0 ? "bg-warn" : "bg-faint"}`} />
           {needCount} need you
         </span>
-        {costToday !== null && <span className="tabular-nums">${costToday.toFixed(2)} today</span>}
+        {cost !== null && (
+          <span className="tabular-nums" title="what this workspace's colonies have spent in total">
+            ${cost.toFixed(2)} spent
+          </span>
+        )}
         {update !== null && (
           <button
             type="button"
