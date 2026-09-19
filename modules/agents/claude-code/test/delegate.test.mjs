@@ -14,6 +14,13 @@ test('the orchestrator keeps planning, asking and delegating', () => {
   assert.equal(delegationDecision('mcp__colonizer_memory__memory_search', {}, ORCHESTRATOR), null);
 });
 
+test('waiting passes the gate for the orchestrator and its subagents alike', () => {
+  // A wait is not work handed to a subagent: the orchestrator holds the turn itself, and a subagent
+  // running the long build is exactly who would otherwise poll a log.
+  assert.equal(delegationDecision('mcp__colonizer_wait__wait', { seconds: 30 }, ORCHESTRATOR), null);
+  assert.equal(delegationDecision('mcp__colonizer_wait__wait', { file: '/tmp/build.log', pattern: 'test result: ok' }, SUBAGENT), null);
+});
+
 test('the orchestrator is refused the work itself, by name', () => {
   for (const tool of ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'WebFetch']) {
     const reason = delegationDecision(tool, {}, ORCHESTRATOR);

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
+import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
 import { routeEnv, routingPlan, startRouter } from './router.mjs';
@@ -25,7 +26,7 @@ export const DELEGATE_PROMPT_APPEND = [
   '- You are the orchestrator of this colony. Plan the work, split it into tasks, and start a subagent with the Task tool for each one. Read the subagent\'s report, decide what follows, and keep a subagent going until its task is genuinely done.',
   '- Do the thinking yourself: what to build, in what order, whether a result is good enough, and what to tell the user. Leave reading, searching, editing, running commands and tests to subagents.',
   '- Ask each subagent for a focused report: its conclusions, file:line references for every claim, and verbatim snippets only where you need the exact text. Do not ask for exhaustive, verbatim or "in full" dumps of files; everything a report carries stays in your context for the rest of the colony. When you need more detail on one point, start another subagent for it.',
-  '- A subagent started in the background reports back on its own. While you wait, start other work or end your turn; never run placeholder commands such as sleep or echo to pass the time.',
+  '- A subagent started in the background reports back on its own. While you wait, start other work or end your turn; when nothing is left but the waiting, mcp__colonizer_wait__wait holds the turn — never a placeholder command such as sleep or echo.',
   '- Subagents do not see this system prompt. When the colony\'s limits below bear on a task, include them in that subagent\'s brief.',
 ].join('\n');
 
@@ -258,10 +259,11 @@ export function childEnv(env) {
  * @param {object} [extras]
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
+ * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, hiddenEnv = [], routes = [] } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, waitServer, hiddenEnv = [], routes = [] } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -290,6 +292,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
     .map((dir) => dir.trim())
     .filter(Boolean);
   const appended = [SYSTEM_PROMPT_APPEND];
+  if (waitServer) appended.push(WAIT_PROMPT_APPEND);
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
@@ -332,6 +335,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   // No allowedTools entry: canUseTool already allows every tool except AskUserQuestion, and listing
   // them would make the SDK warn that canUseTool is shadowed.
   const mcpServers = {};
+  if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
@@ -767,23 +771,28 @@ async function main() {
   if (process.env.COLONIZER_HEADROOM === 'true') {
     headroom = await startHeadroom({ env: process.env, upstream: router?.url, log: ({ level, message }) => emit({ type: 'log', level, message }) });
   }
+  const { z } = await import('zod');
+
   let memoryServer;
   if (process.env.COLONIZER_MEMORY_DIR) {
-    const { z } = await import('zod');
     memoryServer = createMemoryServer({ dir: process.env.COLONIZER_MEMORY_DIR, emit, createSdkMcpServer, tool, z });
   }
 
   let findingsServer;
   if (process.env.COLONIZER_FINDINGS === 'true') {
-    const { z } = await import('zod');
     findingsServer = createFindingsServer({ emit, createSdkMcpServer, tool, z });
   }
+
+  // Every colony can wait: a blocking wait costs no model turn, and the tool has no dependency or
+  // setting to gate it on.
+  const waitServer = createWaitServer({ createSdkMcpServer, tool, z });
 
   const { options, warnings } = buildOptions(process.env, {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     findingsServer,
+    waitServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,
   });
