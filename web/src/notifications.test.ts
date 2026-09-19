@@ -48,6 +48,7 @@ function session(overrides: Partial<Session> = {}): Session {
     status: "running",
     branch: `colonizer/issue-42-${id}`,
     base: "main",
+    parent: null,
     worktree: `/wt/${id}`,
     git_admin_dir: `/git/${id}`,
     sandbox: `colony-${id}`,

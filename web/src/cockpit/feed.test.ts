@@ -16,6 +16,7 @@ function session(overrides: Partial<Session> = {}): Session {
     status: "running",
     branch: "colonizer/issue-42-s1",
     base: "main",
+    parent: null,
     worktree: "/wt/s1",
     git_admin_dir: "/git/s1",
     sandbox: "colony-s1",
@@ -66,6 +67,11 @@ describe("feedEntry text", () => {
   it("says what the watchdog flagged, not just that something waits", () => {
     const stalled = session({ attention: { reason: "stalled", since: "2026-09-18T09:05:00Z", nudges: 1 } });
     expect(feedEntries([stalled])[0].text).toBe("webshop#42 has stopped making progress");
+  });
+
+  it("reads a stacked colony's queue as waiting for its parent, not a slot", () => {
+    const stacked = session({ status: "queued", parent: "root0001" });
+    expect(feedEntries([stacked])[0].text).toBe("webshop#42 waits for the colony it is stacked on");
   });
 
   it("falls back to the repository for a colony started without an issue", () => {

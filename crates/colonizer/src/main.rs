@@ -33,6 +33,7 @@ mod routing;
 mod runtime;
 mod sandbox;
 mod sessions;
+mod stack;
 mod telemetry;
 mod timing;
 mod update;

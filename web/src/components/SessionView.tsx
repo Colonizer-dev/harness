@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Api } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
+import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
 import type { Session } from "../types";
 import { ChatPanel } from "./ChatPanel";
@@ -14,10 +15,11 @@ import {
   IconMenu,
   IconNetwork,
   IconPower,
+  IconStack,
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, attentionText, buttonClass, canPublish, cx, isLive, minutesAgo, orgOf } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isLive, minutesAgo, orgOf } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -35,8 +37,10 @@ export function SessionView({
   interfaces,
   narrow,
   showOrg,
+  sessions,
   onSessionChanged,
   onSessionDeleted,
+  onSelectSession,
   onOpenSidebar,
   onOpenMemory,
   onMemoryProposed,
@@ -47,8 +51,12 @@ export function SessionView({
   narrow: boolean;
   /** Show the org chip (the sidebar isn't filtered to one org). */
   showOrg: boolean;
+  /** Every colony the mothership knows; the stack chip resolves the parent and the children against it. */
+  sessions: Session[];
   onSessionChanged: (session: Session) => void;
   onSessionDeleted: (id: string) => void;
+  /** Selecting the colony a stack chip points at; App's own `select`, so org filters and storage follow it. */
+  onSelectSession: (id: string) => void;
   onOpenSidebar: () => void;
   onOpenMemory: () => void;
   onMemoryProposed: () => void;
@@ -96,6 +104,10 @@ export function SessionView({
   const split = showChat && showTerminal;
   const waiting = state.agentState === "waiting_for_answer" || session.status === "waiting_for_answer";
   const attention = session.attention ?? null;
+  // The stack, resolved against the full colony list: a parent that has aged out of the list reads
+  // as the raw id rather than a crash, and the children count is why a blocked review is explained.
+  const stackParent = parentOf(sessions, session);
+  const stackedChildren = childrenOf(sessions, session);
 
   /** What deleting this colony takes with it, in the words the confirmation uses. */
   const deleteWarning =
@@ -168,6 +180,43 @@ export function SessionView({
                 <IconBranch size={13} className="shrink-0" />
                 <code className="truncate font-mono">{session.branch}</code>
               </span>
+              {session.parent &&
+                (stackParent ? (
+                  <button
+                    type="button"
+                    onClick={() => onSelectSession(stackParent.id)}
+                    title={`Stacked on ${stackParent.issue_title || stackParent.repo} — this colony branched from ${stackParent.branch}, so its pull request waits for the parent's.`}
+                    className="-mx-1 inline-flex min-w-0 items-center gap-1 rounded-md px-1 text-left hover:bg-panel-2 hover:text-text"
+                  >
+                    <IconStack size={13} className="shrink-0" />
+                    <span className="shrink-0">stacked on</span>
+                    <span className="min-w-0 truncate font-mono">
+                      {stackParent.repo}
+                      {stackParent.issue != null && `#${stackParent.issue}`}
+                    </span>
+                    <code className="min-w-0 truncate font-mono text-faint">{stackParent.branch}</code>
+                  </button>
+                ) : (
+                  <span
+                    title="The colony this one is stacked on is no longer in the list"
+                    className="inline-flex min-w-0 items-center gap-1"
+                  >
+                    <IconStack size={13} className="shrink-0" />
+                    <span className="shrink-0">stacked on</span>
+                    <code className="min-w-0 truncate font-mono">{session.parent}</code>
+                  </span>
+                ))}
+              {stackedChildren.length > 0 && (
+                <span
+                  title={stackedChildren
+                    .map((c) => `${c.repo}${c.issue != null ? `#${c.issue}` : ""} — ${SESSION_STATUS[c.status]?.label ?? c.status}`)
+                    .join("\n")}
+                  className="inline-flex items-center gap-1"
+                >
+                  <IconStack size={13} className="shrink-0" />
+                  {stackedChildren.length} stacked on this
+                </span>
+              )}
               {session.mesh && (
                 <span className="inline-flex items-center gap-1" title="Private mesh node">
                   <IconNetwork size={13} />

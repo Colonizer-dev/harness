@@ -78,7 +78,9 @@ function textFor(session: Session, kind: FeedKind): string {
     case "stopped":
       return `${at} was stopped · the worktree is kept`;
     case "queued":
-      return `${at} waits for a free slot`;
+      // A stacked colony queues on its parent, not on a parallelism slot — the one thing worth
+      // saying differently about the same status.
+      return session.parent ? `${at} waits for the colony it is stacked on` : `${at} waits for a free slot`;
     case "publishing":
       return `${at} is opening its pull request`;
     case "starting":

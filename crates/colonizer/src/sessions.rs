@@ -11,6 +11,7 @@ use crate::{
     modules::{AgentModule, schema_for},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
+    stack::{self, Stacked},
     util::{append_line, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic, write_private},
     watchdog::Activity,
 };
@@ -152,6 +153,11 @@ pub struct Session {
     pub status: SessionStatus,
     pub branch: String,
     pub base: Option<String>,
+    /// The colony this one is stacked on, when it was created with `after`: that colony's branch is
+    /// this colony's starting point and the base its pull request targets. `None` for the
+    /// overwhelming majority, which branch from the repository's default branch as always.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub worktree: String,
     pub git_admin_dir: Option<String>,
     pub sandbox: String,
@@ -219,6 +225,7 @@ impl Default for Session {
             status: SessionStatus::Stopped,
             branch: String::new(),
             base: None,
+            parent: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),
@@ -523,6 +530,10 @@ pub struct NewSession {
     /// routing rule picks for the task.
     #[serde(default)]
     model_tier: Option<String>,
+    /// Stack this colony on another one: it queues until that colony has pushed its branch, then
+    /// starts from that branch instead of the default one, and its pull request is a diff against it.
+    #[serde(default)]
+    after: Option<String>,
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -620,6 +631,54 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             }
         },
     };
+    // Stacking: `after` names the colony whose branch this one must build on. Whitespace is refused
+    // rather than read as nothing — an operator who typed something there meant to stack. A parent
+    // that can never provide a branch is refused now, with the reason; one that has not pushed yet
+    // is allowed, and the colony queues for it — the queue, not this handler, waits for the branch.
+    let after = match req.after.as_deref() {
+        None => None,
+        Some(raw) => {
+            let id = raw.trim();
+            if id.is_empty() {
+                return Err(client_error(StatusCode::BAD_REQUEST, "`after` names no colony to stack on"));
+            }
+            Some(id.to_string())
+        }
+    };
+    let (parent, wait_for_parent) = match after {
+        None => (None, false),
+        Some(parent_id) => {
+            let source = app.session(&parent_id).await;
+            match source.as_ref() {
+                None => {
+                    return Err(client_error(
+                        StatusCode::NOT_FOUND,
+                        &format!("there is no colony `{parent_id}` to stack on"),
+                    ));
+                }
+                Some(source) => {
+                    // A stacked colony builds on its parent's branch, and a branch belongs to one
+                    // repository: refused here, like every other un-stackable parent, rather than
+                    // let the boot die later inside `create_worktree` with a raw git error.
+                    if source.repo != repo {
+                        return Err(client_error(
+                            StatusCode::CONFLICT,
+                            &format!(
+                                "colony `{parent_id}` is on {}, not {repo}: a stacked colony builds \
+                                 on its parent's branch, and a branch belongs to one repository",
+                                source.repo
+                            ),
+                        ));
+                    }
+                    match stack::stacked_on(&parent_id, Some(source)) {
+                        Stacked::Refuse(reason) => return Err(client_error(StatusCode::CONFLICT, &reason)),
+                        Stacked::Wait => (Some(parent_id), true),
+                        Stacked::Ready(_) => (Some(parent_id), false),
+                    }
+                }
+            }
+        }
+    };
     if let (Some(issue), false) = (req.issue, req.allow_duplicate)
         && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
     {
@@ -662,6 +721,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         status: SessionStatus::Starting, // decided by admission, just before the push
         branch: format!("colonizer/{slug}"),
         base: None,
+        parent: parent.clone(),
         worktree: app
             .cfg
             .data_dir
@@ -701,14 +761,18 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // cannot both take it. Counted before the push, so this colony is never waiting behind itself.
     let (session, queued, waiting) = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
         let mut session = session;
-        session.status = if room {
+        // A colony still waiting for its parent's branch queues even when a slot is free: booting now
+        // would branch from the default branch, which is exactly what stacking exists to avoid. A
+        // queued colony holds no slot, so nothing is wasted by the wait.
+        session.status = if room && !wait_for_parent {
             SessionStatus::Starting
         } else {
             SessionStatus::Queued
         };
+        let queued = session.status == SessionStatus::Queued;
         let waiting = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
         sessions.push(session.clone());
-        (session, !room, waiting)
+        (session, queued, waiting)
     })
     .await;
     if let Err(e) = app.persist_sessions().await {
@@ -733,13 +797,22 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     }
     app.runtime(&id).await;
     if queued {
-        let ahead = if waiting == 0 {
-            String::new()
-        } else {
-            format!(", behind {waiting} already waiting")
-        };
-        app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}"))
+        if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
+            app.session_log(
+                &id,
+                "info",
+                format!("queued behind colony {parent_id}: it starts once that colony has pushed its branch"),
+            )
             .await;
+        } else {
+            let ahead = if waiting == 0 {
+                String::new()
+            } else {
+                format!(", behind {waiting} already waiting")
+            };
+            app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}"))
+                .await;
+        }
     } else {
         tokio::spawn(boot(app.clone(), id, false));
     }
@@ -777,6 +850,14 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
     }
 }
 
+/// The repository's default branch, with access failures worded the way boots report them.
+async fn default_base(app: &Shared, repo: &str) -> Result<String> {
+    match github::default_branch(app, repo).await {
+        Ok(base) => Ok(base),
+        Err(e) => Err(github::access_error(app, repo, e).await),
+    }
+}
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -800,13 +881,36 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         None => None,
     };
-    // A resumed colony keeps the base it started from; its branch already exists on top of it.
-    let base = match s.base.clone().filter(|_| resume) {
-        Some(base) => base,
-        None => match github::default_branch(app, &s.repo).await {
-            Ok(base) => base,
-            Err(e) => return Err(github::access_error(app, &s.repo, e).await),
-        },
+    // A resumed colony keeps the base it started from; its branch already exists on top of it. A
+    // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
+    // a fresh answer rather than the one given at create time. The queue only starts a stacked
+    // colony once the parent's branch exists, so `Wait` and `Refuse` here mean the parent moved
+    // under the queue's feet: fail the boot rather than silently branch from the wrong place. The
+    // decision is `stack::boot_base`, pure and tested; here is only its I/O.
+    let parent = match s.parent.as_deref() {
+        Some(parent_id) => app.session(parent_id).await,
+        None => None,
+    };
+    let mut stacked_on: Option<String> = None;
+    let base = match stack::boot_base(s.base.clone().filter(|_| resume), s.parent.as_deref(), parent.as_ref()) {
+        stack::BootBase::Kept(base) => {
+            // What a stacked colony kept is the parent's branch it started from; the prompt says so.
+            if s.parent.is_some() {
+                stacked_on = Some(base.clone());
+            }
+            base
+        }
+        stack::BootBase::Parent { colony, branch } => {
+            log.info(format!("stacked on colony {colony}: branching from its branch {branch}"))
+                .await;
+            stacked_on = Some(branch.clone());
+            branch
+        }
+        stack::BootBase::Default => default_base(app, &s.repo).await?,
+        stack::BootBase::Wait { colony } => {
+            bail!("the colony `{colony}` this one is stacked on has no branch to build on yet")
+        }
+        stack::BootBase::Refuse(reason) => bail!("{reason}"),
     };
     let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
     app.update_session(id, |x| {
@@ -844,7 +948,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let vm_dir = dir.join("vm");
     let out_dir = dir.join("out");
     let siblings = github::siblings_of(&app.sessions.read().await, &s);
-    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings);
+    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let org_settings = app.org_settings(&s.org);
     let agent_choice = orgs::effective_agent(&modules, &org_settings);
@@ -1750,6 +1854,7 @@ pub(crate) mod tests {
         full.instructions = "do the thing".into();
         full.branch = "b".into();
         full.base = Some("main".into());
+        full.parent = Some("source".into());
         full.worktree = "w".into();
         full.git_admin_dir = Some("git".into());
         full.sandbox = "s".into();
@@ -1795,6 +1900,7 @@ pub(crate) mod tests {
             status,
             branch: String::new(),
             base: None,
+            parent: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),
@@ -2250,6 +2356,7 @@ pub(crate) mod tests {
                 autopilot: None,
                 allow_duplicate: false,
                 model_tier: None,
+                after: None,
             }),
         )
         .await
@@ -2323,6 +2430,7 @@ pub(crate) mod tests {
                 autopilot: None,
                 allow_duplicate: false,
                 model_tier: None,
+                after: None,
             }),
         )
         .await
@@ -2336,6 +2444,153 @@ pub(crate) mod tests {
             "working in an org is an answer, and the sighting's avatar is recorded with it; the prompt \
              must never ask about it later"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- stacking (create with `after`) ----------------------------------------------------------
+
+    /// The smallest install `create` insists on, as in the org-known test above: an agent module
+    /// matching the configured provider and a guest binary that claims to be an ELF.
+    fn app_that_can_create(root: &std::path::Path) -> Shared {
+        let assets = root.join("assets");
+        let dir = assets.join("modules/agents/claude-code");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
+        std::fs::create_dir_all(assets.join("bin")).unwrap();
+        std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
+        let agent = AgentModule {
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
+            description: String::new(),
+            dir,
+            entry: vec!["run".into()],
+            needs_claude: false,
+            schema: json!({}),
+        };
+        crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))
+    }
+
+    /// A `create` request with nothing but the repo and, where the test names one, the parent.
+    fn stack_request(repo: &str, after: Option<String>) -> Json<NewSession> {
+        Json(NewSession {
+            repo: repo.into(),
+            issue: None,
+            title: String::new(),
+            instructions: String::new(),
+            autopilot: None,
+            allow_duplicate: false,
+            model_tier: None,
+            after,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_colony_asked_to_stack_on_another_queues_until_that_one_pushes() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let mut parent = colony("acme", SessionStatus::Running);
+        parent.id = "parent".into();
+        parent.branch = "colonizer/issue-1-parent".into();
+        parent.repo = "acme/app".into();
+        app.sessions.write().await.push(parent);
+
+        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into())))
+            .await
+            .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
+        assert_eq!(
+            created.parent.as_deref(),
+            Some("parent"),
+            "the colony records what it is stacked on"
+        );
+        assert_eq!(
+            created.status,
+            SessionStatus::Queued,
+            "the parent has not pushed a branch, so the colony queues even though a slot is free"
+        );
+        assert_eq!(
+            created.base, None,
+            "the base is the boot's business, resolved fresh when the wait ends"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let mut dead = colony("acme", SessionStatus::Failed);
+        dead.id = "dead".into();
+        dead.branch = "colonizer/issue-1-dead".into();
+        dead.repo = "acme/app".into();
+        app.sessions.write().await.push(dead);
+
+        let err = create(State(app.clone()), stack_request("acme/app", Some("dead".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT, "a refusal, like the duplicate-issue one");
+        let message = err.1.to_string();
+        assert!(message.contains("dead"), "{message}");
+        assert!(message.contains("failed"), "it says which reason applies: {message}");
+        let sessions = app.sessions.read().await;
+        assert_eq!(sessions.len(), 1, "nothing was created");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stacking_on_a_colony_that_does_not_exist_is_refused_as_a_404_naming_it() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let err = create(State(app.clone()), stack_request("acme/app", Some("ghost".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            StatusCode::NOT_FOUND,
+            "the same answer asking for an unknown colony gets"
+        );
+        let message = err.1.to_string();
+        assert!(message.contains("ghost") && message.contains("no colony"), "{message}");
+        assert!(app.sessions.read().await.is_empty(), "nothing was created");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_after_of_nothing_but_whitespace_is_refused_not_read_as_absent() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let err = create(State(app.clone()), stack_request("acme/app", Some("   ".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST, "the request names nothing stackable");
+        assert!(err.1.to_string().contains("`after`"), "{}", err.1);
+        assert!(
+            app.sessions.read().await.is_empty(),
+            "silently starting unstacked would branch from the wrong place without a word"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stacking_on_a_colony_of_another_repository_is_refused_naming_both() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let mut parent = colony("acme", SessionStatus::PrOpened);
+        parent.id = "parent".into();
+        parent.branch = "colonizer/issue-1-parent".into();
+        parent.repo = "acme/app".into();
+        app.sessions.write().await.push(parent);
+
+        let err = create(State(app.clone()), stack_request("acme/other", Some("parent".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT, "a refusal at create, like the other stack ones");
+        let message = err.1.to_string();
+        assert!(message.contains("acme/app"), "the parent's repository is named: {message}");
+        assert!(message.contains("acme/other"), "and so is this one's: {message}");
+        let sessions = app.sessions.read().await;
+        assert_eq!(sessions.len(), 1, "nothing was created to fail a boot later");
+        drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
 }

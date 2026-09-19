@@ -8,9 +8,10 @@ import type { ReactElement } from "react";
 import { AntAvatar } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
-import { SESSION_STATUS, type Tone, isLive, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { SubagentView } from "../sessionStream";
+import { parentOf } from "../stack";
 import type { HarnessStatus, Session, UpdateStatus } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -24,9 +25,9 @@ const TONE_VAR: Record<Tone, string> = {
 
 export type InspectorTarget = { kind: "mothership" } | { kind: "colony"; session: Session };
 
-function Fact({ label, value }: { label: string; value: string }): ReactElement {
+function Fact({ label, value, className, title }: { label: string; value: string; className?: string; title?: string }): ReactElement {
   return (
-    <div className="bg-panel px-3 py-2.5">
+    <div className={cx("bg-panel px-3 py-2.5", className)} title={title}>
       <div className="font-mono text-[10px] tracking-[0.1em] text-faint">{label}</div>
       <div className="mt-0.5 truncate font-mono text-[12.5px] text-text">{value}</div>
     </div>
@@ -48,6 +49,7 @@ export function Inspector({
   target,
   avatarUrl,
   settlers,
+  sessions,
   status,
   liveCount,
   queuedCount,
@@ -67,6 +69,8 @@ export function Inspector({
   avatarUrl: string | null;
   /** Real settlers, present only while this colony's stream is open; empty otherwise. */
   settlers: SubagentView[];
+  /** Every colony the mothership knows; the stack fact resolves the parent against it. */
+  sessions: Session[];
   status: HarnessStatus | null;
   liveCount: number;
   queuedCount: number;
@@ -86,6 +90,13 @@ export function Inspector({
   const session = target.kind === "colony" ? target.session : null;
   const tone = session ? (SESSION_STATUS[session.status]?.tone ?? "neutral") : "neutral";
   const edge = TONE_VAR[tone];
+
+  // What the colony is stacked on. A parent that has left the list falls back to the raw id, which
+  // still says more than leaving the fact out of a stacked colony's card.
+  const stackParent = session ? parentOf(sessions, session) : null;
+  const stackedOn = stackParent
+    ? `${stackParent.repo}${stackParent.issue != null ? `#${stackParent.issue}` : ""} · ${stackParent.branch}`
+    : (session?.parent ?? null);
 
   // Only rows the mothership actually reported: an absent fact is left out rather than guessed at.
   const connections: { label: string; dot: string; section: SectionId }[] = [];
@@ -229,6 +240,14 @@ export function Inspector({
                 <Fact label="COST" value={money(session.cost_usd)} />
                 <Fact label="MESH" value={session.mesh?.name ?? "—"} />
                 <Fact label="AGENT" value={session.agent} />
+                {stackedOn && (
+                  <Fact
+                    className="col-span-2"
+                    label="STACKED ON"
+                    value={stackedOn}
+                    title={stackParent?.issue_title}
+                  />
+                )}
               </div>
 
               {settlers.length > 0 && (

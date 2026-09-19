@@ -426,8 +426,10 @@ export function App() {
       interfaces={interfaces}
       narrow={narrow}
       showOrg={!selectedOrg}
+      sessions={sessions}
       onSessionChanged={upsertSession}
       onSessionDeleted={removeSession}
+      onSelectSession={select}
       onOpenSidebar={() => setSidebarOpen(true)}
       onOpenMemory={openMemory}
       onMemoryProposed={loadPendingMemory}
