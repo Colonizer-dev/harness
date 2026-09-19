@@ -172,6 +172,13 @@ pub struct Session {
     /// cache_write_tokens}}` — every model the colony used, priced or not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<Value>,
+    /// The tier this colony was started on, when the operator named one instead of letting the rule choose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_tier: Option<String>,
+    /// The routing decision this colony booted with: the tier, the tier the rule would have chosen, and
+    /// the signals behind it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<Value>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
@@ -224,6 +231,8 @@ impl Default for Session {
             error: None,
             cost_usd: None,
             model_usage: None,
+            model_tier: None,
+            model_routing: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
@@ -388,6 +397,13 @@ impl App {
         self.cfg.data_dir.join("sessions.json")
     }
 
+    /// Every per-task model routing decision, one JSON line each. Kept in the data dir rather than a
+    /// session's directory: the record has to outlive cleanup, so the rule can be judged across
+    /// colonies instead of disappearing with each one.
+    fn routing_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("routing.jsonl")
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.cfg.data_dir.join("sessions").join(id)
     }
@@ -503,6 +519,10 @@ pub struct NewSession {
     /// Start a colony on an issue another colony already holds. Off by default: see `issue_held_by`.
     #[serde(default)]
     allow_duplicate: bool,
+    /// Run this colony on a named model tier — `low`, `medium` or `high` — instead of the one the
+    /// routing rule picks for the task.
+    #[serde(default)]
+    model_tier: Option<String>,
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -577,6 +597,20 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if let Err(e) = app.cfg.asset("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
+    // A tier the rule does not know would silently fall back to the rule's own choice, which is not
+    // what an operator naming one asked for — refuse the launch instead.
+    let model_tier = match req.model_tier.as_deref() {
+        None => None,
+        Some(raw) => match crate::routing::Tier::parse(raw) {
+            Some(tier) => Some(tier.as_str().to_string()),
+            None => {
+                return Err(client_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("unknown model tier \"{raw}\"; use low, medium or high"),
+                ));
+            }
+        },
+    };
     if let (Some(issue), false) = (req.issue, req.allow_duplicate)
         && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
     {
@@ -639,6 +673,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         error: None,
         cost_usd: None,
         model_usage: None,
+        model_tier,
+        model_routing: None,
         routed_cost_usd: None,
         host_disk_bytes: None,
         cleaned_up: false,
@@ -796,7 +832,86 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings);
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let org_settings = app.org_settings(&s.org);
-    let mut runner_env = agent_env(&agent, &orgs::effective_agent(&modules, &org_settings));
+    let agent_choice = orgs::effective_agent(&modules, &org_settings);
+    let mut runner_env = agent_env(&agent, &agent_choice);
+    // Resolved here rather than at the boot spec below: whether the sandbox preset is one the harness
+    // knows is one of the routing signals (an unknown preset never routes down to the cheapest tier),
+    // and the boot spec builds on the same two values.
+    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
+    // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
+    // unless the operator named one at launch, and the tier's model replaces the module's own when
+    // that tier has one. Read off the effective settings, so an org override is honoured.
+    let route_settings = crate::routing::RoutingSettings {
+        enabled: setting(&agent_choice, &agent.schema, "route_per_task")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
+    };
+    let task_labels: Vec<String> = issue
+        .as_ref()
+        .and_then(|i| i["labels"].as_array())
+        .map(|ls| {
+            ls.iter()
+                .map(|l| l["name"].as_str().unwrap_or_default().trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let task_signals = crate::routing::signals(
+        &s.issue_title,
+        issue.as_ref().and_then(|i| i["body"].as_str()).unwrap_or(&s.instructions),
+        &task_labels,
+        crate::presets::find(&preset).is_some(),
+    );
+    let tier_decision = crate::routing::decide(&route_settings, &task_signals);
+    let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
+    let model = setting_str(&agent_choice, &agent.schema, "model");
+    let model_high = setting_str(&agent_choice, &agent.schema, "model_high");
+    let routed_model = crate::routing::model_for(tier_decision.tier, &model_low, &model, &model_high);
+    let module_model = runner_env
+        .get("COLONIZER_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !routed_model.is_empty() {
+        runner_env.insert("COLONIZER_MODEL".into(), Value::String(routed_model.into()));
+    }
+    // The runner reads only COLONIZER_MODEL: the tier settings are for the mothership's provider
+    // tally, and leaving them in would make the boot probe check providers this colony is not using.
+    runner_env.remove("COLONIZER_MODEL_LOW");
+    runner_env.remove("COLONIZER_MODEL_HIGH");
+    let model_changed = !routed_model.is_empty() && routed_model != module_model;
+    let mut message = format!("model routing: {}", tier_decision.reason);
+    if model_changed {
+        message.push_str(&format!("; running on {routed_model}"));
+    }
+    if tier_decision.misroute() {
+        message.push_str(&format!("; misroute: the rule wants {}", tier_decision.rule.as_str()));
+    }
+    log.info(message).await;
+    let record = json!({
+        "tier": tier_decision.tier,
+        "rule": tier_decision.rule,
+        "source": tier_decision.source,
+        "score": tier_decision.score,
+        "reason": tier_decision.reason,
+        "model": if model_changed { json!(routed_model) } else { Value::Null },
+        "misroute": tier_decision.misroute(),
+        "signals": task_signals,
+    });
+    app.update_session(id, |x| x.model_routing = Some(record.clone())).await;
+    let line = json!({
+        "ts": Utc::now(),
+        "session": id,
+        "repo": s.repo.clone(),
+        "issue": s.issue,
+        "decision": record,
+    })
+    .to_string();
+    // A lost routing record is a lost measurement, not a failed boot: say so and carry on.
+    if let Err(e) = append_line(&app.routing_file(), &line).await {
+        log.error(format!("could not save the routing decision: {e:#}")).await;
+    }
     let gateway_token = random_token();
     write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
     let routing = providers::colony_routes(app, &gateway_token);
@@ -1086,10 +1201,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         net_profiles.push("host".into());
     }
 
-    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     // The chosen stack fills in image and machine size; anything set explicitly
-    // in modules.json still wins. See crates/colonizer/src/presets.rs.
-    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
+    // in modules.json still wins. See crates/colonizer/src/presets.rs. `sandbox_schema` and the
+    // preset id were resolved above, where model routing reads the preset.
     let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&preset));
     let spec = BootSpec {
         name: s.sandbox.clone(),
@@ -1675,6 +1789,8 @@ pub(crate) mod tests {
             error: None,
             cost_usd: None,
             model_usage: None,
+            model_tier: None,
+            model_routing: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,

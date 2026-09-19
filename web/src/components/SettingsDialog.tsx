@@ -2428,6 +2428,8 @@ const MODEL_SETTING_LABEL: Record<ModelSetting, string> = {
   model: "Orchestrator model",
   subagent_model: "Subagent model",
   background_model: "Background model",
+  model_low: "Model for small tasks",
+  model_high: "Model for large tasks",
 };
 
 /**
@@ -2438,8 +2440,11 @@ const MODEL_SETTING_LABEL: Record<ModelSetting, string> = {
  */
 function idleWiringNote(usedBy: ModelSetting[]): string | null {
   if (usedBy.length === 0 || usedBy.includes("model")) return null;
-  const [first, second] = usedBy.map((setting) => MODEL_SETTING_LABEL[setting]);
-  const settings = second ? `the ${first} and ${second} settings` : `the ${first} setting`;
+  const names = usedBy.map((setting) => MODEL_SETTING_LABEL[setting]);
+  const settings =
+    names.length === 1
+      ? `the ${names[0]} setting`
+      : `the ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} settings`;
   return `only wired to ${settings} — the Orchestrator model does nearly all of a colony's work, so it can look idle`;
 }
 
