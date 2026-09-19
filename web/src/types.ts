@@ -255,8 +255,17 @@ export interface ProviderUsage {
   last_request_at: string | null;
 }
 
-/** The model settings whose resolved value can route to a provider. */
-export type ModelSetting = "model" | "subagent_model" | "background_model";
+/**
+ * The model settings whose resolved value can route to a provider. The two tier settings are the
+ * Mothership's per-task model routing: it reads them itself and strips their env vars from a
+ * colony's environment, so only the tier actually in use is probed at boot.
+ */
+export type ModelSetting =
+  | "model"
+  | "subagent_model"
+  | "background_model"
+  | "model_low"
+  | "model_high";
 
 export interface SaveProviderRequest {
   name: string;

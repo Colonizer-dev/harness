@@ -37,6 +37,17 @@ auxiliary calls. A provider reachable only through the subagent and background s
 correctly and will still see almost nothing; to put real traffic on your own hardware, point
 `COLONIZER_MODEL` at it.
 
+Which model `COLONIZER_MODEL` carries can be chosen per task. With the agent module's `route_per_task`
+setting on (the default), the mothership reads the issue in front of a colony and boots it on one of
+three tiers: `low` runs on the `model_low` setting, `high` on `model_high`, and `medium` on `model`.
+Both tier settings accept the same forms as `model` — a Claude alias or ID, or `<provider>/<model>` —
+and a blank tier setting falls back to `model`, so with neither tier model set nothing changes about
+which model a colony runs on; `route_per_task: false` puts every colony that was not started with an
+explicit tier on `model`. Only the orchestrator model is routed — the subagent and background settings
+are untouched — and the tier settings are read on the mothership alone: their env vars are stripped
+from the colony's environment once the tier is chosen, so only the provider actually in use is probed
+at boot. What the rule reads off an issue, and what it records, is `docs/protocol.md` §6.1b.
+
 When a route or a `<provider>/<model>` model is configured, `router.mjs` listens on `127.0.0.1` and
 Claude Code's `ANTHROPIC_BASE_URL` points at it. A request whose `model` starts with a route prefix
 (`deepseek/deepseek-flash`) goes to that route's `base_url` with the prefix stripped, the route's key

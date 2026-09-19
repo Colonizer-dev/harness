@@ -188,7 +188,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
@@ -650,7 +650,7 @@ Runner environment set by the mothership:
 
 | Variable | Meaning |
 | --- | --- |
-| `COLONIZER_MODEL` | Orchestrator (main thread) model; nearly all of a colony's model traffic |
+| `COLONIZER_MODEL` | Orchestrator (main thread) model; nearly all of a colony's model traffic. With per-task routing on (§6.1b) the mothership may substitute the tier's model here, chosen from the agent module's tier settings — those settings exist only on the mothership, and their variables are stripped from this environment once the tier is chosen, so only the provider actually in use is probed at boot |
 | `COLONIZER_SUBAGENT_MODEL` | Model for subagents; only used when the agent delegates to one, which colonies rarely do (maps to `CLAUDE_CODE_SUBAGENT_MODEL`, with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so agents that name their own model (Claude Code's built-in Explore is `inherit`) use it too) |
 | `COLONIZER_IMAGE` | The container image the colony booted; the runner tells the agent what it can and cannot run |
 | `COLONIZER_BACKGROUND_MODEL` | Model for small auxiliary background work (maps to `ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
@@ -675,6 +675,48 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   credential, drop Anthropic OAuth betas from `anthropic-beta`, stream the response back unchanged.
   If the upstream has no `count_tokens`, answer `{"input_tokens": ceil(chars / 4)}`.
 - Everything else: forward to `https://api.anthropic.com` with headers unchanged.
+
+### 6.1b Per-task model tiers (mothership)
+
+What §6.1 describes transports a request to a model you named; per-task routing is the part that
+names it. With the agent module's `route_per_task` setting on (the default), the mothership picks a
+tier for each colony at boot — `low`, `medium` or `high` — from the issue in front of it, with a
+pure heuristic over the task's own signals (`crates/colonizer/src/routing.rs`): the issue's labels
+(`chore`, `copy`, `docs`, `documentation`, `typo` pull toward `low`; `breaking-change`, `epic`,
+`migration`, `refactor` pull toward `high`, and a high label wins over a low one), the task text's
+length, its markdown checklist items, how many file paths it names and whether they all sit in one
+directory, and whether the colony's sandbox preset is one the harness knows — an unknown preset
+never routes down to the cheapest tier. These add to a score, and the score picks the tier. No
+model call, no network, no new dependency: the same shape as the other pure decision functions,
+`watchdog::decide` and `queue::has_room`.
+
+| Setting | Default | |
+| --- | --- | --- |
+| `route_per_task` | true | Off: every colony without its own `model_tier` runs on `model` |
+| `model_low` | none | Model for the `low` tier: a Claude alias or ID, or `<provider>/<model>`, in the same forms as `model` |
+| `model_high` | none | Model for the `high` tier, in the same forms as `model` |
+
+`medium` runs on the existing `model` setting. A tier whose setting is blank falls back to `model`,
+so with neither tier model set nothing changes about which model a colony runs on. Only the
+orchestrator model is routed — `subagent_model` and `background_model` are untouched — and the tier
+models resolve through the same provider routes as `model` (§6.5's `used_by` counts them). Their
+env variables are stripped from the colony's environment once the tier is chosen, so only the
+provider actually in use is probed at boot.
+
+The decision is recorded three ways:
+
+- an `info` line in the colony's session log (`model routing: low tier, score 0: a 180-character
+  body, no checklist items, 1 path named`), naming the model when it differs from `model`, and the
+  rule's tier when an override disagrees;
+- a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
+  misroute, signals}`, where `source` is `off`/`rule`/`override`, `model` is set only when the tier
+  changed it, `misroute` is true when an operator override lands somewhere the rule did not want,
+  and `signals` is what the rule read off the issue;
+- one JSON line per boot appended to `routing.jsonl` in the mothership's data directory — the
+  recorded set a future replacement for the heuristic could be evaluated against.
+
+An operator override is §4's `model_tier` on `POST /api/sessions`; it wins over the rule for that
+colony, whether or not routing is on.
 
 ### 6.2 Shared memory (runner ⇄ mothership)
 
@@ -1039,7 +1081,8 @@ by a background task every 5 s when they changed and once more at shutdown, so a
 of the tally and a restart carries on where it left off; `DELETE /api/providers/{id}` also removes the
 provider's tally.
 
-`used_by` names the model settings (`model`, `subagent_model`, `background_model`) whose resolved value
+`used_by` names the model settings (`model`, `subagent_model`, `background_model`, and per-task
+routing's `model_low`/`model_high`, whose env vars a colony's environment never sees) whose resolved value
 (schema default, global setting or org override) routes to this provider as `<provider>/<model>`, across
 the global agent env and every org override, e.g. `["subagent_model"]`. Empty means the provider is
 configured but no model setting points at it: wired only to `subagent_model`, say, on a harness whose
