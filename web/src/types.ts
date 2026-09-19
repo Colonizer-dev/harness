@@ -439,6 +439,11 @@ export interface OrgSettings {
   host_disk?: string | null;
   memory?: { enabled?: boolean | null } | null;
   watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;
+  /**
+   * Off keeps the org out of the workspace list and stops new colonies starting there; its existing
+   * colonies stay listed and resumable. Absent and null mean on, like every field above.
+   */
+  enabled?: boolean | null;
 }
 
 export interface OrgInfo {
@@ -446,6 +451,13 @@ export interface OrgInfo {
   colonies: { live: number; total: number };
   pending_memory: number;
   settings: OrgSettings;
+  /** The org's GitHub avatar. Absent when unknown — an org that only appears in the colony list has none. */
+  avatar_url?: string;
+  /**
+   * True for a newly-appeared org the operator has not decided about yet; it is not a workspace
+   * until then. Optional so an older mothership that never sends it simply has no pending orgs.
+   */
+  awaiting_decision?: boolean;
 }
 
 // ---------------------------------------------------------------------------

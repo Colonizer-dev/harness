@@ -77,8 +77,10 @@ Two settings layers sit next to the modules:
   key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
-- **Org workspaces** (`orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
-  per-colony budget and host-disk quota, memory, the watchdog and notifications. A colony belongs to its repository
+- **Org workspaces** (`orgs.json`, `known-orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
+  per-colony budget and host-disk quota, memory, the watchdog and notifications, plus an on/off switch per org.
+  `known-orgs.json` records the orgs seen on the signed-in GitHub account, so an org that appears for the first time
+  asks instead of being adopted silently. A colony belongs to its repository
   owner's org.
 
 ## Session lifecycle

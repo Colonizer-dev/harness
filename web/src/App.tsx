@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "./context";
 import { IconMenu, IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
+import { OrgPromptCard } from "./components/OrgPromptCard";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsDialog, type SectionId } from "./components/SettingsDialog";
@@ -23,9 +24,10 @@ import {
   type NotificationPrefs,
   type SessionSnapshot,
 } from "./notifications";
+import { pendingOrgPrompt } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
-import type { HarnessStatus, ModuleInfo, OrgInfo, Session, StorageHealth, TelemetryStatus, UsageStatus } from "./types";
+import type { HarnessStatus, ModuleInfo, OrgInfo, OrgSettings, Session, StorageHealth, TelemetryStatus, UsageStatus } from "./types";
 
 export function App() {
   const api = useApi();
@@ -47,6 +49,9 @@ export function App() {
   const [view, setView] = useState<MainView>(() => (stored("colonizer.view") === "memory" ? "memory" : "colonies"));
   const [pendingMemory, setPendingMemory] = useState(0);
   const [orgSettingsFor, setOrgSettingsFor] = useState<string | null>(null);
+  // Orgs answered this session: the PUT has marked them decided server-side, but until the 15 s
+  // poll confirms, this is what keeps a just-answered prompt card from flashing back in.
+  const [answeredOrgs, setAnsweredOrgs] = useState<ReadonlySet<string>>(() => new Set());
   const [notifyPrefs, setNotifyPrefs] = useState<NotificationPrefs>(() => parseNotificationPrefs(stored(NOTIFICATIONS_KEY)));
   // The mothership's storage alert is sticky, so dismissal is client-side, keyed on the alert's ts
   // (or its message when an older mothership omits the ts): a newer failure shows the card again.
@@ -302,6 +307,15 @@ export function App() {
     setSidebarOpen(false);
   }, []);
 
+  // The one newly-appeared org to ask about now, if any; several pending are asked one at a time.
+  const pendingOrg = useMemo(() => pendingOrgPrompt(orgs, answeredOrgs), [orgs, answeredOrgs]);
+
+  /** The prompt card's answer, folded back so the sidebar moves at once; the 15 s poll confirms it. */
+  const answerPendingOrg = useCallback((org: string, settings: OrgSettings) => {
+    setAnsweredOrgs((answered) => new Set(answered).add(org));
+    setOrgs((list) => list.map((info) => (sameOrg(info.org, org) ? { ...info, awaiting_decision: false, settings } : info)));
+  }, []);
+
   const current = sessions.find((s) => s.id === selectedId) ?? null;
 
   const storage = status?.storage;
@@ -359,35 +373,46 @@ export function App() {
           <aside className="relative h-full w-[min(340px,88vw)] border-r border-border bg-panel shadow-[var(--shadow)]">{sidebar}</aside>
         </div>
       )}
-      <main className="h-full min-w-0 flex-1">
-        {view === "memory" ? (
-          <MemoryView
-            narrow={narrow}
-            selectedOrg={selectedOrg}
-            orgs={orgs}
-            onOpenSidebar={() => setSidebarOpen(true)}
-            onChanged={() => {
-              void loadPendingMemory();
-              void loadOrgs();
-            }}
-          />
-        ) : current ? (
-          <SessionView
-            key={current.id}
-            sessionId={current.id}
-            fallback={current}
-            interfaces={interfaces}
-            narrow={narrow}
-            showOrg={!selectedOrg}
-            onSessionChanged={upsertSession}
-            onSessionDeleted={removeSession}
-            onOpenSidebar={() => setSidebarOpen(true)}
-            onOpenMemory={openMemory}
-            onMemoryProposed={loadPendingMemory}
-          />
-        ) : (
-          <EmptyState narrow={narrow} org={selectedOrg} onOpenSidebar={() => setSidebarOpen(true)} />
+      <main className="flex h-full min-w-0 flex-1 flex-col">
+        {pendingOrg && (
+          // A standalone card at the top of the pane: seen without hunting for it, but nothing
+          // behind it is blocked while the decision waits.
+          <div className="shrink-0 border-b border-border px-4 py-3 sm:px-6">
+            <div className="mx-auto w-full max-w-xl">
+              <OrgPromptCard org={pendingOrg.org} avatarUrl={pendingOrg.avatar_url} onAnswered={answerPendingOrg} />
+            </div>
+          </div>
         )}
+        <div className="min-h-0 flex-1">
+          {view === "memory" ? (
+            <MemoryView
+              narrow={narrow}
+              selectedOrg={selectedOrg}
+              orgs={orgs}
+              onOpenSidebar={() => setSidebarOpen(true)}
+              onChanged={() => {
+                void loadPendingMemory();
+                void loadOrgs();
+              }}
+            />
+          ) : current ? (
+            <SessionView
+              key={current.id}
+              sessionId={current.id}
+              fallback={current}
+              interfaces={interfaces}
+              narrow={narrow}
+              showOrg={!selectedOrg}
+              onSessionChanged={upsertSession}
+              onSessionDeleted={removeSession}
+              onOpenSidebar={() => setSidebarOpen(true)}
+              onOpenMemory={openMemory}
+              onMemoryProposed={loadPendingMemory}
+            />
+          ) : (
+            <EmptyState narrow={narrow} org={selectedOrg} onOpenSidebar={() => setSidebarOpen(true)} />
+          )}
+        </div>
       </main>
       <SettingsDialog
         open={settingsOpen}

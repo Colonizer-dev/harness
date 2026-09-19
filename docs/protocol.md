@@ -781,8 +781,8 @@ strings; UIs offer `GET /api/models` as suggestions).
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings}]` for every org seen in repositories, colonies or saved settings |
-| `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value |
+| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings, avatar_url?, awaiting_decision?}]` for every org that has a reason to be a workspace — saved settings, colonies, repository owners — plus the orgs still awaiting an answer, which appear only so a UI can ask about them. Switched-off orgs are still listed, so a UI can offer them back |
+| `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value. A save is also the answer to a pending "do you want this org?" prompt for that org |
 
 The PUT is a merge, not a replace. A field of `settings` the body does not name keeps its saved value; a
 field it names always wins, `null` included: an explicit `null` is how a client inherits the global
@@ -791,6 +791,13 @@ module setting. The merge reaches one level deeper for two nested fields: an `ag
 its saved value (the web form never sends `waiting_minutes`, and a save from a client that predates a
 field must not quietly clear it). So a body naming only `max_parallel` changes just that, where a plain
 replace would have cleared everything it left out.
+
+`settings.enabled` ([#176](https://github.com/Colonizer-dev/harness/issues/176)) is the on/off switch
+per org: absent or `true` the org is offered as a workspace, `false` — or a form save that names it
+`false` — takes the workspace off the list and refuses new colonies for it ("the acme workspace is
+switched off; turn it back on in its org settings to start a colony there") while keeping its settings
+and its existing colonies: a colony of a switched-off org is still listed and resumable, and an
+`orgs.json` written before the switch existed reads as every org on.
 
 `agent.skillsets` is a map of plugin directory name to `true` or `false`: those skillsets are switched on
 or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
@@ -806,6 +813,7 @@ gateway half).
 
 ```json
 {"settings": {
+  "enabled": true,
   "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
             "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
@@ -815,6 +823,33 @@ gateway half).
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
 }}
 ```
+
+Avatars and the new-org prompt. The mothership fetches the orgs the signed-in GitHub account belongs
+to, together with their avatars, and keeps what it saw in `config/known-orgs.json` — login to
+`avatar_url`, written only when something changed. A successful fetch is throttled to once every five
+minutes; a failed `gh` records nothing and is retried on the next poll. Avatars are refreshed for
+every org the fetch reports, workspace or not (a switched-off org keeps its face for the Hidden list
+and its settings dialog), except the ones still awaiting an answer: the record doubles as the
+seen-set, so an unanswered sighting stays out of it, avatar and all, until the `PUT` that answers
+records both.
+`GET /api/orgs` carries `avatar_url` only where it knows one (the saved record, or the sighting that
+is still waiting for an answer); an org that only shows up in the colony list has none, and a UI falls
+back to an initial. The same record is the seen-set behind the prompt:
+
+- The **first** fetch after an install — no record yet — adopts every org the account belongs to and
+  records them all without asking; the count of workspaces added is logged. That is what keeps an
+  upgrade from asking about orgs the account always had.
+- After that, an org the record has never heard of is **not** adopted: it appears in the list with
+  `"awaiting_decision": true` until a `PUT` answers for it —
+  `enabled: true` adds it, `enabled: false` declines it, and either way it is never asked about again.
+- An org GitHub stops reporting (the account left it) is dropped from the workspace list by the fetch
+  that no longer reports it — unless it has settings of its own saved: a switched-off or declined org
+  keeps its `orgs.json` entry on purpose, so it stays listed and reachable. Starting a colony for an
+  org with no record also marks it known, because working in an org is an answer. The signed-in
+  account's own login is never asked about, but its switch is respected like any other org's:
+  switching it off takes its workspace off the list and stops new colonies on its own repositories.
+  The prompt itself is in-memory only: after a restart the next fetch rebuilds it from
+  `known-orgs.json`.
 
 **Shared memory.** `scope` is `global`, `org` (key = org) or `repo` (key = `owner/repo`).
 

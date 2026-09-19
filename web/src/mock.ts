@@ -1256,7 +1256,20 @@ export function createMockApi(): Api {
       memory: { enabled: true },
       watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
     },
+    // Switched off (issue #176): out of the workspace choices, still reachable via the switcher's Hidden disclosure.
+    globex: { enabled: false },
+    // Newly appeared and awaiting a decision, so the prompt card shows; it has no colonies yet.
+    initech: {},
   };
+  // Org avatars, as GET /api/orgs reports them. octocat has none on purpose: an org that only
+  // appears in the colony list has no avatar, so its row falls back to the initial.
+  const orgAvatars: Record<string, string> = {
+    acme: "https://avatars.githubusercontent.com/u/9919?v=4&s=64",
+    globex: "https://avatars.githubusercontent.com/u/7654321?v=4&s=64",
+    initech: "https://avatars.githubusercontent.com/u/7654322?v=4&s=64",
+  };
+  // Any explicit save — the prompt card, or a workspace settings save — marks the org decided.
+  const awaitingDecision = new Set(["initech"]);
   const orgOfKey = (note: MemoryNote) => (note.scope === "org" ? note.key : note.scope === "repo" ? note.key.split("/")[0] : null);
 
   let githubSource = "gh CLI login";
@@ -1827,13 +1840,20 @@ export function createMockApi(): Api {
             colonies: { live: colonies.filter((s) => isLive(s.session.status)).length, total: colonies.length },
             pending_memory: proposals.filter((p) => orgOfKey(p) === org).length,
             settings: orgSettings[org] ?? {},
+            avatar_url: orgAvatars[org],
+            ...(awaitingDecision.has(org.toLowerCase()) ? { awaiting_decision: true } : null),
           };
         });
       }),
     saveOrg: async (org, settings) => {
       await sleep(250);
-      orgSettings[org] = clone(settings);
-      return clone({ org, settings });
+      // The server merges: a field the body omits keeps its saved value, one it names (null
+      // included) wins. The prompt card answers with `{enabled}` alone, so a replace here would
+      // clear every other setting the org has — the merge is the semantics. The merged settings are
+      // what comes back, as from the server.
+      orgSettings[org] = { ...(orgSettings[org] ?? {}), ...settings };
+      awaitingDecision.delete(org.toLowerCase());
+      return clone({ org, settings: orgSettings[org] });
     },
 
     memory: (scope, key) =>
