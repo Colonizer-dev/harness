@@ -46,6 +46,20 @@ setting) is called out under **Take care** rather than left for you to find.
   log. ([#99])
 - Settings names the Claude account that is connected, or says plainly that it
   cannot be named. ([#83])
+- A model provider's failure rate and average latency are shown on the
+  providers screen and in `GET /api/status`, as a new `model_providers` array,
+  instead of living only in `~/.local/share/colonizer/provider-usage.json`. A
+  provider that has 50 or more requests and failed 10% or more of them reads as
+  degraded, so it can be unhealthy even while its one-request health check
+  passes. `GET /api/providers` gained a `health` object (`failure_pct`,
+  `avg_latency_ms`, `rated`, `degraded`) and `usage.since`, the instant the
+  tally started, so the percentage is labelled with the span it covers.
+  ([#184])
+- The notify module gained a `provider_degraded` event and an `on_provider`
+  setting: crossing the degraded threshold announces once, and re-arms only
+  after the failure rate falls back below 8%. ([#184])
+- The docs say what an unset `max_concurrent` means: unlimited fan-out.
+  ([#184])
 
 ### Changed
 
@@ -201,6 +215,7 @@ Macs. ([#74])
 [#131]: https://github.com/Colonizer-dev/harness/pull/131
 [#172]: https://github.com/Colonizer-dev/harness/pull/172
 [#177]: https://github.com/Colonizer-dev/harness/issues/177
+[#184]: https://github.com/Colonizer-dev/harness/issues/184
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2

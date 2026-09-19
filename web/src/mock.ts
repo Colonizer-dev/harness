@@ -1179,7 +1179,9 @@ export function createMockApi(): Api {
   sessions.set(closed.session.id, closed);
 
   const DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
-  const zeroUsage = () => ({ requests: 0, failures: 0, fallbacks: 0, duration_ms: 0, last_request_at: null });
+  const zeroUsage = () => ({ requests: 0, failures: 0, fallbacks: 0, duration_ms: 0, since: null, last_request_at: null });
+  // What the Mothership computes for a tally with no requests: numbers of zero, and nothing rated.
+  const zeroHealth = () => ({ failure_pct: 0, avg_latency_ms: 0, rated: false, degraded: false });
   const providers: ModelProvider[] = [
     {
       id: "deepseek",
@@ -1198,6 +1200,7 @@ export function createMockApi(): Api {
       // Wired only to the subagent model and the small-task tier, and no colony has ever
       // delegated: the issue #39 state.
       usage: zeroUsage(),
+      health: zeroHealth(),
       used_by: ["subagent_model", "model_low"],
     },
     {
@@ -1216,8 +1219,17 @@ export function createMockApi(): Api {
       fallback_model: "sonnet",
       in_flight: 1,
       queued: 2,
-      // The orchestrator model for acme, so it sees a steady stream of requests.
-      usage: { requests: 412, failures: 3, fallbacks: 1, duration_ms: 2_538_000, last_request_at: ago(2) },
+      // The orchestrator model for acme, so it sees a steady stream of requests — and, issue #184's
+      // report, it fails 29.4% of them at 12.8 s apiece: rated, well past the 10% mark.
+      usage: {
+        requests: 32_689,
+        failures: 9_599,
+        fallbacks: 12,
+        duration_ms: 418_419_200,
+        since: "2026-03-12T09:00:00Z",
+        last_request_at: ago(2),
+      },
+      health: { failure_pct: 29.4, avg_latency_ms: 12_800, rated: true, degraded: true },
       used_by: ["model"],
     },
     {
@@ -1235,6 +1247,7 @@ export function createMockApi(): Api {
       queued: 0,
       // Reachable, but no model setting points at it, so nothing ever will.
       usage: zeroUsage(),
+      health: zeroHealth(),
       used_by: [],
     },
   ];
@@ -1477,6 +1490,16 @@ export function createMockApi(): Api {
         // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
         // runtime at all, as a mothership from before the probe did not.
         runtime: mockRuntime(),
+        // The same verdict the providers list serves, read off its own seeds: strix is the
+        // degraded one (issue #184's report), deepseek and lab have never been used.
+        model_providers: providers.map((p) => ({
+          id: p.id,
+          name: p.name,
+          requests: p.usage?.requests ?? 0,
+          failure_pct: p.health?.failure_pct ?? 0,
+          avg_latency_ms: p.health?.avg_latency_ms ?? 0,
+          degraded: p.health?.degraded ?? false,
+        })),
       })),
     modules: () => later(() => modules),
     saveModule: async (kind, body) => {
@@ -1800,6 +1823,7 @@ export function createMockApi(): Api {
         in_flight: existing?.in_flight ?? 0,
         queued: existing?.queued ?? 0,
         usage: existing?.usage ?? zeroUsage(),
+        health: existing?.health ?? zeroHealth(),
         used_by: existing?.used_by ?? [],
       };
       if (existing) Object.assign(existing, provider);

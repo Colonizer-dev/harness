@@ -457,6 +457,8 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
         on_attention: overrides.on_attention.unwrap_or_else(|| flag("on_attention", true)),
         on_failed: overrides.on_failed.unwrap_or_else(|| flag("on_failed", true)),
         on_pull_request: overrides.on_pull_request.unwrap_or_else(|| flag("on_pull_request", true)),
+        // A provider is not org-scoped, so this switch has no org override to resolve.
+        on_provider: flag("on_provider", true),
         desktop: overrides.desktop.unwrap_or_else(|| flag("desktop", false)),
         webhook_url: overrides
             .webhook_url
