@@ -139,9 +139,17 @@ expect_refusal() { # label binary
   grep -q "has to run in a Linux colony" "$err" || bad "$1: the refusal did not say the binary runs in a Linux colony: $(cat "$err")"
   grep -q "unset COLONIZER_BUILD_HERE to build it in the rust:1-alpine microVM" "$err" || bad "$1: the refusal did not point at the fix: $(cat "$err")"
 }
+# The same ELF probe the build scripts themselves use: `head` and `printf`,
+# which busybox always has. Not `od -An -tx1` — that spelling is GNU/BSD `od`,
+# and a host whose `od` is neither (a uutils or busybox one on PATH) answers
+# "unknown option" and the check silently degrades to comparing empty strings.
+is_elf() {
+  [ "$(head -c 4 "$1" 2>/dev/null)" = "$(printf '\177ELF')" ]
+}
+
 
 expect_elf() { # path label
-  [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] || bad "$2: $1 is not an ELF binary"
+  is_elf "$1" || bad "$2: $1 is not an ELF binary"
 }
 
 stamps() {
@@ -195,7 +203,7 @@ note "ok: rtk refused to install a Mach-O artefact and wrote no stamp"
 
 # 3. The ELF happy paths copy a real ELF binary from the host, so they need Linux; on any other host
 #    the checks above have already run, and these would only re-test the Mach-O refusal.
-if [ "$(head -c 4 "$real_sh" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
+if ! is_elf "$real_sh"; then
   note "skip: the happy paths copy a real ELF from the host, and this host has none; the refusal and Mach-O cases passed"
   note "all checks passed"
   exit 0
