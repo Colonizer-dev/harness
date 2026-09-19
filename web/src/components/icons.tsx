@@ -125,6 +125,13 @@ export const IconBranch = make(
     <path d="M6 7.5v9M18 10.5c0 4-6 3-11 6" />
   </>,
 );
+export const IconStack = make(
+  <>
+    <path d="m12 3 9 5-9 5-9-5 9-5z" />
+    <path d="m3 12.5 9 5 9-5" />
+    <path d="m3 17 9 5 9-5" />
+  </>,
+);
 export const IconPlus = make(<path d="M12 5v14M5 12h14" />);
 export const IconMemory = make(
   <>

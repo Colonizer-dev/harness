@@ -4,7 +4,7 @@
 //! The pull-request watcher lives here too: once a colony's work is published, what happens to
 //! that pull request is the last thing the colony's badge still reflects.
 
-use crate::{ApiResult, App, Shared, client_error, github, util::truncate};
+use crate::{ApiResult, App, Shared, client_error, github, stack, util::truncate};
 use axum::{
     Json,
     extract::{Path, State},
@@ -194,6 +194,21 @@ pub async fn watch_pull_requests(app: Shared) {
                             _ => "the pull request was reopened",
                         };
                         app.session_log(&s.id, "info", message.into()).await;
+                        // A merge completes a stack, but GitHub only retargets a dependent pull
+                        // request when its base branch is *deleted*, and nothing here ever deletes
+                        // a branch — without this explicit call the children would point at a
+                        // merged-but-undeleted branch indefinitely. Off the tick: the edits each
+                        // take up to twenty seconds, and the loop must not sit on them while every
+                        // other colony's merge goes unnoticed. A duplicate run is a no-op — a child
+                        // that already moved no longer has the merged branch as its base — so two
+                        // overlapping runs cost a redundant edit and nothing else.
+                        if target == SessionStatus::Merged {
+                            tokio::spawn({
+                                let app = app.clone();
+                                let parent = s.clone();
+                                async move { retarget_stacked_children(&app, &parent).await }
+                            });
+                        }
                     }
                     poll.backoff = pr_backoff(poll.backoff, changed);
                 }
@@ -206,6 +221,134 @@ pub async fn watch_pull_requests(app: Shared) {
                     }
                     poll.backoff = pr_backoff(poll.backoff, false);
                 }
+            }
+        }
+    }
+}
+
+/// What moving a merged colony's stacked children needs from the world, named so tests can stand in
+/// for GitHub, the session record and the log and make any step fail — the pattern
+/// `github::PublishOps` uses for the publish itself. Module-private on purpose: only the concrete
+/// impl below is ever awaited here, so the spawned retarget's future stays `Send` with no
+/// `async-trait` dependency.
+trait RetargetOps {
+    /// The repository's default branch, for a merged colony that recorded no base of its own.
+    async fn default_branch(&self, repo: &str) -> anyhow::Result<String>;
+    /// Points one open pull request at a different base branch, on GitHub.
+    async fn edit_pr(&self, pr_url: &str, base: &str) -> anyhow::Result<()>;
+    /// Records the new base on the colony; `false` when the colony no longer exists.
+    async fn record_base(&self, id: &str, base: &str) -> bool;
+    /// Says something in a colony's own log.
+    async fn say(&self, id: &str, level: &str, message: String);
+}
+
+/// The real retarget operations: `gh` on GitHub, the session record, and the colony's own log.
+struct GithubRetargetOps<'a> {
+    app: &'a App,
+}
+
+impl RetargetOps for GithubRetargetOps<'_> {
+    async fn default_branch(&self, repo: &str) -> anyhow::Result<String> {
+        github::default_branch(self.app, repo).await
+    }
+
+    async fn edit_pr(&self, pr_url: &str, base: &str) -> anyhow::Result<()> {
+        github::retarget_pr(self.app, pr_url, base).await
+    }
+
+    async fn record_base(&self, id: &str, base: &str) -> bool {
+        self.app
+            .update_session(id, |x| x.base = Some(base.to_string()))
+            .await
+            .is_some()
+    }
+
+    async fn say(&self, id: &str, level: &str, message: String) {
+        self.app.session_log(id, level, message).await
+    }
+}
+
+/// Moves a merged colony's stacked children onto the branch the merged colony was itself based on —
+/// GitHub's own rule for a merged base, and not always the repository default: for a stack deeper
+/// than two those differ, and the default would fold every lower colony's still-unmerged work into
+/// the child's diff. GitHub's own retargeting cannot be relied on — it triggers on base-branch
+/// deletion, and nothing here ever deletes a branch. A failure is logged and left for a person: a
+/// pull request that could not be moved is not the child's work failing, so the colony is never
+/// marked failed.
+async fn retarget_stacked_children(app: &Shared, parent: &Session) {
+    let ops = GithubRetargetOps { app: app.as_ref() };
+    let Some(destination) = retarget_destination(&ops, parent).await else {
+        return;
+    };
+    // Bound to a local first: a read guard held across the edits below would deadlock against
+    // update_session's write lock.
+    let sessions = app.sessions.read().await.clone();
+    let children: Vec<Session> = stack::children_to_retarget(&sessions, parent).into_iter().cloned().collect();
+    run_retargets(&ops, &children, &destination).await;
+}
+
+/// Where the children go: the branch the merged colony was itself based on, or — when it recorded no
+/// base at all, a shape this code never creates — the repository's default branch. `None` when
+/// there is nowhere to move them: the children already sit on the destination, or no destination
+/// could be found, which is said on the merged colony's own log rather than left silent.
+async fn retarget_destination(ops: &impl RetargetOps, parent: &Session) -> Option<String> {
+    let destination = match stack::retarget_base(parent) {
+        Some(base) => base,
+        None => match ops.default_branch(&parent.repo).await {
+            Ok(default) => default,
+            Err(e) => {
+                ops.say(
+                    &parent.id,
+                    "warn",
+                    format!(
+                        "no base was recorded for this colony and the default branch to fall back to could not be looked up, so the colonies stacked on it stay where they are: {e:#}"
+                    ),
+                )
+                .await;
+                return None;
+            }
+        },
+    };
+    (destination != parent.branch).then_some(destination)
+}
+
+/// Moves each child still based on the merged branch onto `destination`, saying every outcome in the
+/// child's own log. One that could not be moved is said and left for a person — there is no retry,
+/// and the colony is never marked failed for its pull request's base.
+async fn run_retargets(ops: &impl RetargetOps, children: &[Session], destination: &str) {
+    for child in children {
+        let Some(url) = child.pr_url.clone() else { continue };
+        let id = child.id.clone();
+        match ops.edit_pr(&url, destination).await {
+            Ok(()) => {
+                // `gh pr edit` has already moved the pull request on GitHub, so the recorded base
+                // must follow or the record quietly disagrees with the real pull request — and a
+                // merged colony is never polled again, so this is the last look anything takes.
+                if ops.record_base(&id, destination).await {
+                    ops.say(
+                        &id,
+                        "info",
+                        format!("the colony this one is stacked on was merged, so its pull request now targets {destination}"),
+                    )
+                    .await;
+                } else {
+                    // The colony was deleted while `gh pr edit` ran: GitHub has the new base and
+                    // nothing here does. Said rather than left silent — there is no retry.
+                    ops.say(
+                        &id,
+                        "warn",
+                        format!("its pull request was retargeted onto {destination}, but the colony was deleted before the new base could be recorded"),
+                    )
+                    .await;
+                }
+            }
+            Err(e) => {
+                ops.say(
+                    &id,
+                    "warn",
+                    format!("could not retarget its pull request onto {destination}: {e:#}"),
+                )
+                .await;
             }
         }
     }
@@ -313,5 +456,223 @@ mod tests {
             assert!(!can_publish(status, true, true), "cleaned up: {status:?}");
             assert!(!can_publish(status, false, false), "no worktree: {status:?}");
         }
+    }
+
+    // ----- the retarget glue, against a stand-in for GitHub, the record and the log -----
+
+    use std::cell::RefCell;
+
+    /// A stand-in for [`GithubRetargetOps`]: everything asked of it is recorded, and each step can
+    /// be made to fail.
+    struct FakeRetarget {
+        /// What the default-branch lookup answers for a merged colony with no recorded base.
+        default_branch: Result<String, String>,
+        /// Whether the edit on GitHub succeeds.
+        edit_ok: bool,
+        /// Whether the colony the new base is recorded on still exists.
+        colony_exists: bool,
+        /// How many times the default branch was looked up.
+        default_asked: std::cell::Cell<usize>,
+        /// `(pr_url, base)` of every edit asked of GitHub.
+        edits: RefCell<Vec<(String, String)>>,
+        /// `(id, base)` of every base recorded.
+        recorded: RefCell<Vec<(String, String)>>,
+        /// `(id, level, message)` of everything said.
+        said: RefCell<Vec<(String, String, String)>>,
+    }
+
+    impl FakeRetarget {
+        fn merged_parent(&self) -> Session {
+            let mut p = crate::sessions::tests::colony("acme", SessionStatus::Merged);
+            p.id = "parent".into();
+            p.branch = "colonizer/issue-9-parent".into();
+            p.base = Some("main".into());
+            p
+        }
+
+        fn said_contains(&self, fragment: &str) -> bool {
+            self.said.borrow().iter().any(|(_, _, m)| m.contains(fragment))
+        }
+    }
+
+    impl RetargetOps for FakeRetarget {
+        async fn default_branch(&self, _repo: &str) -> anyhow::Result<String> {
+            self.default_asked.set(self.default_asked.get() + 1);
+            self.default_branch.clone().map_err(anyhow::Error::msg)
+        }
+
+        async fn edit_pr(&self, pr_url: &str, base: &str) -> anyhow::Result<()> {
+            self.edits.borrow_mut().push((pr_url.into(), base.into()));
+            if self.edit_ok {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("gh pr edit failed"))
+            }
+        }
+
+        async fn record_base(&self, id: &str, base: &str) -> bool {
+            self.recorded.borrow_mut().push((id.into(), base.into()));
+            self.colony_exists
+        }
+
+        async fn say(&self, id: &str, level: &str, message: String) {
+            self.said.borrow_mut().push((id.into(), level.into(), message));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_recorded_base_is_where_the_children_go_and_the_default_is_never_asked() {
+        let ops = FakeRetarget {
+            default_branch: Ok("develop".into()),
+            edit_ok: true,
+            colony_exists: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let parent = ops.merged_parent();
+        assert_eq!(
+            retarget_destination(&ops, &parent).await.as_deref(),
+            Some("main"),
+            "the destination is the branch the merged colony was itself based on"
+        );
+        assert_eq!(ops.default_asked.get(), 0, "the default branch need not be looked up");
+
+        // A colony already sitting on its own base is nowhere to move to, and asks nothing.
+        let mut settled = parent.clone();
+        settled.base = Some(settled.branch.clone());
+        assert_eq!(retarget_destination(&ops, &settled).await, None);
+        assert_eq!(ops.default_asked.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn with_no_recorded_base_the_children_fall_back_to_the_default_branch() {
+        let ops = FakeRetarget {
+            default_branch: Ok("develop".into()),
+            edit_ok: true,
+            colony_exists: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let mut parent = ops.merged_parent();
+        parent.base = None;
+        assert_eq!(
+            retarget_destination(&ops, &parent).await.as_deref(),
+            Some("develop"),
+            "the fallback is the repository's default branch"
+        );
+        assert_eq!(ops.default_asked.get(), 1, "looked up, since nothing was recorded");
+    }
+
+    #[tokio::test]
+    async fn no_base_and_no_default_leaves_the_children_saying_why_on_the_merged_colonys_log() {
+        let ops = FakeRetarget {
+            default_branch: Err("gh api failed".into()),
+            edit_ok: true,
+            colony_exists: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let mut parent = ops.merged_parent();
+        parent.base = None;
+        assert_eq!(retarget_destination(&ops, &parent).await, None, "nowhere to send them");
+        assert_eq!(ops.default_asked.get(), 1);
+        assert!(
+            ops.said_contains("stay where they are") && ops.said_contains("gh api failed"),
+            "the gap is said, not silent: {:?}",
+            ops.said.borrow()
+        );
+        let (_, level, _) = ops.said.borrow()[0].clone();
+        assert_eq!(level, "warn", "said on the merged colony's log");
+    }
+
+    #[tokio::test]
+    async fn a_moved_child_records_its_new_base_and_says_so() {
+        let ops = FakeRetarget {
+            default_branch: Ok("main".into()),
+            edit_ok: true,
+            colony_exists: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        child.id = "child".into();
+        child.pr_url = Some("https://github.com/acme/repo/pull/10".into());
+
+        run_retargets(&ops, &[child], "main").await;
+        assert_eq!(
+            ops.edits.borrow().as_slice(),
+            [("https://github.com/acme/repo/pull/10".to_string(), "main".to_string())],
+            "GitHub is asked to point the pull request at the destination"
+        );
+        assert_eq!(
+            ops.recorded.borrow().as_slice(),
+            [("child".to_string(), "main".to_string())],
+            "the recorded base follows the real pull request"
+        );
+        assert!(ops.said_contains("now targets main"), "the child's log says what happened");
+        let (_, level, _) = ops.said.borrow()[0].clone();
+        assert_eq!(level, "info");
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_fails_is_said_and_the_base_is_left_alone() {
+        let ops = FakeRetarget {
+            default_branch: Ok("main".into()),
+            edit_ok: false,
+            colony_exists: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        child.id = "child".into();
+        child.pr_url = Some("https://github.com/acme/repo/pull/10".into());
+
+        run_retargets(&ops, &[child], "main").await;
+        assert!(
+            ops.recorded.borrow().is_empty(),
+            "nothing is recorded: GitHub still has the old base"
+        );
+        assert!(
+            ops.said_contains("could not retarget") && ops.said_contains("gh pr edit failed"),
+            "the failure is said, for a person: {:?}",
+            ops.said.borrow()
+        );
+        let (_, level, _) = ops.said.borrow()[0].clone();
+        assert_eq!(level, "warn");
+    }
+
+    #[tokio::test]
+    async fn a_child_deleted_before_its_base_was_recorded_says_so() {
+        let ops = FakeRetarget {
+            default_branch: Ok("main".into()),
+            edit_ok: true,
+            colony_exists: false,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        child.id = "child".into();
+        child.pr_url = Some("https://github.com/acme/repo/pull/10".into());
+
+        run_retargets(&ops, &[child], "main").await;
+        assert!(
+            ops.said_contains("deleted before the new base could be recorded"),
+            "GitHub has the new base and nothing here does; that is said: {:?}",
+            ops.said.borrow()
+        );
+        let (_, level, _) = ops.said.borrow()[0].clone();
+        assert_eq!(level, "warn");
     }
 }
