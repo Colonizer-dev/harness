@@ -33,7 +33,9 @@ import type {
   ModuleInfo,
   OrgInfo,
   OrgSettings,
+  RedTeamRun,
   Session,
+  StartRedTeamRunRequest,
   StorageHealth,
   TelemetryStatus,
   UpdateStatus,
@@ -47,6 +49,7 @@ export function App() {
   const [statusError, setStatusError] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  const [redRuns, setRedRuns] = useState<RedTeamRun[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => stored("colonizer.session"));
   const [interfaces, setInterfaces] = useState<InterfaceFlags>({ chat: true, terminal: true });
   const [autopilotDefault, setAutopilotDefault] = useState(true);
@@ -97,6 +100,14 @@ export function App() {
       setSessionsLoaded(true);
     } catch {
       /* keep the last list */
+    }
+  }, [api]);
+
+  const loadRedRuns = useCallback(async () => {
+    try {
+      setRedRuns(await api.redTeamRuns());
+    } catch {
+      /* older mothership, or offline: the overview simply shows no raids */
     }
   }, [api]);
 
@@ -161,9 +172,11 @@ export function App() {
     void loadOrgs();
     void loadPendingMemory();
     void loadUpdate();
+    void loadRedRuns();
     api.modules().then(applyModules).catch(() => {});
     const timers = [
       setInterval(loadSessions, 4000),
+      setInterval(loadRedRuns, 5000),
       setInterval(loadStatus, 30_000),
       setInterval(loadOrgs, 15_000),
       setInterval(loadPendingMemory, 10_000),
@@ -171,7 +184,7 @@ export function App() {
       setInterval(loadUpdate, 900_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, applyModules]);
+  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, loadRedRuns, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -275,6 +288,24 @@ export function App() {
       return next;
     });
   }, []);
+
+  // Red-team start/stop fold the returned run into the list immediately; the 5 s poll confirms.
+  // Start rejects with the server's 409 reason — the card renders that verbatim at the form.
+  const startRedRun = useCallback(
+    async (body: StartRedTeamRunRequest) => {
+      const run = await api.startRedTeamRun(body);
+      setRedRuns((list) => [run, ...list.filter((r) => r.id !== run.id)]);
+    },
+    [api],
+  );
+
+  const stopRedRun = useCallback(
+    async (id: string) => {
+      const run = await api.stopRedTeamRun(id);
+      setRedRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
+    },
+    [api],
+  );
 
   // Stable identity, so the notifier effect can call the latest selection without re-running on every render.
   const select = useCallback((id: string) => {
@@ -502,6 +533,7 @@ export function App() {
             <Cockpit
               sessions={sessions}
               orgs={orgs}
+              redRuns={redRuns}
               selectedOrg={selectedOrg}
               onSelectOrg={selectOrg}
               selectedId={selectedId}
@@ -514,6 +546,8 @@ export function App() {
               settingsRequests={settingsRequests}
               settings={settingsPane}
               onSessionChanged={upsertSession}
+              onRedStart={startRedRun}
+              onRedStop={stopRedRun}
               onCreated={(session) => {
                 upsertSession(session);
                 select(session.id);

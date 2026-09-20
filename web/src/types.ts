@@ -654,3 +654,51 @@ export interface NewSessionRequest {
   /** Stack the new colony on another's branch: the parent session's id, which becomes `parent` and whose branch becomes `base`. Launching a stack is API-only; no form picker yet. */
   after?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Red-team runs (issue #212): a swarm of hunter colonies raiding one repository
+// ---------------------------------------------------------------------------
+
+/**
+ * Ordered lifecycle of a red-team run (issue #212). `armed` and `waiting` are gated —
+ * the run is live but not raiding until the nest empties — `running`/`draining` are
+ * raiding, and `done`/`stopped` are terminal.
+ */
+export type RedTeamState = "armed" | "waiting" | "running" | "draining" | "done" | "stopped";
+
+export interface RedTeamHunter {
+  session_id: string;
+  title: string;
+  module: string;
+  /** The module's pinned release; null when the module has no version of its own. */
+  version: string | null;
+  focus: string;
+}
+
+/** GET /api/redteam/runs: one swarm against one repository. */
+export interface RedTeamRun {
+  id: string;
+  repo: string;
+  org: string;
+  state: RedTeamState;
+  swarm_size: number;
+  modules: string[];
+  /** Whether the swarm may merge its finds; off by default, so a raid never touches main. */
+  autofix: boolean;
+  hunters: RedTeamHunter[];
+  counts: { found: number; validated: number; rejected: number; filed: number };
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  /** The server's reason for holding an armed run at the gate; null while none applies. */
+  gate_reason: string | null;
+}
+
+/** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */
+export interface StartRedTeamRunRequest {
+  repo: string;
+  swarm_size?: number;
+  modules?: string[];
+  autofix?: boolean;
+  arm?: boolean;
+}
