@@ -1487,7 +1487,7 @@ pub(crate) mod tests {
         );
         assert!(
             payload["runtime"]["host"].is_null(),
-            "the Runtime struct is unchanged: host lives only at the top level: {payload}"
+            "Runtime carries no host of its own (`os` aside): host lives only at the top level: {payload}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

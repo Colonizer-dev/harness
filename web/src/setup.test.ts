@@ -34,6 +34,7 @@ const LINUX: RuntimeInfo = {
   gh: { ok: true, version: "2.60.0" },
   host_claude_bin: "/usr/local/bin/claude",
   host_claude_bin_error: null,
+  os: { vendor: "ubuntu", name: "Ubuntu", version: "24.04", id: "ubuntu" },
 };
 
 const MAC: RuntimeInfo = {
@@ -43,6 +44,7 @@ const MAC: RuntimeInfo = {
   gh: { ok: true, version: "2.60.0" },
   host_claude_bin: "/Users/you/.local/bin/claude",
   host_claude_bin_error: null,
+  os: { vendor: "apple", name: "macOS", version: "14.5", id: null },
 };
 
 /** GET /api/status: a healthy Linux box, with overrides for whatever is broken. */
@@ -104,6 +106,7 @@ describe("setupRows", () => {
     it("collapses to one line naming the versions and paths it found", () => {
       const machine = row(input(), "machine");
       expect(machine.state).toBe("done");
+      expect(machine.detail).toContain("Ubuntu 24.04");
       expect(machine.detail).toContain("msb 0.6.18");
       expect(machine.detail).toContain("git 2.45.0");
       expect(machine.detail).toContain("gh 2.60.0");
@@ -122,6 +125,7 @@ describe("setupRows", () => {
       const machine = row(mac, "machine");
       expect(machine.state).toBe("done");
       expect(machine.gatesLaunch).toBe(true);
+      expect(machine.detail).toContain("macOS 14.5");
       expect(machine.notes.join(" ")).toContain("loopback port");
       // Nothing anywhere may read as missing or broken.
       const rows = setupRows(mac);

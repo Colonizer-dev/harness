@@ -2,7 +2,7 @@
 // few payloads beside it. The dialog renders rows; this module decides what they say, what is
 // blocking and what only advisory, and whether Launch may fire. Nothing here touches the browser.
 import { meshBroken } from "./components/ui";
-import type { HarnessStatus, PullStatus, TelemetryStatus } from "./types";
+import type { HarnessStatus, OsInfo, PullStatus, TelemetryStatus } from "./types";
 
 /** A row's place in the checklist, in display order. The live map is not one of the five. */
 export type SetupRowId = "machine" | "stack" | "github" | "claude" | "launch" | "map";
@@ -29,6 +29,8 @@ export interface SetupRow {
   gatesLaunch: boolean;
   /** The one line the collapsed row shows, naming what was detected. */
   detail: string;
+  /** The OS the machine row sits on, for the small logo next to its title; only the machine row has one. */
+  os?: OsInfo;
   /** What to show as the failure. Verbatim, except GitHub, where the issue pins the first line of a multi-line `github.error` (the UI can expand the rest from the source payload). */
   error?: string;
   /** One sentence on what to do about it. */
@@ -247,8 +249,9 @@ function machineRow(status: HarnessStatus): SetupRow {
     });
   }
 
-  // The collapsed line names what was found: versions, then paths.
+  // The collapsed line names what was found: the OS, versions, then paths.
   const facts = [
+    runtime?.os ? [runtime.os.name, runtime.os.version].filter(Boolean).join(" ") : null,
     msb ? (msb.startsWith("msb") ? msb : `msb ${msb}`) : null,
     runtime?.git?.version ? `git ${runtime.git.version}` : null,
     runtime?.gh?.version ? `gh ${runtime.gh.version}` : null,
@@ -262,6 +265,7 @@ function machineRow(status: HarnessStatus): SetupRow {
     state: findings.length > 0 ? "blocked" : "done",
     gatesLaunch: true,
     detail: facts.join(" · "),
+    os: runtime?.os,
     ...findings[0],
     notes,
     retry: findings[0]?.retry ?? false,

@@ -3,7 +3,20 @@
 // the local calendar rather than an elapsed count, and that the order holds between polls.
 import { describe, expect, it } from "vitest";
 
-import { dayLabel, feedEntries, feedKind, headlineFor, historyRows, matchesFilter, needCountByOrg } from "./feed";
+import {
+  OVERVIEW_FILTERS,
+  RETURNED,
+  dayLabel,
+  feedEntries,
+  feedKind,
+  headlineFor,
+  historyRows,
+  matchesFilter,
+  matchesOverviewFilter,
+  needCountByOrg,
+  overviewCounts,
+  overviewSessions,
+} from "./feed";
 import type { Session, SessionStatus } from "../types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -47,6 +60,15 @@ describe("feedKind", () => {
   it("groups every terminal pull-request status as returned", () => {
     for (const status of ["pr_opened", "merged", "closed", "no_changes"] as SessionStatus[]) {
       expect(feedKind(session({ status }))).toBe("returned");
+    }
+  });
+
+  it("keeps the returned grouping in lockstep with the overview's RETURNED set", () => {
+    // feedKind reads RETURNED itself now, so this pins the two against meeting by accident;
+    // a returned status the overview counts must read as "returned" on the timeline and vice versa.
+    const all: SessionStatus[] = Object.keys({ queued: 1, starting: 1, running: 1, waiting_for_answer: 1, idle: 1, publishing: 1, pr_opened: 1, merged: 1, closed: 1, no_changes: 1, stopped: 1, failed: 1 }) as SessionStatus[];
+    for (const status of all) {
+      expect(feedKind(session({ status })) === "returned").toBe(RETURNED.has(status));
     }
   });
 
@@ -191,5 +213,50 @@ describe("headlineFor", () => {
 
   it("does not mention work that is not happening", () => {
     expect(headlineFor(0, 0)).toBe("All quiet");
+  });
+});
+
+describe("overview buckets, counts and filters", () => {
+  const stalled = session({ id: "stalled", status: "running", attention: { reason: "stalled", since: "2026-09-18T09:05:00Z", nudges: 1 } });
+  const list = [
+    session({ id: "running", status: "running" }),
+    session({ id: "waiting", status: "waiting_for_answer" }),
+    stalled,
+    session({ id: "pr", status: "pr_opened" }),
+    session({ id: "no-changes", status: "no_changes" }),
+    session({ id: "queued", status: "queued" }),
+    session({ id: "idle", status: "idle" }),
+    session({ id: "stopped", status: "stopped" }),
+  ];
+
+  it("defines returned as the pull-request round-trip statuses", () => {
+    expect([...RETURNED].sort()).toEqual(["closed", "merged", "no_changes", "pr_opened"]);
+  });
+
+  it("lets a waiting colony count as both live and need-you, and still in the bucketed total", () => {
+    // The buckets overlap on purpose (you count the same colony in each pane it belongs to), so
+    // the four counters may not add up to the list — but each equals its own pane's rows.
+    expect(overviewCounts(list)).toEqual({ live: 4, "need you": 2, returned: 2, queued: 1 });
+  });
+
+  it("keeps each filter in lockstep with its counter", () => {
+    for (const filter of OVERVIEW_FILTERS) {
+      const byPredicate = list.filter((s) => matchesOverviewFilter(s, filter));
+      const byHelper = overviewSessions(list, filter);
+      expect(byPredicate.map((s) => s.id)).toEqual(byHelper.map((s) => s.id));
+      expect(overviewCounts(list)[filter]).toBe(byHelper.length);
+    }
+  });
+
+  it("shows exactly the bucket's colonies under each filter", () => {
+    expect(overviewSessions(list, "live").map((s) => s.id)).toEqual(["running", "waiting", "stalled", "idle"]);
+    expect(overviewSessions(list, "need you").map((s) => s.id)).toEqual(["waiting", "stalled"]);
+    expect(overviewSessions(list, "returned").map((s) => s.id)).toEqual(["pr", "no-changes"]);
+    expect(overviewSessions(list, "queued").map((s) => s.id)).toEqual(["queued"]);
+  });
+
+  it("restores the whole list when the filter is cleared — a second click or the counts", () => {
+    expect(overviewSessions(list, null).map((s) => s.id)).toEqual(list.map((s) => s.id));
+    expect(overviewSessions([], "returned")).toEqual([]);
   });
 });
