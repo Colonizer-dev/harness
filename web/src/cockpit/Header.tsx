@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import type { OrgEntry } from "../orgs";
+import { formatCost } from "../spend";
 import type { UpdateStatus } from "../types";
 
 // Chip text and its tooltip are derived together so they can never disagree.
@@ -121,7 +122,7 @@ export function Header(props: {
         </span>
         {cost !== null && (
           <span className="tabular-nums" title="what this workspace's colonies have spent in total">
-            ${cost.toFixed(2)} spent
+            {formatCost(cost)} spent
           </span>
         )}
         {update !== null && (

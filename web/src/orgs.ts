@@ -2,7 +2,7 @@
 // off, and which newly-appeared one the UI should be asking about. The components render; this
 // module decides what is in the list and in what order. Nothing here touches the browser.
 import { orgOf, occupiesSlot } from "./components/ui";
-import type { OrgInfo, OrgSettings, Session } from "./types";
+import type { OrgInfo, OrgSettings, OrgSpend, Session } from "./types";
 
 /** Absent, null and true all mean on — nothing changes for an existing install; only an explicit false is off. */
 export function orgEnabled(settings: OrgSettings | undefined): boolean {
@@ -18,6 +18,8 @@ export interface OrgEntry {
   pending: number;
   /** The org's avatar, when /api/orgs knows one; null for an org that only appears in the colony list. */
   avatar: string | null;
+  /** The org's spend from /api/orgs; absent on a mothership that does not measure it. */
+  spend?: OrgSpend;
 }
 
 /**
@@ -41,6 +43,7 @@ export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: Org
     if (info.awaiting_decision === true) continue;
     const e = entry(info.org, info.avatar_url ?? null);
     e.pending = info.pending_memory ?? 0;
+    if (info.spend !== undefined) e.spend = info.spend;
     if (!orgEnabled(info.settings)) off.add(e.org.toLowerCase());
   }
   for (const session of sessions) {

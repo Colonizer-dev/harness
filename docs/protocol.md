@@ -830,7 +830,7 @@ strings; UIs offer `GET /api/models` as suggestions).
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings, avatar_url?, awaiting_decision?}]` for every org that has a reason to be a workspace — saved settings, colonies, repository owners — plus the orgs still awaiting an answer, which appear only so a UI can ask about them. Switched-off orgs are still listed, so a UI can offer them back |
+| `GET /api/orgs` | `[{org, colonies: {live, total}, pending_memory, settings, spend, avatar_url?, awaiting_decision?}]` for every org that has a reason to be a workspace — saved settings, colonies, repository owners — plus the orgs still awaiting an answer, which appear only so a UI can ask about them. `spend` sums the org's sessions (§6.7). Switched-off orgs are still listed, so a UI can offer them back |
 | `PUT /api/orgs/{org}` | `{settings}`; merged into the saved settings instead of replacing them: a field the body names always wins (`null` = inherit the global module setting), one it omits keeps its saved value. A save is also the answer to a pending "do you want this org?" prompt for that org |
 
 The PUT is a merge, not a replace. A field of `settings` the body does not name keeps its saved value; a
@@ -1223,3 +1223,85 @@ Mothership side. The GitHub token never enters a colony, so filing happens on th
 - Every outcome (filed, duplicate, over the cap, rejected, failed) is a line in the colony log. The
   agent is told only that the finding was handed over.
 
+### 6.7 Spend (per org and per day)
+
+A UI can show an org what its colonies have spent, and history of that spend after a restart — even
+after colonies are cleaned up or deleted. Two surfaces answer, from two sources that agree by
+construction:
+
+- Every org entry of `GET /api/orgs` carries a `spend` object, summed live over the org's sessions:
+  whatever a session record currently holds is what the org reads as spent.
+- `GET /api/spend/history` answers the same shape per day, from an append-only journal, so the
+  picture survives the session records being cleaned up or deleted.
+
+```json
+"spend": {
+  "cost_usd": 12.47,
+  "routed_cost_usd": 0.03,
+  "tokens": {"input": 482001, "output": 123477, "cache_read": 900233, "cache_write": 4412},
+  "models": [
+    {"model": "claude-opus-5", "tokens": 932190, "cost_usd": 11.80},
+    {"model": "deepseek/deepseek-flash", "tokens": 577933, "cost_usd": null}
+  ]
+}
+```
+
+`cost_usd` adds the sessions' (or the day's) Claude-side estimates — `null` until any session (or
+any journal row) measured one, never `0.0` for an unmeasured cost. `routed_cost_usd` is the same
+addition over what the provider gateway routed and priced (§6.5). `tokens` sums `input_tokens`,
+`output_tokens`, `cache_read_tokens` and `cache_write_tokens` over the sessions' `model_usage`,
+`0` while nothing reported them. `models` lists every model the org (or day) used, sorted by tokens
+descending (ties by name). Each entry's `tokens` is that model's four counts summed; its
+`cost_usd` is the attributed cost, `null` when nothing attributed one.
+
+The cost-attribution rule, on both surfaces. A session's Claude-reported cost (`cost_usd`) is
+attributed to its model only when the session's `model_usage` contains exactly one model. A
+multi-model session contributes its cost to the org totals but to no model's row, and the split
+such a row would need is never fabricated. Gateway-routed dollars are never attributed per model:
+the gateway prices whole responses and cannot say which of its models served one (the journal's
+`routed` rows carry no model), so they reach the org totals' `routed_cost_usd` alone. A model whose
+cost was never attributed reads `null`, never `0.0` — and never a routed dollar. The history
+applies the same rule per turn, so the two surfaces agree. A subscription plan that reports no cost
+at all reads as `null`, never as free.
+
+### `GET /api/spend/history?days=30`
+
+```json
+{"days": [
+  {"day": "2026-09-20", "orgs": [
+    {"org": "acme",
+     "cost_usd": 12.47, "routed_cost_usd": 0.03,
+     "tokens": {"input": 482001, "output": 123477, "cache_read": 900233, "cache_write": 4412},
+     "models": [{"model": "claude-opus-5", "tokens": 932190, "cost_usd": 11.80}],
+     "launched": 2, "returned": 1}
+  ]}
+]}
+```
+
+`days` is how far back to answer, default 30, clamped to 1–365. Days come back oldest first and only
+days the journal mentions appear; each day's orgs are sorted by org name. Per day, `orgs` entries
+carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting) and
+`returned` (colonies that crossed into a terminal state that day — pull request opened, merged or
+closed, nothing to push, or stopped/failed). A colony counts as returned once per run, on the
+transition, never on the later updates.
+
+The journal behind it is `spend.jsonl` in the data dir, next to `sessions.json` and `routing.jsonl`:
+append-only, one JSON line per event, never rewritten. Colony cleanup and deletion do not touch it,
+so the history outlives the sessions that made it. A line that fails to parse, or a row from a newer
+build whose extra keys this one does not know, is skipped rather than fatal. The rows, with the UTC
+day each one is filed under and `cost_usd` omitted while nothing measured it:
+
+```json
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "usage", "model": "claude-opus-5",
+ "input_tokens": 400, "output_tokens": 10, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd": 1.50}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "usage", "cost_usd": 0.09}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "routed", "cost_usd": 0.03}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "launched"}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "returned"}
+```
+
+`usage` rows are a turn's increment over the turn before it (the session record keeps the
+cumulative; the journal gets the deltas). A one-model turn files its cost on that model's row; a
+multi-model turn files per-model token rows and its cost on an un-modeled row, mirroring the
+attribution rule. A failed append is reported through the app's sticky storage alert and leaves
+the run unchanged: a lost row is a lost measurement, not a failed run.

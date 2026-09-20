@@ -5,6 +5,7 @@ use crate::{
     config::{ModuleChoice, ModulesConfig, setting, setting_f64, setting_str, setting_u64},
     modules::schema_for,
     notify::NotifySettings,
+    spend,
     util::parse_disk_size,
     watchdog::WatchdogSettings,
 };
@@ -546,6 +547,8 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
             .map(|org| {
                 let live = sessions.iter().filter(|s| s.org == org && s.status.is_live()).count();
                 let total = sessions.iter().filter(|s| s.org == org).count();
+                let spending = sessions.iter().filter(|s| s.org == org);
+                let spend = spend::rollup_sessions(spending);
                 let pending = proposals
                     .iter()
                     .filter(|p| match p.note.scope.as_str() {
@@ -565,6 +568,7 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                 let mut entry = json!({
                     "org": org,
                     "colonies": {"live": live, "total": total},
+                    "spend": spend::spend_json(&spend),
                     "pending_memory": pending,
                     "settings": saved.get(&org).cloned().unwrap_or_default(),
                 });
@@ -1444,6 +1448,34 @@ mod tests {
             "a switched-off org keeps its saved entry and stays reachable"
         );
         assert!(listed.contains("acme"), "an org with colonies stays listed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_workspace_list_carries_each_orgs_spend() {
+        use crate::sessions::{SessionStatus, tests::colony};
+
+        let (app, root) = org_app();
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        *app.orgs_refreshed.lock().await = Some(std::time::Instant::now());
+        // No known orgs, no repo owners: the org the list answers for comes from its colonies alone.
+        let mut s = colony("acme", SessionStatus::Running);
+        s.id = "busy".into();
+        s.cost_usd = Some(3.5);
+        s.model_usage = Some(json!({"claude-opus-5": {"input_tokens": 100}}));
+        let mut free = colony("acme", SessionStatus::Stopped);
+        free.id = "done".into();
+        app.sessions.write().await.extend([s, free]);
+
+        let listed = list(State(app.clone())).await.0;
+        let acme = listed.iter().find(|e| e["org"] == "acme").expect("acme is listed");
+        assert_eq!(acme["colonies"]["total"], json!(2));
+        assert_eq!(acme["spend"]["cost_usd"], json!(3.5));
+        assert_eq!(acme["spend"]["tokens"]["input"], json!(100));
+        assert_eq!(acme["spend"]["tokens"]["output"], json!(0));
+        assert_eq!(acme["spend"]["models"][0]["model"], "claude-opus-5");
+        assert_eq!(acme["spend"]["models"][0]["tokens"], json!(100));
+        assert_eq!(acme["spend"]["models"][0]["cost_usd"], json!(3.5));
         let _ = std::fs::remove_dir_all(root);
     }
 

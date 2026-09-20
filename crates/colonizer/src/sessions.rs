@@ -11,6 +11,7 @@ use crate::{
     modules::{AgentModule, schema_for},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
+    spend,
     stack::{self, Stacked},
     util::{append_line, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic, write_private},
     watchdog::Activity,
@@ -87,6 +88,17 @@ impl SessionStatus {
     /// A microVM is expected to be running.
     pub fn is_live(self) -> bool {
         matches!(self, Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle)
+    }
+
+    /// The states a colony is left in when its run is over — stopped or failed, or done with its
+    /// pull request opened, merged, closed or nothing to push. PrOpened is included: the work is
+    /// out, whatever a reviewer does next. This is the status set the spend journal's `returned`
+    /// edge keys on, so [`App::update_session`] can tell the first transition into one of them.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::PrOpened | Self::Merged | Self::Closed | Self::NoChanges | Self::Stopped | Self::Failed
+        )
     }
 
     /// The name the API serialises, for messages that name a colony's state back to a person.
@@ -420,13 +432,23 @@ impl App {
     }
 
     pub async fn update_session<R>(&self, id: &str, f: impl FnOnce(&mut Session) -> R) -> Option<(Session, R)> {
-        let (session, result) = {
+        let (session, returned, result) = {
             let mut sessions = self.sessions.write().await;
             let session = sessions.iter_mut().find(|s| s.id == id)?;
+            // Told apart before the closure runs, so the journal can hear once about the crossing
+            // into a terminal state — PrOpened, merged, closed, stopped or failed — and never about
+            // the later updates inside it. That one hearing is the run's `returned` edge, filed
+            // against the day it happened, so it survives the cleanup or delete that forgets the
+            // colony itself.
+            let was_terminal = session.status.is_terminal();
             let result = f(session);
+            let returned = !was_terminal && session.status.is_terminal();
             session.updated_at = Utc::now();
-            (session.clone(), result)
+            (session.clone(), returned, result)
         };
+        if returned {
+            spend::record_returned(self, &session.org).await;
+        }
         self.persist_and_broadcast(&session).await;
         Some((session, result))
     }
@@ -848,6 +870,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         return Err(e.into());
     }
     app.runtime(&id).await;
+    // Heard about by the append-only spend journal now, before the colony does anything else: the
+    // `launched` edge has to survive the cleanup or delete that will forget this record.
+    spend::record_launched(&app, owner).await;
     if queued {
         if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
             app.session_log(
