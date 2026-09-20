@@ -872,6 +872,7 @@ function mockRuntime(): RuntimeInfo | undefined {
     gh: { ok: true, version: "2.60.0" },
     host_claude_bin: "/usr/local/bin/claude",
     host_claude_bin_error: null,
+    os: { vendor: "ubuntu", name: "Ubuntu", version: "24.04", id: "ubuntu" },
   });
   switch (mockRuntimeParam()) {
     case "mac":
@@ -882,6 +883,7 @@ function mockRuntime(): RuntimeInfo | undefined {
         gh: { ok: true, version: "2.60.0" },
         host_claude_bin: "/Users/you/.local/bin/claude",
         host_claude_bin_error: null,
+        os: { vendor: "apple", name: "macOS", version: "14.5", id: null },
       };
     case "kvm":
       return linux({ ok: false, error: "/dev/kvm: Permission denied" });

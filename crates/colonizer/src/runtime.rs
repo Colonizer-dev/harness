@@ -39,6 +39,9 @@ const KVM_DEVICE: &str = "/dev/kvm";
 pub struct Runtime {
     /// The released platform name, the same string the live map heartbeat sends.
     pub platform: &'static str,
+    /// Additive display info about the host OS. `platform` stays the supported/unsupported gate;
+    /// `os` only says what the machine is running and is always present.
+    pub os: Os,
     /// Linux only; `null` elsewhere, where there is no `/dev/kvm` to fix.
     pub kvm: Option<Kvm>,
     pub git: Tool,
@@ -48,6 +51,24 @@ pub struct Runtime {
     pub host_claude_bin: Option<String>,
     /// Set when `host_claude_bin` is None, saying plainly why.
     pub host_claude_bin_error: Option<String>,
+}
+
+/// The `os` object of `GET /api/status`: what host OS this machine runs, for display. `platform`
+/// stays the gate — supported or not — and `os` only adds colour, always present, never guessed.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Os {
+    /// The mapped vendor: the os-release `ID` against the known-distro map, its `ID_LIKE` tried
+    /// as the fallback, "apple" on macOS, "linux" for a distro the map does not know, "unknown"
+    /// off every OS that is neither Linux nor macOS.
+    pub vendor: String,
+    /// The display name: `NAME` from os-release, "macOS" on macOS, the raw os string elsewhere,
+    /// "Linux" on Linux when the os-release file is missing or unreadable.
+    pub name: String,
+    /// `VERSION_ID` on Linux, `sw_vers -productVersion` on macOS, `null` when not found.
+    pub version: Option<String>,
+    /// The raw os-release `ID` value, e.g. `linuxmint` for a distro the map does not know; Linux
+    /// only, `null` elsewhere.
+    pub id: Option<String>,
 }
 
 /// `/dev/kvm`, as the installer's `[ -r /dev/kvm ] && [ -w /dev/kvm ]` sees it.
@@ -80,9 +101,15 @@ pub struct Cached {
 /// returns: the `--version` execs get [`TOOL_PROBE_TIMEOUT`], the host binary walk gets
 /// [`HOST_BIN_TIMEOUT`]. Nothing here awaits an unbounded exec.
 pub async fn probe(app: &App) -> Runtime {
-    let (git, gh, host) = tokio::join!(probe_tool("git"), probe_tool("gh"), host_bin(app, HOST_BIN_TIMEOUT));
+    let (git, gh, host, os) = tokio::join!(
+        probe_tool("git"),
+        probe_tool("gh"),
+        host_bin(app, HOST_BIN_TIMEOUT),
+        probe_os()
+    );
     Runtime {
         platform: telemetry::platform(),
+        os,
         kvm: probe_kvm().await,
         git,
         gh,
@@ -248,6 +275,129 @@ async fn current_user() -> String {
         .unwrap_or_else(|| "the current user".into())
 }
 
+/// The os answer as a pure function of what the probe would find, so the mapping and the
+/// os-release parsing are testable without a real `/etc/os-release` or `sw_vers`. Never guesses:
+/// a distro the map does not know stays vendor `linux` with its raw `id` — we know it is Linux,
+/// just not which distro — and an OS beyond Linux and macOS is vendor `unknown` with the raw os
+/// string, name only.
+fn os_for(os: &str, os_release: Option<&str>, product_version: Option<&str>) -> Os {
+    if os == "linux" {
+        return match os_release {
+            Some(body) => os_from_release(body),
+            None => Os {
+                vendor: "linux".into(),
+                name: "Linux".into(),
+                version: None,
+                id: None,
+            },
+        };
+    }
+    if os == "macos" {
+        let version = product_version
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(str::to_owned);
+        return Os {
+            vendor: "apple".into(),
+            name: "macOS".into(),
+            version,
+            id: None,
+        };
+    }
+    Os {
+        vendor: "unknown".into(),
+        name: os.to_owned(),
+        version: None,
+        id: None,
+    }
+}
+
+/// The linux answer from an os-release body: `NAME` for display, `VERSION_ID` for the version,
+/// the raw `ID` kept for clients that want it, and the vendor from `ID` with each whitespace
+/// token of `ID_LIKE` tried as the fallback, in order, so `ID_LIKE="ubuntu debian"` maps to
+/// `ubuntu` and not the first token guessed at.
+fn os_from_release(body: &str) -> Os {
+    let id = os_release_field(body, "ID");
+    let vendor = id
+        .and_then(vendor_for)
+        .or_else(|| os_release_field(body, "ID_LIKE").and_then(|like| like.split_whitespace().find_map(vendor_for)))
+        .unwrap_or("linux");
+    Os {
+        vendor: vendor.to_owned(),
+        name: os_release_field(body, "NAME").unwrap_or("Linux").to_owned(),
+        version: os_release_field(body, "VERSION_ID").map(str::to_owned),
+        id: id.map(str::to_owned),
+    }
+}
+
+/// One field of an os-release body: `KEY=VALUE` lines only, the first occurrence of each key wins,
+/// comments and blank lines skipped, double quotes and a trailing CRLF stripped, and an empty
+/// value treated as absent so the caller falls back rather than reporting blank.
+fn os_release_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (k, value) = line.split_once('=')?;
+            if k != key {
+                return None;
+            }
+            let value = value.trim();
+            let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+            if value.is_empty() { None } else { Some(value) }
+        })
+}
+
+/// The vendored string for one os-release `ID` (or `ID_LIKE` token), or None when the map does
+/// not know it.
+fn vendor_for(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "ubuntu" => "ubuntu",
+        "debian" => "debian",
+        "fedora" => "fedora",
+        "rhel" => "rhel",
+        "centos" => "centos",
+        "rocky" => "rocky",
+        "almalinux" => "almalinux",
+        "arch" => "arch",
+        "omarchy" => "omarchy",
+        "manjaro" => "manjaro",
+        "endeavouros" => "endeavouros",
+        "nixos" => "nixos",
+        "alpine" => "alpine",
+        _ => return id.starts_with("opensuse").then_some("opensuse"),
+    })
+}
+
+/// What the probe finds on this machine: `/etc/os-release` read on Linux, `sw_vers -productVersion`
+/// on macOS. Either can fail — an unreadable file or a missing command degrades only that field,
+/// to vendor `linux` with name `Linux` on Linux, to no version on macOS — and anywhere else stays
+/// `unknown`.
+async fn probe_os() -> Os {
+    let os = std::env::consts::OS;
+    let os_release = if os == "linux" {
+        tokio::fs::read_to_string("/etc/os-release").await.ok()
+    } else {
+        None
+    };
+    let product_version = if os == "macos" { sw_vers().await } else { None };
+    os_for(os, os_release.as_deref(), product_version.as_deref())
+}
+
+/// `sw_vers -productVersion` stdout, accepted only when the command exits successfully and prints
+/// a non-empty version; anything else is None, which degrades the version field alone.
+async fn sw_vers() -> Option<String> {
+    let mut cmd = Command::new("sw_vers");
+    cmd.arg("-productVersion");
+    let output = cmd.output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout);
+    let version = version.trim();
+    if version.is_empty() { None } else { Some(version.to_owned()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +415,12 @@ mod tests {
     fn runtime_with(kvm: Option<Kvm>) -> Runtime {
         Runtime {
             platform: "linux-x86_64",
+            os: Os {
+                vendor: "ubuntu".into(),
+                name: "Ubuntu".into(),
+                version: Some("24.04".into()),
+                id: Some("ubuntu".into()),
+            },
             kvm,
             git: Tool {
                 ok: true,
@@ -350,14 +506,133 @@ mod tests {
     }
 
     #[test]
+    fn every_known_distro_id_maps_to_its_vendor() {
+        for (id, vendor) in [
+            ("ubuntu", "ubuntu"),
+            ("debian", "debian"),
+            ("fedora", "fedora"),
+            ("rhel", "rhel"),
+            ("centos", "centos"),
+            ("rocky", "rocky"),
+            ("almalinux", "almalinux"),
+            ("arch", "arch"),
+            ("omarchy", "omarchy"),
+            ("manjaro", "manjaro"),
+            ("endeavouros", "endeavouros"),
+            ("nixos", "nixos"),
+            ("alpine", "alpine"),
+            ("opensuse-leap", "opensuse"),
+            ("opensuse-tumbleweed", "opensuse"),
+        ] {
+            let os = os_for("linux", Some(&format!("ID={id}\n")), None);
+            assert_eq!(os.vendor, vendor, "os-release id {id}");
+        }
+    }
+
+    #[test]
+    fn an_unmapped_id_falls_back_to_id_like_in_order() {
+        let mint = os_for("linux", Some("ID=linuxmint\nID_LIKE=ubuntu\nNAME=\"Linux Mint\"\n"), None);
+        assert_eq!(mint.vendor, "ubuntu", "ID_LIKE maps when ID does not");
+        let pop = os_for("linux", Some("ID=pop\nID_LIKE=\"ubuntu debian\"\nNAME=Pop\n"), None);
+        assert_eq!(pop.vendor, "ubuntu", "the first ID_LIKE token wins");
+        let something = os_for("linux", Some("ID=something\nID_LIKE=fedora\n"), None);
+        assert_eq!(something.vendor, "fedora", "a single-token ID_LIKE works too");
+    }
+
+    #[test]
+    fn an_unmapped_distro_is_vendor_linux_with_its_raw_id_kept() {
+        let mint = os_for(
+            "linux",
+            Some("ID=linuxmint\nNAME=\"Linux Mint\"\nVERSION_ID=\"21.3\"\n"),
+            None,
+        );
+        assert_eq!(mint.vendor, "linux", "vendor is linux, not a guess");
+        assert_eq!(mint.id.as_deref(), Some("linuxmint"), "the raw id is kept");
+        assert_eq!(mint.name, "Linux Mint");
+        assert_eq!(mint.version.as_deref(), Some("21.3"));
+        let flavour = os_for(
+            "linux",
+            Some("ID=flavour\nID_LIKE=zzz\nNAME=Flavour\nVERSION_ID=\"1\"\n"),
+            None,
+        );
+        assert_eq!(flavour.vendor, "linux", "a missing and an unmapped ID_LIKE both fall back");
+        assert_eq!(flavour.id.as_deref(), Some("flavour"));
+        assert_eq!(flavour.name, "Flavour");
+        assert_eq!(flavour.version.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn os_release_values_are_unquoted_and_comments_blanks_and_crlf_are_handled() {
+        let body = "# the distro marker\n\nNAME=\"Ubuntu\"\r\nVERSION_ID=\"24.04\"\r\nID=ubuntu\n";
+        let os = os_for("linux", Some(body), None);
+        assert_eq!(os.vendor, "ubuntu");
+        assert_eq!(os.name, "Ubuntu", "surrounding quotes are stripped");
+        assert_eq!(os.version.as_deref(), Some("24.04"));
+        let quoted_id = os_for("linux", Some("ID=\"ubuntu\"\nNAME=\"Ubuntu\"\n"), None);
+        assert_eq!(quoted_id.vendor, "ubuntu", "an unquoted and a quoted ID both map");
+        assert_eq!(quoted_id.id.as_deref(), Some("ubuntu"));
+    }
+
+    #[test]
+    fn linux_without_an_os_release_is_just_linux() {
+        let os = os_for("linux", None, None);
+        assert_eq!(os.vendor, "linux");
+        assert_eq!(os.name, "Linux");
+        assert_eq!(os.version, None);
+        assert_eq!(os.id, None);
+    }
+
+    #[test]
+    fn macos_reports_apple_with_the_product_version_or_none() {
+        let os = os_for("macos", None, Some("14.5\n"));
+        assert_eq!(os.vendor, "apple");
+        assert_eq!(os.name, "macOS");
+        assert_eq!(os.version.as_deref(), Some("14.5"), "the newline is trimmed");
+        assert_eq!(os.id, None);
+        let os = os_for("macos", None, None);
+        assert_eq!(os.version, None, "no product version, no version field");
+        let os = os_for("macos", None, Some("   \n"));
+        assert_eq!(os.version, None, "blank output is treated as no version");
+    }
+
+    #[test]
+    fn an_unknown_os_is_vendor_unknown_with_the_raw_name() {
+        let os = os_for("freebsd", None, None);
+        assert_eq!(os.vendor, "unknown");
+        assert_eq!(os.name, "freebsd", "the raw os string, never a guess");
+        assert_eq!(os.version, None);
+        assert_eq!(os.id, None);
+    }
+
+    #[test]
     fn the_runtime_object_serialises_as_documented() {
         let value = serde_json::to_value(runtime_with(Some(Kvm { ok: true, error: None }))).unwrap();
         assert_eq!(value["platform"], "linux-x86_64");
+        assert_eq!(
+            value["os"],
+            json!({"vendor": "ubuntu", "name": "Ubuntu", "version": "24.04", "id": "ubuntu"})
+        );
         assert_eq!(value["kvm"], json!({"ok": true, "error": null}));
         assert_eq!(value["git"], json!({"ok": true, "version": "2.45.0", "error": null}));
         assert_eq!(value["gh"], json!({"ok": true, "version": "2.60.0", "error": null}));
         assert_eq!(value["host_claude_bin"], "/Users/me/.local/bin/claude");
         assert_eq!(value["host_claude_bin_error"], Value::Null);
+        // version and id are Options that hold Nothing here, advertised as null so the web UI
+        // skips nothing.
+        let bare = Runtime {
+            os: Os {
+                vendor: "linux".into(),
+                name: "Linux".into(),
+                version: None,
+                id: None,
+            },
+            ..runtime_with(None)
+        };
+        let value = serde_json::to_value(bare).unwrap();
+        assert_eq!(
+            value["os"],
+            json!({"vendor": "linux", "name": "Linux", "version": null, "id": null})
+        );
     }
 
     #[test]
