@@ -134,6 +134,28 @@ export interface RuntimeInfo {
   host_claude_bin: string | null;
   /** Why the host binary is missing, when it is. */
   host_claude_bin_error: string | null;
+  /**
+   * Which operating system the mothership runs on, as the host distro tooling reports it. Additive
+   * display info only — `platform` stays the supported/unsupported gate. Older mothership builds
+   * omit the whole field.
+   */
+  os?: OsInfo;
+}
+
+/**
+ * GET /api/status `runtime.os` (issue #208): which operating system the mothership runs on.
+ * Additive display info only — `platform` remains the supported/unsupported gate. Older mothership
+ * builds omit the whole block.
+ */
+export interface OsInfo {
+  /** The family key, one of: ubuntu, debian, fedora, rhel, centos, rocky, almalinux, arch, omarchy, manjaro, endeavouros, nixos, alpine, opensuse, linux, apple, unknown. */
+  vendor: string;
+  /** Display name, e.g. "Ubuntu", "macOS". */
+  name: string;
+  /** e.g. "24.04", "14.5"; null when there is no version to report. */
+  version: string | null;
+  /** Raw os-release ID, Linux only; null off Linux and where the probe found none. */
+  id: string | null;
 }
 
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */

@@ -9,6 +9,7 @@ import type { HarnessStatus, ModuleInfo, TelemetryStatus } from "../types";
 import { type ImagePull } from "../useImagePull";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { IconCheck, IconChevron } from "./icons";
+import { OsLogo } from "./OsLogo";
 import { Badge, Button, Spinner, Switch, cx, seconds } from "./ui";
 
 /** The stacks a sandbox preset can name, the automatic default first; "custom" and anything unknown has no chip. */
@@ -323,6 +324,7 @@ export function SetupSection({
                 <StateMark state={row.state} />
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {row.os != null && <OsLogo os={row.os} size={14} />}
                     <span className="text-[14px] font-semibold">{row.title}</span>
                     {row.state === "done" && <span className="min-w-0 text-[12.5px] text-muted [overflow-wrap:anywhere]">{row.detail}</span>}
                     {row.state === "working" && <Badge tone="info">Downloading</Badge>}
