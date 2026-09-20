@@ -136,6 +136,17 @@ pub struct MeshInfo {
     pub ip: Option<String>,
 }
 
+/// What linked a fix colony to the finding that spawned it: the hunter colony that filed the
+/// finding, the finding's title, and the issue URL it was filed as. The review runs on this colony's
+/// pull request and reports back to the hunter's ledger and event stream.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FixFor {
+    pub session: String,
+    pub title: String,
+    pub issue: Option<String>,
+}
+
 /// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
 /// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
 /// making every existing file unparseable on upgrade. New fields need no annotation of their own.
@@ -165,6 +176,18 @@ pub struct Session {
     pub local_port: Option<u16>,
     pub agent: String,
     pub autopilot: bool,
+    /// Whether a filed finding from this colony spawns a fix colony. `None` until the operator
+    /// answers, and the publish module's `autofix` setting decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autofix: Option<bool>,
+    /// Whether a fix colony's review-passing pull request merges itself. `None` until the operator
+    /// answers, and the publish module's `automerge` setting decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automerge: Option<bool>,
+    /// The finding this colony was spawned to fix, and the hunter that filed it; `None` when a
+    /// colony started on an issue or free, no colony is fixing anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_for: Option<FixFor>,
     pub pr_url: Option<String>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,6 +256,9 @@ impl Default for Session {
             local_port: None,
             agent: String::new(),
             autopilot: false,
+            autofix: None,
+            automerge: None,
+            fix_for: None,
             pr_url: None,
             publish_stage: None,
             error: None,
@@ -258,6 +284,18 @@ pub struct Runtime {
     pub(crate) events: broadcast::Sender<Arc<Broadcast>>,
     pub(crate) commands: mpsc::UnboundedSender<Value>,
     pub(crate) commands_rx: Mutex<Option<mpsc::UnboundedReceiver<Value>>>,
+    /// The last *agentd* seq persisted, and only agentd events advance it: it is the dedupe cursor
+    /// the reconnect guard compares against (`events.rs` `handle_agent_event`) and the `?since=`
+    /// rank agentd replays from. Host chain events (`validation.rs` `emit_chain`) live in the file's
+    /// seq space but never move this cursor, so one cursor cannot push the other past an event that
+    /// has not arrived yet — the shared cursor that used to do both is exactly what dropped the next
+    /// real agentd event when a host chain event consumed its rank.
+    pub(crate) agent_seq: AtomicU64,
+    /// The highest `seq` written to `events.jsonl` so far, agentd and host chain lines together. It
+    /// is the monotonic rank a reconnecting browser replays above, and the file's seq at this rank
+    /// the browser uses as its own `?since=`. Agentd events whose own seq would regress it are
+    /// renumbered to one past it (with their true seq kept in `a_seq`), so the file never holds two
+    /// lines out of order.
     pub(crate) last_seq: AtomicU64,
     pub(crate) logs: Mutex<VecDeque<Value>>,
     /// The open question: its id, and the questions themselves, which autonomous mode needs to
@@ -291,8 +329,8 @@ fn read_jsonl(path: &std::path::Path) -> (Vec<u8>, Option<std::io::Error>) {
 }
 
 pub(crate) struct Broadcast {
-    seq: Option<u64>,
-    json: String,
+    pub(crate) seq: Option<u64>,
+    pub(crate) json: String,
 }
 
 impl Runtime {
@@ -313,6 +351,22 @@ impl Runtime {
             .split(|b| *b == b'\n')
             .rev()
             .find_map(|line| serde_json::from_str::<Value>(std::str::from_utf8(line).ok()?).ok()?["seq"].as_u64())
+            .unwrap_or(0);
+        // The reconnect cursor is agentd's, not the file's: only lines the runner wrote count, each
+        // at its own seq (a line `handle_agent_event` renumbered because it collided with a host
+        // chain event keeps its true seq in `a_seq`). Host chain events are cut out by their type —
+        // the five this build emits and the protocol reserves — so a restart mid-life asks agentd to
+        // replay exactly the events it has missed, and cannot skip the ones that never landed.
+        let agent_seq = events_bytes
+            .split(|b| *b == b'\n')
+            .filter_map(|line| serde_json::from_str::<Value>(std::str::from_utf8(line).ok()?).ok())
+            .filter(|v| {
+                v.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| !crate::validation::is_host_chain_type(t))
+            })
+            .filter_map(|v| v.get("a_seq").and_then(Value::as_u64).or_else(|| v["seq"].as_u64()))
+            .max()
             .unwrap_or(0);
         let (logs_bytes, logs_err) = read_jsonl(&logs_path);
         // The take counts parsed entries, not raw split segments: `append_line` ends every entry
@@ -348,6 +402,7 @@ impl Runtime {
             events: broadcast::channel(1024).0,
             commands,
             commands_rx: Mutex::new(Some(commands_rx)),
+            agent_seq: AtomicU64::new(agent_seq),
             last_seq: AtomicU64::new(last_seq),
             logs: Mutex::new(logs),
             open_question: Mutex::new(None),
@@ -513,27 +568,35 @@ impl App {
 
 #[derive(Deserialize)]
 pub struct NewSession {
-    repo: String,
+    pub repo: String,
     #[serde(default)]
-    issue: Option<u64>,
+    pub issue: Option<u64>,
     #[serde(default)]
-    title: String,
+    pub title: String,
     #[serde(default)]
-    instructions: String,
+    pub instructions: String,
     /// Omitted uses the publish module's `autopilot` setting.
     #[serde(default)]
-    autopilot: Option<bool>,
+    pub autopilot: Option<bool>,
+    /// Whether a filed finding from this colony spawns a fix colony; omitted uses the publish
+    /// module's `autofix` setting.
+    #[serde(default)]
+    pub autofix: Option<bool>,
+    /// Whether a fix colony's review-passing pull request merges itself; omitted uses the publish
+    /// module's `automerge` setting, which is only read when autofix is also on.
+    #[serde(default)]
+    pub automerge: Option<bool>,
     /// Start a colony on an issue another colony already holds. Off by default: see `issue_held_by`.
     #[serde(default)]
-    allow_duplicate: bool,
+    pub allow_duplicate: bool,
     /// Run this colony on a named model tier — `low`, `medium` or `high` — instead of the one the
     /// routing rule picks for the task.
     #[serde(default)]
-    model_tier: Option<String>,
+    pub model_tier: Option<String>,
     /// Stack this colony on another one: it queues until that colony has pushed its branch, then
     /// starts from that branch instead of the default one, and its pull request is a diff against it.
     #[serde(default)]
-    after: Option<String>,
+    pub after: Option<String>,
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -570,6 +633,37 @@ pub(crate) fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     setting(&modules.publish, &schema, "file_findings")
         .and_then(Value::as_bool)
         .unwrap_or(true)
+}
+
+/// The publish module's boolean setting `key`, its schema default when nothing is set.
+async fn publish_bool(app: &App, key: &str) -> bool {
+    let modules = app.modules.read().await.clone();
+    let schema = schema_for("publish", &modules.publish.provider, &app.agents);
+    setting(&modules.publish, &schema, key)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether a finding that passes validation spawns a fix colony: the launch choice on the session,
+/// or the publish module's `autofix` setting.
+pub(crate) async fn autofix_enabled(app: &App, s: &Session) -> bool {
+    match s.autofix {
+        Some(on) => on,
+        None => publish_bool(app, "autofix").await,
+    }
+}
+
+/// Whether a fix colony's review-passing pull request merges itself: the launch choice on the
+/// session, or the publish module's `automerge` setting. An explicit choice always counts — a fix
+/// colony's `automerge` was written from its hunter's decision at creation, so gating it on the fix
+/// colony's own autofix (which is `Some(false)`, to stop it cascading further colonies) would
+/// quietly undo the hunter's opt-in. Only the module *default* is gated on autofix: a default
+/// automerge while default-autofix is off is a setting nobody can have meant.
+pub(crate) async fn automerge_enabled(app: &App, s: &Session) -> bool {
+    match s.automerge {
+        Some(on) => on,
+        None => autofix_enabled(app, s).await && publish_bool(app, "automerge").await,
+    }
 }
 
 /// The container image a colony boots: what the given stack's preset names, unless modules.json sets
@@ -789,6 +883,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         local_port: None,
         agent: agent.id.clone(),
         autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app.agents, &modules)),
+        autofix: req.autofix,
+        automerge: req.automerge,
+        fix_for: None,
         pr_url: None,
         publish_stage: None,
         error: None,
@@ -1932,6 +2029,13 @@ pub(crate) mod tests {
         full.local_port = Some(7070);
         full.agent = "claude".into();
         full.autopilot = true;
+        full.autofix = Some(true);
+        full.automerge = Some(false);
+        full.fix_for = Some(FixFor {
+            session: "hunter".into(),
+            title: "something is broken".into(),
+            issue: Some("https://github.com/acme/repo/issues/9".into()),
+        });
         full.pr_url = Some("https://github.com/acme/repo/pull/1".into());
         full.publish_stage = Some(PublishStage::Pushed);
         full.error = Some("boom".into());
@@ -1956,6 +2060,44 @@ pub(crate) mod tests {
         }
     }
 
+    /// Nothing configured means nothing automatic; the publish module's defaults flow into a session
+    /// that did not choose, and a module-default automerge without autofix is nothing, while an
+    /// explicit automerge on a fix colony counts on its own — that explicit value IS the hunter's
+    /// decision, set at the fix colony's creation.
+    #[tokio::test]
+    async fn autofix_and_automerge_fall_back_to_the_module_and_count_explicit_choices() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let s = app.session("abc").await.unwrap();
+        assert!(!autofix_enabled(&app, &s).await);
+        assert!(!automerge_enabled(&app, &s).await);
+
+        // The publish module's defaults flow down when the session did not choose.
+        {
+            let mut modules = app.modules.write().await;
+            modules.publish.settings.insert("autofix".into(), json!(true));
+            modules.publish.settings.insert("automerge".into(), json!(true));
+        }
+        assert!(autofix_enabled(&app, &s).await);
+        assert!(automerge_enabled(&app, &s).await);
+
+        // Automerge only counts when autofix is enabled: with autofix off, there are no fix
+        // colonies, so the module-default automerge is a setting nobody can have meant.
+        {
+            let mut modules = app.modules.write().await;
+            modules.publish.settings.remove("autofix");
+        }
+        assert!(!autofix_enabled(&app, &s).await);
+        assert!(!automerge_enabled(&app, &s).await);
+
+        // A fix colony carries its automerge explicitly from its hunter, so it counts even though
+        // its autofix is `Some(false)` — the flag that stops a fix colony cascading.
+        let mut fix = colony("acme", SessionStatus::Idle);
+        fix.autofix = Some(false);
+        fix.automerge = Some(true);
+        assert!(automerge_enabled(&app, &fix).await);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         Session {
             id: String::new(),
@@ -1975,6 +2117,9 @@ pub(crate) mod tests {
             local_port: None,
             agent: String::new(),
             autopilot: false,
+            autofix: None,
+            automerge: None,
+            fix_for: None,
             pr_url: None,
             publish_stage: None,
             error: None,
@@ -2421,6 +2566,8 @@ pub(crate) mod tests {
                 title: String::new(),
                 instructions: String::new(),
                 autopilot: None,
+                autofix: None,
+                automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
                 after: None,
@@ -2495,6 +2642,8 @@ pub(crate) mod tests {
                 title: String::new(),
                 instructions: String::new(),
                 autopilot: None,
+                autofix: None,
+                automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
                 after: None,
@@ -2579,8 +2728,9 @@ pub(crate) mod tests {
     // -- stacking (create with `after`) ----------------------------------------------------------
 
     /// The smallest install `create` insists on, as in the org-known test above: an agent module
-    /// matching the configured provider and a guest binary that claims to be an ELF.
-    fn app_that_can_create(root: &std::path::Path) -> Shared {
+    /// matching the configured provider and a guest binary that claims to be an ELF. Shared with
+    /// validation.rs, whose fix-colony test creates a session the same way.
+    pub(crate) fn app_that_can_create(root: &std::path::Path) -> Shared {
         let assets = root.join("assets");
         let dir = assets.join("modules/agents/claude-code");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2607,6 +2757,8 @@ pub(crate) mod tests {
             title: String::new(),
             instructions: String::new(),
             autopilot: None,
+            autofix: None,
+            automerge: None,
             allow_duplicate: false,
             model_tier: None,
             after,

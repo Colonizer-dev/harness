@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  FindingRecord,
   HarnessStatus,
   HeadroomStatus,
   Issue,
@@ -74,6 +75,8 @@ export interface Api {
   issues(repo: string): Promise<Issue[]>;
   sessions(): Promise<Session[]>;
   session(id: string): Promise<Session>;
+  /** The colony's finding ledger, in the order it was written (an append-only record per finding stage). */
+  findings(id: string): Promise<FindingRecord[]>;
   createSession(body: NewSessionRequest): Promise<Session>;
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
@@ -173,6 +176,7 @@ export const httpApi: Api = {
   },
   sessions: () => request("/api/sessions"),
   session: (id) => request(`/api/sessions/${enc(id)}`),
+  findings: (id) => request(`/api/sessions/${enc(id)}/findings`),
   createSession: (body) => post("/api/sessions", body),
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),

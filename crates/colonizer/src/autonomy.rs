@@ -417,7 +417,7 @@ fn outbound_request(provider: &Provider, body: &Value) -> Result<Outbound> {
 /// An `openai`-wire provider is translated on the way out and back, the same translation the gateway
 /// does for colonies; both wires end at one Anthropic-shaped reply, so the text extraction below
 /// stays single-source.
-async fn ask_model(app: &App, model: &str, prompt: &str) -> Result<String> {
+pub(crate) async fn ask_model(app: &App, model: &str, prompt: &str) -> Result<String> {
     let providers = app.providers();
     let (provider, upstream) = route(model, &providers)?;
     let Outbound {

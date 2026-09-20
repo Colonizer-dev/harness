@@ -39,6 +39,7 @@ mod timing;
 mod update;
 mod usage;
 mod util;
+mod validation;
 mod version;
 mod watchdog;
 
@@ -910,7 +911,9 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/stop", post(lifecycle::stop))
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
-        .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws));
+        .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
+        .route("/api/sessions/{id}/findings", get(findings::list))
+        .route("/api/findings", get(findings::list_all));
     let router = api
         .merge(web_router(app.cfg.assets.as_deref()))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))

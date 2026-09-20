@@ -6,6 +6,7 @@ import type {
   AgentEventBody,
   AgentRef,
   Answers,
+  FindingRecord,
   HarnessStatus,
   HeadroomStatus,
   Issue,
@@ -1469,12 +1470,30 @@ export function createMockApi(): Api {
       provider: "github-pr",
       providers: [{ id: "github-pr", name: "GitHub pull request" }],
       enabled: true,
-      settings: { autopilot: true, draft: false },
+      settings: { autopilot: true, draft: false, file_findings: true, autofix: false, automerge: false },
       schema: {
         type: "object",
         properties: {
           autopilot: { type: "boolean", title: "Open the PR automatically", default: true },
           draft: { type: "boolean", title: "Open PRs as drafts", default: false },
+          file_findings: {
+            type: "boolean",
+            title: "File validated findings as issues",
+            description: "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.",
+            default: true,
+          },
+          autofix: {
+            type: "boolean",
+            title: "Autofix validated findings",
+            description: "When a colony files a validated finding, spawn a fix colony for it: a fresh colony whose pull request is reviewed by an independent session before anything merges. Can be switched off per colony at launch.",
+            default: false,
+          },
+          automerge: {
+            type: "boolean",
+            title: "Merge fixes whose review passes",
+            description: "Merge a fix colony's pull request when its independent review passes; requires autofix, since with no fix colonies there is nothing to merge. Can be switched off per colony at launch.",
+            default: false,
+          },
         },
       },
     },
@@ -1489,6 +1508,20 @@ export function createMockApi(): Api {
     await sleep(ms);
     return clone(value());
   };
+
+  // The demo checkout colony's finding ledger, in the same append-only record-line shape the real
+  // endpoint returns: one finding that ran the whole way to a merged pull request, and a second
+  // that validation rejected with a reason. Any other id has no ledger, like a colony that never
+  // validated a finding.
+  const FINDINGS: FindingRecord[] = [
+    { session: "demo1234", title: "Checkout fails for guest users", state: "validated", severity: "high", ts: ago(60 * 24 * 6) },
+    { session: "demo1234", title: "Checkout fails for guest users", state: "filed", issue: "https://github.com/acme/webshop/issues/88", ts: ago(60 * 24 * 6) },
+    { session: "demo1234", title: "Checkout fails for guest users", state: "fix_colony", fix_session: "fix-demo1234-1", ts: ago(60 * 24 * 5) },
+    { session: "demo1234", title: "Checkout fails for guest users", state: "review", review_session: "rev-demo1234-1", verdict: "pass", ts: ago(60 * 24 * 4) },
+    { session: "demo1234", title: "Checkout fails for guest users", state: "merged", pr: "https://github.com/acme/webshop/pull/215", ts: ago(60 * 24 * 3) },
+    { session: "demo1234", title: "Free-shipping threshold shows the cart subtotal", state: "validated", severity: "medium", ts: ago(60 * 24 * 2) },
+    { session: "demo1234", title: "Free-shipping threshold shows the cart subtotal", state: "rejected", reason: "does not reproduce on the staging sandbox", ts: ago(60 * 24 * 2) },
+  ];
 
   return {
     mock: true,
@@ -1615,6 +1648,7 @@ export function createMockApi(): Api {
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
+    findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
     session: async (id) => later(() => find(id).session),
@@ -1631,6 +1665,10 @@ export function createMockApi(): Api {
         {
           ...baseSession(id, body.repo, issueNumber, title),
           autopilot: body.autopilot ?? true,
+          // A launch choice carries through to the session record, as on the mothership; omitted
+          // means the session fell back to the publish module's setting and reports none of its own.
+          autofix: body.autofix,
+          automerge: body.automerge,
           parent: after?.id ?? null,
           base: after?.branch ?? "main",
         },

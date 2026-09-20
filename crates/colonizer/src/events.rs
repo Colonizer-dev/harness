@@ -45,7 +45,7 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
 
 pub(crate) async fn start_link(app: &Shared, id: &str) {
     let rt = app.runtime(id).await;
-    // Before `agent_link` reads `last_seq` for the reconnect URL: a load that failed to read the
+    // Before `agent_link` reads `agent_seq` for the reconnect URL: a load that failed to read the
     // stored events must be on the record before the colony starts using the restarted cursor.
     app.report_load_error(id, &rt).await;
     rt.stop.send_replace(false);
@@ -69,7 +69,7 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
         if !s.status.is_live() {
             return;
         }
-        let since = rt.last_seq.load(Ordering::SeqCst);
+        let since = rt.agent_seq.load(Ordering::SeqCst);
         match agentd_ws(&app, &s, &format!("/v1/events?since={since}")).await {
             Ok(ws) => {
                 let message = if connected_before {
@@ -124,29 +124,55 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
 }
 
 pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
-    let Ok(event) = serde_json::from_str::<Value>(line) else {
+    let Ok(mut event) = serde_json::from_str::<Value>(line) else {
         return;
     };
     let Some(seq) = event["seq"].as_u64() else { return };
-    let persisted = {
+    let (persisted, file_seq, file_line) = {
         let _guard = rt.file_lock.lock().await;
-        if seq <= rt.last_seq.load(Ordering::SeqCst) {
-            return; // replayed after a reconnect
+        if seq <= rt.agent_seq.load(Ordering::SeqCst) {
+            return; // replayed by agentd after a reconnect: already on record
         }
-        match append_line(&rt.events_path, line).await {
-            Ok(()) => {
-                rt.last_seq.store(seq, Ordering::SeqCst);
-                None
-            }
-            Err(e) => Some(e),
-        }
+        // The file's seqs are one counter, agentd lines and host chain lines together, so a browser
+        // reconnecting with `?since=` replays one monotonic file. A host chain event has already
+        // stamped a rank at or past this agentd event's own seq (validation.rs `emit_chain` numbers
+        // from the same file cursor), so the line that would collide or regress the file is
+        // renumbered to one past the highest line in it, and remembers its agentd seq in `a_seq`:
+        // the reconnect cursor stays agentd's (`agent_seq`), and a host restart reads `a_seq` back
+        // exactly (sessions.rs `Runtime::load`). Agentd's own seq is never consumed or advanced by a
+        // host event, so the next real agentd event cannot be mistaken for a replay. A line that
+        // does not collide is appended byte-for-byte as the runner wrote it.
+        let (file_seq, file_line);
+        let err = if seq <= rt.last_seq.load(Ordering::SeqCst) {
+            event["seq"] = json!(rt.last_seq.load(Ordering::SeqCst) + 1);
+            event["a_seq"] = json!(seq);
+            file_seq = event["seq"].as_u64().unwrap_or(seq);
+            file_line = event.to_string();
+            append_line(&rt.events_path, &file_line).await.err()
+        } else {
+            file_seq = seq;
+            file_line = line.to_string();
+            append_line(&rt.events_path, line).await.err()
+        };
+        (
+            match err {
+                None => {
+                    rt.agent_seq.store(seq, Ordering::SeqCst);
+                    rt.last_seq.store(file_seq, Ordering::SeqCst);
+                    None
+                }
+                Some(e) => Some(e),
+            },
+            file_seq,
+            file_line,
+        )
     };
     if let Some(e) = persisted {
         // The event still reaches every browser below, but the evidence on disk now has a gap, and
-        // a gap in the event log must not be silent. `last_seq` stays put, so if the reconnect's
-        // re-fetch of this seq arrives before anything else is appended, the append gets another
-        // chance — but once a later event succeeds, `last_seq` jumps past the lost one and the gap
-        // is permanent. This is a second chance, not a retry that is guaranteed to happen.
+        // a gap in the event log must not be silent. The agentd cursor stays put, so if the
+        // reconnect's re-fetch of this seq arrives before anything else is appended, the append gets
+        // another chance — but once a later event succeeds, `agent_seq` jumps past the lost one and
+        // the gap is permanent. This is a second chance, not a retry that is guaranteed to happen.
         app.storage_failed("append to the colony's event log", &e).await;
         app.session_log(
             id,
@@ -155,13 +181,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         )
         .await;
     }
-    rt.broadcast(Some(seq), line.to_string());
+    rt.broadcast(Some(file_seq), file_line.to_string());
 
     // What the harness acts on is a type, not a bag of fields (docs/agent-events.schema.json). A line
     // outside the contract — a newer runner's event type, or a known one whose body is broken — lands
     // on `Other` and triggers nothing; it has already been forwarded to the browser above, which is
     // the only consumer of most event types anyway.
-    let deserialised = serde_json::from_str::<AgentEvent>(line);
+    let deserialised = serde_json::from_str::<AgentEvent>(&file_line);
     if let Err(e) = &deserialised
         && AgentEvent::is_acted_on(event["type"].as_str().unwrap_or_default())
     {
@@ -391,9 +417,12 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
     }
 }
 
-/// A colony's orchestrator confirmed something outside its task: file it as an issue on the
-/// colony's repository, unless findings are off, the colony has hit its cap, or an open issue
-/// already has the same title. Every outcome is recorded and logged; none reaches the agent.
+/// A colony's orchestrator confirmed something outside its task. Nothing is filed directly anymore:
+/// a host-side validation call judges the finding first, every stage is minuted on the findings
+/// ledger and the colony's event stream, and only a validated finding reaches GitHub's cap and
+/// issue check. None of it reaches the agent; none of it blocks the event stream — this runs on a
+/// spawned task, and the model call that validates is intentionally outside the findings lock, so a
+/// slow model cannot hold up another finding's cap check.
 pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, event: Value) {
     let Some(s) = app.session(&id).await else { return };
     let modules = app.modules.read().await.clone();
@@ -413,6 +442,52 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             return;
         }
     };
+    let decision = match crate::validation::validate(&app, &s, &finding).await {
+        Ok(decision) => decision,
+        Err(e) => {
+            let reason = format!("{e:#}");
+            app.session_log(&id, "warn", format!("did not file \"{}\": {reason}", finding.title))
+                .await;
+            crate::validation::record(
+                &app,
+                &id,
+                &json!({"title": finding.title, "state": "error", "reason": reason}),
+            )
+            .await;
+            return;
+        }
+    };
+    // A rejected finding is fully decided: the ledger and the wire both say so, and nothing further
+    // happens — no cap check, no GitHub call, no issue.
+    if !decision.real {
+        let message = format!("did not file \"{}\": {}", finding.title, decision.reason);
+        app.session_log(&id, "info", message).await;
+        crate::validation::emit_chain(
+            &app,
+            &id,
+            json!({"type": "rejected", "title": finding.title, "reason": decision.reason}),
+        )
+        .await;
+        crate::validation::record(
+            &app,
+            &id,
+            &json!({"title": finding.title, "state": "rejected", "reason": decision.reason}),
+        )
+        .await;
+        return;
+    }
+    crate::validation::emit_chain(
+        &app,
+        &id,
+        json!({"type": "validated", "title": finding.title, "severity": decision.severity}),
+    )
+    .await;
+    crate::validation::record(
+        &app,
+        &id,
+        &json!({"title": finding.title, "state": "validated", "severity": decision.severity}),
+    )
+    .await;
     let _serial = rt.findings_lock.lock().await;
     let dir = app.session_dir(&id);
     let record = dir.join("findings.jsonl");
@@ -430,12 +505,12 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
         Ok(findings::Filed::Issue(url)) => (
             "info",
             format!("filed finding \"{}\" as {url}", finding.title),
-            json!({"title": finding.title, "issue": url}),
+            json!({"title": finding.title, "state": "filed", "issue": url}),
         ),
         Ok(findings::Filed::Duplicate(url)) => (
             "info",
             format!("did not file \"{}\": {url} is already open with that title", finding.title),
-            json!({"title": finding.title, "duplicate_of": url}),
+            json!({"title": finding.title, "state": "duplicate", "duplicate_of": url}),
         ),
         Err(e) => (
             "error",
@@ -443,7 +518,8 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             Value::Null,
         ),
     };
-    // Only a filed or matched finding counts toward the cap; a GitHub error should not use one up.
+    // Only a filed or matched finding counts toward the cap, so the line that carries the issue or
+    // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
         let recorded = append_line(&record, &entry.to_string()).await;
         if let Err(e) = recorded {
@@ -459,6 +535,27 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
         }
     }
     app.session_log(&id, level, message).await;
+    if let Ok(findings::Filed::Issue(url)) = &outcome
+        && crate::sessions::autofix_enabled(&app, &s).await
+    {
+        // The fix colony starts off this path: filing has already returned, the issue is on GitHub,
+        // and the colony's event stream must not wait for a second colony to boot.
+        let title = finding.title.clone();
+        let hunting = s.id.clone();
+        let fix_colony = crate::validation::spawn_fix_colony(app.clone(), s.clone(), finding.clone(), url.clone());
+        tokio::spawn(async move {
+            if let Err(e) = fix_colony.await {
+                let reason = format!("{e:#}");
+                app.session_log(
+                    &hunting,
+                    "warn",
+                    format!("could not start the fix colony for \"{title}\": {reason}"),
+                )
+                .await;
+                crate::validation::record(&app, &hunting, &json!({"title": title, "state": "error", "reason": reason})).await;
+            }
+        });
+    }
 }
 
 #[cfg(test)]
