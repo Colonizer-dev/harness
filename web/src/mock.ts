@@ -22,10 +22,12 @@ import type {
   OrgSettings,
   PullStatus,
   Question,
+  RedTeamRun,
   Repo,
   RuntimeInfo,
   Session,
   SessionStatus,
+  StartRedTeamRunRequest,
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
@@ -1490,6 +1492,33 @@ export function createMockApi(): Api {
     return clone(value());
   };
 
+  // One raid out of the gate under ?mock=1, so the red ants are already marching: a swarm on the
+  // demo checkout colony, two hunters riding the running mock sessions and one a lost chamber, so
+  // the card shows both the joined status and the ghost.
+  const redRuns: RedTeamRun[] = [
+    {
+      id: "rt-demo1",
+      repo: "acme/webshop",
+      org: "acme",
+      state: "running",
+      swarm_size: 3,
+      modules: ["checkout", "email"],
+      autofix: false,
+      hunters: [
+        { session_id: "demo1234", title: "Guest checkout regression", module: "checkout", version: "1.2.0", focus: "guest conversion" },
+        { session_id: "stall5678", title: "Dark-mode email fuzz", module: "email", version: null, focus: "template injection" },
+        { session_id: "red-party1", title: "Discount stacking probe", module: "pricing", version: "0.9.1", focus: "multi-code carts" },
+      ],
+      counts: { found: 3, validated: 2, rejected: 1, filed: 1 },
+      created_at: ago(40),
+      started_at: ago(39),
+      ended_at: null,
+      gate_reason: null,
+    },
+  ];
+  const redActive = (repo: string) =>
+    redRuns.some((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped");
+
   return {
     mock: true,
     status: () =>
@@ -1972,6 +2001,76 @@ export function createMockApi(): Api {
     checkMem0: async () => {
       await sleep(600);
       return mem0.has_key ? { ok: true } : { ok: false, error: "add a mem0 API key in Settings → Modules → Memory" };
+    },
+
+    redTeamRuns: () =>
+      later(() => [...redRuns].sort((a, b) => b.created_at.localeCompare(a.created_at))),
+    startRedTeamRun: async (body: StartRedTeamRunRequest) => {
+      await sleep(400);
+      const repo = body.repo.trim();
+      if (!repo) throw new ApiError("pick a repository to raid", 400);
+      const swarm = body.swarm_size ?? 3;
+      if (!Number.isInteger(swarm) || swarm < 1 || swarm > 8) throw new ApiError("swarm size must be between 1 and 8", 400);
+      const live = [...sessions.values()].filter((s) => isLive(s.session.status)).length;
+      // The server's refusals, in its order (issue #212): the nest gate applies to a start-now
+      // create only, while another run still active on the repo rejects the create however it arms.
+      if (!body.arm && live > 0) {
+        throw new ApiError(
+          `the nest is busy: ${live} colony${live === 1 ? "" : "ies"} live`,
+          409,
+        );
+      }
+      if (redActive(repo)) {
+        throw new ApiError("a red-team run is already active on this repo", 409);
+      }
+      const run: RedTeamRun = {
+        id: `rt-${Math.random().toString(16).slice(2, 8)}`,
+        repo,
+        org: repo.split("/")[0] ?? repo,
+        state: body.arm ? "armed" : "running",
+        swarm_size: swarm,
+        modules: [...(body.modules ?? [])],
+        autofix: body.autofix ?? false,
+        // Hunters are the repo's own sessions wearing red: a fresh raid rides the work the
+        // nest already cleared, and each hunter keeps its colony, so the card can join them.
+        hunters: [...sessions.values()]
+          .filter((s) => s.session.repo === repo)
+          .sort((a, b) => b.session.updated_at.localeCompare(a.session.updated_at))
+          .slice(0, swarm)
+          .map((s) => ({
+            session_id: s.session.id,
+            title: s.session.issue_title || repo,
+            module: (body.modules ?? [])[0] ?? "harness",
+            version: null,
+            focus: "adversarial pass",
+          })),
+        counts: { found: 0, validated: 0, rejected: 0, filed: 0 },
+        created_at: now(),
+        started_at: body.arm ? null : now(),
+        ended_at: null,
+        gate_reason:
+          body.arm && live > 0 ? `${live} colony${live === 1 ? "" : "ies"} live — the nest must empty first` : null,
+      };
+      redRuns.unshift(run);
+      return clone(run);
+    },
+    stopRedTeamRun: async (id) => {
+      await sleep(250);
+      const run = redRuns.find((r) => r.id === id);
+      if (!run) throw new ApiError("no such red-team run", 404);
+      if (run.state === "done" || run.state === "stopped") throw new ApiError("this run is already over", 409);
+      run.state = "stopped";
+      run.ended_at = now();
+      // Send the hunters home too, when there is a chapel to close: a live mock colony just
+      // halts and reports stopped, the same way stopSession would.
+      for (const hunter of run.hunters) {
+        const s = sessions.get(hunter.session_id);
+        if (s && isLive(s.session.status)) {
+          s.halt();
+          s.patch({ status: "stopped", mesh: null });
+        }
+      }
+      return clone(run);
     },
   };
 }

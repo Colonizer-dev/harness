@@ -10,10 +10,12 @@ import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactElemen
 
 import { AntAvatar, type AntState } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
-import { SESSION_STATUS, type Tone } from "../components/ui";
+import { SESSION_STATUS, type Tone, orgOf, sameOrg } from "../components/ui";
 import { needsYou } from "../notifications";
+import { isActive, isRaiding } from "../redTeam";
 import type { SubagentView } from "../sessionStream";
-import type { Session, SessionStatus } from "../types";
+import type { RedTeamRun, Session, SessionStatus } from "../types";
+import { RedAnts } from "./RedAnts";
 import {
   MAX_CHAMBERS,
   SURFACE_Y,
@@ -82,6 +84,7 @@ export function NestView({
   sessions,
   selectedId,
   mothershipSelected,
+  redRuns = [],
   settlers,
   backlogCount,
   avatarFor,
@@ -94,6 +97,8 @@ export function NestView({
   sessions: Session[];
   selectedId: string | null;
   mothershipSelected: boolean;
+  /** Red-team runs (issue #212): a live one targeting this nest's org marches ants over the plot. */
+  redRuns?: RedTeamRun[];
   /** Real settlers, and only for `selectedId` — the harness streams one colony at a time. */
   settlers: SubagentView[];
   /** Open issues across the workspace's repositories; the frontier's badge. */
@@ -140,6 +145,11 @@ export function NestView({
     const branches = branchPaths(slot, session.id === selectedId ? selectedSteps : 0, box, seed);
     return { session, slot, index, edge: TONE_VAR[tone], path: tunnelPath(slot, box, seed), branches };
   });
+
+  // The raid a red-team run is staging on this nest: the first active one whose org is ours.
+  // Its ants render only while the run is live — a done or stopped run has isActive() false,
+  // so the column vanishes with it.
+  const raid = redRuns.find((r) => isActive(r) && sessions.some((s) => sameOrg(orgOf(s), r.org || r.repo.split("/")[0])));
 
   return (
     <div className="cockpit nest relative grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
@@ -442,6 +452,16 @@ export function NestView({
             </button>
           )}
         </div>
+
+        {/* The raiders: red-team ants (issue #212) marching over soil, tunnels and chambers
+            — beneath the mothership and the worker riders, and never swallowing a click. */}
+        {raid && (
+          <RedAnts
+            mode={isRaiding(raid) ? "raiding" : "waiting"}
+            count={raid.swarm_size}
+            className="z-[1]"
+          />
+        )}
       </div>
 
       {waiting.length > 0 && (

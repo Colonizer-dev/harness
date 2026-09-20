@@ -29,6 +29,7 @@ mod protocol;
 mod providers;
 mod publish;
 mod queue;
+mod redteam;
 mod routing;
 mod runtime;
 mod sandbox;
@@ -99,6 +100,7 @@ pub struct App {
     pub modules: RwLock<ModulesConfig>,
     pub agents: Vec<AgentModule>,
     pub sessions: RwLock<Vec<Session>>,
+    pub redteam: redteam::RedTeamStore,
     session_persist: Mutex<()>,
     pub storage_alert: RwLock<Option<StorageAlert>>,
     pub runtimes: Mutex<HashMap<String, Arc<sessions::Runtime>>>,
@@ -362,6 +364,7 @@ async fn walk_claude_candidates(candidates: &[PathBuf], elf_only: bool) -> Resul
 // HTTP plumbing
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct AppError(StatusCode, anyhow::Error);
 
 impl IntoResponse for AppError {
@@ -378,6 +381,18 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 
 pub fn client_error(status: StatusCode, message: &str) -> AppError {
     AppError(status, anyhow!(message.to_string()))
+}
+
+impl AppError {
+    /// The HTTP status the response would carry.
+    pub fn status(&self) -> StatusCode {
+        self.0
+    }
+
+    /// The message a handler returns, as the client sees it in `{"error": …}`.
+    pub fn message(&self) -> String {
+        format!("{:#}", self.1)
+    }
 }
 
 pub type ApiResult<T> = Result<Json<T>, AppError>;
@@ -836,6 +851,7 @@ async fn serve() -> Result<()> {
         modules: RwLock::new(modules),
         agents,
         sessions: RwLock::new(sessions),
+        redteam: redteam::RedTeamStore::new(&cfg.data_dir),
         session_persist: Mutex::new(()),
         storage_alert: RwLock::new(corrupt),
         runtimes: Mutex::new(HashMap::new()),
@@ -910,7 +926,10 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/stop", post(lifecycle::stop))
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
-        .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws));
+        .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
+        .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
+        .route("/api/redteam/runs/{id}", get(redteam::get))
+        .route("/api/redteam/runs/{id}/stop", post(redteam::stop));
     let router = api
         .merge(web_router(app.cfg.assets.as_deref()))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
@@ -964,6 +983,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { lifecycle::watch_sandboxes(sandbox_watch).await });
     let queue = app.clone();
     tokio::spawn(async move { queue::run_queue(queue).await });
+    let redteam = app.clone();
+    tokio::spawn(async move { redteam::run(redteam).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
     let pr_watch = app.clone();
@@ -1060,6 +1081,7 @@ pub(crate) mod tests {
             modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
             agents,
             sessions: RwLock::new(Vec::new()),
+            redteam: redteam::RedTeamStore::new(&root.join("data")),
             session_persist: Mutex::new(()),
             storage_alert: RwLock::new(None),
             runtimes: Mutex::new(HashMap::new()),
