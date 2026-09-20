@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { analyze, formatTranscript, reasons, redact, summarize } from '../colony-report.mjs';
+import { analyze, formatReport, formatTranscript, reasons, redact, summarize } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -121,4 +121,95 @@ test('a transcript reads as steps, with the question, the wait and the failure',
   assert.match(text, /✗ Bash failed: HTTP 429 rate limit exceeded/);
   assert.match(text, /■ turn ended after 5m00s, \$0.40 so far/);
   assert.match(text, /mothership warn: the private mesh is unavailable/);
+});
+
+/** A finding that is validated, fixed by a colony, reviewed and merged, end to end. */
+const chain = {
+  mothership: 'test',
+  session: { id: 'chain01', repo: 'acme/webshop', issue: 7, status: 'pr_opened', pr_url: 'https://github.com/acme/webshop/pull/8' },
+  events: [
+    { type: 'status', state: 'working', ts: at(0) },
+    { type: 'finding', title: 'llms.txt promises career pages the scanner cannot fetch', ts: at(1) },
+    { type: 'validated', title: 'llms.txt promises career pages the scanner cannot fetch', severity: 'medium', ts: at(2) },
+    { type: 'fix_colony', title: 'llms.txt promises career pages the scanner cannot fetch', session: 'fix00aa', issue: 'https://github.com/acme/webshop/issues/9', ts: at(3) },
+    { type: 'review', title: 'llms.txt promises career pages the scanner cannot fetch', session: 'rev00bb', verdict: 'pass', pr: 'https://github.com/acme/webshop/pull/8', ts: at(4) },
+    { type: 'merged', title: 'llms.txt promises career pages the scanner cannot fetch', session: 'fix00aa', pr: 'https://github.com/acme/webshop/pull/8', ts: at(5) },
+  ],
+};
+
+test("a finding's whole chain is counted: validated, fix colony, review, merge", () => {
+  const r = analyze(chain);
+  assert.equal(r.findings, 1);
+  assert.equal(r.validated, 1);
+  assert.equal(r.fix_colonies, 1);
+  assert.equal(r.reviews, 1);
+  assert.equal(r.review_passed, 1);
+  assert.equal(r.merged, 1);
+});
+
+test('a transcript prints the chain, one line per host event', () => {
+  const text = formatTranscript(chain);
+  assert.match(text, /◆ finding: llms\.txt promises career pages/);
+  assert.match(text, /✓ validated: llms\.txt promises career pages.*\(medium\)/);
+  assert.match(text, /⚒ fix colony fix00aa for: llms\.txt promises career pages/);
+  assert.match(text, /⚖ review rev00bb of https:\/\/github\.com\/acme\/webshop\/pull\/8: pass/);
+  assert.match(text, /✔ merged https:\/\/github\.com\/acme\/webshop\/pull\/8/);
+});
+
+test('a rejected finding is counted and keeps its reason', () => {
+  const rejected = analyze({
+    mothership: 'test',
+    session: { id: 'rej00cc', repo: 'acme/webshop', issue: 8, status: 'pr_opened' },
+    events: [
+      { type: 'status', state: 'working', ts: at(0) },
+      { type: 'finding', title: 'docs promise a query endpoint the code lacks', ts: at(1) },
+      { type: 'rejected', title: 'docs promise a query endpoint the code lacks', reason: 'the endpoint is behind gated auth', ts: at(2) },
+    ],
+  });
+  assert.equal(rejected.findings, 1);
+  assert.equal(rejected.rejected, 1);
+  assert.equal(rejected.validated, 0);
+  const text = formatTranscript({
+    mothership: 'test',
+    session: { id: 'rej00cc', repo: 'acme/webshop', issue: 8, status: 'pr_opened' },
+    events: [
+      { type: 'status', state: 'working', ts: at(0) },
+      { type: 'rejected', title: 'docs promise a query endpoint the code lacks', reason: 'the endpoint is behind gated auth', ts: at(1) },
+    ],
+  });
+  assert.match(text, /✗ rejected: docs promise a query endpoint the code lacks — the endpoint is behind gated auth/);
+});
+
+test('a failed review is worth reading, a rejection is not', () => {
+  const failed = analyze({
+    session: { id: 'failfix', status: 'pr_opened' },
+    events: [
+      { type: 'review', title: '…', session: 'rev00bb', verdict: 'fail', pr: 'https://github.com/acme/webshop/pull/8', ts: at(1) },
+    ],
+  });
+  assert.deepEqual(reasons(failed), ['1 fix review failed']);
+  const rejectedOnly = analyze({
+    session: { id: 'quietrej', status: 'pr_opened' },
+    events: [
+      { type: 'rejected', title: '…', reason: '…', ts: at(1) },
+    ],
+  });
+  assert.deepEqual(reasons(rejectedOnly), []);
+});
+
+test('the summary adds up the finding chain and names it in the report', () => {
+  const s = summarize([analyze(chain), analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })]);
+  assert.equal(s.findings, 1);
+  assert.equal(s.validated, 1);
+  assert.equal(s.rejected, 0);
+  assert.equal(s.fix_colonies, 1);
+  assert.equal(s.reviews, 1);
+  assert.equal(s.review_passed, 1);
+  assert.equal(s.merged, 1);
+  const report = formatReport(s, [analyze(chain), analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })]);
+  assert.match(report, /Findings filed: 1 \(1 validated, 1 fix, 1 review, 1 passed, merged: 1\)/);
+  const quietSummary = summarize([analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })]);
+  const quietReport = formatReport(quietSummary, [analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })]);
+  assert.match(quietReport, /Findings filed: 0\./);
+  assert.ok(!quietReport.split('\n').find((l) => l.startsWith('- Settlers')).includes('validated'));
 });

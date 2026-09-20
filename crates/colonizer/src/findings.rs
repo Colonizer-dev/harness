@@ -6,11 +6,17 @@
 //! capped per colony and checked against open issues before anything is created.
 
 use crate::{
-    App,
+    ApiResult, App, Shared, client_error,
     sessions::Session,
     util::{exec, truncate},
 };
 use anyhow::{Result, bail};
+use axum::{
+    Json,
+    extract::{Path as AxumPath, State},
+    http::StatusCode,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -23,7 +29,7 @@ const MAX_TITLE: usize = 200;
 const MAX_BODY: usize = 20_000;
 const MAX_EVIDENCE: usize = 5_000;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Finding {
     pub title: String,
     pub body: String,
@@ -105,10 +111,118 @@ pub fn issue_body(finding: &Finding, s: &Session) -> String {
 }
 
 /// How many findings a colony has already filed or matched, from its record on disk.
+///
+/// Only lines that carry `issue` or `duplicate_of` count: a finding that was validated but never
+/// filed consumed nothing, so a colony that keeps submitting junk is stopped by the cap while one
+/// whose findings the orchestrator rejects is not punished for trying.
 pub fn count(record: &Path) -> usize {
     std::fs::read_to_string(record)
-        .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
+        .map(|content| {
+            content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .is_some_and(|v| v.get("issue").is_some() || v.get("duplicate_of").is_some())
+                })
+                .count()
+        })
         .unwrap_or(0)
+}
+
+/// One line of a session's findings ledger (`sessions/<id>/findings.jsonl`), read back. The ledger
+/// is append-only and one line per stage transition, so a finding appears several times; the
+/// `state` field says which stage. Lines written before states existed carry no `state` — a present
+/// `issue` or `duplicate_of` *is* the state, so `records` infers it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FindingRecord {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
+    /// Which session's ledger this line came from; the ledger itself does not say, the reader does.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session: String,
+    /// Filled only by the aggregate reader, so the per-session view stays the bare ledger line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+/// Reads a session's findings ledger, in the order it was written, tolerating whatever a crash or
+/// an older version left behind: a torn or corrupt line costs itself, and a legacy line without
+/// `state` is read by its `issue` or `duplicate_of` field.
+pub fn records(path: &Path) -> Vec<FindingRecord> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<FindingRecord>(line).ok())
+        .filter(|rec| !rec.title.is_empty())
+        .map(|mut rec| {
+            if rec.state.is_none() {
+                // A legacy line: writing an issue *was* the filment, matching an open one the
+                // duplicate check, so the state is read off what the line carries.
+                rec.state = if rec.issue.is_some() {
+                    Some("filed".into())
+                } else if rec.duplicate_of.is_some() {
+                    Some("duplicate".into())
+                } else {
+                    None
+                };
+            }
+            rec
+        })
+        .collect()
+}
+
+/// The finding ledger of one session, each line on the side of the colony it records.
+pub async fn list(State(app): State<Shared>, AxumPath(id): AxumPath<String>) -> ApiResult<Vec<FindingRecord>> {
+    app.session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let record = app.session_dir(&id).join("findings.jsonl");
+    let mut out = records(&record);
+    for line in &mut out {
+        line.session = id.clone();
+    }
+    Ok(Json(out))
+}
+
+/// The finding ledger of every session, newest session first with each line naming its colony.
+pub async fn list_all(State(app): State<Shared>) -> Json<Vec<FindingRecord>> {
+    let sessions = app.sessions.read().await.clone();
+    let mut out = Vec::new();
+    for s in sessions.into_iter().rev() {
+        let record = app.session_dir(&s.id).join("findings.jsonl");
+        let mut lines = records(&record);
+        for line in &mut lines {
+            line.session = s.id.clone();
+            line.repo = Some(s.repo.clone());
+        }
+        out.extend(lines);
+    }
+    Json(out)
 }
 
 /// Files `finding` on the colony's repository unless an open issue already has its title.
@@ -231,13 +345,63 @@ mod tests {
     }
 
     #[test]
-    fn the_record_counts_one_line_per_finding() {
-        let dir = std::env::temp_dir().join(format!("colonizer-findings-{}", std::process::id()));
+    fn the_record_counts_only_lines_that_filed_or_matched() {
+        let dir = std::env::temp_dir().join(format!("colonizer-findings-count-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let record = dir.join("findings.jsonl");
         assert_eq!(count(&record), 0, "no record yet");
-        std::fs::write(&record, "{\"a\":1}\n{\"b\":2}\n\n").unwrap();
+        std::fs::write(
+            &record,
+            concat!(
+                "{\"title\":\"a\",\"issue\":\"https://x/1\"}\n",
+                "{\"title\":\"b\",\"state\":\"duplicate\",\"duplicate_of\":\"https://x/2\"}\n",
+                "{\"title\":\"c\",\"state\":\"validated\",\"severity\":\"high\"}\n",
+                "{\"title\":\"d\",\"state\":\"rejected\",\"reason\":\"not a bug\"}\n",
+                "\n",
+            ),
+        )
+        .unwrap();
+        // A colony that files two findings is at 2 of its 5, however many more it validated or
+        // had rejected in between: those stages never consume the cap.
         assert_eq!(count(&record), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn records_reads_a_mixed_ledger_in_order_and_infers_legacy_states() {
+        let dir = std::env::temp_dir().join(format!("colonizer-findings-records-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("findings.jsonl");
+        std::fs::write(
+            &record,
+            concat!(
+                // The lines an older build wrote: no state, the issue field *was* the filment.
+                "{\"title\":\"legacy\",\"issue\":\"https://x/1\"}\n",
+                "not json at all\n",
+                "{\"brand_new\":true}\n",
+                "{\"title\":\"watched\",\"state\":\"validated\",\"severity\":\"critical\"}\n",
+                "{\"title\":\"held\",\"state\":\"rejected\",\"reason\":\"spurious\"}\n",
+                "{\"title\":\"legacy dup\",\"duplicate_of\":\"https://x/2\"}\n",
+            ),
+        )
+        .unwrap();
+        let lines = records(&record);
+        let states: Vec<Option<String>> = lines.iter().map(|l| l.state.clone()).collect();
+        assert_eq!(
+            states,
+            vec![
+                Some("filed".into()),
+                Some("validated".into()),
+                Some("rejected".into()),
+                Some("duplicate".into()),
+            ],
+            "a corrupt or shapeless line costs itself, and legacy lines read by what they carry"
+        );
+        assert_eq!(lines[0].issue.as_deref(), Some("https://x/1"));
+        assert_eq!(lines[1].severity.as_deref(), Some("critical"));
+        assert_eq!(lines[2].reason.as_deref(), Some("spurious"));
+        assert_eq!(lines[3].duplicate_of.as_deref(), Some("https://x/2"));
+        assert!(records(&dir.join("nowhere")).is_empty(), "no ledger is no ledger");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
