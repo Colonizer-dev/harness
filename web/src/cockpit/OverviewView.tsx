@@ -8,15 +8,19 @@
 // behind a click so the page reads as a roster, not a wall of issue text. The header only toggles its
 // row in place; reaching the colony's own view is the explicit "open colony →" action, so the
 // overview stays one page and the full session is still one more click deep.
+//
+// The counters at the top double as filters: a click narrows the roster to that bucket, a second
+// click on the active one clears it. The buckets themselves live in feed.ts, so the number a counter
+// shows and the rows its filter reveals can never disagree.
 import { useId, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { IconChevron } from "../components/icons";
 import { SESSION_STATUS, type Tone, attentionText, cx, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
-import { colonyLabel, needsYou } from "../notifications";
+import { colonyLabel } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
-import { headlineFor } from "./feed";
+import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
 import type { Session } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -28,7 +32,13 @@ const TONE_VAR: Record<Tone, string> = {
   accent: "var(--accent)",
 };
 
-const RETURNED = new Set(["pr_opened", "merged", "closed", "no_changes"]);
+/** The counter's number keeps its accent per bucket; the "need you" one dims at zero, as it always did. */
+const COUNT_COLOR: Record<OverviewFilter, (count: number) => string> = {
+  live: () => "text-accent",
+  "need you": (count) => (count > 0 ? "text-warn" : "text-muted"),
+  returned: () => "text-ok",
+  queued: () => "text-text",
+};
 
 /** Flip one colony's membership in the expanded set. Pure, so the tests can pin the toggle. */
 export function flipExpanded(expanded: ReadonlySet<string>, id: string): Set<string> {
@@ -131,15 +141,18 @@ export function OverviewView({
   onOpenOrg: (org: string) => void;
   onOpenColony: (id: string) => void;
 }): ReactElement {
+  // The filter lives here, not in the cockpit: toggling a counter narrows the page, and a second
+  // click on the active one (or the counts themselves) clears it. State is per-visit on purpose.
+  const [filter, setFilter] = useState<OverviewFilter | null>(null);
   // Which rows are unfolded, by session id. The 4 s poll hands this component brand-new session
   // objects, so the set is keyed on the id and lives here — a re-render must not close the row a
-  // person is reading.
+  // person is reading. Filtering narrows which rows render but never touches this set, so a row
+  // stays expanded across a filter switch and is still open when its bucket comes back.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (id: string) => setExpanded((rows) => flipExpanded(rows, id));
-  const live = sessions.filter((s) => isLive(s.status)).length;
-  const need = sessions.filter(needsYou).length;
-  const returned = sessions.filter((s) => RETURNED.has(s.status)).length;
-  const queued = sessions.filter((s) => s.status === "queued").length;
+  // Counts come from the whole list, never the filtered one, so they keep moving on the 4s poll.
+  const counts = overviewCounts(sessions);
+  const shown = overviewSessions(sessions, filter);
 
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
@@ -147,64 +160,84 @@ export function OverviewView({
         <div className="flex flex-wrap items-baseline justify-between gap-4">
           <div>
             <div className="mb-1.5 font-mono text-[10.5px] tracking-[0.12em] text-faint">OVERVIEW</div>
-            <div className="text-[20px] font-semibold tracking-tight">{headlineFor(need, live)}</div>
+            <div className="text-[20px] font-semibold tracking-tight">{headlineFor(counts["need you"], counts.live)}</div>
           </div>
-          <div className="flex gap-4.5 font-mono text-xs text-muted tabular-nums">
-            <span>
-              <span className="text-accent">{live}</span> live
-            </span>
-            <span>
-              <span className={need > 0 ? "text-warn" : "text-muted"}>{need}</span> need you
-            </span>
-            <span>
-              <span className="text-ok">{returned}</span> returned
-            </span>
-            <span>
-              <span className="text-text">{queued}</span> queued
-            </span>
-            {cost !== null && <span title="what every colony has spent in total">${cost.toFixed(2)} spent</span>}
-          </div>
-        </div>
-
-        <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
-          {orgs.map((org) => {
-            const mine = sortSessions(sessions.filter((s) => sameOrg(orgOf(s), org.org)));
-            return (
-              <section key={org.org} className="flex flex-col overflow-hidden rounded-2xl border border-border bg-panel">
+          <div className="flex flex-wrap items-center justify-end gap-1.5 font-mono text-xs tabular-nums">
+            {OVERVIEW_FILTERS.map((name) => {
+              const count = counts[name];
+              const active = filter === name;
+              return (
                 <button
+                  key={name}
                   type="button"
-                  onClick={() => onOpenOrg(org.org)}
-                  className="grid cursor-pointer grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 border-b border-border px-3.5 py-3 text-left hover:bg-panel-2"
-                >
-                  <Avatar name={org.org} src={org.avatar} size={30} rounded="lg" />
-                  <span className="min-w-0">
-                    <span className="block truncate font-semibold">{org.org}</span>
-                    <span className="block font-mono text-[11px] text-faint">
-                      {mine.length} {mine.length === 1 ? "colony" : "colonies"} · {org.live} live
-                    </span>
-                  </span>
-                  <span className="whitespace-nowrap font-mono text-[11px] text-accent">open nest →</span>
-                </button>
-
-                <div className="flex flex-col">
-                  {mine.length === 0 ? (
-                    <div className="p-3.5 text-[12px] text-faint">No colonies yet.</div>
-                  ) : (
-                    mine.map((session) => (
-                      <ColonyRow
-                        key={session.id}
-                        session={session}
-                        open={expanded.has(session.id)}
-                        onToggle={toggle}
-                        onOpenColony={onOpenColony}
-                      />
-                    ))
+                  aria-pressed={active}
+                  onClick={() => setFilter(active ? null : name)}
+                  className={cx(
+                    "cursor-pointer rounded-full border px-2.5 py-1 text-[11.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]",
+                    active ? "border-accent bg-accent-soft text-text" : "border-border text-muted hover:border-accent hover:text-text",
                   )}
-                </div>
-              </section>
-            );
-          })}
+                >
+                  <span className={COUNT_COLOR[name](count)}>{count}</span> {name}
+                </button>
+              );
+            })}
+            {cost !== null && (
+              <span className="whitespace-nowrap px-1" title="what every colony has spent in total">
+                ${cost.toFixed(2)} spent
+              </span>
+            )}
+          </div>
         </div>
+
+        {filter && shown.length === 0 ? (
+          <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">
+            nothing here under this filter
+          </div>
+        ) : (
+          <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
+            {orgs.map((org) => {
+              const mine = sortSessions(shown.filter((s) => sameOrg(orgOf(s), org.org)));
+              // Under a filter, an org with no matching colonies drops out entirely.
+              if (filter && mine.length === 0) return null;
+              return (
+                <section key={org.org} className="flex flex-col overflow-hidden rounded-2xl border border-border bg-panel">
+                  <button
+                    type="button"
+                    onClick={() => onOpenOrg(org.org)}
+                    className="grid cursor-pointer grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 border-b border-border px-3.5 py-3 text-left hover:bg-panel-2"
+                  >
+                    <Avatar name={org.org} src={org.avatar} size={30} rounded="lg" />
+                    <span className="min-w-0">
+                      <span className="block truncate font-semibold">{org.org}</span>
+                      <span className="block font-mono text-[11px] text-faint">
+                        {mine.length} {mine.length === 1 ? "colony" : "colonies"} ·{" "}
+                        {/* Under a filter the card counts the rows it actually shows; unfiltered, the org's own tally. */}
+                        {filter ? mine.filter((s) => isLive(s.status)).length : org.live} live
+                      </span>
+                    </span>
+                    <span className="whitespace-nowrap font-mono text-[11px] text-accent">open nest →</span>
+                  </button>
+
+                  <div className="flex flex-col">
+                    {mine.length === 0 ? (
+                      <div className="p-3.5 text-[12px] text-faint">No colonies yet.</div>
+                    ) : (
+                      mine.map((session) => (
+                        <ColonyRow
+                          key={session.id}
+                          session={session}
+                          open={expanded.has(session.id)}
+                          onToggle={toggle}
+                          onOpenColony={onOpenColony}
+                        />
+                      ))
+                    )}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        )}
       </div>
     </main>
   );
