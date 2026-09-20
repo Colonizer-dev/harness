@@ -55,6 +55,12 @@ export interface Session {
   routed_cost_usd?: number | null;
   /** What the colony leaves on the host — its worktree plus its session files — as last measured. */
   host_disk_bytes?: number | null;
+  /** The microVM this colony boots: vCPUs and memory as the sandbox sized them. Absent on a colony booted before this change. */
+  boot_cpus?: number | null;
+  /** `8G`-shaped, like the sandbox's `memory` setting. Absent on a colony booted before this change. */
+  boot_memory?: string | null;
+  /** Where the last launch's time went, filled in when the colony finished booting (docs/protocol.md §4). */
+  boot_timing?: { total_ms: number; phases?: { name: string; ms: number }[] } | null;
   cleaned_up: boolean;
   created_at: string;
   updated_at: string;
@@ -116,6 +122,8 @@ export interface HarnessStatus {
   storage?: StorageHealth;
   /** The machine facts a colony's first minute depends on (issue #129); older mothership builds omit it. */
   runtime?: RuntimeInfo;
+  /** The machine every colony in the overview boots on (issue #205); older mothership builds omit it. */
+  host?: HostInfo | null;
   /** One entry per configured model provider, so the status poll can answer "is it the provider?" without the providers screen; older mothership builds omit it. */
   model_providers?: ModelProviderStatus[];
 }
@@ -134,6 +142,36 @@ export interface RuntimeInfo {
   host_claude_bin: string | null;
   /** Why the host binary is missing, when it is. */
   host_claude_bin_error: string | null;
+}
+
+/**
+ * GET /api/status `host` (issue #205): the machine every colony boots on, re-probed on each status
+ * poll. Every measurable is optional and omitted — never null, never zero-filled — when the host
+ * cannot read it, so the overview never draws a number the mothership did not measure.
+ */
+export interface HostInfo {
+  /** Stable per-install host id (uuid). It keys the host: a second machine can be summed into the
+   * overview later instead of being mistaken for this one (issue #205). */
+  id: string;
+  /** Omitted when unmeasurable. */
+  hostname?: string;
+  cpu_cores?: number;
+  memory_total_bytes?: number;
+  memory_used_bytes?: number;
+  /** 1, 5 and 15 minute load averages; the overview shows the first. */
+  load?: [number, number, number];
+  uptime_secs?: number;
+  disk_total_bytes?: number;
+  disk_used_bytes?: number;
+  disk_free_bytes?: number;
+  /** When the probe ran, RFC3339; always present. */
+  checked_at: string;
+  /** Always present. */
+  microvms_live: number;
+  /** Always present. */
+  microvms_ceiling: number;
+  /** Whether this host can boot a microVM at all; omitted on non-Linux. false means colonies cannot start here, which reads as idle rather than broken. */
+  kvm_ok?: boolean;
 }
 
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */

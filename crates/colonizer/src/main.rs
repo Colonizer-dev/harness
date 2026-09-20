@@ -134,6 +134,9 @@ pub struct App {
     /// The last `runtime` probe for the status payload, cached so the poll does not re-spawn the
     /// version probes for every open tab. `GET /api/status?fresh=1` bypasses it.
     pub runtime_cache: Mutex<Option<runtime::Cached>>,
+    /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
+    /// bypasses it.
+    pub host_cache: Mutex<Option<runtime::HostCached>>,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
@@ -432,14 +435,23 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
     msb.arg("--version");
     let cred = app.claude_cred();
     let fresh = query.fresh.as_deref().is_some_and(|v| !matches!(v, "0" | "false"));
-    let (user, msb_version, claude_bin, claude, runtime) = tokio::join!(
+    let (user, msb_version, claude_bin, claude, runtime, host) = tokio::join!(
         github::viewer(&app),
         exec_within(PROBE_LIMIT, &mut msb),
         resolve_guest_claude_bin(&app),
         claude_login::claude_status(&app, cred.as_ref()),
         runtime::status_runtime(&app, fresh),
+        runtime::status_host(&app, fresh),
     );
     let modules = app.modules.read().await.clone();
+    // The same "busy" definition `queue::has_room` counts against the parallel limit — a live colony
+    // or one mid-publish keeps its microVM claimed. Kept in step with it; `sessions::SessionStatus::busy`
+    // is the shared predicate both sides express.
+    let microvms_live = app.sessions.read().await.iter().filter(|s| s.status.busy()).count();
+    let microvms_ceiling = orgs::global_max_parallel(&modules);
+    // Computed before the `json!` literal below, which moves `runtime` into the payload: the host
+    // object borrows its kvm answer, so the borrow must end before the move.
+    let host_value = runtime::host_json(&host, runtime.kvm.as_ref(), microvms_live, microvms_ceiling);
     let live = async {
         match app.mesh().await {
             Ok(mesh) => Ok(mesh.status().await),
@@ -488,6 +500,7 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
         "mesh": mesh,
         "storage": storage_status(storage_alert),
         "runtime": runtime,
+        "host": host_value,
         "model_providers": model_providers,
         "modules": {
             "source": modules.source.provider,
@@ -852,6 +865,7 @@ async fn serve() -> Result<()> {
         github_viewer: Mutex::new(None),
         claude_bins: Mutex::new(HashMap::new()),
         runtime_cache: Mutex::new(None),
+        host_cache: Mutex::new(None),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
@@ -1073,6 +1087,7 @@ pub(crate) mod tests {
             github_viewer: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
             runtime_cache: Mutex::new(None),
+            host_cache: Mutex::new(None),
             usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),
             updater: update::Updater::new(),
@@ -1445,6 +1460,34 @@ pub(crate) mod tests {
             started.elapsed() < Duration::from_secs(30),
             "the handler answered in {:?}; the probe was waited out",
             started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The `host` object rides every poll: a stable id, the admission numbers, and the RFC 3339
+    /// `checked_at` that says how fresh the rest of it is. On this Linux machine the probe also
+    /// fills most of the measurables; the contract only promises `id` and `checked_at` wherever the
+    /// mothership runs.
+    #[tokio::test]
+    async fn the_status_payload_carries_a_host_object_with_the_microvm_counts() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let Json(payload) = status(State(app), Query(StatusQuery { fresh: None })).await;
+        let host = &payload["host"];
+        assert!(host["id"].as_str().is_some_and(|s| !s.is_empty()), "{host}");
+        assert!(
+            host["checked_at"].is_string(),
+            "checked_at is the RFC 3339 string the contract sends: {host}"
+        );
+        assert!(host["microvms_live"].is_u64(), "{host}");
+        assert!(host["microvms_ceiling"].is_u64(), "{host}");
+        assert!(
+            !payload["host"].is_null(),
+            "host is a top-level key, not nested under runtime: {payload}"
+        );
+        assert!(
+            payload["runtime"]["host"].is_null(),
+            "the Runtime struct is unchanged: host lives only at the top level: {payload}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

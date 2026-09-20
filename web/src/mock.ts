@@ -892,6 +892,34 @@ function mockRuntime(): RuntimeInfo | undefined {
   }
 }
 
+/**
+ * GET /api/status `host` (issue #205): the machine every colony boots on, with every number the
+ * strip reads. `?runtime=` carries over the way it does for `mockRuntime`: a Mac is not Linux so
+ * `kvm_ok` is omitted, `?runtime=kvm` is a host whose KVM this user cannot use, and anything else
+ * is a healthy Linux box. `live` is the running-colony count, so the strip's paid/total reading
+ * tracks the rest of the mock's state.
+ */
+function mockHost(live: number): HarnessStatus["host"] {
+  const kvm =
+    mockRuntimeParam() === "mac" ? {} : mockRuntimeParam() === "kvm" ? { kvm_ok: false } : { kvm_ok: true };
+  return {
+    id: "1e6f2a84-c5b3-4f2a-9f1c-8d4e2a1b6c90",
+    hostname: "archlinux",
+    cpu_cores: 8,
+    memory_total_bytes: 34_359_738_368, // 32G
+    memory_used_bytes: 17_179_869_184, // 16G
+    load: [0.42, 0.38, 0.31],
+    uptime_secs: 273_600, // 3d 4h
+    disk_total_bytes: 549_755_813_888, // 512G
+    disk_used_bytes: 373_662_154_752, // 348G
+    disk_free_bytes: 176_093_659_136, // 164G
+    checked_at: now(),
+    microvms_live: live,
+    microvms_ceiling: 3,
+    ...kvm,
+  };
+}
+
 /** The mesh payload for this load. A Mac vendors no tailscaled, so its mesh is `unavailable` by
  *  design (#32) and must never read as a fault (#128): `?runtime=mac` implies it unless `?mesh=`
  *  says otherwise, and `?mesh=error` stays a genuine failure. */
@@ -985,6 +1013,10 @@ export function createMockApi(): Api {
     ...baseSession("demo1234", "acme/webshop", 42, "Checkout fails for guest users"),
     status: "running",
     mesh: { name: "colony-demo1234", ip: "100.64.0.3" },
+    // Booted after issue #205, so the overview row's second line has something to read.
+    boot_cpus: 4,
+    boot_memory: "8G",
+    boot_timing: { total_ms: 94_320, phases: [{ name: "vm-boot", ms: 86_400 }] },
     created_at: ago(6),
   });
   const old = new MockSession(
@@ -1493,26 +1525,32 @@ export function createMockApi(): Api {
   return {
     mock: true,
     status: () =>
-      later(() => ({
-        github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
-        claude,
-        sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
-        mesh: mockMesh([...sessions.values()].filter((s) => isLive(s.session.status)).length + 1),
-        // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
-        // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
-        // runtime at all, as a mothership from before the probe did not.
-        runtime: mockRuntime(),
-        // The same verdict the providers list serves, read off its own seeds: strix is the
-        // degraded one (issue #184's report), deepseek and lab have never been used.
-        model_providers: providers.map((p) => ({
-          id: p.id,
-          name: p.name,
-          requests: p.usage?.requests ?? 0,
-          failure_pct: p.health?.failure_pct ?? 0,
-          avg_latency_ms: p.health?.avg_latency_ms ?? 0,
-          degraded: p.health?.degraded ?? false,
-        })),
-      })),
+      later(() => {
+        const live = [...sessions.values()].filter((s) => isLive(s.session.status)).length;
+        return {
+          github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
+          claude,
+          sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+          mesh: mockMesh(live + 1),
+          // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
+          // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
+          // runtime at all, as a mothership from before the probe did not.
+          runtime: mockRuntime(),
+          // The host strip's numbers (issue #205); ?runtime=kvm shows a host whose KVM the
+          // user cannot use, so the strip reads "no KVM".
+          host: mockHost(live),
+          // The same verdict the providers list serves, read off its own seeds: strix is the
+          // degraded one (issue #184's report), deepseek and lab have never been used.
+          model_providers: providers.map((p) => ({
+            id: p.id,
+            name: p.name,
+            requests: p.usage?.requests ?? 0,
+            failure_pct: p.health?.failure_pct ?? 0,
+            avg_latency_ms: p.health?.avg_latency_ms ?? 0,
+            degraded: p.health?.degraded ?? false,
+          })),
+        };
+      }),
     modules: () => later(() => modules),
     saveModule: async (kind, body) => {
       await sleep(250);

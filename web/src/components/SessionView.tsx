@@ -471,7 +471,7 @@ function compactTokens(n: number): string {
 }
 
 /** The colony's host footprint, in the same 16G / 512M shape the sandbox settings write sizes in. */
-function diskSize(n: number): string {
+export function diskSize(n: number): string {
   if (n >= 1024 ** 3) return `${+(n / 1024 ** 3).toFixed(1)}G`;
   if (n >= 1024 ** 2) return `${+(n / 1024 ** 2).toFixed(1)}M`;
   if (n >= 1024) return `${Math.round(n / 1024)}K`;

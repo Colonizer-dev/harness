@@ -6,12 +6,14 @@
 import type { ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
+import { IconAlert, IconCpu, IconMemory, IconServer } from "../components/icons";
 import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { headlineFor } from "./feed";
-import type { Session } from "../types";
+import { colonyFacts, hostFacts } from "./host";
+import type { HostInfo, Session } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -28,6 +30,7 @@ export function OverviewView({
   sessions,
   orgs,
   cost,
+  host,
   onOpenOrg,
   onOpenColony,
 }: {
@@ -35,6 +38,8 @@ export function OverviewView({
   sessions: Session[];
   orgs: OrgEntry[];
   cost: number | null;
+  /** The machine every listed colony boots on, polled with the status; a mothership before issue #205 sends none. */
+  host?: HostInfo | null;
   onOpenOrg: (org: string) => void;
   onOpenColony: (id: string) => void;
 }): ReactElement {
@@ -68,6 +73,37 @@ export function OverviewView({
           </div>
         </div>
 
+        {host && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border bg-panel px-3.5 py-2">
+            <span
+              title={host.hostname ? `${host.hostname} · host ${host.id}` : `host ${host.id}`}
+              className="font-mono text-[11px] font-semibold"
+            >
+              {host.hostname || host.id.slice(0, 8)}
+            </span>
+            {hostFacts(host).map((fact, i) => (
+              <span key={i} title={fact.title} className="inline-flex items-center gap-1 font-mono text-[11px] text-faint">
+                {fact.icon === "server" && <IconServer size={12} className="shrink-0" />}
+                {fact.icon === "cpu" && <IconCpu size={12} className="shrink-0" />}
+                {fact.icon === "memory" && <IconMemory size={12} className="shrink-0" />}
+                {fact.value}
+              </span>
+            ))}
+            {host.kvm_ok === false && (
+              <span
+                title="KVM is unavailable: this host cannot boot microVMs, so no colony can start here"
+                className="inline-flex items-center gap-1 font-mono text-[11px] text-warn"
+              >
+                <IconAlert size={12} className="shrink-0" />
+                no KVM
+              </span>
+            )}
+            <span title="when the mothership last probed the machine" className="ml-auto font-mono text-[11px] text-faint">
+              checked {timeAgo(host.checked_at)}
+            </span>
+          </div>
+        )}
+
         <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
           {orgs.map((org) => {
             const mine = sortSessions(sessions.filter((s) => sameOrg(orgOf(s), org.org)));
@@ -96,6 +132,7 @@ export function OverviewView({
                       const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
                       const edge = TONE_VAR[tone];
                       const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
+                      const meta = colonyFacts(session);
                       return (
                         <button
                           key={session.id}
@@ -109,6 +146,16 @@ export function OverviewView({
                             <span className="block truncate font-mono text-[11px] text-faint">
                               {short} · {timeAgo(session.last_activity_at ?? session.updated_at)}
                             </span>
+                            {meta.length > 0 && (
+                              <span className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[11px] text-faint">
+                                {meta.map((fact, i) => (
+                                  <span key={i} title={fact.title} className="inline-flex items-center gap-1 whitespace-nowrap">
+                                    {fact.icon === "cpu" && <IconCpu size={11} className="shrink-0" />}
+                                    {fact.value}
+                                  </span>
+                                ))}
+                              </span>
+                            )}
                           </span>
                           <span className="whitespace-nowrap font-mono text-[11px]" style={{ color: edge }}>
                             {SESSION_STATUS[session.status]?.label ?? session.status}

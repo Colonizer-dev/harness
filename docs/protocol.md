@@ -184,7 +184,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart. Also carries `runtime` (below): whether this machine can boot a colony at all, cached for 10 s, `?fresh=1` to re-probe |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart. Also carries `runtime` (below): whether this machine can boot a colony at all, and `host` (below): what kind of machine it is and how full it is. Both are cached for 10 s, `?fresh=1` to re-probe |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
@@ -229,10 +229,16 @@ missing values mean the `default`.
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
   "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
+  "boot_cpus": 4, "boot_memory": "8g",
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
 }
 ```
+
+`boot_cpus` and `boot_memory` are how this colony's microVM was sized at boot, exactly as `msb run`
+received them. The microsandbox exposes no guest CPU% or RSS metrics (agentd serves only health,
+events, pty and shutdown), so the boot spec is the only per-colony number about the VM — guest
+figures are omitted rather than faked. `null` on colonies booted before these fields existed.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish
@@ -467,6 +473,42 @@ none, `host_claude_bin_error` says why; the search is bounded too, so a binary t
 The probes spawn subprocesses, and every open tab polls this endpoint every 30 s, so answers are
 cached for 10 s. Add `?fresh=1` to skip the cache and re-probe now; the "Check again" button sends
 it, so it always reports what is true at the moment you clicked.
+
+The `host` object is the other half — not a check, but a picture: what kind of machine this is and
+how full it is, so the page can show the host next to the colonies running on it.
+
+```json
+{
+  "id": "5e1347a6-5f2e-4b8b-9c1a-0d4b7c8e9f10",
+  "hostname": "picard",
+  "cpu_cores": 8,
+  "memory_total_bytes": 17179869184,
+  "memory_used_bytes": 10737418240,
+  "load": [1.2, 0.8, 0.6],
+  "uptime_secs": 43200,
+  "disk_total_bytes": 246177628160,
+  "disk_used_bytes": 109088034816,
+  "disk_free_bytes": 124592496640,
+  "checked_at": "2026-09-20T12:00:00Z",
+  "microvms_live": 3,
+  "microvms_ceiling": 4,
+  "kvm_ok": true
+}
+```
+
+`id` is a UUID, stable per install, persisted in `<config_dir>/host_id` and generated on first
+call — the host panel's key, distinct from telemetry's `install_id`, which is ephemeral (forgotten
+when the live map is switched off). `checked_at` is an RFC 3339 timestamp and always present, saying
+when the measurements were taken. `microvms_live` is how many colonies currently hold a microVM
+against the parallel limit — the same "busy" count `queue::has_room` uses — and `microvms_ceiling`
+is the sandbox module's `max_parallel`: live against ceiling, like a resource gauge.
+
+Every other key is optional and `OMITTED` — not `null`, not `0` — when it cannot be measured. A Mac
+has no `/proc`, so `memory_total_bytes`, `memory_used_bytes`, `load` and `uptime_secs` are simply
+absent there; a disk that cannot be read drops all three disk numbers. `kvm_ok` is omitted too (it is
+`runtime.kvm`'s truth, present only where there is a `/dev/kvm` to check). Memory figures come from
+`/proc/meminfo` in bytes (`used` = `MemTotal` − `MemAvailable`), disk bytes from `df -kP` on the data
+directory, and the probe shares the 10 s cache with `runtime`.
 
 ### `GET /api/version`
 
