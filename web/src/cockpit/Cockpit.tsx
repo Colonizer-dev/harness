@@ -11,6 +11,7 @@ import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
+import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { HarnessStatus, OrgInfo, Repo, Session, UpdateStatus } from "../types";
 import { Header } from "./Header";
@@ -163,7 +164,7 @@ export function Cockpit({
   const needHere = useMemo(() => inOrg.filter(needsYou).length, [inOrg]);
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
-  const spend = inOrg.reduce((total, s) => total + (s.cost_usd ?? 0) + (s.routed_cost_usd ?? 0), 0);
+  const spend = sumCosts(inOrg.map(sessionCost));
   const backlogCount = repos
     .filter((r) => !selectedOrg || sameOrg(r.full_name.split("/")[0], selectedOrg))
     .reduce((total, r) => total + r.open_issues_count, 0);
@@ -227,7 +228,7 @@ export function Cockpit({
           <OverviewView
             sessions={sessions}
             orgs={workspaces}
-            cost={sessions.length ? sessions.reduce((t, x) => t + (x.cost_usd ?? 0) + (x.routed_cost_usd ?? 0), 0) : null}
+            cost={sumCosts(sessions.map(sessionCost))}
             onOpenOrg={(org) => {
               onSelectOrg(org);
               setView("home");
@@ -317,7 +318,7 @@ export function Cockpit({
           crumb={CRUMB[view]}
           liveCount={liveCount}
           needCount={needHere}
-          cost={spend > 0 ? spend : null}
+          cost={spend != null && spend > 0 ? spend : null}
           update={update}
           onOpenUpdates={() => onOpenSettings("updates")}
         />
@@ -333,7 +334,7 @@ export function Cockpit({
               liveCount={liveCount}
               queuedCount={queuedCount}
               needCount={needHere}
-              spend={spend > 0 ? spend : null}
+              spend={spend != null && spend > 0 ? spend : null}
               maxParallel={status?.sandbox.max_parallel ?? null}
               update={update}
               onClose={() => setInspector(null)}

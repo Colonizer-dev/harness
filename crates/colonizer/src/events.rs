@@ -5,7 +5,7 @@
 //! The autopilot decision itself is a pure function (`autopilot_step`) so the policy can be tested
 //! apart from the stream it acts on.
 
-use crate::{Shared, findings, github, memory, orgs, util::append_line};
+use crate::{Shared, findings, github, memory, orgs, spend, util::append_line};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -255,6 +255,14 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         } => {
             let cost = cost_usd;
             let usage = model_usage.filter(|u| u.is_object());
+            // The spend journal is fed increments, not the cumulative the record is about to carry:
+            // appending cumulatives would re-add every earlier turn on the next one. So the record's
+            // values are captured before the overwrite and the difference is what gets filed.
+            let (old_cost, old_usage) = app
+                .session(id)
+                .await
+                .map(|s| (s.cost_usd, s.model_usage))
+                .unwrap_or((None, None));
             if let Some((s, ())) = app
                 .update_session(id, |x| {
                     if cost.is_some() {
@@ -266,6 +274,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 })
                 .await
             {
+                spend::record_turn_usage(app, &s.org, old_cost, old_usage.as_ref(), cost, s.model_usage.as_ref()).await;
                 // Claude's own cost just landed, so the budget can trip here exactly as it can in the
                 // gateway; checked before autopilot, which must not publish a colony the budget stopped.
                 enforce_budget(app, id).await;

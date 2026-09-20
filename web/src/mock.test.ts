@@ -6,6 +6,31 @@ import { describe, expect, it } from "vitest";
 
 import { createMockApi } from "./mock";
 
+describe("mock spend (issue #209)", () => {
+  it("carries the measured org rollup on /api/orgs and keeps an unmeasured one null", async () => {
+    const api = createMockApi();
+    const acme = (await api.orgs()).find((info) => info.org === "acme");
+    expect(acme?.spend?.cost_usd).toBe(44.37);
+    expect(acme?.spend?.models[0].model).toBe("claude-opus-5");
+    const octo = (await api.orgs()).find((info) => info.org === "octocat");
+    expect(octo?.spend?.cost_usd).toBeNull();
+  });
+
+  it("serves a deterministic spend history, oldest first, with gap days so the '—' path is exercised", async () => {
+    const api = createMockApi();
+    const { days } = await api.spendHistory();
+    expect(days).toHaveLength(8);
+    const [oldest, second] = days;
+    expect(oldest.orgs.some((o) => o.org === "acme")).toBe(true);
+    expect(days[0].day < days[7].day || days[0].day === days[7].day).toBe(true);
+    // A day where only octocat moved: acme's slot for it is a zero-height gap.
+    expect(second.orgs.some((o) => o.org === "acme")).toBe(false);
+    for (const day of days) {
+      for (const o of day.orgs) if (o.org === "octocat") expect(o.cost_usd).toBeNull();
+    }
+  });
+});
+
 describe("mock saveOrg", () => {
   it("merges like the server: a field the body omits keeps its saved value", async () => {
     const api = createMockApi();

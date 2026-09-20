@@ -23,6 +23,7 @@ import type {
   Repo,
   SaveProviderRequest,
   Session,
+  SpendHistory,
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
@@ -97,6 +98,8 @@ export interface Api {
   providerHealth(id: string): Promise<ProviderHealth>;
   models(): Promise<ModelOption[]>;
   orgs(): Promise<OrgInfo[]>;
+  /** GET /api/spend/history: per-org daily totals for the last `days` (default 30); the overview's sparklines (issue #209). */
+  spendHistory(days?: number): Promise<SpendHistory>;
   /** Returns `{org, settings}`; colony and memory counts come from the next `orgs()`. */
   saveOrg(org: string, settings: OrgSettings): Promise<Pick<OrgInfo, "org" | "settings">>;
   memory(scope: MemoryScope, key: string): Promise<MemoryListing>;
@@ -194,6 +197,7 @@ export const httpApi: Api = {
   providerHealth: (id) => request(`/api/providers/${enc(id)}/health`),
   models: () => request("/api/models"),
   orgs: () => request("/api/orgs"),
+  spendHistory: (days) => request(`/api/spend/history?days=${days ?? 30}`),
   saveOrg: (org, settings) => put(`/api/orgs/${enc(org)}`, { settings }),
   memory: (scope, key) => request(`/api/memory?scope=${enc(scope)}&key=${enc(key)}`),
   memoryProposals: () => request("/api/memory/proposals"),

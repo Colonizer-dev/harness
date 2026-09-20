@@ -3,15 +3,18 @@
 //
 // The prototype's rows carry a settler count. This one does not: the mothership streams events for a
 // single colony at a time, so the only honest per-colony facts here are the ones in the list itself.
-import type { ReactElement } from "react";
+import { useMemo, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
-import type { OrgEntry } from "../orgs";
+import { type OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
+import { formatCost, orgCost, sumCosts } from "../spend";
+import { useSpendHistory } from "../useSpendHistory";
 import { headlineFor } from "./feed";
-import type { Session } from "../types";
+import { OrgSpend } from "./OrgSpend";
+import type { Session, SpendOrgDay } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -43,6 +46,36 @@ export function OverviewView({
   const returned = sessions.filter((s) => RETURNED.has(s.status)).length;
   const queued = sessions.filter((s) => s.status === "queued").length;
 
+  // The daily spend history for the sparklines, loaded once (see useSpendHistory). Per org it is
+  // aligned to the full day span: a day the org has no entry becomes an empty (zero-height) slot.
+  const spendHistory = useSpendHistory();
+  const daysByOrg = useMemo(() => {
+    const span = spendHistory?.days ?? [];
+    const byOrg = new Map<string, { day: string; org: SpendOrgDay | undefined }[]>();
+    for (const day of span) {
+      for (const orgDay of day.orgs) {
+        const list = byOrg.get(orgDay.org) ?? [];
+        list.push({ day: day.day, org: orgDay });
+        byOrg.set(orgDay.org, list);
+      }
+    }
+    // Align each org to the full day span: a day the response lists with no entry for this org
+    // becomes an empty (zero-height) slot on its sparkline.
+    for (const [org, days] of byOrg) {
+      const orgByDay = new Map(days.map((d) => [d.day, d.org]));
+      byOrg.set(org, span.map((day) => ({ day: day.day, org: orgByDay.get(day.day) })));
+    }
+    return byOrg;
+  }, [spendHistory]);
+
+  // Prefer the server's per-org rollups when it reports them, so the header can never disagree with
+  // the rows it sits above; only fall back to the sessions-derived `cost` while any org carries no
+  // server spend — an older mothership, or an org the rollup has never measured a dollar for.
+  const headerCost =
+    orgs.length > 0 && orgs.every((o) => o.spend !== undefined)
+      ? sumCosts(orgs.map((o) => orgCost(o.spend)))
+      : cost;
+
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
       <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-5">
@@ -64,7 +97,9 @@ export function OverviewView({
             <span>
               <span className="text-text">{queued}</span> queued
             </span>
-            {cost !== null && <span title="what every colony has spent in total">${cost.toFixed(2)} spent</span>}
+            {headerCost !== null && (
+              <span title="what every colony has spent in total">{formatCost(headerCost)} spent</span>
+            )}
           </div>
         </div>
 
@@ -87,6 +122,8 @@ export function OverviewView({
                   </span>
                   <span className="whitespace-nowrap font-mono text-[11px] text-accent">open nest →</span>
                 </button>
+
+                <OrgSpend spend={org.spend} history={daysByOrg.get(org.org)} />
 
                 <div className="flex flex-col">
                   {mine.length === 0 ? (

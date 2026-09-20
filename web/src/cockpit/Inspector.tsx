@@ -10,6 +10,7 @@ import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
+import { formatCost } from "../spend";
 import type { SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
 import type { HarnessStatus, Session, UpdateStatus } from "../types";
@@ -43,7 +44,7 @@ function Section({ title, children }: { title: string; children: ReactElement | 
   );
 }
 
-const money = (amount: number | null | undefined) => (amount == null ? "—" : `$${amount.toFixed(2)}`);
+const money = (amount: number | null | undefined) => formatCost(amount ?? null);
 
 /** `#149` from a pull-request URL; null when it is not shaped like one. */
 function prNumber(url: string): string | null {
