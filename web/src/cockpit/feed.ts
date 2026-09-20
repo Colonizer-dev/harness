@@ -7,8 +7,8 @@
 // would put words in the mothership's mouth.
 import { needsYou } from "../notifications";
 import { colonyLabel } from "../notifications";
-import { orgOf } from "../components/ui";
-import type { Session } from "../types";
+import { isLive, orgOf } from "../components/ui";
+import type { Session, SessionStatus } from "../types";
 
 export type FeedKind = "question" | "returned" | "failed" | "launched" | "queued" | "stopped";
 
@@ -37,12 +37,10 @@ const KIND_FOR_FILTER: Record<Exclude<HistoryFilter, "all">, readonly FeedKind[]
 /** Which kind of line a colony is on right now. `needsYou` wins over status: that is the one thing worth interrupting for. */
 export function feedKind(session: Session): FeedKind {
   if (needsYou(session)) return "question";
+  // The same round-trip statuses the overview's RETURNED bucket counts, read from that one set so
+  // the timeline and the counter can never name a different "returned".
+  if (RETURNED.has(session.status)) return "returned";
   switch (session.status) {
-    case "pr_opened":
-    case "merged":
-    case "closed":
-    case "no_changes":
-      return "returned";
     case "failed":
       return "failed";
     case "stopped":
@@ -111,6 +109,52 @@ export function feedEntries(sessions: Session[]): FeedEntry[] {
 
 export function matchesFilter(kind: FeedKind, filter: HistoryFilter): boolean {
   return filter === "all" || KIND_FOR_FILTER[filter].includes(kind);
+}
+
+// ---------------------------------------------------------------------------
+// The overview's buckets. The counters at the top of OVERVIEW and the click-filters
+// read these same predicates, so the number a counter shows can never disagree with
+// the colonies the corresponding filter reveals.
+// ---------------------------------------------------------------------------
+
+/** The four buckets the overview counts and filters on. Kept apart from `HistoryFilter`: the timeline groups by kind of line, the overview by these. */
+export type OverviewFilter = "live" | "need you" | "returned" | "queued";
+
+/** The order the counters render in. */
+export const OVERVIEW_FILTERS: readonly OverviewFilter[] = ["live", "need you", "returned", "queued"];
+
+/** "Returned" as the overview draws it: the statuses that end a pull-request round-trip. */
+export const RETURNED: ReadonlySet<SessionStatus> = new Set(["pr_opened", "merged", "closed", "no_changes"]);
+
+/** Whether a colony belongs to the overview bucket `filter`. */
+export function matchesOverviewFilter(session: Session, filter: OverviewFilter): boolean {
+  switch (filter) {
+    case "live":
+      return isLive(session.status);
+    case "need you":
+      return needsYou(session);
+    case "returned":
+      return RETURNED.has(session.status);
+    case "queued":
+      return session.status === "queued";
+  }
+}
+
+/** The overview's counts over the whole list — a filter narrows the page, never these, so they keep updating on the 4s poll while one is active. */
+export function overviewCounts(sessions: Session[]): Record<OverviewFilter, number> {
+  const counts: Record<OverviewFilter, number> = { live: 0, "need you": 0, returned: 0, queued: 0 };
+  for (const session of sessions) {
+    counts.live += matchesOverviewFilter(session, "live") ? 1 : 0;
+    counts["need you"] += matchesOverviewFilter(session, "need you") ? 1 : 0;
+    counts.returned += matchesOverviewFilter(session, "returned") ? 1 : 0;
+    counts.queued += matchesOverviewFilter(session, "queued") ? 1 : 0;
+  }
+  return counts;
+}
+
+/** The rows the overview shows: everything when `filter` is null (a second click clears it), else exactly the bucket's colonies. */
+export function overviewSessions(sessions: Session[], filter: OverviewFilter | null): Session[] {
+  return filter ? sessions.filter((s) => matchesOverviewFilter(s, filter)) : sessions;
 }
 
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
