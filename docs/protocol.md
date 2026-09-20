@@ -194,6 +194,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
+| `GET /api/burn-down` · `POST /api/burn-down/stop` | Burn-down mode (§6.2c): the measured window and launch plan, and a stop that persistently switches the module off and halts every colony it launched |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
 
@@ -224,7 +225,7 @@ missing values mean the `default`.
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
   "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|merged|closed|no_changes|stopped|failed",
-  "branch": "colonizer/issue-12-ab12cd34", "base": "main", "worktree": "/…",
+  "branch": "colonizer/issue-12-ab12cd34", "base": "main", "origin": null, "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
@@ -233,6 +234,10 @@ missing values mean the `default`.
   "created_at": "…", "updated_at": "…"
 }
 ```
+
+`origin` names who launched the colony when the operator did not: `"burn_down"` marks a colony the
+burn-down scheduler auto-launched (§6.2c), so the global stop can find it and the UI can label it.
+`null` (or absent) means a person started it.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish
@@ -800,6 +805,51 @@ as above, or three consecutive failures, hands the colony back to the person.
 An accepted answer travels the ordinary path (§6.2's `answer` command), so the colony cannot tell it
 apart from a person's, except that its `response` says so in words, and the session log records the
 model and its reason. A pull request that came out of autonomous mode reads as one afterwards.
+
+### 6.2c Burn-down mode (Mothership)
+
+The `burn_down` module (provider `default`) maxes out the weekly plan: near the weekly reset it
+deliberately launches bug-hunt colonies — paced across the window, not a burst — until the estimated
+allowance is down to whatever reserve you set, then stops. Every colony it launches carries
+`"origin": "burn_down"`, and a global stop kills the scheduler and every colony it launched. Like
+`autonomy` and `notify`, it is absent from `modules.json` until first configured.
+
+| Setting | Default | |
+| --- | --- | --- |
+| `reset_weekday` | `Monday` | The weekday the allowance resets, UTC (an enum). A value no day matches leaves `next_reset` null and the scheduler dormant |
+| `reset_time` | `00:00` | The 24-hour UTC time of the reset (`HH:MM`); a value that never parses means the same dormancy |
+| `lead_hours` | 48 | How long before the reset the burn window opens |
+| `reserve_pct` | 5 | Percent of the allowance left untouched when the reset lands |
+| `allowance_usd` | *none* | Your **estimate** of the weekly allowance in USD. The scheduler never launches without it — an invented number would be worse than no number |
+| `spend_usd_per_colony` | 5 | What one bug-hunt colony roughly burns; paces the launches |
+| `max_live` | 2 | Cap on concurrent live burn-down colonies |
+| `repos` | `""` | Comma-separated `owner/repo` list to hunt in. Empty means burn-down is unconfigured and launches nothing |
+| `instructions` | `""` | Custom hunt prompt; empty uses a built-in bug-hunt prompt |
+
+Once a minute, inside the window (`reset − lead_hours` to `reset`), the scheduler plans
+`ceil((allowance − spent − reserve) / spend_usd_per_colony)` launches in total. By fraction `f` of
+the window, `floor(f × needed)` should already be out; a tick that is behind launches another,
+round-robin over `repos`, one that is on pace or ahead holds, and `max_live` caps how many run at
+once. When spend brings the allowance down to the reserve it stops. Launches go through the ordinary
+admission path, so past the parallel limit a burn-down colony queues like any other.
+
+`spent_usd` is **measured, not read from the plan**: `claude_login` exposes only the subscription's
+identity, never its usage limits or reset schedules, so the authoritative number is what sessions
+have actually cost since the previous reset anchor. `allowance_usd` is your estimate, and
+`GET /api/burn-down` says so with `"estimate": true`.
+
+`POST /api/burn-down/stop` persistently switches the module off — it stays off until re-enabled in
+Settings — then stops every `origin: "burn_down"` colony: live ones through the ordinary stop
+(worktree kept), queued ones out of the queue. It is idempotent, and safe before the module was ever
+configured.
+
+Failures are quiet and never spike: unknown `allowance_usd` → `state: "unknown_allowance"` and
+nothing launches; an unparseable `reset_time`/`reset_weekday` → `next_reset` null and the window
+never opens; a launch that fails is logged and retried on the next tick.
+
+Hunt colonies currently run a generic bug-hunt prompt — find real bugs, verify before filing, keep
+pull requests small; they will adopt the red-team runs of
+[#212](https://github.com/Colonizer-dev/harness/issues/212) when those land.
 
 ### 6.3 Mothership API additions
 

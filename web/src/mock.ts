@@ -6,6 +6,7 @@ import type {
   AgentEventBody,
   AgentRef,
   Answers,
+  BurnDownStatus,
   HarnessStatus,
   HeadroomStatus,
   Issue,
@@ -1026,6 +1027,16 @@ export function createMockApi(): Api {
   stuck.log("Publish committed 2 files on colonizer/issue-43-stuck2468");
   stuck.log("Publish failed: git push was rejected by the remote", "error");
   stuck.session.updated_at = ago(48);
+  // A burn-down colony the scheduler auto-launched (issue #210): `origin: "burn_down"` is what the
+  // real mothership persists, so the colony's "Burn-down" badge and the global stop are exercisable.
+  const burn = new MockSession({
+    ...baseSession("burn_a1b2c3", "acme/webshop", 61, "Fix the flaky checkout retry"),
+    status: "running",
+    origin: "burn_down",
+    cost_usd: 12.4,
+    created_at: ago(3),
+  });
+  sessions.set(burn.session.id, burn);
   sessions.set(demo.session.id, demo);
   sessions.set(failed.session.id, failed);
   sessions.set(old.session.id, old);
@@ -1314,6 +1325,24 @@ export function createMockApi(): Api {
     expires_estimated: true,
   };
   let login: LoginView = { state: "idle", url: null, message: null };
+  // The burn-down /api/burn-down payload (issue #210): mid-burn, ~1 day from the reset. `setBurnDown`
+  // flips the payload below when the operator stops it; the session list carries one `origin:
+  // "burn_down"` colony (`sessions.set(burn.session.id, burn)` above) against this same clock.
+  let burnDown: BurnDownStatus = {
+    enabled: true,
+    state: "burning",
+    estimate: true,
+    now: now(),
+    next_reset: new Date(Date.now() + 86_400_000).toISOString(),
+    window_start: null,
+    spent_usd: 140,
+    allowance_usd: 200,
+    remaining_usd: 60,
+    reserve_usd: 10,
+    colonies: { live: 1, queued: 1, total: 3 },
+    launches_needed: 6,
+    launches_done: 3,
+  };
   const modules: ModuleInfo[] = [
     { kind: "source", provider: "github", providers: [{ id: "github", name: "GitHub", description: "Issues from repositories you can access" }], enabled: true, settings: {}, schema: null },
     {
@@ -1478,6 +1507,33 @@ export function createMockApi(): Api {
         },
       },
     },
+    {
+      kind: "burn_down",
+      provider: "default",
+      providers: [
+        {
+          id: "default",
+          name: "Burn down",
+          description: "Maxes out the weekly plan: near the weekly reset it launches bug-hunt colonies, paced across the window, until the allowance is down to whatever reserve you set",
+        },
+      ],
+      enabled: true,
+      settings: { reset_weekday: "Monday", reset_time: "00:00", lead_hours: 48, reserve_pct: 5, allowance_usd: 200, spend_usd_per_colony: 5, max_live: 2, repos: "acme/webshop, acme/design-system", instructions: "" },
+      schema: {
+        type: "object",
+        properties: {
+          reset_weekday: { type: "string", title: "Weekly reset day (UTC)", enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], default: "Monday", description: "The day of the week your plan's allowance resets" },
+          reset_time: { type: "string", title: "Weekly reset time (UTC)", default: "00:00", description: "24-hour HH:MM in UTC" },
+          lead_hours: { type: "number", title: "Hours before reset to start burning", minimum: 1, maximum: 168, default: 48, description: "How long before the weekly reset burn-down starts launching colonies" },
+          reserve_pct: { type: "number", title: "Reserve (percent of allowance)", minimum: 0, maximum: 90, default: 5, description: "Percent of the weekly allowance left untouched when the reset lands" },
+          allowance_usd: { type: "number", title: "Weekly allowance (USD, your estimate)", description: "Your estimate of the weekly plan allowance. Burn-down never launches without it — an invented number would be worse than no number" },
+          spend_usd_per_colony: { type: "number", title: "Estimated spend per colony (USD)", minimum: 0.5, default: 5, description: "What one bug-hunt colony roughly burns, used to pace launches across the window" },
+          max_live: { type: "integer", title: "Concurrent live burn-down colonies", minimum: 1, maximum: 8, default: 2, description: "Cap on how many burn-down colonies run at once" },
+          repos: { type: "string", title: "Repositories to hunt in", default: "", description: "Comma-separated owner/repo list. Empty means burn-down is not configured and launches nothing" },
+          instructions: { type: "string", title: "Custom hunt instructions", default: "", description: "When empty, a built-in bug-hunt prompt is used" },
+        },
+      },
+    },
   ];
 
   const find = (id: string): MockSession => {
@@ -1521,6 +1577,13 @@ export function createMockApi(): Api {
       if (!module.providers.some((p) => p.id === body.provider)) throw new ApiError("unknown provider", 400);
       Object.assign(module, { provider: body.provider, enabled: body.enabled, settings: body.settings });
       return clone(module);
+    },
+    burnDown: () => later(() => burnDown),
+    stopBurnDown: async () => {
+      await sleep(200);
+      // The real endpoint stops every live/queued burn_down colony too; the payload's colony
+      // counts reflect that so the Overview card empties the live/queued columns on stop.
+      burnDown = { ...burnDown, enabled: false, state: "disabled", colonies: { ...burnDown.colonies, live: 0, queued: 0 } };
     },
     // Simulates a cold pull that takes a few seconds, so the Settings row can be
     // seen going through pulling -> done against the mock backend.
