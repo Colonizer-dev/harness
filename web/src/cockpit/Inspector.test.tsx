@@ -1,0 +1,163 @@
+// The inspector's question card: a waiting colony's question is readable and answerable from the
+// pane — text, options, who asked and how long it has been waiting — and the pane says so instead
+// of going blank when the stream has not delivered a payload yet. Answers flow from the live stream
+// state, so an answered question drops out on its own. Rendered through react-dom/server, because
+// this codebase keeps tests off jsdom.
+import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import type { QuestionActions } from "../components/AskUserCard";
+import { initialStreamState, reduceFrame, type StreamState } from "../sessionStream";
+import type { ServerFrame, Session } from "../types";
+import { Inspector, pendingQuestionsOf, type PendingQuestion } from "./Inspector";
+
+const ASKED_AT = "2026-09-01T09:00:00Z";
+
+function session(overrides: Partial<Session> = {}): Session {
+  return {
+    id: "s1",
+    repo: "acme/webshop",
+    org: "acme",
+    issue: 42,
+    issue_title: "Checkout fails for guest users",
+    status: "waiting_for_answer",
+    branch: "colonizer/issue-42-s1",
+    base: "main",
+    parent: null,
+    worktree: "/wt/s1",
+    git_admin_dir: "/git/s1",
+    sandbox: "colony-s1",
+    mesh: null,
+    agent: "claude-code",
+    autopilot: false,
+    pr_url: null,
+    error: null,
+    cost_usd: null,
+    cleaned_up: false,
+    created_at: "2026-09-18T09:00:00Z",
+    updated_at: "2026-09-18T09:10:00Z",
+    attention: null,
+    ...overrides,
+  };
+}
+
+const noop = () => {};
+
+// The stream is open and the colony is live: the card's submit is enabled and nothing is blocked.
+const CONNECTED: QuestionActions = { answer: () => true, submitting: {}, canAnswer: true, blockedBy: null };
+// The stream is still finding the colony: nothing can be answered yet.
+const CONNECTING: QuestionActions = { answer: () => false, submitting: {}, canAnswer: false, blockedBy: "disconnected" };
+
+function renderInspector(props: { pendingQuestions?: PendingQuestion[]; questionActions?: QuestionActions }): string {
+  return renderToStaticMarkup(
+    <Inspector
+      target={{ kind: "colony", session: session() }}
+      avatarUrl={null}
+      settlers={[]}
+      pendingQuestions={props.pendingQuestions ?? []}
+      questionActions={props.questionActions ?? CONNECTED}
+      sessions={[session()]}
+      status={null}
+      liveCount={0}
+      queuedCount={0}
+      needCount={1}
+      spend={null}
+      maxParallel={null}
+      update={null}
+      onClose={noop}
+      onOpenColony={noop}
+      onStop={noop}
+      onResume={noop}
+      onLaunch={noop}
+      onOpenSettings={noop}
+    />,
+  );
+}
+
+const PENDING: PendingQuestion = {
+  id: "q1",
+  questions: [
+    { question: "Push the branch?", header: "Push", multi_select: false, options: [{ label: "Push now" }, { label: "Wait" }] },
+  ],
+  asked_at: ASKED_AT,
+};
+
+describe("Inspector", () => {
+  it("shows a waiting colony's question, its options, who asked, and how long it has waited", () => {
+    const markup = renderInspector({ pendingQuestions: [PENDING] });
+    expect(markup).toContain("Push the branch?");
+    expect(markup).toContain("Push now");
+    expect(markup).toContain("Wait");
+    // The pane's own header names the colony that asked.
+    expect(markup).toContain("acme/webshop#42");
+    // The frame timestamp lands as a relative duration, "asked 18d ago"-shaped.
+    expect(markup).toMatch(/asked (just now|\d+m ago|\d+h ago|\d+d ago)/);
+    // The way deeper is kept next to the in-pane card.
+    expect(markup).toContain("open the colony and answer →");
+  });
+
+  it("without a question payload a waiting colony gets a labelled state, not a blank box", () => {
+    const waiting = renderInspector({ pendingQuestions: [], questionActions: CONNECTED });
+    expect(waiting).toContain("this colony has no pending question");
+
+    const connecting = renderInspector({ pendingQuestions: [], questionActions: CONNECTING });
+    expect(connecting).toContain("loading the question…");
+  });
+
+  it("nothing selected is its own labelled state", () => {
+    const markup = renderToStaticMarkup(
+      <Inspector
+        target={null}
+        avatarUrl={null}
+        settlers={[]}
+        pendingQuestions={[]}
+        questionActions={CONNECTING}
+        sessions={[]}
+        status={null}
+        liveCount={0}
+        queuedCount={0}
+        needCount={0}
+        spend={null}
+        maxParallel={null}
+        update={null}
+        onClose={noop}
+        onOpenColony={noop}
+        onStop={noop}
+        onResume={noop}
+        onLaunch={noop}
+        onOpenSettings={noop}
+      />,
+    );
+    expect(markup).toMatch(/aria-label="nothing selected"/);
+    expect(markup).toContain("nothing selected");
+  });
+});
+
+describe("pendingQuestionsOf", () => {
+  const ASK = { question: "Push now?", header: "Push", multi_select: false, options: [{ label: "Yes" }] };
+  const frame = (body: ServerFrame): ServerFrame => body;
+
+  /** A stream where one question was asked, answered or not, on the wire itself. */
+  const streamWithQuestion = (answered: boolean): StreamState => {
+    let state = reduceFrame(
+      initialStreamState(),
+      frame({ type: "assistant_text", seq: 1, ts: ASKED_AT, message_id: "m1", block_index: 0, text: "Shall I?" }),
+    );
+    state = reduceFrame(state, frame({ type: "question", seq: 2, ts: ASKED_AT, question_id: "q1", message_id: "m1", questions: [ASK] }));
+    if (answered) {
+      state = reduceFrame(
+        state,
+        frame({ type: "question_answered", seq: 3, ts: ASKED_AT, question_id: "q1", answers: { "Push now?": "Yes" }, response: null }),
+      );
+    }
+    return state;
+  };
+
+  it("lists only the questions still waiting for an answer", () => {
+    expect(pendingQuestionsOf(streamWithQuestion(false))).toEqual([{ id: "q1", questions: [ASK], asked_at: ASKED_AT }]);
+  });
+
+  it("an answered question drops out, so the pane clears as question_answered arrives", () => {
+    expect(pendingQuestionsOf(streamWithQuestion(true))).toEqual([]);
+  });
+});
