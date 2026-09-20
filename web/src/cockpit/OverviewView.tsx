@@ -10,6 +10,7 @@ import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg, timeAgo } from "../c
 import { needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
+import { BurnDownCard } from "./BurnDownCard";
 import { headlineFor } from "./feed";
 import type { Session } from "../types";
 
@@ -67,6 +68,8 @@ export function OverviewView({
             {cost !== null && <span title="what every colony has spent in total">${cost.toFixed(2)} spent</span>}
           </div>
         </div>
+
+        <BurnDownCard />
 
         <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
           {orgs.map((org) => {

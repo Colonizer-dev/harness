@@ -158,6 +158,11 @@ pub struct Session {
     /// overwhelming majority, which branch from the repository's default branch as always.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Who launched the colony when the operator did not: `Some("burn_down")` marks a colony the
+    /// burn-down scheduler auto-launched, so the global stop can find it and the UI can label it.
+    /// `None` for anything a person started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     pub worktree: String,
     pub git_admin_dir: Option<String>,
     pub sandbox: String,
@@ -226,6 +231,7 @@ impl Default for Session {
             branch: String::new(),
             base: None,
             parent: None,
+            origin: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),
@@ -534,6 +540,10 @@ pub struct NewSession {
     /// starts from that branch instead of the default one, and its pull request is a diff against it.
     #[serde(default)]
     after: Option<String>,
+    /// Who is asking, when the operator is not: the burn-down scheduler tags its colonies
+    /// `Some("burn_down")` so `POST /api/burn-down/stop` can find them again.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -774,6 +784,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         branch: format!("colonizer/{slug}"),
         base: None,
         parent: parent.clone(),
+        origin: req.origin.clone(),
         worktree: app
             .cfg
             .data_dir
@@ -1968,6 +1979,7 @@ pub(crate) mod tests {
             branch: String::new(),
             base: None,
             parent: None,
+            origin: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),
@@ -2424,6 +2436,7 @@ pub(crate) mod tests {
                 allow_duplicate: false,
                 model_tier: None,
                 after: None,
+                origin: None,
             }),
         )
         .await
@@ -2498,6 +2511,7 @@ pub(crate) mod tests {
                 allow_duplicate: false,
                 model_tier: None,
                 after: None,
+                origin: None,
             }),
         )
         .await
@@ -2610,6 +2624,7 @@ pub(crate) mod tests {
             allow_duplicate: false,
             model_tier: None,
             after,
+            origin: None,
         })
     }
 

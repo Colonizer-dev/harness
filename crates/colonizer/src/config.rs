@@ -155,6 +155,10 @@ pub struct ModulesConfig {
     /// your colonies is something to switch on, not a default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<ModuleChoice>,
+    /// Absent until it is configured, like `autonomy` and `notify`: spending a weekly plan on
+    /// burner colonies is a decision, not a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_down: Option<ModuleChoice>,
 }
 
 fn default_memory() -> ModuleChoice {
@@ -180,6 +184,8 @@ impl Default for ModulesConfig {
             autonomy: None,
             // Off until it is configured: a webhook is a write to somewhere outside this machine.
             notify: None,
+            // Off until it is configured: burning a plan is a decision, not a default.
+            burn_down: None,
         }
     }
 }
@@ -214,6 +220,7 @@ impl ModulesConfig {
             "watchdog" => Some(&self.watchdog),
             "autonomy" => self.autonomy.as_ref(),
             "notify" => self.notify.as_ref(),
+            "burn_down" => self.burn_down.as_ref(),
             _ => None,
         }
     }
@@ -232,6 +239,7 @@ impl ModulesConfig {
             // written into every modules.json that never asked for it.
             "autonomy" => Some(self.autonomy.get_or_insert_with(|| ModuleChoice::new("off"))),
             "notify" => Some(self.notify.get_or_insert_with(|| ModuleChoice::new("default"))),
+            "burn_down" => Some(self.burn_down.get_or_insert_with(|| ModuleChoice::new("default"))),
             _ => None,
         }
     }
