@@ -108,6 +108,11 @@ pub async fn recover(app: &Shared) {
             if !orphaned_publish(&s, &fresh) {
                 continue;
             }
+            //
+            // Fencing (issue #98): the colony is left `Failed`, and anything preserved here resumes
+            // only under fresh authorization — `authority::requires_reauth_after_restart` is true by
+            // construction, so no grant survives the restart and resume re-authenticates from scratch.
+            debug_assert!(crate::authority::requires_reauth_after_restart());
             teardown_vm(app, &fresh).await;
             let mut attention = None;
             app.update_session(&fresh.id, |x| {

@@ -7,6 +7,7 @@
 //! credential is injected by microsandbox's host-side TLS proxy for the API host only, and model
 //! provider keys are added by the mothership's provider gateway.
 
+mod authority;
 mod autonomy;
 mod burn_down;
 mod claude_accounts;
