@@ -488,6 +488,19 @@ impl SessionLogger {
     }
 }
 
+/// Whether two session records hold the same content, ignoring `updated_at`. Compared through
+/// their JSON projections rather than a derived `PartialEq`: floats like `cost_usd` make
+/// structural equality brittle, and the projection keeps the check to exactly what persists.
+/// A serialization failure falls back to "changed", so a write is never skipped on doubt.
+fn session_contents_equal(before: &Session, after: &Session) -> bool {
+    let (Ok(Value::Object(mut a)), Ok(Value::Object(mut b))) = (serde_json::to_value(before), serde_json::to_value(after)) else {
+        return false;
+    };
+    a.remove("updated_at");
+    b.remove("updated_at");
+    a == b
+}
+
 impl App {
     pub fn sessions_file(&self) -> PathBuf {
         self.cfg.data_dir.join("sessions.json")
@@ -518,7 +531,16 @@ impl App {
             // against the day it happened, so it survives the cleanup or delete that forgets the
             // colony itself.
             let was_terminal = session.status.is_terminal();
+            let before = session.clone();
             let result = f(session);
+            if session_contents_equal(&before, session) {
+                // The closure changed nothing: leave `updated_at` alone and skip the persist and
+                // broadcast, or every no-op poll rewrites sessions.json and wakes every browser.
+                // There can be no terminal transition either, so no spend edge is recorded.
+                // `updated_at` itself is excluded from the comparison above.
+                let session = session.clone();
+                return Some((session, result));
+            }
             let returned = !was_terminal && session.status.is_terminal();
             session.updated_at = Utc::now();
             (session.clone(), returned, result)
@@ -2325,6 +2347,44 @@ pub(crate) mod tests {
         let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
         assert!(log.contains("could not save the session list"), "{log}");
         drop(_guard);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_session_with_noop_closure_leaves_updated_at_and_disk_alone() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let before = app.session("abc").await.unwrap();
+        // Seed sessions.json so a write would be observable.
+        app.persist_sessions().await.unwrap();
+        let disk_before = std::fs::read_to_string(app.sessions_file()).unwrap();
+        // updated_at only has second precision on disk in spirit; sleep past any clock bump so
+        // a spurious bump could not hide behind timestamp granularity.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (after, ()) = app.update_session("abc", |_| {}).await.unwrap();
+        assert_eq!(
+            after.updated_at, before.updated_at,
+            "a closure that changes nothing must not bump updated_at"
+        );
+        let disk_after = std::fs::read_to_string(app.sessions_file()).unwrap();
+        assert_eq!(disk_after, disk_before, "a no-op update must not rewrite sessions.json");
+        assert!(
+            app.storage_alert.read().await.is_none(),
+            "skipping the write must not raise a storage alert"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_session_with_real_change_bumps_updated_at_and_persists() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let before = app.session("abc").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (after, ()) = app.update_session("abc", |s| s.status = SessionStatus::Idle).await.unwrap();
+        assert_eq!(after.status, SessionStatus::Idle);
+        assert!(after.updated_at > before.updated_at, "a real change must bump updated_at");
+        let disk: Value = serde_json::from_str(&std::fs::read_to_string(app.sessions_file()).unwrap()).unwrap();
+        let saved = disk.as_array().unwrap().iter().find(|v| v["id"] == "abc").unwrap();
+        assert_eq!(saved["status"], "idle", "a real change must reach sessions.json");
         let _ = std::fs::remove_dir_all(root);
     }
 
