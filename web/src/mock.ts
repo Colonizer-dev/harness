@@ -200,11 +200,12 @@ class MockSession {
    */
   private turnUsage(perTurn: Record<string, ModelTokens>): Record<string, ModelTokens> {
     for (const [model, tokens] of Object.entries(perTurn)) {
-      const total = (this.modelUsage[model] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 });
+      const total = (this.modelUsage[model] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, thinking_tokens: 0 });
       total.input_tokens += tokens.input_tokens;
       total.output_tokens += tokens.output_tokens;
       total.cache_read_tokens += tokens.cache_read_tokens;
       total.cache_write_tokens += tokens.cache_write_tokens;
+      total.thinking_tokens += tokens.thinking_tokens;
     }
     return clone(this.modelUsage);
   }
@@ -413,7 +414,7 @@ class MockSession {
         result: null,
         cost_usd: 0.01,
         duration_ms: 2_100,
-        model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 1_850, output_tokens: 240, cache_read_tokens: 19_400, cache_write_tokens: 1_200 } }),
+        model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 1_850, output_tokens: 240, cache_read_tokens: 19_400, cache_write_tokens: 1_200, thinking_tokens: 0 } }),
       });
       this.emit({ type: "status", state: "idle" });
       return;
@@ -637,8 +638,8 @@ class MockSession {
       cost_usd: Math.round(this.cost * 100) / 100,
       duration_ms: 81_234,
       model_usage: this.turnUsage({
-        "claude-opus-5": { input_tokens: 46_200, output_tokens: 9_100, cache_read_tokens: 402_000, cache_write_tokens: 16_800 },
-        "deepseek/deepseek-flash": { input_tokens: 28_400, output_tokens: 6_200, cache_read_tokens: 0, cache_write_tokens: 0 },
+        "claude-opus-5": { input_tokens: 46_200, output_tokens: 9_100, cache_read_tokens: 402_000, cache_write_tokens: 16_800, thinking_tokens: 0 },
+        "deepseek/deepseek-flash": { input_tokens: 28_400, output_tokens: 6_200, cache_read_tokens: 0, cache_write_tokens: 0, thinking_tokens: 0 },
       }),
     });
     this.emit({ type: "status", state: "idle" });
@@ -677,7 +678,7 @@ class MockSession {
       result: reply,
       cost_usd: Math.round(this.cost * 100) / 100,
       duration_ms: 4_210,
-      model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 5_800, output_tokens: 940, cache_read_tokens: 48_000, cache_write_tokens: 3_600 } }),
+      model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 5_800, output_tokens: 940, cache_read_tokens: 48_000, cache_write_tokens: 3_600, thinking_tokens: 0 } }),
     });
     this.emit({ type: "status", state: this.pendingQuestion ? "waiting_for_answer" : "idle" });
   }

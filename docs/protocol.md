@@ -1267,11 +1267,11 @@ counted differently but on one scale, Anthropic's token names:
   estimate can only undercount.
 - `wire: openai`: the usage the translation already extracted is reused; the body is never read twice.
 
-`pricing` is four rates in dollars per million tokens: `input_per_mtok`, `output_per_mtok`,
-`cache_read_per_mtok` and `cache_write_per_mtok`, each `0` or more. A provider without it (or with all
-four at `0`) still counts its tokens, which reach `model_usage` as usual, but contributes nothing to
-`routed_cost_usd`. `PUT /api/providers/{id}` with `pricing` omitted keeps the saved rates, like the key;
-an all-`0` object clears them in effect. Claude traffic does not pass through the gateway at all:
+`pricing` is five rates in dollars per million tokens: `input_per_mtok`, `output_per_mtok`,
+`cache_read_per_mtok`, `cache_write_per_mtok` and `thinking_per_mtok`, each `0` or more. A provider
+without it (or with all five at `0`) still counts its tokens, which reach `model_usage` as usual, but
+contributes nothing to `routed_cost_usd`. `PUT /api/providers/{id}` with `pricing` omitted keeps the saved
+rates, like the key; an all-`0` object clears them in effect. Claude traffic does not pass through the gateway at all:
 microsandbox injects the credential straight to `api.anthropic.com`, so Claude's spend is only seen when
 a turn ends, as the runner's `cost_usd`. A colony's budget answers to the two added together, and both
 are estimates.
@@ -1284,6 +1284,24 @@ provider gets asked for as many requests at once as are made of it. With `delega
 default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
 of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
 `GET /api/providers` also returns `pricing`, `in_flight`, `queued`, `usage`, `health` and `used_by`.
+
+**Integration notes (Meta Model API).** Adding the `meta` preset as a first-class `wire: anthropic`
+provider surfaced a few quirks worth carrying into the next such integration. `base_url` for an
+anthropic-wire provider must be scheme and host only, with no `/v1` suffix: the gateway appends the
+request's own path itself (`/v1/messages`, and `/v1/models` for the health probe), so a base already
+ending in `/v1` doubles it and 404s silently until the first live call. `PUT /api/providers/{id}` now
+rejects that shape at save time for `wire: anthropic` (an `openai`-wire base_url ending in `/v1`, like
+`xai-grok`'s, is unaffected — the translator appends `/chat/completions` itself). Meta enforces
+`max_tokens >= 16`, answering `400` `invalid_request_error` below it, so a colony or provider default for
+this preset must respect that floor. Meta is also a heavy reasoner: thinking tokens are spent from the
+output budget before any text, so `max_tokens` should be set generously here, and its
+`usage.output_tokens_details.thinking_tokens` is now tracked as `Usage.thinking_tokens`, priced by
+`Pricing.thinking_per_mtok` alongside the other four rates. Thinking itself arrives as opaque
+`redacted_thinking` blocks — standard Anthropic wire, passed through by Claude Code unchanged — and
+nothing in the harness inspects their contents; only the text blocks are visible to diagnosis and event
+streams. Contributor-tier pricing for Meta is currently unknown and unverified, so the preset ships with
+`pricing` unset: honest (tokens are still counted; nothing is guessed), but it means spend on this
+provider has to be watched manually rather than assumed free.
 
 **Usage.** `usage` is the provider's cumulative counters: what says a request has ever actually gone to it,
 which the momentary `in_flight`/`queued` gauges cannot:

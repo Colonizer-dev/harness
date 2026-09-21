@@ -38,6 +38,7 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    pub thinking_tokens: u64,
 }
 
 impl Usage {
@@ -52,7 +53,7 @@ impl Usage {
     }
 
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens + self.thinking_tokens
     }
 }
 
@@ -68,6 +69,8 @@ pub struct Pricing {
     pub cache_read_per_mtok: f64,
     #[serde(default)]
     pub cache_write_per_mtok: f64,
+    #[serde(default)]
+    pub thinking_per_mtok: f64,
 }
 
 impl Pricing {
@@ -76,7 +79,8 @@ impl Pricing {
         (usage.input_tokens as f64 * self.input_per_mtok
             + usage.output_tokens as f64 * self.output_per_mtok
             + usage.cache_read_tokens as f64 * self.cache_read_per_mtok
-            + usage.cache_write_tokens as f64 * self.cache_write_per_mtok)
+            + usage.cache_write_tokens as f64 * self.cache_write_per_mtok
+            + usage.thinking_tokens as f64 * self.thinking_per_mtok)
             / 1_000_000.0
     }
 }
@@ -421,6 +425,14 @@ fn valid_price(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
+/// The gateway appends the request's own path to an anthropic-wire base_url (e.g. `/v1/messages`, and
+/// `/v1/models` for the health probe), so a base already ending in `/v1` doubles it and 404s silently
+/// until the first real call surfaces it. `openai`-wire providers are unaffected: their base_url
+/// legitimately ends in `/v1` (e.g. xai-grok), since the translator appends `/chat/completions` itself.
+fn base_url_needs_stripping(base_url: &str, wire: Wire) -> bool {
+    wire == Wire::Anthropic && base_url.ends_with("/v1")
+}
+
 pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<PutProvider>) -> ApiResult<Value> {
     let bad = |message: &str| client_error(StatusCode::BAD_REQUEST, message);
     if !valid_id(&id) {
@@ -435,6 +447,12 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     let base_url = req.base_url.trim().trim_end_matches('/').to_string();
     if base_url.len() > 300 || split_url(&base_url).is_none() {
         return Err(bad("base URL must be an http(s) URL like https://api.deepseek.com/anthropic"));
+    }
+    if base_url_needs_stripping(&base_url, req.wire) {
+        return Err(bad(
+            "base URL for an Anthropic-wire provider must not end in /v1 — the gateway appends its own \
+             path (e.g. /v1/messages); strip the trailing /v1",
+        ));
     }
     if !AUTH_MODES.contains(&req.auth.as_str()) {
         return Err(bad("auth must be x-api-key, bearer or none"));
@@ -588,17 +606,19 @@ mod tests {
             output_tokens: 500_000,
             cache_read_tokens: 2_000_000,
             cache_write_tokens: 0,
+            thinking_tokens: 200_000,
         };
         let pricing = Pricing {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
             cache_read_per_mtok: 0.3,
             cache_write_per_mtok: 3.75,
+            thinking_per_mtok: 5.0,
         };
         let cost = pricing.cost_usd(usage);
         assert!(
-            (cost - (3.0 + 7.5 + 0.6)).abs() < 1e-9,
-            "3 in + 0.5 out at 15 + 2 cache read at 0.3, got {cost}"
+            (cost - (3.0 + 7.5 + 0.6 + 1.0)).abs() < 1e-9,
+            "3 in + 0.5 out at 15 + 2 cache read at 0.3 + 0.2 thinking at 5, got {cost}"
         );
         // Cached reads are priced separately from fresh input: the same million tokens twice, once each way.
         let fresh = Usage {
@@ -628,7 +648,7 @@ mod tests {
             "no pricing configured: tokens counted, dollars none"
         );
         assert_eq!(Usage::default().total_tokens(), 0);
-        assert_eq!(usage.total_tokens(), 3_500_000);
+        assert_eq!(usage.total_tokens(), 3_700_000, "thinking tokens count toward the total too");
     }
 
     /// providers.json on disk predates `pricing`, and a Settings save from an older web build omits it.
@@ -686,6 +706,23 @@ mod tests {
         assert!(split_url("ftp://example.com").is_none());
         assert!(split_url("https://user:pass@example.com").is_none());
         assert!(split_url("https://example.com:notaport").is_none());
+    }
+
+    /// An anthropic-wire base_url ending in `/v1` doubles up with the path the gateway appends
+    /// (`/v1/messages`, and `/v1/models` for the health probe) and 404s silently. `openai`-wire
+    /// providers legitimately end in `/v1` (e.g. the xai-grok catalog entry), since the translator
+    /// appends `/chat/completions` itself, so the check only applies to `wire: anthropic`.
+    #[test]
+    fn an_anthropic_wire_base_url_ending_in_v1_is_rejected() {
+        assert!(base_url_needs_stripping("https://api.example.com/v1", Wire::Anthropic));
+        assert!(!base_url_needs_stripping(
+            "https://api.example.com/anthropic",
+            Wire::Anthropic
+        ));
+        assert!(
+            !base_url_needs_stripping("https://api.x.ai/v1", Wire::Openai),
+            "an openai-wire provider legitimately ends in /v1"
+        );
     }
 
     /// providers.json on disk predates `wire`, and a Settings save from an older web build omits it.
