@@ -29,6 +29,7 @@ import type {
   Session,
   SpendHistory,
   StartRedTeamRunRequest,
+  StorageSummary,
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
@@ -89,6 +90,10 @@ export interface Api {
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
+  /** GET /api/storage: disk usage plus the reclaimable / unpushed / orphan breakdown (issue #223). */
+  storageSummary(): Promise<StorageSummary>;
+  /** POST /api/sessions/{id}/retain: keep (`{keep: true}`) or release this colony's worktree from automatic reclamation. */
+  setKeep(id: string, keep: boolean): Promise<Session>;
   /** Forgets a colony: worktree, local branch, chat and logs. Its pull request stays on GitHub. */
   deleteSession(id: string): Promise<unknown>;
   /** GET /api/burn-down: the burn-down scheduler's read on the weekly token plan (issue #210). */
@@ -200,6 +205,8 @@ export const httpApi: Api = {
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
+  storageSummary: () => request("/api/storage"),
+  setKeep: (id, keep) => post(`/api/sessions/${enc(id)}/retain`, { keep }),
   deleteSession: (id) => del(`/api/sessions/${enc(id)}`),
   burnDown: () => request("/api/burn-down"),
   stopBurnDown: () => post("/api/burn-down/stop"),

@@ -39,7 +39,7 @@ function session(overrides: Partial<Session> = {}): Session {
     pr_url: null,
     error: null,
     cost_usd: null,
-    cleaned_up: false,
+    cleaned_up: false, keep_worktree: false,
     created_at: "2026-09-18T09:00:00Z",
     updated_at: "2026-09-18T09:10:00Z",
     attention: null,

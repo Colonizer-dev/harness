@@ -22,7 +22,7 @@ function session(id: string, status: Session["status"] = "running"): Session {
     id, repo: "acme/webshop", org: "acme", issue: 42, issue_title: "Checkout fails for guest users",
     status, branch: `colonizer/issue-42-${id}`, base: "main", parent: null,
     worktree: `/home/you/wt/${id}`, git_admin_dir: null, sandbox: `colony-${id}`, mesh: null,
-    agent: "claude-code", autopilot: false, pr_url: null, error: null, cost_usd: null, cleaned_up: false,
+    agent: "claude-code", autopilot: false, pr_url: null, error: null, cost_usd: null, cleaned_up: false, keep_worktree: false,
     created_at: "2026-09-20T08:00:00Z", updated_at: "2026-09-20T08:00:00Z",
   };
 }

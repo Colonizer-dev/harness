@@ -832,6 +832,7 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
     error: null,
     cost_usd: null,
     cleaned_up: false,
+    keep_worktree: false,
     created_at: now(),
     updated_at: now(),
   };
@@ -1736,6 +1737,8 @@ export function createMockApi(): Api {
           // The host strip's numbers (issue #205); ?runtime=kvm shows a host whose KVM the
           // user cannot use, so the strip reads "no KVM".
           host: mockHost(live),
+          // Reclamation counts for the sidebar's Storage dot (issue #223).
+          reclaim: { reclaimable: 1, unpushed: 1 },
           // The same verdict the providers list serves, read off its own seeds: strix is the
           // degraded one (issue #184's report), deepseek and lab have never been used.
           model_providers: providers.map((p) => ({
@@ -1936,6 +1939,25 @@ export function createMockApi(): Api {
       if (isLive(s.session.status) || s.session.status === "publishing") throw new ApiError("stop the colony first", 409);
       s.patch({ cleaned_up: true });
       s.log("Removed the worktree and local branch");
+      return clone(s.session);
+    },
+    storageSummary: () =>
+      later(() => ({
+        worktrees_bytes: 0,
+        repos_bytes: 0,
+        sessions_bytes: 0,
+        reclaimable: [],
+        unpushed: [],
+        orphans: [],
+        free_bytes: null,
+        min_free_bytes: 0,
+        retention_secs: 43200,
+        enabled: true,
+      })),
+    setKeep: async (id, keep) => {
+      const s = find(id);
+      s.patch({ keep_worktree: keep });
+      s.log(keep ? "Worktree kept: automatic reclamation will skip this colony" : "Worktree released back to automatic reclamation");
       return clone(s.session);
     },
     setGithubToken: async (token) => {
