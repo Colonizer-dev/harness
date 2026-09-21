@@ -893,6 +893,13 @@ async fn serve() -> Result<()> {
             s.org = s.repo.split('/').next().unwrap_or_default().to_string();
         }
     }
+    // Colonies persisted as finished while still carrying an attention flag predate the clearing
+    // every terminal transition now does; drop those stale flags before `recover` runs, so a
+    // stopped colony does not look like it still needs attention.
+    let stale_attention = sessions::clear_stale_attention(&mut sessions);
+    if stale_attention > 0 {
+        println!("sessions: cleared a stale attention flag from {stale_attention} finished colonies");
+    }
     let modules = ModulesConfig::load(&cfg.config_dir.join("modules.json"));
     let agents = modules::discover_agents(cfg.assets.as_deref());
 

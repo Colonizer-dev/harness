@@ -133,6 +133,43 @@ impl Session {
     pub fn total_cost_usd(&self) -> f64 {
         self.cost_usd.unwrap_or_default() + self.routed_cost_usd.unwrap_or_default()
     }
+
+    /// Drop the attention flag the watchdog or autopilot set (`stalled`, `nudges_exhausted`,
+    /// `autopilot_held`) as the colony stops or fails. The flag is only meaningful while the
+    /// colony is live — it says someone should look at it — and without this a stopped colony
+    /// keeps it in `sessions.json` forever. Every terminal transition calls this and notes the
+    /// returned flag in the colony's log, so the history survives the clear. Returns what was
+    /// removed, if anything.
+    pub(crate) fn clear_attention(&mut self) -> Option<Value> {
+        self.attention.take()
+    }
+}
+
+/// The one-line history note for an attention flag a terminal transition just removed: the reason
+/// it was set, so the colony's log still says what the flag meant after the flag itself is gone.
+/// `None` when there was no flag, so callers only log when something was actually cleared.
+pub(crate) fn cleared_attention_message(attention: &Option<Value>) -> Option<String> {
+    let attention = attention.as_ref()?;
+    let reason = attention.get("reason").and_then(Value::as_str).unwrap_or("unknown");
+    Some(format!(
+        "clearing the attention flag ({reason}): the colony is not running, so nothing is waiting on it any more"
+    ))
+}
+
+/// Startup migration, run in `serve` next to the org backfill and before `recover`: colonies
+/// persisted as finished while still carrying an attention flag predate the clearing every
+/// terminal transition now does. A finished colony that still carries one looks like it needs
+/// attention it no longer does, so drop the flag from every terminal colony that has one.
+/// Returns how many flags were cleared.
+pub(crate) fn clear_stale_attention(sessions: &mut [Session]) -> usize {
+    let mut cleared = 0;
+    for s in sessions.iter_mut() {
+        if s.status.is_terminal() && s.attention.is_some() {
+            s.attention = None;
+            cleared += 1;
+        }
+    }
+    cleared
 }
 
 /// How far the last publish got, persisted on the session so a retry continues from there instead of
@@ -610,6 +647,14 @@ impl App {
         rt.broadcast(None, entry.to_string());
     }
 
+    /// Notes an attention flag a terminal transition just cleared in the colony's log, so the
+    /// reason it was set survives the clear. Silent when there was no flag.
+    pub(crate) async fn note_cleared_attention(&self, id: &str, attention: Option<Value>) {
+        if let Some(message) = cleared_attention_message(&attention) {
+            self.session_log(id, "info", message).await;
+        }
+    }
+
     /// Reports a read failure from `Runtime::load`, once, the first time the colony's runtime is
     /// actually used. Not done inside `runtime()`: `session_log` calls back into it, and the
     /// runtimes map is locked there. The message is built per file in `load` — this only puts it
@@ -1064,11 +1109,14 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
         app.session_log(&id, "error", format!("session failed to start: {message}"))
             .await;
         teardown_vm(&app, &s).await;
+        let mut attention = None;
         app.update_session(&id, |s| {
             s.status = SessionStatus::Failed;
             s.error = Some(truncate(&message, 2000));
+            attention = s.clear_attention();
         })
         .await;
+        app.note_cleared_attention(&id, attention).await;
     }
 }
 
@@ -2091,6 +2139,35 @@ pub(crate) mod tests {
         assert_eq!(s.total_cost_usd(), 1.25);
         s.routed_cost_usd = Some(0.75);
         assert!((s.total_cost_usd() - 2.0).abs() < 1e-9, "Claude and routed spend add up");
+    }
+
+    #[test]
+    fn startup_migration_clears_stale_attention_only_on_finished_colonies() {
+        fn flagged(status: SessionStatus) -> Session {
+            let mut s = colony("acme", status);
+            s.attention = Some(json!({"reason": "stalled", "since": Utc::now(), "nudges": 2}));
+            s
+        }
+        let mut sessions = vec![
+            flagged(SessionStatus::Stopped),
+            flagged(SessionStatus::Failed),
+            flagged(SessionStatus::PrOpened),
+            flagged(SessionStatus::Running),
+            colony("acme", SessionStatus::Stopped),
+        ];
+        assert_eq!(clear_stale_attention(&mut sessions), 3);
+        for s in &sessions[..3] {
+            assert!(s.attention.is_none(), "{:?} must not keep a stale attention flag", s.status);
+        }
+        assert!(
+            sessions[3].attention.is_some(),
+            "a live colony keeps the flag the watchdog is still managing"
+        );
+        assert!(
+            sessions[4].attention.is_none(),
+            "a finished colony without a flag is untouched"
+        );
+        assert_eq!(clear_stale_attention(&mut sessions), 0, "the migration is idempotent");
     }
 
     /// sessions.json written before `routed_cost_usd` existed must still load, cost and all.

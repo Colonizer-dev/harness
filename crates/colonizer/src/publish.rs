@@ -101,11 +101,14 @@ pub async fn publish_session(app: Shared, id: String) {
         Err(e) => {
             let message = format!("{e:#}");
             log.error(format!("publishing failed: {message}")).await;
+            let mut attention = None;
             app.update_session(&id, |x| {
                 x.status = SessionStatus::Failed;
                 x.error = Some(truncate(&message, 2000));
+                attention = x.clear_attention();
             })
             .await;
+            app.note_cleared_attention(&id, attention).await;
         }
     }
 }

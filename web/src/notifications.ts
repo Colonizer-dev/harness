@@ -17,11 +17,36 @@ import { orgOf, sameOrg } from "./components/ui";
 // ---------------------------------------------------------------------------
 
 /**
+ * Terminal statuses, mirroring `SessionStatus::is_terminal()` in
+ * crates/colonizer/src/sessions.rs — keep the two in step. A colony in one of
+ * these has finished its run (the work is out, stopped or failed), so it never
+ * needs a person even when a stale `attention` flag has not been cleared yet.
+ */
+export const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set([
+  "pr_opened",
+  "merged",
+  "closed",
+  "no_changes",
+  "stopped",
+  "failed",
+]);
+
+/** Whether the colony's run is over — mirrors `SessionStatus::is_terminal()`. */
+export function isTerminal(status: SessionStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
+/**
  * The one definition of "needs a person": flagged by the watchdog or autopilot, or sat on an open
- * question. The sidebar's rank-0 group, the tab-title count, the favicon dot and the strip all read
- * this, so none of them can disagree about who is waiting.
+ * question. Terminal colonies never need anyone, even with a stale attention flag: the flag is
+ * cleared by the next agent event and there is no next event once the run is over. Deliberately
+ * not `!isLive`: `waiting_for_answer` is live and must stay true, and non-terminal non-live
+ * statuses (`queued`, `publishing`) keep their attention behaviour. The sidebar's rank-0 group,
+ * the tab-title count, the favicon dot and the strip all read this, so none of them can disagree
+ * about who is waiting.
  */
 export function needsYou(session: Session): boolean {
+  if (isTerminal(session.status)) return false;
   return Boolean(session.attention) || session.status === "waiting_for_answer";
 }
 
