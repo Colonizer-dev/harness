@@ -95,6 +95,15 @@ setting) is called out under **Take care** rather than left for you to find.
   An installer run by hand still replaces it immediately, which is safe when
   nothing is running and not when something is. ([#112])
 
+## [v0.1.5] - 2026-09-18
+
+### Changed
+
+- Following a live colony moves at a steady speed instead of a burst per
+  line: how far behind the view is sets a pace in pixels per second, averaged
+  over 250 ms and aimed to sit level 300 ms ahead, so a stream of lines is one
+  movement rather than a series of starts. ([#134])
+
 ## [v0.1.4] - 2026-09-17
 
 ### Changed
@@ -213,9 +222,11 @@ Macs. ([#74])
 [#120]: https://github.com/Colonizer-dev/harness/issues/120
 [#127]: https://github.com/Colonizer-dev/harness/issues/127
 [#131]: https://github.com/Colonizer-dev/harness/pull/131
+[#134]: https://github.com/Colonizer-dev/harness/pull/134
 [#172]: https://github.com/Colonizer-dev/harness/pull/172
 [#177]: https://github.com/Colonizer-dev/harness/issues/177
 [#184]: https://github.com/Colonizer-dev/harness/issues/184
+[v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2
