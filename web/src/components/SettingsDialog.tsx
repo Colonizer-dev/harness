@@ -35,7 +35,7 @@ import type {
   UsageStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
-import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, usageHealthTone } from "../providerHealth";
+import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
 import { useModels } from "../useModels";
 import { type ImagePull } from "../useImagePull";
 import { setupTone, type SetupView } from "../setup";
@@ -2525,6 +2525,9 @@ function UsageLine({ provider }: { provider: ModelProvider }) {
     segments.push({ text: "no model setting points at it as configured", tone: requests === 0 ? "lift" : undefined });
   } else if (wiring) {
     segments.push({ text: wiring });
+  }
+  if (provider.quota_exhausted) {
+    segments.push({ text: quotaExhaustedText(provider.quota_exhausted) ?? "quota exhausted", tone: quotaTone(provider.quota_exhausted) ?? undefined });
   }
 
   return (

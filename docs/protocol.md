@@ -1159,7 +1159,7 @@ settings `enabled` = true, `require_review` = true). `Session` gains `last_activ
 `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted", "since": "…", "nudges": 2}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -1168,7 +1168,10 @@ notice, not a user bubble), at most `max_nudges` times per stall; then `attentio
 `nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) is not published and gets
 `autopilot_held`. Any new agent event clears `attention`; a disabled watchdog clears only the reasons
-it sets itself.
+it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
+(see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
+`provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
+announce here either.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
@@ -1441,6 +1444,33 @@ everywhere: `GET /api/status` carries a `model_providers` array of
 `{id, name, requests, failure_pct, avg_latency_ms, degraded}`, so the status poll answers "is it the
 provider?" without opening the providers screen, and the notify module's `provider_degraded` event
 announces the same verdict when it first appears (§6.3).
+
+**Quota exhaustion.** An upstream 429/403 — or turn text with no status at all, from the colony-side
+turn-end scan — whose message says the plan ran out — "quota has been exhausted",
+"weekly limit", "token-plan" with limit/reset phrasing, `insufficient_quota`, billing/plan quota
+wording beside an exhaustion verb, or "usage limit" with reset phrasing, never a bare rate limit or
+a refused model — is quota exhaustion, and the gateway treats it apart from transport failure. Any
+other status is not exhaustion, whatever it says. The anthropic wire forwards the error body
+verbatim; the OpenAI wire forwards the translated body (the classifier reads the raw error code
+there, since translation drops `insufficient_quota`). Either way the provider is recorded as
+exhausted (in memory; a restart forgets it) with the reset the message named — or, when the message
+names none, a 15-minute TTL after which the record lapses and the queue re-probes — and the answer
+carries `x-colonizer-quota-exhausted` (the reset words, or `exhausted`). An upstream 2xx clears the
+record at once. When the
+provider has a `fallback_model` the answer also carries `x-colonizer-fallback:
+provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504 —
+failover happens at request level, so an operator opts a role out by unsetting that role's
+provider's `fallback_model`, or everything at once with `COLONIZER_QUOTA_FALLBACK=0`.
+`GET /api/providers` carries `quota_exhausted` (`{reset_at, reset_unix}`, null while healthy) per
+provider, and a quota-exhausted provider reads `health.degraded: true` whatever its failure rate
+says. `GET /api/status` carries `quota`: `{paused, reason, reset_at, reset_unix, providers}` —
+`paused` when every routable provider (every `used_by` non-empty one, or every provider when none
+is used) is exhausted, with the earliest reset and the queue holder's own `reason`. A paused queue
+admits nothing; the overview banners the reason. A colony whose turn dies on an exhausted provider
+is parked: `status` `stopped` with the worktree kept (reused until #213 adds a real `Parked`
+state, so slots release and resume works today) and `attention.reason`
+`provider_quota_exhausted`. The queue's 5 s tick requeues parked colonies whose provider recovered
+— reset passed, or the provider deleted — and leaves the rest parked.
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 

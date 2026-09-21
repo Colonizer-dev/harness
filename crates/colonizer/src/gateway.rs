@@ -4,7 +4,7 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    ApiResult, App, Shared, client_error, openai,
+    ApiResult, App, Shared, client_error, openai, provider_quota,
     providers::{Provider, ProviderQuirks, Usage, Wire, strip_oauth_betas},
     util::read_trimmed,
 };
@@ -33,6 +33,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const COLONY_HEADER: &str = "x-colonizer-colony";
 pub const FALLBACK_HEADER: &str = "x-colonizer-fallback";
+/// Names a quota-exhausted provider answer (issue #225); the body stays the provider's own.
+pub const QUOTA_HEADER: &str = "x-colonizer-quota-exhausted";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Large contexts with images can exceed axum's 2 MB default.
 const MAX_BODY: usize = 64 * 1024 * 1024;
@@ -255,6 +257,15 @@ struct Limit {
     slots: Arc<Semaphore>,
 }
 
+/// One provider's quota-exhaustion record: when the plan refills, and when it ran out. In-memory
+/// only — a restart forgets it, and the next error re-learns it.
+#[derive(Clone, Debug)]
+pub struct QuotaState {
+    pub reset_at: Option<String>,
+    pub reset_unix: Option<i64>,
+    pub since: DateTime<Utc>,
+}
+
 pub struct Gateway {
     client: reqwest::Client,
     stats: Mutex<HashMap<String, Arc<ProviderStats>>>,
@@ -264,6 +275,8 @@ pub struct Gateway {
     /// Cumulative usage per provider, seeded from `usage_file` at startup and written back to it when dirty.
     usage: Mutex<HashMap<String, Arc<UsageCounters>>>,
     usage_file: PathBuf,
+    /// Quota-exhausted providers by id; entries with a passed `reset_unix` read as recovered.
+    quota: Mutex<HashMap<String, QuotaState>>,
 }
 
 impl Gateway {
@@ -290,6 +303,7 @@ impl Gateway {
             colonies: Default::default(),
             usage: Mutex::new(usage),
             usage_file,
+            quota: Default::default(),
         })
     }
 
@@ -368,6 +382,68 @@ impl Gateway {
             }
             self.write_usage();
         }
+    }
+
+    /// Records a provider's plan as exhausted, with the reset the error named, if any.
+    pub fn mark_quota_exhausted(&self, provider: &str, reset_at: Option<String>, reset_unix: Option<i64>) {
+        self.quota.lock().unwrap().insert(
+            provider.to_string(),
+            QuotaState {
+                reset_at,
+                reset_unix,
+                since: Utc::now(),
+            },
+        );
+    }
+
+    /// The provider's quota record, if it has one — expired or not; [`Self::is_quota_exhausted`] judges.
+    pub fn quota_state(&self, provider: &str) -> Option<QuotaState> {
+        self.quota.lock().unwrap().get(provider).cloned()
+    }
+
+    /// True while the provider's plan is out: recorded and still active — a named reset ahead, or
+    /// a reset-less mark younger than its TTL. A lapsed record reads as recovered without a re-probe.
+    pub fn is_quota_exhausted(&self, provider: &str) -> bool {
+        let now = Utc::now();
+        self.quota
+            .lock()
+            .unwrap()
+            .get(provider)
+            .is_some_and(|q| provider_quota::quota_active(q.reset_unix, q.since, now))
+    }
+
+    /// Every still-exhausted provider with its reset, by id: what the status poll and the queue read.
+    pub fn quota_exhausted(&self) -> Vec<(String, Option<String>, Option<i64>)> {
+        let now = Utc::now();
+        let mut out: Vec<_> = self
+            .quota
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, q)| provider_quota::quota_active(q.reset_unix, q.since, now))
+            .map(|(id, q)| (id.clone(), q.reset_at.clone(), q.reset_unix))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// An upstream 2xx for the provider proves the plan is back: forget its quota record, so the
+    /// queue unpauses and parked colonies resume on the next tick.
+    pub fn clear_quota_on_success(&self, provider: &str) {
+        self.quota.lock().unwrap().remove(provider);
+    }
+
+    /// Forgets a provider's quota record with its usage, so a deleted provider recovers by removal.
+    pub fn forget_quota(&self, provider: &str) {
+        self.quota.lock().unwrap().remove(provider);
+    }
+
+    /// `COLONIZER_QUOTA_FALLBACK=0` (or `false`) opts every role out of quota failover at once;
+    /// anything else — including unset — keeps it on. Checked where the fallback is offered.
+    pub fn quota_fallback_enabled() -> bool {
+        std::env::var("COLONIZER_QUOTA_FALLBACK")
+            .ok()
+            .map_or(true, |v| !matches!(v.as_str(), "0" | "false"))
     }
 
     fn colony_counter(&self, colony: &str) -> Arc<AtomicU64> {
@@ -984,18 +1060,35 @@ async fn proxy(
     let guards = (busy, in_flight, permit, timed);
     if let Some(info) = translation {
         let record = usage_recorder(&app, &colony, &provider);
-        return openai_response(upstream, guards, usage, record, timeout, &info, &id, Some((&app, &colony))).await;
+        // The fallback is decided here, where the provider's `fallback_model` is in reach: set means
+        // quota failover is on for this role, unset opts it out, and the env opts out globally.
+        let quota_fallback =
+            provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
+        return openai_response(
+            upstream,
+            guards,
+            usage,
+            record,
+            timeout,
+            &info,
+            &app.gateway,
+            &provider,
+            quota_fallback,
+            &id,
+            Some((&app, &colony)),
+        )
+        .await;
     }
 
     let status = upstream.status();
     if status.as_u16() >= 400 {
-        usage.add_failure();
-        // Named, not invisible: a 400 here is usually a field the provider's dialect rejects (notably
-        // `cache_control.ttl`, normalized preemptively above when the quirks say so), and any 4xx/5xx
-        // flags the colony for attention instead of leaving it idle with a failed turn.
-        eprintln!("gateway: provider \"{id}\" answered {status} for colony {colony}");
-        flag_model_error(&app, &colony).await;
+        // Buffered, not streamed: the body still forwards verbatim, but only a buffered error can
+        // be classified for quota exhaustion before answering.
+        return anthropic_error(&app, &colony, upstream, guards, usage, &provider, timeout).await;
     }
+    // A 2xx from upstream proves the plan is back: a quota record from an earlier error lapses now,
+    // so the queue unpauses and parked colonies resume on the next tick.
+    app.gateway.clear_quota_on_success(&id);
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
         if !DROP_RESPONSE_HEADERS.contains(&name.as_str()) {
@@ -1021,9 +1114,97 @@ async fn proxy(
     response
 }
 
+/// An `anthropic`-wire provider's error, buffered whole: error bodies are small and terminal, and
+/// only a buffered error can be classified before answering. The body forwards verbatim; a quota
+/// hit additionally records the provider as exhausted and names it in headers, offering the Claude
+/// fallback exactly when the provider has a `fallback_model` (unset is the per-role opt-out) and
+/// `COLONIZER_QUOTA_FALLBACK` keeps failover on.
+async fn anthropic_error(
+    app: &Shared,
+    colony: &str,
+    upstream: reqwest::Response,
+    guards: Guards,
+    usage: Arc<UsageCounters>,
+    provider: &Provider,
+    timeout: Duration,
+) -> Response {
+    let status = upstream.status();
+    let mut response_headers = HeaderMap::new();
+    for (name, value) in upstream.headers() {
+        if !DROP_RESPONSE_HEADERS.contains(&name.as_str()) {
+            response_headers.append(name.clone(), value.clone());
+        }
+    }
+    let bytes = match tokio::time::timeout(timeout, upstream.bytes()).await {
+        Ok(Ok(bytes)) => bytes,
+        // Past the headers the failure is one unpriced error either way; the distinction the
+        // request path draws (unreachable vs timeout) no longer applies.
+        _ => {
+            usage.add_failure();
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                format!("provider \"{}\" response failed", provider.id),
+                None,
+            );
+        }
+    };
+    drop(guards);
+    // Errors carry no usage, but the recorder ran on them when they streamed past — keep it fed.
+    usage_recorder(app, colony, provider)(Usage::default());
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let kind = body["error"]["type"].as_str().unwrap_or("api_error");
+    let message = body["error"]["message"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+    let quota = provider_quota::classify_quota_exhaustion(status.as_u16(), kind, &message);
+    if let Some(hit) = &quota {
+        app.gateway
+            .mark_quota_exhausted(&provider.id, hit.reset_at.clone(), hit.reset_unix);
+    } else {
+        // Named, not invisible: a non-quota 4xx/5xx flags the colony for attention instead of
+        // leaving it idle with a failed turn. Quota hits skip this: parking the colony and
+        // pausing the queue already say what is wrong.
+        eprintln!("gateway: provider \"{}\" answered {status} for colony {colony}", provider.id);
+        flag_model_error(app, colony).await;
+    }
+    let fallback =
+        quota.is_some() && provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
+    if fallback {
+        usage.add_failure_with_fallback(provider);
+    } else {
+        usage.add_failure();
+    }
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = status;
+    *response.headers_mut() = response_headers;
+    if let Some(hit) = quota {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(QUOTA_HEADER), quota_header_value(&hit));
+        if fallback {
+            response.headers_mut().insert(
+                HeaderName::from_static(FALLBACK_HEADER),
+                HeaderValue::from_static(provider_quota::QUOTA_FALLBACK),
+            );
+        }
+    }
+    response
+}
+
+/// The quota header's value: the reset words when the error named one, plain exhaustion otherwise.
+fn quota_header_value(hit: &provider_quota::QuotaExhaustion) -> HeaderValue {
+    hit.reset_at
+        .as_deref()
+        .and_then(|reset| HeaderValue::from_str(reset).ok())
+        .unwrap_or_else(|| HeaderValue::from_static("exhausted"))
+}
+
 /// An `openai`-wire provider's response in Anthropic's shape. Only `retry-after` is copied from upstream:
 /// OpenAI's other headers (`openai-*`, `x-ratelimit-*`) describe a different API. Once response headers
-/// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`. The usage
+/// have arrived there is no transport fallback — except quota exhaustion, which names
+/// `x-colonizer-quota-exhausted` (and the Claude fallback when one is configured). The usage
 /// the translation already extracted is teed out to `record_routed_usage` on both paths.
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
 #[allow(clippy::too_many_arguments)]
@@ -1034,6 +1215,9 @@ async fn openai_response(
     record: Recorder,
     timeout: Duration,
     info: &openai::RequestInfo,
+    gateway: &Gateway,
+    provider: &Provider,
+    quota_fallback: bool,
     id: &str,
     // Who to flag for attention on an upstream 4xx/5xx; `None` in tests, which have no session store.
     attention: Option<(&Shared, &str)>,
@@ -1041,6 +1225,8 @@ async fn openai_response(
     let status = upstream.status();
     let retry_after = upstream.headers().get("retry-after").cloned();
     if status.is_success() && info.stream {
+        // Streaming 2xx headers prove the plan is back, as below.
+        gateway.clear_quota_on_success(id);
         let body = stream_body(
             openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record),
             guards,
@@ -1081,6 +1267,8 @@ async fn openai_response(
     let mut response = if status.is_success() {
         match openai::translate_response(&bytes, info) {
             Ok((message, priced)) => {
+                // A translated 2xx proves the plan is back: the quota record lapses now.
+                gateway.clear_quota_on_success(id);
                 record(priced);
                 (StatusCode::OK, Json(message)).into_response()
             }
@@ -1092,15 +1280,47 @@ async fn openai_response(
             ),
         }
     } else {
-        if status.as_u16() >= 400 {
-            usage.add_failure();
-            if let Some((app, colony)) = attention {
-                eprintln!("gateway: provider \"{id}\" answered {status} for colony {colony}");
-                flag_model_error(app, colony).await;
+        let upstream_status = status.as_u16();
+        let (status, kind, message) = openai::translate_error(status, &bytes, id);
+        // The translation drops the provider's error code (`insufficient_quota` becomes 403
+        // `permission_error`), so the classifier reads the raw code, not the translated kind.
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        let code = parsed["error"]["code"].as_str().unwrap_or(kind);
+        // The translated body keeps the provider's detail, so the classifier reads the translation.
+        match provider_quota::classify_quota_exhaustion(upstream_status, code, &message) {
+            Some(hit) => {
+                gateway.mark_quota_exhausted(id, hit.reset_at.clone(), hit.reset_unix);
+                if quota_fallback {
+                    usage.add_failure_with_fallback(provider);
+                } else {
+                    usage.add_failure();
+                }
+                let mut response = api_error(
+                    status,
+                    kind,
+                    &message,
+                    quota_fallback.then_some(provider_quota::QUOTA_FALLBACK),
+                );
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static(QUOTA_HEADER), quota_header_value(&hit));
+                response
+            }
+            None => {
+                if upstream_status >= 400 {
+                    usage.add_failure();
+                    if let Some((app, colony)) = attention {
+                        // Named, not invisible: a 400 here is usually a field the provider's dialect
+                        // rejects, and any 4xx/5xx flags the colony for attention instead of leaving
+                        // it idle with a failed turn. Quota hits skip this: parking the colony and
+                        // pausing the queue already say what is wrong.
+                        eprintln!("gateway: provider \"{id}\" answered {upstream_status} for colony {colony}");
+                        flag_model_error(app, colony).await;
+                    }
+                }
+                api_error(status, kind, message, None)
             }
         }
-        let (status, kind, message) = openai::translate_error(status, &bytes, id);
-        api_error(status, kind, message, None)
     };
     if let Some(value) = retry_after {
         response.headers_mut().insert("retry-after", value);
@@ -1451,6 +1671,9 @@ mod tests {
     /// was >= 400.
     #[tokio::test]
     async fn an_openai_body_that_fails_after_the_headers_still_counts_as_a_failure() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        let strix = provider("strix", Some("sonnet"));
         let usage = Arc::new(UsageCounters::default());
         let info = openai::RequestInfo {
             model: "gpt-5.5".into(),
@@ -1475,6 +1698,9 @@ mod tests {
             Box::new(|_| {}),
             Duration::from_secs(30),
             &info,
+            &gateway,
+            &strix,
+            false,
             "strix",
             None,
         )
@@ -1490,6 +1716,9 @@ mod tests {
             Box::new(|_| {}),
             Duration::from_secs(30),
             &info,
+            &gateway,
+            &strix,
+            false,
             "strix",
             None,
         )
@@ -1500,6 +1729,103 @@ mod tests {
             2,
             "one per request, never a header-phase count on top of the body-phase one"
         );
+    }
+
+    /// A quota error records the provider as exhausted and names it in headers, offering the
+    /// Claude fallback exactly when the provider has a `fallback_model`.
+    #[tokio::test]
+    async fn an_openai_quota_error_marks_the_provider_and_offers_fallback() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        let info = openai::RequestInfo {
+            model: "gpt-5.5".into(),
+            stream: false,
+        };
+        let quota_body = || {
+            reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(429)
+                    .body(reqwest::Body::from(
+                        r#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota."}}"#,
+                    ))
+                    .unwrap(),
+            )
+        };
+        let answer = |fallback: bool| {
+            let gateway = &gateway;
+            let info = &info;
+            async move {
+                let model = fallback.then_some("sonnet");
+                let strix = provider("strix", model);
+                openai_response(
+                    quota_body(),
+                    guards(),
+                    gateway.usage_counters("strix"),
+                    Box::new(|_| {}),
+                    Duration::from_secs(30),
+                    info,
+                    gateway,
+                    &strix,
+                    model.is_some(),
+                    "strix",
+                )
+                .await
+            }
+        };
+        let response = answer(true).await;
+        assert!(gateway.is_quota_exhausted("strix"), "the plan is recorded as out");
+        assert!(
+            response.headers().contains_key(QUOTA_HEADER),
+            "the answer names the exhaustion"
+        );
+        assert_eq!(
+            response.headers().get(FALLBACK_HEADER).and_then(|v| v.to_str().ok()),
+            Some(provider_quota::QUOTA_FALLBACK),
+            "a fallback_model earns the Claude retry"
+        );
+        gateway.forget_quota("strix");
+        let response = answer(false).await;
+        assert!(gateway.is_quota_exhausted("strix"), "marked whatever the fallback");
+        assert!(response.headers().contains_key(QUOTA_HEADER));
+        assert!(
+            !response.headers().contains_key(FALLBACK_HEADER),
+            "no fallback_model, no retry"
+        );
+    }
+
+    /// An upstream 2xx clears the provider's quota record, so the queue that reads
+    /// `quota_exhausted()` unpauses without waiting for a reset or a re-probe.
+    #[test]
+    fn upstream_success_clears_a_quota_record() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        gateway.mark_quota_exhausted("strix", None, None);
+        assert!(gateway.is_quota_exhausted("strix"), "marked, so exhausted");
+        assert_eq!(gateway.quota_exhausted().len(), 1, "the queue would pause on this");
+        gateway.clear_quota_on_success("strix");
+        assert!(!gateway.is_quota_exhausted("strix"), "success proves the plan is back");
+        assert!(gateway.quota_exhausted().is_empty(), "nothing exhausted, no pause");
+        // Quota marks live in memory and this test never flushes usage, so the
+        // temp dir may never have been created; its absence is the clean state.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reset-less mark counts while fresh and lapses past its TTL, bounding the retry loop.
+    #[test]
+    fn a_reset_less_mark_lapses_past_its_ttl() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        gateway.mark_quota_exhausted("strix", None, None);
+        assert!(gateway.is_quota_exhausted("strix"), "a fresh reset-less mark counts");
+        gateway.quota.lock().unwrap().get_mut("strix").unwrap().since =
+            chrono::Utc::now() - chrono::Duration::seconds(provider_quota::QUOTA_DEFAULT_TTL_SECS + 1);
+        assert!(!gateway.is_quota_exhausted("strix"), "past TTL reads as recovered");
+        assert!(
+            gateway.quota_exhausted().is_empty(),
+            "the queue and resume see the recovery too"
+        );
+        // As above: quota marks never touch disk, so the temp dir may not exist.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
