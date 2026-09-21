@@ -196,6 +196,34 @@ export interface HostInfo {
   kvm_ok?: boolean;
 }
 
+/** Whether a fleet host answered the mothership's live poll (issue #231). */
+export type FleetHostHealth = "online" | "unreachable";
+
+/**
+ * GET /api/hosts (issue #231): every host the mothership knows about — itself, always first and
+ * always `online`, plus each peer configured via `COLONIZER_FLEET_PEERS`, polled live on every
+ * request. An unreachable peer never disappears from the list: it keeps its last-known cached
+ * stats (with `health: "unreachable"`) once it has answered before, or comes back as a bare
+ * placeholder — `id`/`name` are its configured URL, `platform`/`os` are `""`, everything else is
+ * `null`/`0` — if it has never been reached at all.
+ */
+export interface FleetHost {
+  id: string;
+  name: string;
+  platform: string;
+  os: string;
+  /** Absent on an older peer build, or a peer never reached. */
+  version: string | null;
+  slots_in_use: number;
+  slots_ceiling: number;
+  queue_depth: number;
+  /** Absent when the peer has never reported it. */
+  disk_free_bytes: number | null;
+  /** RFC3339; null when the peer has never answered. */
+  last_heartbeat: string | null;
+  health: FleetHostHealth;
+}
+
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
 export interface StorageHealth {
   ok: boolean;

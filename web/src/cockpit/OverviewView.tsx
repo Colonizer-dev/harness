@@ -27,9 +27,10 @@ import { SESSION_STATUS, type Tone, attentionText, cx, isLive, orgOf, sameOrg, t
 import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
+import { FleetPanel } from "./FleetPanel";
 import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
-import type { HostInfo, Session } from "../types";
+import type { FleetHost, HostInfo, Session } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -166,6 +167,7 @@ export function OverviewView({
   orgs,
   cost,
   host,
+  fleet,
   onOpenOrg,
   onOpenColony,
   onSelect,
@@ -176,6 +178,8 @@ export function OverviewView({
   cost: number | null;
   /** The machine every listed colony boots on, polled with the status; a mothership before issue #205 sends none. */
   host?: HostInfo | null;
+  /** Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); absent or empty renders no fleet panel. */
+  fleet?: FleetHost[];
   onOpenOrg: (org: string) => void;
   onOpenColony: (id: string) => void;
   /** Puts a chosen colony into the cockpit's inspector; its pane can answer a waiting question. */
@@ -259,6 +263,8 @@ export function OverviewView({
             </span>
           </div>
         )}
+
+        <FleetPanel hosts={fleet ?? []} />
 
         {filter && shown.length === 0 ? (
           <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">

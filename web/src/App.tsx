@@ -29,6 +29,7 @@ import { pendingOrgPrompt } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
 import type {
+  FleetHost,
   HarnessStatus,
   ModuleInfo,
   OrgInfo,
@@ -45,6 +46,9 @@ export function App() {
   const narrow = useMediaQuery("(max-width: 899px)");
   const [status, setStatus] = useState<HarnessStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
+  // Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); older mothership builds
+  // have no /api/hosts, so a failed poll just leaves the fleet panel with nothing to show.
+  const [fleet, setFleet] = useState<FleetHost[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() => stored("colonizer.session"));
@@ -88,6 +92,14 @@ export function App() {
       setStatusError(false);
     } catch {
       setStatusError(true);
+    }
+  }, [api]);
+
+  const loadFleet = useCallback(async () => {
+    try {
+      setFleet((await api.hosts()).hosts);
+    } catch {
+      /* older mothership: no /api/hosts, and the fleet panel just has nothing to show */
     }
   }, [api]);
 
@@ -155,6 +167,7 @@ export function App() {
 
   useEffect(() => {
     void loadStatus();
+    void loadFleet();
     void loadSessions();
     void loadTelemetry();
     void loadUsage();
@@ -165,13 +178,15 @@ export function App() {
     const timers = [
       setInterval(loadSessions, 4000),
       setInterval(loadStatus, 30_000),
+      // Fleet stats change about as slowly as the host's own, so it shares that cadence.
+      setInterval(loadFleet, 30_000),
       setInterval(loadOrgs, 15_000),
       setInterval(loadPendingMemory, 10_000),
       // A release check is a request to github.com, so it runs far more slowly than the rest.
       setInterval(loadUpdate, 900_000),
     ];
     return () => timers.forEach(clearInterval);
-  }, [api, loadStatus, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, applyModules]);
+  }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -508,6 +523,7 @@ export function App() {
               onSelectSession={setSelectedId}
               onOpenColony={openColony}
               status={status}
+              fleet={fleet}
               update={updateStatus}
               autopilotDefault={autopilotDefault}
               launchRequests={launchRequests}
