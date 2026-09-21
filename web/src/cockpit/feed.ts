@@ -7,7 +7,7 @@
 // would put words in the mothership's mouth.
 import { needsYou } from "../notifications";
 import { colonyLabel } from "../notifications";
-import { isLive, orgOf } from "../components/ui";
+import { isLive, orgOf, sameOrg } from "../components/ui";
 import type { Session, SessionStatus } from "../types";
 
 export type FeedKind = "question" | "returned" | "failed" | "launched" | "queued" | "stopped";
@@ -155,6 +155,16 @@ export function overviewCounts(sessions: Session[]): Record<OverviewFilter, numb
 /** The rows the overview shows: everything when `filter` is null (a second click clears it), else exactly the bucket's colonies. */
 export function overviewSessions(sessions: Session[], filter: OverviewFilter | null): Session[] {
   return filter ? sessions.filter((s) => matchesOverviewFilter(s, filter)) : sessions;
+}
+
+/**
+ * The colonies the overview may show: the page renders one card per entry of its `orgs` prop
+ * (the visible workspaces), so a colony whose org is not among them — a switched-off org — has
+ * no card. The view counts this set and names the rest, instead of showing bare global numbers
+ * over a list that cannot contain them (issue #246).
+ */
+export function overviewVisibleSessions(sessions: Session[], orgs: readonly { org: string }[]): Session[] {
+  return sessions.filter((session) => orgs.some((entry) => sameOrg(orgOf(session), entry.org)));
 }
 
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;

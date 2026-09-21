@@ -17,6 +17,7 @@ import { createMockApi } from "../mock";
 import type { OrgEntry } from "../orgs";
 import type { HarnessStatus, Session } from "../types";
 import { ColonyRow, OverviewView, flipExpanded } from "./OverviewView";
+import type { OverviewFilter } from "./feed";
 
 const api = createMockApi();
 
@@ -192,8 +193,7 @@ describe("OverviewView", () => {
   });
 });
 
-describe("OverviewView spend", () => {
-  it("derives the header from the org rows, matching their sum and ignoring the session-based cost prop", () => {
+describe("OverviewView spend", () => {  it("derives the header from the org rows, matching their sum and ignoring the session-based cost prop", () => {
     const html = render([entry("acme", measured(12.5, 0.5)), entry("globex", measured(2, 0))], 999);
     // 12.5 + 0.5 + 2 = 15. The `cost` prop of 999 must not win.
     expect(html).toContain("$15.00 spent");
@@ -218,5 +218,75 @@ describe("OverviewView spend", () => {
     // reporting a complete rollup, so the sessions-derived `cost` of 7.25 must win.
     expect(html).toContain("$7.25 spent");
     expect(html).not.toContain("$13.00 spent");
+  });
+});
+
+// Counters vs list (issue #246): the chips must never count colonies the cards cannot show. A
+// switched-off org has no card, so its colonies are out of the counters and named in the scope
+// line instead; a bucket filter that hides everything explains where the rest went and offers a
+// one-click way back. renderToStaticMarkup cannot click, so the filtered states render through
+// the `initialFilter` prop.
+describe("OverviewView counters vs list", () => {
+  // 14 live in the visible workspaces (9 in acme, 5 in beta, plus 2 queued in acme) and 11
+  // waiting in gamma, which is switched off and therefore has no card.
+  const live = (id: string, org: string, repo: string): Session =>
+    session({ id, org, repo, status: "running", issue: 1, issue_title: `Work ${id}` });
+  const queued = (id: string): Session => session({ id, status: "queued", issue: 2, issue_title: `Queued ${id}` });
+  const waiting = (id: string): Session =>
+    session({ id, org: "gamma", repo: "gamma/secret", status: "waiting_for_answer", issue: 3, issue_title: `Help ${id}` });
+
+  const sessions = (): Session[] => [
+    ...Array.from({ length: 9 }, (_, i) => live(`a${i}`, "acme", "acme/webshop")),
+    ...Array.from({ length: 5 }, (_, i) => live(`b${i}`, "beta", "beta/api")),
+    queued("q0"),
+    queued("q1"),
+    ...Array.from({ length: 11 }, (_, i) => waiting(`g${i}`)),
+  ];
+  const workspaces: OrgEntry[] = [
+    { org: "acme", live: 9, queued: 2, total: 11, pending: 0, avatar: null },
+    { org: "beta", live: 5, queued: 0, total: 5, pending: 0, avatar: null },
+  ];
+
+  const renderOverview = (list: Session[], filter: OverviewFilter | null = null) =>
+    renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <OverviewView
+          sessions={list}
+          orgs={workspaces}
+          cost={null}
+          initialFilter={filter}
+          onOpenOrg={() => {}}
+          onOpenColony={() => {}}
+          onSelect={noop}
+        />
+      </ApiContext.Provider>,
+    );
+
+  it("scopes the counter chips to the visible workspaces and names the hidden org", () => {
+    const html = renderOverview(sessions());
+    // 14 live and 2 queued in acme/beta; gamma's 11 waiting must not reach any chip.
+    expect(html).toContain(">14</span> live");
+    expect(html).toContain(">0</span> need you");
+    expect(html).toContain(">2</span> queued");
+    expect(html).not.toContain(">11</span>");
+    // ... but they are explained, not silently dropped: the scope line names gamma.
+    expect(html).toContain("hidden org (gamma)");
+    expect(html).toContain("11 need you");
+  });
+
+  it("labels an active bucket filter with a one-click clear", () => {
+    const html = renderOverview(sessions(), "live");
+    expect(html).toContain("showing 14 of 16");
+    expect(html).toContain("clear ×");
+  });
+
+  it("an empty filtered page explains where the hidden colonies are and links back", () => {
+    // "returned" matches nothing anywhere, so the page is empty: the 16 visible colonies sit in
+    // other buckets and gamma's 11 wait in a hidden org. Neither may read as bare numbers.
+    const html = renderOverview(sessions(), "returned");
+    expect(html).toContain("nothing under");
+    expect(html).toContain("16 in other buckets");
+    expect(html).toContain("hidden org (gamma)");
+    expect(html).toContain("clear filter ×");
   });
 });
