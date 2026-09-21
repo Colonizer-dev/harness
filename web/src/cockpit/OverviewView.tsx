@@ -17,7 +17,7 @@ import { useId, useState, type ReactElement } from "react";
 import { Avatar } from "../components/Avatar";
 import { IconChevron } from "../components/icons";
 import { SESSION_STATUS, type Tone, attentionText, cx, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
-import { colonyLabel } from "../notifications";
+import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
@@ -59,12 +59,15 @@ export function ColonyRow({
   open,
   onToggle,
   onOpenColony,
+  onSelect,
 }: {
   session: Session;
   /** Whether this colony's detail is revealed. */
   open: boolean;
   onToggle: (id: string) => void;
   onOpenColony: (id: string) => void;
+  /** Puts the colony into the inspector, whose pane can answer a waiting question directly. */
+  onSelect: (session: Session) => void;
 }): ReactElement {
   const detailsId = useId();
   const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
@@ -113,6 +116,15 @@ export function ColonyRow({
                 {attention}
               </span>
             )}
+            {needsYou(session) && (
+              <button
+                type="button"
+                onClick={() => onSelect(session)}
+                className="ml-auto cursor-pointer whitespace-nowrap font-sans text-[12.5px] font-semibold text-warn hover:underline"
+              >
+                answer in the pane →
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onOpenColony(session.id)}
@@ -133,6 +145,7 @@ export function OverviewView({
   cost,
   onOpenOrg,
   onOpenColony,
+  onSelect,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -140,6 +153,8 @@ export function OverviewView({
   cost: number | null;
   onOpenOrg: (org: string) => void;
   onOpenColony: (id: string) => void;
+  /** Puts a chosen colony into the cockpit's inspector; its pane can answer a waiting question. */
+  onSelect: (session: Session) => void;
 }): ReactElement {
   // The filter lives here, not in the cockpit: toggling a counter narrows the page, and a second
   // click on the active one (or the counts themselves) clears it. State is per-visit on purpose.
@@ -229,6 +244,7 @@ export function OverviewView({
                           open={expanded.has(session.id)}
                           onToggle={toggle}
                           onOpenColony={onOpenColony}
+                          onSelect={onSelect}
                         />
                       ))
                     )}

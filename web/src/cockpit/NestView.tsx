@@ -450,7 +450,8 @@ export function NestView({
             <button
               key={session.id}
               type="button"
-              onClick={() => onOpen(session.id)}
+              // Selecting fills the inspector with the question; the pane then offers the way in.
+              onClick={() => onSelect(session.id)}
               className="flex max-w-[520px] cursor-pointer items-center gap-3 rounded-xl border border-border bg-panel py-2.5 pl-3.5 pr-3 text-left transition-colors hover:border-warn"
             >
               <span

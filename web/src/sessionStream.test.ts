@@ -60,6 +60,7 @@ const questionBlock = (id: string, answered = false): QuestionBlock => ({
   id,
   questions: [{ question: "Push now?", header: "Push", multi_select: false, options: [{ label: "Yes" }] }],
   answer: answered ? { answers: { "Push now?": "Yes" }, response: null } : null,
+  asked_at: null,
 });
 const proposal = (id: string): MemoryProposal => ({
   id,
@@ -283,10 +284,10 @@ describe("reduceFrame", () => {
   describe("questions and answers", () => {
     const ask = { question: "Push now?", header: "Push", multi_select: false, options: [{ label: "Yes" }] };
 
-    it("a question opens on the message that asked it, and its answer closes it", () => {
+    it("a question opens on the message that asked it, carrying its timestamp, and its answer closes it", () => {
       let s = send(colony(), event({ type: "assistant_text", message_id: "m1", block_index: 0, text: "Shall I?" }));
       s = send(s, event({ type: "question", question_id: "q1", message_id: "m1", questions: [ask] }));
-      expect(s.messages[0].blocks[1]).toMatchObject({ kind: "question", id: "q1", answer: null });
+      expect(s.messages[0].blocks[1]).toMatchObject({ kind: "question", id: "q1", answer: null, asked_at: SENT_AT });
 
       s = send(s, event({ type: "question_answered", question_id: "q1", answers: { "Push now?": "Yes" }, response: "Go ahead" }));
       expect(s.messages[0].blocks[1]).toMatchObject({ answer: { answers: { "Push now?": "Yes" }, response: "Go ahead" } });

@@ -5,7 +5,8 @@
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { useApi } from "../context";
+import { errorMessage, useApi, useToast } from "../context";
+import type { QuestionActions } from "../components/AskUserCard";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
@@ -16,7 +17,7 @@ import type { HarnessStatus, OrgInfo, Repo, Session, UpdateStatus } from "../typ
 import { Header } from "./Header";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
-import { Inspector, type InspectorTarget } from "./Inspector";
+import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
 import { OverviewView } from "./OverviewView";
@@ -95,6 +96,7 @@ export function Cockpit({
   memory: ReactNode;
 }) {
   const api = useApi();
+  const toast = useToast();
   const [view, setView] = useState<CockpitView>(storedView);
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
@@ -178,8 +180,30 @@ export function Cockpit({
   // Only one stream at a time: the colony view opens its own, so the nest only listens while it is
   // the view on screen. Without this the open colony would carry two sockets.
   const streamFor = view === "home" && inspector?.kind === "colony" ? inspector.session.id : null;
-  const { state } = useSessionStream(api, streamFor);
+  const { stream, state } = useSessionStream(api, streamFor);
   const settlers = useMemo(() => Object.values(buildThread(state).subagents), [state]);
+  // The inspector answers the colony's question from this same stream, so the pane clears itself
+  // the moment `question_answered` arrives — nothing here is cached from render to render.
+  const pendingQuestions = useMemo(() => pendingQuestionsOf(state), [state]);
+  const questionActions = useMemo<QuestionActions>(() => {
+    const live = inspector?.kind === "colony" ? isLive(inspector.session.status) : false;
+    const connected = state.connection === "open";
+    return {
+      answer: (questionId, answers, response) => {
+        try {
+          const sent = stream?.send({ type: "answer", question_id: questionId, answers, response }) ?? false;
+          if (!sent) toast("Not connected to the colony — try again in a moment.", "error");
+          return sent;
+        } catch (error) {
+          toast(errorMessage(error), "error");
+          return false;
+        }
+      },
+      submitting: state.submitting,
+      canAnswer: connected && live,
+      blockedBy: !live ? "ended" : !connected ? "disconnected" : null,
+    };
+  }, [stream, inspector, state.submitting, state.connection, toast]);
 
   // The inspector points at a colony by identity, so a poll that replaces the list must not leave it
   // holding a stale copy — or pointing at a colony that has since been forgotten.
@@ -234,6 +258,11 @@ export function Cockpit({
               setInspector(null);
             }}
             onOpenColony={openColonyById}
+            onSelect={(session) => {
+              // "answer in the pane": land on the nest with the colony's question in the inspector.
+              setInspector({ kind: "colony", session });
+              setView("home");
+            }}
           />
         );
       case "launch":
@@ -323,11 +352,13 @@ export function Cockpit({
         />
         <div className="flex min-h-0 min-w-0">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">{body()}</div>
-          {view === "home" && inspector && (
+          {view === "home" && (
             <Inspector
               target={inspector}
-              avatarUrl={inspector.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
-              settlers={inspector.kind === "colony" ? settlers : []}
+              avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
+              settlers={inspector?.kind === "colony" ? settlers : []}
+              pendingQuestions={pendingQuestions}
+              questionActions={questionActions}
               sessions={sessions}
               status={status}
               liveCount={liveCount}
