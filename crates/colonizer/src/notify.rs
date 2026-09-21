@@ -14,7 +14,7 @@ use crate::{
     orgs::{OrgSettings, effective_notify},
     providers::Provider,
     sessions::{Session, SessionStatus},
-    util::{env_nonempty, read_trimmed, truncate, write_secret},
+    util::{delete_secret, env_nonempty, read_secret, truncate, write_secret},
 };
 use anyhow::{Result, bail};
 use axum::{Json, extract::State, http::StatusCode};
@@ -476,7 +476,7 @@ fn secret_file(app: &App) -> PathBuf {
 /// and, like them, is never written to modules.json, never returned by the API and never sent into
 /// a colony.
 fn secret(app: &App) -> Option<(String, &'static str)> {
-    read_trimmed(&secret_file(app))
+    read_secret(&secret_file(app))
         .map(|key| (key, "file"))
         .or_else(|| env_nonempty("COLONIZER_NOTIFY_SECRET").map(|key| (key, "env")))
 }
@@ -497,7 +497,7 @@ pub async fn put_secret(State(app): State<Shared>, Json(req): Json<NotifySecret>
     let path = secret_file(&app);
     match req.secret.as_deref().map(str::trim) {
         None | Some("") => {
-            let _ = std::fs::remove_file(&path);
+            delete_secret(&path);
         }
         Some(value) if value.len() > 512 || !value.chars().all(|c| c.is_ascii_graphic()) => {
             return Err(client_error(
