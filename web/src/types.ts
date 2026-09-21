@@ -73,6 +73,7 @@ export interface ModelTokens {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  thinking_tokens: number;
 }
 
 export interface Repo {
@@ -315,6 +316,7 @@ export interface ProviderPricing {
   output_per_mtok?: number;
   cache_read_per_mtok?: number;
   cache_write_per_mtok?: number;
+  thinking_per_mtok?: number;
 }
 
 export interface ModelProvider extends ProviderLimits {
