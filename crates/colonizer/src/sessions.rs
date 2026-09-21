@@ -1104,7 +1104,25 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
         let message = format!("{e:#}");
         let Some(s) = app.session(&id).await else { return };
         if s.status != SessionStatus::Starting {
-            return; // stopped by the user while starting; the stop handler cleaned up
+            // The status moved out from under this task — usually a stop that ran before
+            // `sandbox::boot` created the microVM, so the stop's `msb rm` removed nothing
+            // and this boot's teardown below is the only reaper left for the orphan. The
+            // old code returned here assuming the stop handler had cleaned up, leaking a
+            // running `colonizer-{id}` no reaper ever removes. Re-check under the
+            // lifecycle lock, which the stop handler holds across its claim+teardown: if
+            // the colony is back to `Starting` a newer boot/resume claimed it (both share
+            // the deterministic sandbox name, so tearing down here could kill its fresh
+            // VM), and if it went live a stale boot must not touch the live VM — return
+            // in both cases. Otherwise the colony is still not live (Stopped/Failed): reap
+            // the orphan (`msb rm --force` on a missing name no-ops).
+            let lifecycle = app.session_lock(&id).await;
+            let _guard = lifecycle.lock().await;
+            let Some(s) = app.session(&id).await else { return };
+            if !stale_boot_needs_teardown(s.status) {
+                return;
+            }
+            teardown_vm(&app, &s).await;
+            return;
         }
         app.session_log(&id, "error", format!("session failed to start: {message}"))
             .await;
@@ -1118,6 +1136,14 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
         .await;
         app.note_cleared_attention(&id, attention).await;
     }
+}
+
+/// Whether a boot that failed after its colony left `Starting` must still reap the microVM: only
+/// when the colony is still not live (Stopped/Failed). A colony back to `Starting` was claimed by
+/// a newer boot/resume sharing the deterministic sandbox name, and a live one (Running/Idle/…)
+/// owns a VM this stale task must not touch.
+pub(crate) fn stale_boot_needs_teardown(status: SessionStatus) -> bool {
+    matches!(status, SessionStatus::Stopped | SessionStatus::Failed)
 }
 
 async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
@@ -2130,6 +2156,28 @@ pub(crate) mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_stale_boot_only_reaps_a_colony_that_is_still_not_live() {
+        use SessionStatus::*;
+        // Stopped/Failed mid-boot: the stop's `msb rm` ran before `sandbox::boot`, so the
+        // orphaned microVM is this stale task's to reap.
+        for status in [Stopped, Failed] {
+            assert!(stale_boot_needs_teardown(status), "{status:?} must be reaped");
+        }
+        // Back to Starting: a newer boot/resume claimed the colony under the same sandbox
+        // name — tearing down here could kill its fresh VM.
+        assert!(!stale_boot_needs_teardown(Starting));
+        // Live now: a stale boot must never touch the live VM.
+        for status in [Running, WaitingForAnswer, Idle] {
+            assert!(!stale_boot_needs_teardown(status), "{status:?} must be left alone");
+        }
+        // Terminal without a VM, and queued/publishing which a boot can never stale into:
+        // no teardown either way, but never a live VM at risk.
+        for status in [Queued, Publishing, PrOpened, Merged, Closed, NoChanges] {
+            assert!(!stale_boot_needs_teardown(status), "{status:?}");
+        }
+    }
 
     #[test]
     fn total_cost_is_claude_plus_routed() {
