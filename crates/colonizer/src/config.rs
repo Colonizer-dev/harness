@@ -23,6 +23,12 @@ pub struct Settings {
     /// Provider gateway listener; colonies reach it through `host.microsandbox.internal`.
     pub gateway_bind: String,
     pub allowed_hosts: Vec<String>,
+    /// Other mothership base URLs to poll for `GET /api/hosts` (issue #231's fleet view), reached
+    /// over whatever private network the operator already has (their own tailnet/mesh, a VPN, a LAN).
+    /// This host's own `COLONIZER_BIND` stays loopback-only by default regardless of this list —
+    /// nothing here auto-exposes anything. For a peer to be pollable, its operator sets *that peer's*
+    /// `COLONIZER_BIND` to a private interface IP of their own choosing (never `0.0.0.0`).
+    pub fleet_peers: Vec<String>,
 }
 
 impl Settings {
@@ -59,6 +65,12 @@ impl Settings {
                 .split(',')
                 .map(|h| h.trim().to_string())
                 .filter(|h| !h.is_empty())
+                .collect(),
+            fleet_peers: env_nonempty("COLONIZER_FLEET_PEERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
                 .collect(),
         };
         let data = settings.data_dir.display().to_string();
@@ -426,6 +438,7 @@ mod tests {
             claude_bin: None,
             gateway_bind: String::new(),
             allowed_hosts: Vec::new(),
+            fleet_peers: Vec::new(),
         };
 
         let missing = cfg.linux_binary("bin/colonizer-agentd").unwrap_err().to_string();

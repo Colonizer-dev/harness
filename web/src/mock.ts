@@ -6,6 +6,7 @@ import type {
   AgentEventBody,
   AgentRef,
   Answers,
+  FleetHost,
   HarnessStatus,
   HeadroomStatus,
   Issue,
@@ -937,6 +938,42 @@ function mockHost(live: number): HarnessStatus["host"] {
   };
 }
 
+/** GET /api/hosts (issue #231): self, plus a demo peer so the fleet panel has something to show
+ * in the mock — one reachable, one not, so the online/unreachable distinction is visible without a
+ * real second machine. */
+function mockFleet(live: number): { hosts: FleetHost[] } {
+  return {
+    hosts: [
+      {
+        id: "1e6f2a84-c5b3-4f2a-9f1c-8d4e2a1b6c90",
+        name: "archlinux",
+        platform: "linux-x86_64",
+        os: "Arch Linux",
+        version: "0.1.5",
+        slots_in_use: live,
+        slots_ceiling: 3,
+        queue_depth: 0,
+        disk_free_bytes: 176_093_659_136, // 164G
+        last_heartbeat: now(),
+        health: "online",
+      },
+      {
+        id: "https://colony-2.example.internal:9443",
+        name: "https://colony-2.example.internal:9443",
+        platform: "linux-x86_64",
+        os: "Debian GNU/Linux",
+        version: "0.1.4",
+        slots_in_use: 1,
+        slots_ceiling: 2,
+        queue_depth: 0,
+        disk_free_bytes: 12_884_901_888, // 12G
+        last_heartbeat: ago(38),
+        health: "unreachable",
+      },
+    ],
+  };
+}
+
 /** The mesh payload for this load. A Mac vendors no tailscaled, so its mesh is `unavailable` by
  *  design (#32) and must never read as a fault (#128): `?runtime=mac` implies it unless `?mesh=`
  *  says otherwise, and `?mesh=error` stays a genuine failure. */
@@ -1568,6 +1605,7 @@ export function createMockApi(): Api {
           })),
         };
       }),
+    hosts: () => later(() => mockFleet([...sessions.values()].filter((s) => isLive(s.session.status)).length)),
     modules: () => later(() => modules),
     saveModule: async (kind, body) => {
       await sleep(250);

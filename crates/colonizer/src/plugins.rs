@@ -146,6 +146,7 @@ mod tests {
             claude_bin: None,
             gateway_bind: "127.0.0.1:0".into(),
             allowed_hosts: vec![],
+            fleet_peers: vec![],
         }
     }
 
