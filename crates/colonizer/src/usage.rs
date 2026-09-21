@@ -689,6 +689,8 @@ mod tests {
             attention: None,
             last_activity_at: Some(now),
             boot_timing: None,
+            boot_cpus: None,
+            boot_memory: None,
             created_at: now,
             updated_at: now,
         }

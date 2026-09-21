@@ -23,6 +23,11 @@ pub const RUNTIME_CACHE_TTL: Duration = Duration::from_secs(10);
 /// applies no timeout: dropped is the only way its child dies.
 const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The bound on one host measurement that spawns a subprocess — the `hostname` fallback where there
+/// is no `/proc`, and `df` for the data disk. Same reasoning as [`TOOL_PROBE_TIMEOUT`]: a wedged
+/// mount must not hold the poll, and only its own field degrades when it does.
+const HOST_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The bound on the whole host Claude binary walk. `find_claude_bin` is shared with the guest path
 /// and its per-candidate execs are unbounded — that is the pre-existing trade, filed separately, and
 /// deliberately left alone here — but the *call* from this probe can be bounded without touching it:
@@ -273,6 +278,224 @@ async fn current_user() -> String {
     util::env_nonempty("USER")
         .or_else(|| util::env_nonempty("LOGNAME"))
         .unwrap_or_else(|| "the current user".into())
+}
+
+/// The `host` object of `GET /api/status`: what kind of machine this walk lives on — its name and
+/// size — and how full it is right now. These field names are the JSON contract the web UI is
+/// written against. Every measurement that fails is omitted rather than faked as zero: a Mac has no
+/// `/proc`, so `memory_total_bytes`, `load` and `uptime_secs` are simply absent there, and a disk
+/// that cannot be read drops all three disk numbers.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Host {
+    /// Stable per install: persisted in `<config_dir>/host_id`, generated once and kept, so the host
+    /// panel shows the same id across restarts. Telemetry's `install_id` is ephemeral by design —
+    /// it is forgotten when the live map is switched off — so this panel keys on its own file. A
+    /// UUID keeps the shape per-host: a second machine can be aggregated later without a rewrite
+    /// (issue #205).
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_used_bytes: Option<u64>,
+    /// The 1, 5 and 15 minute load averages, as `/proc/loadavg` reports them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_used_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_free_bytes: Option<u64>,
+    /// When the probe ran, so a "check again" can tell freshness without trusting its own watch.
+    pub checked_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The last host probe, cached on `App` the same 10 s as the runtime probe: every open tab polls
+/// `/api/status` every 30 s, and re-reading `/proc` and spawning `df` on each poll is the same
+/// waste the runtime cache exists to avoid.
+#[derive(Clone)]
+pub struct HostCached {
+    probed_at: Instant,
+    value: Host,
+}
+
+/// The `host` object of `GET /api/status`: from the cache when it is warm, re-probed when it is
+/// cold, stale or when `fresh` asks. Mirrors [`status_runtime`]'s cache.
+pub async fn status_host(app: &App, fresh: bool) -> Host {
+    host_cached(app, fresh, || probe_host(app)).await
+}
+
+/// The host half of [`cached`]: the same decision, keyed on `App.host_cache`, so concurrent polls
+/// share one probe instead of stacking several.
+async fn host_cached<C, Fut>(app: &App, fresh: bool, mut run: C) -> Host
+where
+    C: FnMut() -> Fut,
+    Fut: Future<Output = Host>,
+{
+    let mut cache = app.host_cache.lock().await;
+    if !fresh
+        && let Some(hit) = cache.as_ref()
+        && hit.probed_at.elapsed() < RUNTIME_CACHE_TTL
+    {
+        return hit.value.clone();
+    }
+    let value = run().await;
+    *cache = Some(HostCached {
+        probed_at: Instant::now(),
+        value: value.clone(),
+    });
+    value
+}
+
+/// Measures what kind of machine this is and how full it is. The `/proc` reads and the two bounded
+/// subprocesses are independent, so they race; each field degrades on its own. A measurement that
+/// fails is `None` — and so omitted from the JSON — never a fabricated zero.
+pub async fn probe_host(app: &App) -> Host {
+    let (hostname, disk) = tokio::join!(probe_hostname(), probe_df(&app.cfg.data_dir),);
+    let (memory_total, memory_used) = read_proc("/proc/meminfo")
+        .map(|text| meminfo_total_used(&text))
+        .unwrap_or((None, None));
+    Host {
+        id: host_id(app),
+        hostname,
+        cpu_cores: std::thread::available_parallelism().ok().map(|n| n.get()),
+        memory_total_bytes: memory_total,
+        memory_used_bytes: memory_used,
+        load: read_proc("/proc/loadavg").and_then(|text| loadavg(&text)),
+        uptime_secs: read_proc("/proc/uptime").and_then(|text| uptime_secs(&text)),
+        disk_total_bytes: disk.0,
+        disk_used_bytes: disk.1,
+        disk_free_bytes: disk.2,
+        checked_at: chrono::Utc::now(),
+    }
+}
+
+/// The host's name: `/proc/sys/kernel/hostname` on Linux, which needs no subprocess; a bounded
+/// `hostname` exec elsewhere. Trimmed to the name; a failure is `None`.
+async fn probe_hostname() -> Option<String> {
+    if std::env::consts::OS == "linux" {
+        return read_proc("/proc/sys/kernel/hostname").map(|s| s.trim().to_string());
+    }
+    let mut cmd = Command::new("hostname");
+    match tokio::time::timeout(HOST_PROBE_TIMEOUT, util::exec(&mut cmd)).await {
+        Ok(Ok(name)) => {
+            let name = name.trim().to_string();
+            if name.is_empty() { None } else { Some(name) }
+        }
+        _ => None,
+    }
+}
+
+/// One `/proc` read, `None` where `/proc` does not exist (macOS) or the file cannot be read. A
+/// missing figure is later omitted from the JSON, never replaced with a zero.
+fn read_proc(path: &str) -> Option<String> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+/// Stable per-install host id, from `<config_dir>/host_id`. Created on first call, persisted with
+/// the private write helper so the file is 0600 like the other local state, and read back on every
+/// later call so the id cannot drift within one install. A failed persist is ignored: the id still
+/// answers this run, and the next call retries it.
+pub fn host_id(app: &App) -> String {
+    let path = app.cfg.config_dir.join("host_id");
+    if let Some(existing) = util::read_trimmed(&path) {
+        return existing;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = util::write_private(&path, id.as_bytes());
+    id
+}
+
+/// The data disk's `(total, used, free)` bytes, from `df -kP <dir>` under [`HOST_PROBE_TIMEOUT`].
+/// Everything is 1024-byte blocks, so the parse scales the three numbers to bytes.
+async fn probe_df(dir: &std::path::Path) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let mut cmd = Command::new("df");
+    cmd.arg("-kP").arg(dir);
+    match tokio::time::timeout(HOST_PROBE_TIMEOUT, util::exec(&mut cmd)).await {
+        Ok(Ok(output)) => df_bytes(&output),
+        _ => (None, None, None),
+    }
+}
+
+/// The parse half of `df -kP`, sealed from the exec so it is testable without a real disk. The
+/// second line holds the data: fs, 1024-blocks, used, available, capacity%, mount point. Wrapped or
+/// odd output yields three `None`s, not guesses.
+fn df_bytes(text: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let fields: Vec<&str> = text
+        .lines()
+        .nth(1)
+        .map(|line| line.split_whitespace().collect())
+        .unwrap_or_default();
+    let bytes = |i: usize| fields.get(i).and_then(|w| w.parse::<u64>().ok()).map(|v| v * 1024);
+    (bytes(1), bytes(2), bytes(3))
+}
+
+/// `/proc/meminfo` in kB as `(total, used)` bytes, where used is total minus `MemAvailable`. Both
+/// figures must parse and available must not exceed total, or the pair is `None` — memory
+/// accounting that does not add up is not shipped as a number. The kB the file reports are scaled
+/// to bytes.
+fn meminfo_total_used(text: &str) -> (Option<u64>, Option<u64>) {
+    let mut total_kb = None;
+    let mut available_kb = None;
+    for line in text.lines().take(32) {
+        let kvalue = |prefix: &str| {
+            line.strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next().and_then(|w| w.parse::<u64>().ok()))
+        };
+        if let Some(kb) = kvalue("MemTotal:") {
+            total_kb = Some(kb);
+        } else if let Some(kb) = kvalue("MemAvailable:") {
+            available_kb = Some(kb);
+        }
+    }
+    let (Some(total_kb), Some(available_kb)) = (total_kb, available_kb) else {
+        return (None, None);
+    };
+    if available_kb > total_kb {
+        return (None, None);
+    }
+    (Some(total_kb * 1024), Some((total_kb - available_kb) * 1024))
+}
+
+/// `/proc/loadavg`'s first three floats — the 1, 5 and 15 minute load averages. Anything that does
+/// not parse as three numbers is `None` (and omitted), never a partial triple.
+fn loadavg(text: &str) -> Option<[f64; 3]> {
+    let mut words = text.split_whitespace();
+    let a: f64 = words.next()?.parse().ok()?;
+    let b: f64 = words.next()?.parse().ok()?;
+    let c: f64 = words.next()?.parse().ok()?;
+    Some([a, b, c])
+}
+
+/// `/proc/uptime`'s first float, as whole seconds.
+fn uptime_secs(text: &str) -> Option<u64> {
+    let secs: f64 = text.split_whitespace().next()?.parse().ok()?;
+    Some(secs as u64)
+}
+
+/// The `host` object of `GET /api/status`, with the colony-admission numbers this host's operator
+/// cares about set next to it. `kvm_ok` is omitted entirely where there is no `/dev/kvm` to check
+/// (non-Linux), matching how `runtime.kvm` is `null` there.
+pub fn host_json(host: &Host, kvm: Option<&Kvm>, microvms_live: usize, microvms_ceiling: u64) -> serde_json::Value {
+    let mut value = serde_json::to_value(host).expect("Host serialises: its fields are all plain data");
+    value["microvms_live"] = serde_json::Value::from(microvms_live);
+    value["microvms_ceiling"] = serde_json::Value::from(microvms_ceiling);
+    if let Some(kvm) = kvm {
+        value["kvm_ok"] = serde_json::Value::from(kvm.ok);
+    }
+    value
 }
 
 /// The os answer as a pure function of what the probe would find, so the mapping and the
@@ -756,6 +979,210 @@ mod tests {
             Instant::now() - (RUNTIME_CACHE_TTL + Duration::from_secs(1));
         cached(&app, false, counting(&runs)).await;
         assert_eq!(runs.load(Ordering::SeqCst), 2, "a stale entry is probed again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Host with every measurable field filled, so serialisation tests read only what they name.
+    fn host_with() -> Host {
+        Host {
+            id: "5e1347a6-5f2e-4b8b-9c1a-0d4b7c8e9f10".into(),
+            hostname: Some("picard".into()),
+            cpu_cores: Some(8),
+            memory_total_bytes: Some(17_179_869_184),
+            memory_used_bytes: Some(5_368_709_120),
+            load: Some([0.75, 0.31, 0.13]),
+            uptime_secs: Some(43_200),
+            disk_total_bytes: Some(246_177_628_160),
+            disk_used_bytes: Some(109_088_034_816),
+            disk_free_bytes: Some(124_592_496_640),
+            checked_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn meminfo_parses_total_and_used_out_of_available() {
+        let text =
+            "MemTotal:       16242820 kB\nMemFree:        14047940 kB\nMemAvailable:   15574860 kB\nBuffers:         123456 kB\n";
+        let (total, used) = meminfo_total_used(text);
+        assert_eq!(total, Some(16_242_820 * 1024));
+        assert_eq!(used, Some((16_242_820 - 15_574_860) * 1024));
+    }
+
+    #[test]
+    fn meminfo_missing_available_yields_no_memory_figures() {
+        let text = "MemTotal:       16242820 kB\nMemFree:        14047940 kB\n";
+        assert_eq!(meminfo_total_used(text), (None, None), "no MemAvailable, no memory pair");
+    }
+
+    #[test]
+    fn meminfo_available_beyond_total_is_not_reported() {
+        let text = "MemTotal:       1000 kB\nMemAvailable:   2000 kB\n";
+        assert_eq!(
+            meminfo_total_used(text),
+            (None, None),
+            "fabricated figures are worse than none"
+        );
+    }
+
+    #[test]
+    fn loadavg_parses_the_first_three_floats() {
+        assert_eq!(loadavg("0.75 0.31 0.13 2/834 51234\n"), Some([0.75, 0.31, 0.13]));
+        assert_eq!(loadavg("garbage"), None, "not a number is None, never a partial triple");
+    }
+
+    #[test]
+    fn uptime_parses_the_first_float_as_whole_seconds() {
+        assert_eq!(uptime_secs("43200.10 99831.32\n"), Some(43_200));
+        assert_eq!(uptime_secs("nonsense"), None);
+    }
+
+    #[test]
+    fn df_parses_the_second_line_into_three_bytes_figures() {
+        let text = "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/sda1        240407840  106531284 121672360      47% /\n";
+        assert_eq!(
+            df_bytes(text),
+            (Some(240_407_840 * 1024), Some(106_531_284 * 1024), Some(121_672_360 * 1024))
+        );
+    }
+
+    #[test]
+    fn df_that_does_not_parse_yields_all_nones() {
+        assert_eq!(
+            df_bytes("Filesystem 1024-blocks Used Available Capacity Mounted on\nnot really a df line\n"),
+            (None, None, None)
+        );
+        assert_eq!(df_bytes(""), (None, None, None), "no second line at all");
+    }
+
+    #[test]
+    fn host_json_adds_the_microvm_counts_and_kvm() {
+        let value = host_json(&host_with(), Some(&Kvm { ok: true, error: None }), 3, 4);
+        assert_eq!(value["id"], host_with().id);
+        assert_eq!(value["microvms_live"], 3);
+        assert_eq!(value["microvms_ceiling"], 4);
+        assert_eq!(value["kvm_ok"], true, "{value}");
+        assert_eq!(value["hostname"], "picard");
+        assert_eq!(value["load"], json!([0.75, 0.31, 0.13]));
+        assert!(
+            value["checked_at"].is_string(),
+            "checked_at is the RFC 3339 string the contract sends: {value}"
+        );
+    }
+
+    #[test]
+    fn host_json_omits_kvm_ok_where_there_is_no_kvm() {
+        let value = host_json(&host_with(), None, 0, 1);
+        assert!(
+            !value.as_object().unwrap().contains_key("kvm_ok"),
+            "no /dev/kvm to check, so no such key: {value}"
+        );
+    }
+
+    #[test]
+    fn unmeasurable_host_fields_are_absent_not_null_or_zero() {
+        let mut host = host_with();
+        host.hostname = None;
+        host.load = None;
+        host.memory_used_bytes = None;
+        let value = host_json(&host, None, 0, 1);
+        for key in ["hostname", "load", "memory_used_bytes", "kvm_ok"] {
+            assert!(
+                !value.as_object().unwrap().contains_key(key),
+                "{key} should be omitted: {value}"
+            );
+        }
+        assert!(
+            value.as_object().unwrap().contains_key("cpu_cores"),
+            "a measured field stays: {value}"
+        );
+    }
+
+    /// A probe that counts how often it ran, like `counting` but answering a `Host`.
+    fn counting_host(runs: &Arc<AtomicUsize>) -> impl FnMut() -> std::future::Ready<Host> {
+        let runs = runs.clone();
+        move || {
+            runs.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(host_with())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repeat_host_poll_within_the_ttl_answers_from_the_cache_without_reprobing() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let first = host_cached(&app, false, counting_host(&runs)).await;
+        let second = host_cached(&app, false, counting_host(&runs)).await;
+        assert_eq!(first, second);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the second host poll inside the TTL must not re-probe"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_host_request_bypasses_the_cache_and_reprobes() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let runs = Arc::new(AtomicUsize::new(0));
+        host_cached(&app, false, counting_host(&runs)).await;
+        let fresh = host_cached(&app, true, counting_host(&runs)).await;
+        let expected = host_with();
+        // `checked_at` is a real clock reading, so it differs between two probes; everything else
+        // the cache shares is identical.
+        assert_eq!(
+            Host {
+                checked_at: fresh.checked_at,
+                ..expected
+            },
+            fresh,
+            "a bypassed cache still answers, with what the probe found"
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "?fresh=1 re-probes the host even though the cache is warm"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_host_id_is_created_once_and_persisted_in_the_config_dir() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let first = host_id(&app);
+        let second = host_id(&app);
+        assert_eq!(first, second, "the id is stable within one install");
+        assert!(uuid::Uuid::parse_str(&first).is_ok(), "the id is a uuid, not a word: {first}");
+        assert!(
+            app.cfg.config_dir.join("host_id").exists(),
+            "the id is persisted in the config dir"
+        );
+        // A second app over the same config dir keeps the id: a restart must not shuffle it.
+        let again = test_app(&root);
+        assert_eq!(host_id(&again), first, "the id survives a restart");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn probe_host_measures_this_machines_basics() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let host = probe_host(&app).await;
+        assert!(!host.id.is_empty(), "the id is always answered, however the probe goes");
+        if cfg!(target_os = "linux") {
+            assert_eq!(host.cpu_cores, std::thread::available_parallelism().ok().map(|n| n.get()));
+            assert!(host.cpu_cores.is_some(), "cpu_cores is measured on Linux: {host:?}");
+            assert!(
+                host.hostname.as_deref().is_some_and(|h| !h.is_empty()),
+                "the hostname reads from /proc/sys/kernel/hostname on Linux: {host:?}"
+            );
+            assert!(host.memory_total_bytes.is_some(), "MemTotal is measured on Linux: {host:?}");
+        } else {
+            assert!(host.cpu_cores.is_some(), "available_parallelism answers anywhere");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

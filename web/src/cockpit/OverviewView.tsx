@@ -7,21 +7,29 @@
 // Colonies collapse to one compact line apiece. The issue's title — the one fact that varies — waits
 // behind a click so the page reads as a roster, not a wall of issue text. The header only toggles its
 // row in place; reaching the colony's own view is the explicit "open colony →" action, so the
-// overview stays one page and the full session is still one more click deep.
+// overview stays one page and the full session is still one more click deep. The colony's machine
+// facts (the microVM it booted, its mesh address, its agent) live in the same disclosure: they are
+// per-colony detail, and the collapsed line stays the roster.
 //
 // The counters at the top double as filters: a click narrows the roster to that bucket, a second
 // click on the active one clears it. The buckets themselves live in feed.ts, so the number a counter
 // shows and the rows its filter reveals can never disagree.
+//
+// Above the roster sits the host strip (issue #205): the one machine every listed colony boots on —
+// its name, how many microVMs are live against the ceiling, its cores, load, memory, disk and
+// uptime — so "why is nothing starting" is answerable without leaving the page. It is page-level by
+// nature, orthogonal to the counters and the filter: the filter narrows the roster, never the host.
 import { useId, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
-import { IconChevron } from "../components/icons";
+import { IconAlert, IconChevron, IconCpu, IconMemory, IconServer } from "../components/icons";
 import { SESSION_STATUS, type Tone, attentionText, cx, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
 import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
-import type { Session } from "../types";
+import { colonyFacts, hostFacts } from "./host";
+import type { HostInfo, Session } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -50,9 +58,10 @@ export function flipExpanded(expanded: ReadonlySet<string>, id: string): Set<str
 
 /**
  * One colony on the overview. Collapsed it is a single line — status, name, age, status label — with
- * the issue title kept behind the disclosure; clicked, the title and the issue's address open beneath
- * it in place. The header is a plain disclosure button (never a navigation), and the colony's own
- * view stays one explicit "open colony →" away so the overview does not empty out on a stray click.
+ * the issue title kept behind the disclosure; clicked, the title, the colony's machine facts and the
+ * issue's address open beneath it in place. The header is a plain disclosure button (never a
+ * navigation), and the colony's own view stays one explicit "open colony →" away so the overview
+ * does not empty out on a stray click.
  */
 export function ColonyRow({
   session,
@@ -80,6 +89,9 @@ export function ColonyRow({
     : session.status === "waiting_for_answer"
       ? "Waiting for your answer"
       : null;
+  // The colony's machine facts (issue #205): the microVM it booted, the boot itself, its mesh
+  // address and its agent — only the ones that exist, so a pre-#205 colony shows just its agent.
+  const meta = colonyFacts(session);
 
   return (
     <div className="border-b border-border last:border-b-0">
@@ -102,6 +114,16 @@ export function ColonyRow({
       {open && (
         <div id={detailsId} className="flex flex-col gap-1.5 border-t border-border bg-panel-2 px-3.5 pb-3 pt-2.5">
           <div className="text-[13px] font-medium leading-snug">{session.issue_title || short}</div>
+          {meta.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[11px] text-faint">
+              {meta.map((fact, i) => (
+                <span key={i} title={fact.title} className="inline-flex items-center gap-1 whitespace-nowrap">
+                  {fact.icon === "cpu" && <IconCpu size={11} className="shrink-0" />}
+                  {fact.value}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="flex items-center gap-2.5">
             {issueUrl ? (
               <a href={issueUrl} target="_blank" rel="noreferrer" className="font-mono text-[11.5px] text-accent hover:underline">
@@ -143,6 +165,7 @@ export function OverviewView({
   sessions,
   orgs,
   cost,
+  host,
   onOpenOrg,
   onOpenColony,
   onSelect,
@@ -151,6 +174,8 @@ export function OverviewView({
   sessions: Session[];
   orgs: OrgEntry[];
   cost: number | null;
+  /** The machine every listed colony boots on, polled with the status; a mothership before issue #205 sends none. */
+  host?: HostInfo | null;
   onOpenOrg: (org: string) => void;
   onOpenColony: (id: string) => void;
   /** Puts a chosen colony into the cockpit's inspector; its pane can answer a waiting question. */
@@ -203,6 +228,37 @@ export function OverviewView({
             )}
           </div>
         </div>
+
+        {host && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border bg-panel px-3.5 py-2">
+            <span
+              title={host.hostname ? `${host.hostname} · host ${host.id}` : `host ${host.id}`}
+              className="font-mono text-[11px] font-semibold"
+            >
+              {host.hostname || host.id.slice(0, 8)}
+            </span>
+            {hostFacts(host).map((fact, i) => (
+              <span key={i} title={fact.title} className="inline-flex items-center gap-1 font-mono text-[11px] text-faint">
+                {fact.icon === "server" && <IconServer size={12} className="shrink-0" />}
+                {fact.icon === "cpu" && <IconCpu size={12} className="shrink-0" />}
+                {fact.icon === "memory" && <IconMemory size={12} className="shrink-0" />}
+                {fact.value}
+              </span>
+            ))}
+            {host.kvm_ok === false && (
+              <span
+                title="KVM is unavailable: this host cannot boot microVMs, so no colony can start here"
+                className="inline-flex items-center gap-1 font-mono text-[11px] text-warn"
+              >
+                <IconAlert size={12} className="shrink-0" />
+                no KVM
+              </span>
+            )}
+            <span title="when the mothership last probed the machine" className="ml-auto font-mono text-[11px] text-faint">
+              checked {timeAgo(host.checked_at)}
+            </span>
+          </div>
+        )}
 
         {filter && shown.length === 0 ? (
           <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">

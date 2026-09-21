@@ -89,6 +89,13 @@ impl SessionStatus {
         matches!(self, Self::Starting | Self::Running | Self::WaitingForAnswer | Self::Idle)
     }
 
+    /// Whether this status holds a microVM slot against the parallel limit: the same "busy"
+    /// predicate `queue::has_room` counts. `Publishing` keeps its slot because the colony is working
+    /// on the worktree while the microVM is torn down; a queued colony holds nothing.
+    pub fn busy(self) -> bool {
+        self.is_live() || self == Self::Publishing
+    }
+
     /// The name the API serialises, for messages that name a colony's state back to a person.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -200,6 +207,13 @@ pub struct Session {
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
     /// Set when a colony finishes booting, and replaced on resume.
     pub boot_timing: Option<Value>,
+    /// How this colony's microVM was sized at boot: vCPUs and memory exactly as `msb run` received
+    /// them. microsandbox/agentd expose no guest CPU% or RSS metrics today — agentd serves only
+    /// health, events, pty and shutdown — so these are the only per-colony numbers about the VM, and
+    /// guest figures are omitted rather than faked (issue #205). `null` on colonies booted before
+    /// this field existed.
+    pub boot_cpus: Option<u64>,
+    pub boot_memory: Option<String>,
     /// The app directory this colony's mounts came from. An update keeps that
     /// directory until no live colony still names it (`update::sweep_slots`).
     pub app_slot: Option<String>,
@@ -246,6 +260,8 @@ impl Default for Session {
             attention: None,
             last_activity_at: None,
             boot_timing: None,
+            boot_cpus: None,
+            boot_memory: None,
             app_slot: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
@@ -802,6 +818,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         attention: None,
         last_activity_at: None,
         boot_timing: None,
+        boot_cpus: None,
+        boot_memory: None,
         app_slot: None,
         created_at: now,
         updated_at: now,
@@ -1410,6 +1428,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish,
         command: vec!["sh".into(), "/colonizer/boot.sh".into()],
     };
+    // Record the machine size this launch chose before it is put to work, so the session always
+    // shows the microVM `msb run` was handed even when a later phase fails and the boot never
+    // completes. Spec values are the only per-colony numbers about the VM — agentd exposes no guest
+    // CPU% or RSS — so they are captured here, at source.
+    app.update_session(id, |x| {
+        x.boot_cpus = Some(spec.cpus);
+        x.boot_memory = Some(spec.memory.clone());
+    })
+    .await;
     timing.mark("mesh-start");
 
     // `msb run` pulls an uncached image itself, so this is not what makes the
@@ -1908,6 +1935,19 @@ pub(crate) mod tests {
         assert_eq!(s.host_disk_bytes, None);
     }
 
+    /// So must one saved before the boot spec was recorded: the container-level `#[serde(default)]`
+    /// fills the two new fields with null rather than refusing the file.
+    #[test]
+    fn a_session_saved_before_the_boot_spec_was_recorded_still_deserialises() {
+        let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"running","branch":"b","base":null,"worktree":"","sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: Session = serde_json::from_str(saved).unwrap();
+        assert_eq!(s.boot_cpus, None, "an old record has no boot spec to report");
+        assert_eq!(s.boot_memory, None);
+        // And the round trip back to the wire keeps them or their absence.
+        let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(again.boot_timing, None);
+    }
+
     /// The container-level `#[serde(default)]` is the whole contract that keeps a sessions.json from
     /// an older version loadable, so it is enforced mechanically: take a fully populated record,
     /// drop one key at a time, and the rest must still load. A field added without a usable default
@@ -1943,6 +1983,8 @@ pub(crate) mod tests {
         full.attention = Some(json!({"reason": "stalled"}));
         full.last_activity_at = Some(Utc::now());
         full.boot_timing = Some(json!({"total_ms": 5}));
+        full.boot_cpus = Some(4);
+        full.boot_memory = Some("8g".into());
         full.app_slot = Some("slot".into());
 
         let Value::Object(fields) = serde_json::to_value(&full).unwrap() else {
@@ -1988,6 +2030,8 @@ pub(crate) mod tests {
             attention: None,
             last_activity_at: None,
             boot_timing: None,
+            boot_cpus: None,
+            boot_memory: None,
             app_slot: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
