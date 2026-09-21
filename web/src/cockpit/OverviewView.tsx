@@ -3,7 +3,7 @@
 //
 // The prototype's rows carry a settler count. This one does not: the mothership streams events for a
 // single colony at a time, so the only honest per-colony facts here are the ones in the list itself.
-import { useId, useState, type ReactElement } from "react";
+import { useId, useMemo, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { IconAlert, IconChevron, IconCpu, IconMemory, IconServer } from "../components/icons";
@@ -21,7 +21,7 @@ import { colonyFacts, hostFacts } from "./host";
 import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
 import { RedTeamCard } from "./RedTeamCard";
-import type { BurnDownStatus, FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest } from "../types";
+import type { FleetHost, HostInfo, RedTeamRun, Session, SpendOrgDay, StartRedTeamRunRequest } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -337,6 +337,8 @@ export function OverviewView({
                     </span>
                     <span className="whitespace-nowrap font-mono text-[11px] text-accent">open nest →</span>
                   </button>
+
+                  <OrgSpend spend={org.spend} history={daysByOrg.get(org.org)} />
 
                   <div className="flex flex-col">
                     {mine.length === 0 ? (

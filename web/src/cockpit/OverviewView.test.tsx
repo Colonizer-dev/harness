@@ -139,7 +139,7 @@ describe("ColonyRow", () => {
     expect(unsupportedHost.runtime?.platform).toBe("other");
     expect(unsupportedHost.runtime?.kvm).toBeNull();
 
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} />);
+    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
     // A real focusable button — never a clickable div — and never disabled.
     expect(markup).toMatch(/<button type="button"[^>]*>open colony →<\/button>/);
     expect(markup).not.toContain("disabled");
@@ -173,14 +173,16 @@ describe("ColonyRow", () => {
 describe("OverviewView", () => {
   it("shows no issue title anywhere by default", () => {
     const markup = renderToStaticMarkup(
-      <OverviewView
-        sessions={[session({ id: "s1" }), session({ id: "s2", repo: "acme/design-system", issue: 7, issue_title: "Bad contrast on the nav" })]}
-        orgs={[ACME]}
-        cost={null}
-        onOpenOrg={noop}
-        onOpenColony={noop}
-        onSelect={noop}
-      />,
+      <ApiContext.Provider value={api}>
+        <OverviewView
+          sessions={[session({ id: "s1" }), session({ id: "s2", repo: "acme/design-system", issue: 7, issue_title: "Bad contrast on the nav" })]}
+          orgs={[ACME]}
+          cost={null}
+          onOpenOrg={noop}
+          onOpenColony={noop}
+          onSelect={noop}
+        />
+      </ApiContext.Provider>,
     );
     expect(markup).not.toContain("Checkout fails for guest users");
     expect(markup).not.toContain("Bad contrast on the nav");
