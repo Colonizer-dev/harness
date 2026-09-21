@@ -10,7 +10,7 @@ use crate::{
     orgs::effective_agent,
     provider_quota,
     sessions::agent_env,
-    util::{read_trimmed, write_secret},
+    util::{delete_secret, read_secret, write_secret},
 };
 use axum::{
     Json,
@@ -236,7 +236,7 @@ impl App {
     }
 
     pub fn provider_key(&self, id: &str) -> Option<String> {
-        read_trimmed(&self.provider_key_file(id))
+        read_secret(&self.provider_key_file(id))
     }
 }
 
@@ -611,7 +611,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     }
     match req.api_key.as_deref().map(str::trim) {
         Some("") => {
-            let _ = std::fs::remove_file(app.provider_key_file(&id));
+            delete_secret(&app.provider_key_file(&id));
         }
         Some(key) if key.len() > 500 || key.contains(char::is_whitespace) => {
             return Err(bad("that doesn't look like an API key"));
@@ -661,7 +661,7 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     }
     app.save_providers(&providers)?;
     if valid_id(&id) {
-        let _ = std::fs::remove_file(app.provider_key_file(&id));
+        delete_secret(&app.provider_key_file(&id));
     }
     // A provider that no longer exists must not keep its usage record forever.
     app.gateway.forget_usage(&id);
