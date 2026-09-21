@@ -29,6 +29,10 @@ pub struct AgentOverrides {
     pub subagent_model: Option<String>,
     #[serde(default)]
     pub background_model: Option<String>,
+    /// Which Claude account this org's colonies bill to (issue #95). `None` inherits the install
+    /// default; it never reaches the runner env, only the launch's credential lookup.
+    #[serde(default)]
+    pub claude_account: Option<String>,
     /// Skillsets (plugin directories) this org switches on (`true`) or off (`false`) on top of the global
     /// `plugins` setting. A skillset it doesn't name follows the global switch.
     #[serde(default)]
@@ -486,6 +490,11 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
         {
             return Err("skillset names are plain directory names, at most 64 of them".into());
         }
+        if let Some(account) = agent.claude_account.as_deref().filter(|s| !s.is_empty())
+            && !crate::claude_accounts::valid_id(account)
+        {
+            return Err("Claude account ids are lowercase letters, digits and dashes, 1-40 characters".into());
+        }
     }
     if settings.max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("parallel limit must be between 1 and 32".into());
@@ -718,6 +727,43 @@ mod tests {
             ..Default::default()
         };
         assert!(!effective_memory_enabled(&modules, &disabled));
+    }
+
+    #[test]
+    fn the_claude_account_override_round_trips_and_rejects_bad_ids() {
+        let org = OrgSettings {
+            agent: Some(AgentOverrides {
+                claude_account: Some("acme-corp".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let back: OrgSettings = serde_json::from_value(serde_json::to_value(&org).unwrap()).unwrap();
+        assert_eq!(
+            back.agent.as_ref().and_then(|a| a.claude_account.as_deref()),
+            Some("acme-corp")
+        );
+        assert!(validate(&org).is_ok(), "a well-formed account id validates");
+        assert!(validate(&OrgSettings::default()).is_ok(), "no override validates too");
+
+        for bad in ["Upper", "has space", "under_score"] {
+            let org = OrgSettings {
+                agent: Some(AgentOverrides {
+                    claude_account: Some(bad.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(validate(&org).is_err(), "{bad:?} should be rejected");
+        }
+        let long = OrgSettings {
+            agent: Some(AgentOverrides {
+                claude_account: Some("x".repeat(41)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate(&long).is_err(), "41 chars is one too many");
     }
 
     #[test]
