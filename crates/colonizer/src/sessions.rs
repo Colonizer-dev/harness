@@ -1849,6 +1849,16 @@ pub async fn events_ws(
     Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), socket)))
 }
 
+/// Decode one raw `events.jsonl` line for socket replay: bytes up to (not including) `\n`.
+/// Returns the event's seq and the line to send. `None` means the line is unreadable
+/// (not UTF-8) or carries no seq — the caller counts it and keeps going, so one bad
+/// line costs itself and not the rest of the transcript.
+fn replay_line(bytes: Vec<u8>) -> Option<(u64, String)> {
+    let line = String::from_utf8(bytes).ok()?;
+    let seq = serde_json::from_str::<Value>(&line).ok()?.get("seq")?.as_u64()?;
+    Some((seq, line))
+}
+
 async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, socket: WebSocket) {
     // Before this socket subscribes and the log ring is drained, so its alert lands in the
     // drained history once instead of arriving twice.
@@ -1873,10 +1883,18 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
         }
     }
     let mut replayed = since;
+    let mut skipped = 0usize;
     if let Ok(file) = tokio::fs::File::open(&rt.events_path).await {
-        let mut lines = BufReader::new(file).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Some(seq) = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["seq"].as_u64()) else {
+        // Split on newlines, not `lines()`/`next_line()`: the latter fails the whole read on
+        // the first non-UTF-8 line, silently truncating the transcript there. A torn line
+        // costs itself — it is counted below — and replay continues past it.
+        let mut chunks = BufReader::new(file).split(b'\n');
+        while let Ok(Some(bytes)) = chunks.next_segment().await {
+            if bytes.is_empty() {
+                continue;
+            }
+            let Some((seq, line)) = replay_line(bytes) else {
+                skipped += 1;
                 continue;
             };
             if seq > since {
@@ -1886,6 +1904,16 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
                 replayed = replayed.max(seq);
             }
         }
+    }
+    if skipped > 0 {
+        // The gap lives in events.jsonl, so it is reported via the harness log, not by
+        // writing to the event log itself — that would recurse and corrupt the seq stream.
+        app.session_log(
+            &id,
+            "warn",
+            format!("skipped {skipped} unreadable event log line(s) during replay; transcript may have a gap"),
+        )
+        .await;
     }
 
     loop {
@@ -2523,6 +2551,61 @@ pub(crate) mod tests {
             "a log that loaded fine is not accused of restarting: {message}"
         );
         drop(logs);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn replay_continues_past_an_undecodable_line_instead_of_truncating() {
+        // The socket replay cannot be spun up here (it owns a websocket), so this drives
+        // the same decode — split on newlines, `replay_line` per chunk — over a file with
+        // a non-UTF-8 line and a bad-JSON line between two good ones.
+        let good = |seq: u64, line: &str| {
+            let (got_seq, got_line) = replay_line(line.as_bytes().to_vec()).unwrap();
+            assert_eq!(got_seq, seq);
+            assert_eq!(got_line, line);
+        };
+        good(1, r#"{"seq":1,"type":"status","state":"working"}"#);
+        assert!(replay_line(vec![0xff, 0xfe, b' ', b'x']).is_none(), "not UTF-8: skipped");
+        assert!(replay_line(b"not json at all".to_vec()).is_none(), "bad JSON: skipped");
+        assert!(
+            replay_line(br#"{"type":"status"}"#.to_vec()).is_none(),
+            "no seq: skipped"
+        );
+
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"{\"seq\":1,\"type\":\"status\",\"state\":\"working\"}\n");
+        bytes.extend_from_slice(b"\xff\xfe not utf8\n");
+        bytes.extend_from_slice(b"not json at all\n");
+        bytes.extend_from_slice(b"{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n");
+        tokio::fs::write(app.session_dir("abc").join("events.jsonl"), &bytes)
+            .await
+            .unwrap();
+
+        let file = tokio::fs::File::open(app.session_dir("abc").join("events.jsonl"))
+            .await
+            .unwrap();
+        let mut chunks = BufReader::new(file).split(b'\n');
+        let mut replayed: Vec<(u64, String)> = Vec::new();
+        let mut skipped = 0usize;
+        while let Ok(Some(chunk)) = chunks.next_segment().await {
+            if chunk.is_empty() {
+                continue;
+            }
+            match replay_line(chunk) {
+                Some((seq, line)) => replayed.push((seq, line)),
+                None => skipped += 1,
+            }
+        }
+        assert_eq!(skipped, 2, "both bad lines are counted, neither stops the replay");
+        assert_eq!(
+            replayed.len(),
+            2,
+            "the valid event after the bad lines is still replayed"
+        );
+        assert_eq!(replayed[0].0, 1);
+        assert_eq!(replayed[1].0, 2);
+        assert!(replayed[1].1.contains("\"idle\""), "{}", replayed[1].1);
         let _ = std::fs::remove_dir_all(root);
     }
 
