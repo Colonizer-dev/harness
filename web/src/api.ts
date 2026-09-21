@@ -27,6 +27,7 @@ import type {
   Repo,
   SaveProviderRequest,
   Session,
+  SessionStatus,
   SpendHistory,
   StartRedTeamRunRequest,
   StorageSummary,
@@ -49,6 +50,29 @@ export class ApiError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+/**
+ * Whether a colony in this status holds its issue against a second launch — the cockpit mirror
+ * of the mothership's `issue_held_by` (crates/colonizer/src/sessions.rs): queued, live,
+ * publishing, or with its pull request still open. Stopped, failed, no_changes, merged and
+ * closed leave the issue free for a retry.
+ */
+export function holdsIssue(status: SessionStatus): boolean {
+  return (
+    status === "queued" ||
+    status === "starting" ||
+    status === "running" ||
+    status === "waiting_for_answer" ||
+    status === "idle" ||
+    status === "publishing" ||
+    status === "pr_opened"
+  );
+}
+
+/** The colony already holding `(repo, issue)`, if any — the launch that POST /api/sessions would refuse with a 409. */
+export function heldByFor(sessions: Session[], repo: string, issue: number): Session | null {
+  return sessions.find((s) => s.repo === repo && s.issue === issue && holdsIssue(s.status)) ?? null;
 }
 
 export interface SaveModuleRequest {
