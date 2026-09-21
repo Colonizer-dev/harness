@@ -316,6 +316,9 @@ export function Cockpit({
             mothershipSelected={inspector?.kind === "mothership"}
             redRuns={redRuns}
             settlers={settlers}
+            // The single open stream's live detail: the selected chamber's balloon escalates to
+            // it while non-empty, every other chamber reading its colony-level feed line.
+            liveDetail={state.agentDetail}
             backlogCount={backlogCount}
             avatarFor={avatarFor}
             onSelect={(id) => {
