@@ -559,13 +559,15 @@ fn cleanable(status: SessionStatus) -> bool {
     !status.is_live() && status != SessionStatus::Publishing && status != SessionStatus::Queued
 }
 
-pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
-    let s = app
-        .session(&id)
-        .await
-        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+/// The work of the `cleanup` handler, shared with the auto-reclaim tick: claim the colony as cleaned
+/// up under its lifecycle lock, remove its worktree under its repo lock, and re-read the record.
+/// Errors named exactly `no such session` mean the colony is gone (NOT_FOUND at the HTTP layer) and
+/// `stop the session first` means it is not cleanable (CONFLICT); anything else is the worktree
+/// removal failing and surfaces as a 500. The wrapper below maps these; keep the messages in sync.
+pub(crate) async fn cleanup_one(app: &Shared, id: &str) -> anyhow::Result<Session> {
+    let s = app.session(id).await.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     if !cleanable(s.status) {
-        return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
+        return Err(anyhow::anyhow!("stop the session first"));
     }
     // The lifecycle lock first, and the claim before the removal: `cleaned_up` is exactly what
     // `can_resume` checks, so setting it while holding this lock means a resume waiting on it is
@@ -575,13 +577,13 @@ pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     // colony, which `can_resume` refuses forever. An already-cleaned-up colony still cleans up
     // cleanly: the claim does not look at `cleaned_up`, the worktree is already gone, and
     // `remove_worktree` no-ops.
-    let lifecycle = app.session_lock(&id).await;
+    let lifecycle = app.session_lock(id).await;
     let _lifecycle = lifecycle.lock().await;
     // Compare-and-set under the write lock: the pre-check above read a snapshot, and a resume or a
     // stop may have claimed the colony in the meantime. The previous `cleaned_up` comes back so a
     // failed removal can put it back.
     let (s, (claimed, was_cleaned)) = app
-        .update_session(&id, |x| {
+        .update_session(id, |x| {
             let allowed = cleanable(x.status);
             let was_cleaned = x.cleaned_up;
             if allowed {
@@ -590,14 +592,14 @@ pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
             (allowed, was_cleaned)
         })
         .await
-        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+        .ok_or_else(|| anyhow::anyhow!("no such session"))?;
     if !claimed {
-        return Err(client_error(StatusCode::CONFLICT, "stop the session first"));
+        return Err(anyhow::anyhow!("stop the session first"));
     }
     let removed = {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
-        github::remove_worktree(&app, &s).await
+        github::remove_worktree(app, &s).await
     };
     if let Err(e) = removed {
         // The colony is marked cleaned up but its worktree may still be there, and `can_resume` reads
@@ -605,20 +607,30 @@ pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         // old value back, as `delete` re-inserts the record when its worktree removal fails. A colony
         // deleted while its worktree was being removed makes that a silent no-op: the record is gone,
         // and there is nothing left to restore.
-        app.update_session(&id, |x| x.cleaned_up = was_cleaned).await;
-        return Err(e
-            .context("could not remove the colony's worktree; the colony is left cleanable so the cleanup can be retried")
-            .into());
+        app.update_session(id, |x| x.cleaned_up = was_cleaned).await;
+        return Err(
+            e.context("could not remove the colony's worktree; the colony is left cleanable so the cleanup can be retried")
+        );
     }
     // The answer is read after the removal, not taken from the claim's clone: `delete` takes no
     // lifecycle lock, so a colony deleted while its worktree was being removed must come back as the
     // 404 the old removal-first order got from its post-removal update, not as a 200 naming a colony
     // that no longer exists.
-    let s = app
-        .session(&id)
-        .await
-        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    Ok(Json(s))
+    let s = app.session(id).await.ok_or_else(|| anyhow::anyhow!("no such session"))?;
+    Ok(s)
+}
+
+pub async fn cleanup(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+    match cleanup_one(&app, &id).await {
+        Ok(s) => Ok(Json(s)),
+        // The anyhow error only carries the message, so the HTTP status is recovered from the
+        // sentinel messages `cleanup_one` documents above; anything else is a failed removal.
+        Err(e) => Err(match e.to_string().as_str() {
+            "no such session" => client_error(StatusCode::NOT_FOUND, "no such session"),
+            "stop the session first" => client_error(StatusCode::CONFLICT, "stop the session first"),
+            _ => e.into(),
+        }),
+    }
 }
 
 /// Whether a colony in this state can be deleted. A live or publishing colony has a microVM or a push in flight.

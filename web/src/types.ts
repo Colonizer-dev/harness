@@ -68,6 +68,8 @@ export interface Session {
   /** Where the last launch's time went, filled in when the colony finished booting (docs/protocol.md §4). */
   boot_timing?: { total_ms: number; phases?: { name: string; ms: number }[] } | null;
   cleaned_up: boolean;
+  /** True opts this colony's worktree out of automatic reclamation (issue #223). */
+  keep_worktree: boolean;
   created_at: string;
   updated_at: string;
   last_activity_at?: string | null;
@@ -161,6 +163,8 @@ export interface HarnessStatus {
   } | null;
   /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */
   storage?: StorageHealth;
+  /** Aggregate reclamation counts from the same poll (issue #223); older mothership builds omit it. */
+  reclaim?: { reclaimable: number; unpushed: number };
   /** The machine facts a colony's first minute depends on (issue #129); older mothership builds omit it. */
   runtime?: RuntimeInfo;
   /** The machine every colony in the overview boots on (issue #205); older mothership builds omit it. */
@@ -274,6 +278,23 @@ export interface StorageHealth {
   ts?: string | null;
   /** Failed writes since the mothership started. */
   failures?: number | null;
+}
+
+/** GET /api/storage: disk usage and what automatic reclamation can (and pointedly will not) take (issue #223). */
+export interface StorageSummary {
+  worktrees_bytes: number;
+  repos_bytes: number;
+  sessions_bytes: number;
+  /** Terminal colonies with a PR, past retention: what the sweeper takes next. */
+  reclaimable: Array<{ id: string; status: string; pr_url: string | null; bytes: number; due: boolean; updated_at: string }>;
+  /** Terminal colonies with no PR: listed for a person, never auto-deleted. */
+  unpushed: Array<{ id: string; status: string; bytes: number; updated_at: string }>;
+  /** Worktree directories with no colony behind them, and what the sweep will do. */
+  orphans: Array<{ path: string; bytes: number; action: string }>;
+  free_bytes: number | null;
+  min_free_bytes: number;
+  retention_secs: number;
+  enabled: boolean;
 }
 
 /** GET /api/status `model_providers`: each configured model provider's cumulative requests and the health rule's verdict on it (§6.5) — the one rule the providers screen, the status poll and the notify module all share. */

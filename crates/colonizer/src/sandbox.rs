@@ -84,6 +84,13 @@ pub async fn running(msb: &str) -> Result<HashSet<String>> {
     Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
 }
 
+/// Every sandbox microsandbox knows about, running or not: the orphan-VM
+/// sweep diffs this against the session list and the running set above.
+pub async fn all(msb: &str) -> Result<HashSet<String>> {
+    let out = exec(Command::new(msb).args(["ls", "--quiet"])).await?;
+    Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+}
+
 /// Images already in the local cache, as `msb image list` reports them.
 ///
 /// Used to decide whether a launch is about to pay for a download. A failure

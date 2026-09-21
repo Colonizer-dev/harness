@@ -420,7 +420,7 @@ pub fn host_id(app: &App) -> String {
 
 /// The data disk's `(total, used, free)` bytes, from `df -kP <dir>` under [`HOST_PROBE_TIMEOUT`].
 /// Everything is 1024-byte blocks, so the parse scales the three numbers to bytes.
-async fn probe_df(dir: &std::path::Path) -> (Option<u64>, Option<u64>, Option<u64>) {
+pub(crate) async fn probe_df(dir: &std::path::Path) -> (Option<u64>, Option<u64>, Option<u64>) {
     let mut cmd = Command::new("df");
     cmd.arg("-kP").arg(dir);
     match tokio::time::timeout(HOST_PROBE_TIMEOUT, util::exec(&mut cmd)).await {
@@ -432,7 +432,7 @@ async fn probe_df(dir: &std::path::Path) -> (Option<u64>, Option<u64>, Option<u6
 /// The parse half of `df -kP`, sealed from the exec so it is testable without a real disk. The
 /// second line holds the data: fs, 1024-blocks, used, available, capacity%, mount point. Wrapped or
 /// odd output yields three `None`s, not guesses.
-fn df_bytes(text: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
+pub(crate) fn df_bytes(text: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
     let fields: Vec<&str> = text
         .lines()
         .nth(1)

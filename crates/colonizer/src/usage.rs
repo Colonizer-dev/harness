@@ -690,6 +690,7 @@ mod tests {
             model_tier: None,
             model_routing: None,
             cleaned_up: false,
+            keep_worktree: false,
             attention: None,
             last_activity_at: Some(now),
             boot_timing: None,

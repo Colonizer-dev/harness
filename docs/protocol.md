@@ -196,7 +196,9 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
-| `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
+| `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped). Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
+| `POST /api/sessions/{id}/retain` | `{keep}` opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
+| `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below) |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
 | `POST /api/redteam/runs` | `{repo, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise). **409** when another run for the same repository is still active |
 | `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
@@ -283,6 +285,27 @@ comes. Both are estimates. A colony's budget answers to `cost_usd + routed_cost_
 host-disk quota to `host_disk_bytes`; past either, the mothership stops the colony: `status` `stopped`,
 the reason in `error`, and the worktree kept, so raising the limit (or, for the quota, cleaning up) and
 pressing Resume continues it.
+
+#### Automatic reclamation
+
+Finished colonies accumulate worktrees, so a sweeper reclaims them without being asked. A colony is
+reclaimed only once it is terminal (`merged`, `closed`, `no_changes`, or a stopped colony that will not
+resume) **and** pushed (`pr_url` set), **and** older than `COLONIZER_RECLAIM_RETENTION_HOURS` (default
+12 h) past its last update. Reclaiming removes the worktree and local branch exactly like manual
+cleanup — and carries the same trade-off: a reclaimed colony is unresumable, because resume boots a
+fresh microVM on the kept worktree and there is no worktree left.
+
+What the sweeper never takes: a colony with no `pr_url`. Unpushed work may be the only copy of the
+agent's changes, so it is never auto-deleted — `GET /api/storage` lists it under `unpushed` for a
+person to publish or clean up by hand. Worktree directories with no colony behind them are swept as
+orphans, but only with a git-state guard: dirty or unpushed content is reported, not removed.
+
+Two more guards round it out. When free disk drops below the floor, the sweeper takes due colonies
+oldest-first and the queue stops admitting new colonies until headroom returns. And reclamation can be
+switched off entirely — globally with `COLONIZER_RECLAIM=0`, or per colony with `keep_worktree` via
+`POST /api/sessions/{id}/retain` (the colony view's "Keep worktree" checkbox). `GET /api/storage`
+shows the whole ledger: byte totals, the `reclaimable` list with per-colony `due`, the `unpushed`
+list, the `orphans` with their planned `action`, and the retention and enablement in force.
 
 ### Plugin directories
 
