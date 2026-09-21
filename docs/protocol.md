@@ -1357,6 +1357,17 @@ streams. Contributor-tier pricing for Meta is currently unknown and unverified, 
 `pricing` unset: honest (tokens are still counted; nothing is guessed), but it means spend on this
 provider has to be watched manually rather than assumed free.
 
+**Per-provider quirks.** Dialect gaps like Meta's live as data in `providers.rs` (`ProviderQuirks`,
+one row per preset in `PRESET_QUIRKS`), not as `if id == …` branches: the next such gap becomes a new
+row. Meta's row says `strip_cache_ttl` (its API rejects `cache_control` blocks carrying `ttl`) and
+`min_max_tokens: 16`. On the `wire: anthropic` path the gateway normalizes preemptively — it parses the
+request body and rewrites `{"type":"ephemeral","ttl":…}` blocks (system blocks, message content blocks,
+tools) to `{"type":"ephemeral"}`, raising `max_tokens` below the floor — logging what it changed with the
+field named. Providers without quirks skip this entirely: their bodies proxy byte-identical. An upstream
+`400` is logged with provider and status rather than proxied invisibly, and any upstream 4xx/5xx flags the
+colony for attention under the `model_error` reason (leaving an existing watchdog/autopilot flag alone),
+which usage telemetry buckets as a closed failure label.
+
 **Usage.** `usage` is the provider's cumulative counters: what says a request has ever actually gone to it,
 which the momentary `in_flight`/`queued` gauges cannot:
 
