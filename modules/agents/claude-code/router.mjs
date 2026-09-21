@@ -198,6 +198,12 @@ export async function startRouter({ routes = [], env = process.env, anthropicBas
         try {
           upstream = await send(joinUrl(route.base_url, req.url), routed, Buffer.from(JSON.stringify(parsed)));
           if (FALLBACK_STATUSES.has(upstream.status)) reason = upstream.headers.get(FALLBACK_HEADER);
+          // Quota exhaustion answers 429/403, never 502/503/504: the gateway names it in the
+          // header, and only that marker (never a bare 429/403) earns the Claude retry.
+          if (!reason && (upstream.status === 429 || upstream.status === 403)) {
+            const quota = upstream.headers.get(FALLBACK_HEADER);
+            if (quota === 'provider_quota_exhausted') reason = quota;
+          }
         } catch {
           if (abort.signal.aborted) return;
           reason = 'gateway unreachable';

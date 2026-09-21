@@ -266,6 +266,7 @@ export function Cockpit({
             host={status?.host ?? null}
             fleet={fleet}
             runs={redRuns}
+            quota={status?.quota ?? null}
             onStart={onRedStart}
             onStop={onRedStop}
             onOpenOrg={(org) => {

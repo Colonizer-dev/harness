@@ -29,6 +29,7 @@ mod orgs;
 mod plugins;
 mod presets;
 mod protocol;
+mod provider_quota;
 mod providers;
 mod publish;
 mod queue;
@@ -530,6 +531,9 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
             })
         })
         .collect();
+    // Whether every routable provider's plan is out, and the earliest reset: the queue holder's
+    // own words, so the overview banner and the queue gate never disagree.
+    let quota = providers::quota_status(&app).await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
@@ -554,6 +558,13 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
         "runtime": runtime,
         "host": host_value,
         "model_providers": model_providers,
+        "quota": json!({
+            "paused": quota.paused,
+            "reason": quota.reason,
+            "reset_at": quota.reset_at,
+            "reset_unix": quota.reset_unix,
+            "providers": quota.providers,
+        }),
         "modules": {
             "source": modules.source.provider,
             "sandbox": modules.sandbox.provider,

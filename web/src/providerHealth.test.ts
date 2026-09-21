@@ -2,7 +2,7 @@
 // recomputed — `degraded` and `rated` are taken as given, at and around the 10% boundary included.
 import { describe, expect, it } from "vitest";
 
-import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, usageHealthTone } from "./providerHealth";
+import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "./providerHealth";
 import type { ProviderUsageHealth } from "./types";
 
 const NOW = Date.parse("2026-09-19T08:12:00Z");
@@ -98,5 +98,28 @@ describe("usageHealthTone", () => {
   it("gives an unrated provider no verdict, whatever its raw percentage", () => {
     expect(usageHealthTone(health({ failure_pct: 50, rated: false, degraded: false }))).toBeNull();
     expect(usageHealthTone(undefined)).toBeNull();
+  });
+});
+
+describe("quotaTone", () => {
+  it("tones an exhausted plan err and a healthy one nothing", () => {
+    expect(quotaTone({ reset_at: "09-23 07:54 UTC", reset_unix: 1_789_000_000 })).toBe("err");
+    expect(quotaTone({ reset_at: null, reset_unix: null })).toBe("err");
+    expect(quotaTone(null)).toBeNull();
+    expect(quotaTone(undefined)).toBeNull();
+  });
+});
+
+describe("quotaExhaustedText", () => {
+  it("names the reset when the provider gave one", () => {
+    expect(quotaExhaustedText({ reset_at: "09-23 07:54 UTC", reset_unix: 1_789_000_000 })).toBe(
+      "quota exhausted, resets 09-23 07:54 UTC",
+    );
+  });
+
+  it("reads plain exhaustion without a reset, and nothing without exhaustion", () => {
+    expect(quotaExhaustedText({ reset_at: null, reset_unix: null })).toBe("quota exhausted");
+    expect(quotaExhaustedText(null)).toBeNull();
+    expect(quotaExhaustedText(undefined)).toBeNull();
   });
 });

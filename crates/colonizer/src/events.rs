@@ -5,7 +5,7 @@
 //! The autopilot decision itself is a pure function (`autopilot_step`) so the policy can be tested
 //! apart from the stream it acts on.
 
-use crate::{Shared, findings, github, memory, orgs, spend, util::append_line};
+use crate::{Shared, findings, github, memory, orgs, provider_quota, spend, util::append_line};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -275,6 +275,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
         AgentEvent::TurnEnd {
             is_error,
+            result,
             cost_usd,
             model_usage,
             ..
@@ -345,9 +346,55 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     }
                 }
             }
+            // A turn that died on an empty plan parks the colony instead of holding it: the error
+            // text is the only copy of the provider's answer the colony side ever sees.
+            if is_error
+                && let Some(text) = result.as_deref()
+                && let Some(hit) = provider_quota::classify_quota_exhaustion(0, "", text)
+            {
+                park_quota_colony(app, id, text, &hit).await;
+            }
         }
         // Forwarded to the browser above and acted on nowhere here.
         AgentEvent::UserMessage { .. } | AgentEvent::Other => {}
+    }
+}
+
+/// Parks a colony whose turn died on an exhausted provider: the same stop the budget path takes —
+/// microVM removed, worktree kept, slot released — with the quota attention reason instead of a
+/// hold. `Stopped` stands in until #213 adds `Parked`; the reason string is the #230 contract.
+async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_quota::QuotaExhaustion) {
+    let providers = app.providers();
+    let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
+    let names: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
+    let provider = provider_quota::mentioned_provider(text, &ids, &names);
+    if let Some(pid) = &provider {
+        app.gateway.mark_quota_exhausted(pid, hit.reset_at.clone(), hit.reset_unix);
+    }
+    let Some(s) = app.session(id).await else { return };
+    if !s.status.is_live() {
+        return;
+    }
+    let error = match (&provider, &hit.reset_at) {
+        (Some(pid), Some(reset)) => format!("provider quota exhausted ({pid}, resets {reset})"),
+        (Some(pid), None) => format!("provider quota exhausted ({pid})"),
+        (None, Some(reset)) => format!("provider quota exhausted (resets {reset})"),
+        (None, None) => "provider quota exhausted".to_string(),
+    };
+    let parked = stop_colony(
+        app,
+        &s,
+        |_| true,
+        error,
+        "provider quota exhausted; the microVM is removed and the worktree kept, so the colony resumes when the plan refills"
+            .into(),
+    )
+    .await;
+    if parked {
+        app.update_session(id, |x| {
+            x.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        })
+        .await;
     }
 }
 
