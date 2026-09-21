@@ -526,6 +526,43 @@ pub(crate) fn rotate_events(dir: &std::path::Path) -> std::io::Result<()> {
     ))
 }
 
+/// The current run epoch of a colony's event log: 1 for a fresh colony, one past the highest
+/// archived `events-N.jsonl` after that. Each successful resume rotates `events.jsonl` aside into
+/// the next archive slot (see `rotate_events`), so the archive count is the resume count, and the
+/// epoch survives harness restarts with no migration. Read straight from the session directory so
+/// an events socket can learn it before any Runtime exists (runtimes are created lazily).
+pub(crate) fn run_epoch_for_dir(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 1;
+    };
+    let mut max = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("events-"))
+            .and_then(|n| n.strip_suffix(".jsonl"))
+        else {
+            continue;
+        };
+        if let Ok(n) = rest.parse::<u64>() {
+            max = max.max(n);
+        }
+    }
+    max + 1
+}
+
+/// Which `since` cursor an events socket replays from, given the epoch the client last saw. A
+/// client reconnecting after a resume names a stale epoch — and its `since` is a rank in the
+/// retired run's per-run numbering, meaningless in the new run — so it replays from 0 instead of
+/// dropping the new run's first events. Absent (legacy clients) or 0 ("unknown") keeps `since`.
+pub(crate) fn effective_since(client_epoch: Option<u64>, current_epoch: u64, since: u64) -> u64 {
+    match client_epoch {
+        Some(e) if e != 0 && e != current_epoch => 0,
+        _ => since,
+    }
+}
+
 pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
     let s = app
         .session(&id)
@@ -593,6 +630,12 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let runtime = app.runtimes.lock().await.remove(&id);
     if let Some(rt) = &runtime {
         rt.stop.send_replace(true);
+        // Retire pre-existing event sockets: they hold this Runtime and read from its broadcast
+        // channels, so they can never see the new run's events. `stop` cannot do this —
+        // `teardown_vm` sets it on a plain stop too, where sockets stay open on purpose — so this
+        // dedicated signal, sent only on the resume-retire path, closes them, and the clients
+        // reconnect into the new epoch.
+        rt.retired.send_replace(true);
     }
     // Rotation must not fail silently (see `rotate_events`): with the stale log still in place the
     // resumed colony's events are dropped as already seen. A colony reads as Stopped before
@@ -1008,6 +1051,71 @@ mod tests {
             "the log is left in place, so the resume stays refused instead of dropping events"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_run_epoch_is_one_past_the_highest_archived_event_log() {
+        let dir = std::env::temp_dir().join(format!("colonizer-epoch-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(run_epoch_for_dir(&dir), 1, "a fresh colony is epoch 1");
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
+        assert_eq!(run_epoch_for_dir(&dir), 1, "the live log is the current run, not an archive");
+        std::fs::write(dir.join("events-1.jsonl"), "").unwrap();
+        std::fs::write(dir.join("events-2.jsonl"), "").unwrap();
+        assert_eq!(run_epoch_for_dir(&dir), 3, "two resumes are epoch 3");
+        std::fs::write(dir.join("events-9.jsonl"), "").unwrap();
+        assert_eq!(run_epoch_for_dir(&dir), 10, "only the highest archive counts, gaps aside");
+        assert_eq!(
+            run_epoch_for_dir(&dir.join("missing")),
+            1,
+            "an unreadable directory reads as a fresh colony"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stale_epoch_replays_from_zero_while_a_current_unknown_or_absent_epoch_keeps_since() {
+        assert_eq!(effective_since(Some(3), 3, 41), 41, "a matching epoch keeps the cursor");
+        assert_eq!(
+            effective_since(Some(2), 3, 41),
+            0,
+            "a stale epoch replays from zero: the cursor is a retired run's rank"
+        );
+        assert_eq!(effective_since(Some(4), 3, 41), 0, "an epoch from the future is stale too");
+        assert_eq!(
+            effective_since(Some(0), 3, 41),
+            41,
+            "0 means the client does not know its epoch"
+        );
+        assert_eq!(effective_since(None, 3, 41), 41, "absent means a legacy client");
+        assert_eq!(effective_since(Some(2), 3, 0), 0, "already at zero stays at zero");
+    }
+
+    #[tokio::test]
+    async fn a_resume_bumps_the_run_epoch_and_retires_the_old_runtime() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("git".into()))
+            .await
+            .unwrap();
+        std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
+        assert_eq!(run_epoch_for_dir(&app.session_dir("abc")), 1);
+        // A runtime in the map, as a just-stopped colony still has while its link task drains.
+        let rt_before = app.runtime("abc").await;
+        // No free slot, so the resume queues instead of spawning a boot whose git and `msb` work
+        // would flip the colony's status under the assertions below.
+        fill_the_parallel_limit(&app).await;
+        let _ = resume(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert!(app.session_dir("abc").join("events-1.jsonl").exists(), "the rotation landed");
+        assert_eq!(
+            run_epoch_for_dir(&app.session_dir("abc")),
+            2,
+            "one successful resume is epoch 2"
+        );
+        assert!(
+            *rt_before.retired.borrow(),
+            "the old runtime is retired, so its event sockets close and reconnect"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

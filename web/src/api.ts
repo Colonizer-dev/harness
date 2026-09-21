@@ -178,7 +178,7 @@ export interface Api {
   redTeamRuns(): Promise<RedTeamRun[]>;
   startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
   stopRedTeamRun(id: string): Promise<RedTeamRun>;
-  openEvents(sessionId: string, since: number): SocketLike;
+  openEvents(sessionId: string, since: number, epoch?: number): SocketLike;
   openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
 }
 
@@ -284,7 +284,7 @@ export const httpApi: Api = {
   redTeamRuns: () => request("/api/redteam/runs"),
   startRedTeamRun: (body) => post("/api/redteam/runs", body),
   stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),
-  openEvents: (id, since) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}`)),
+  openEvents: (id, since, epoch = 0) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}&epoch=${epoch}`)),
   openTerminal: (id, cols, rows) =>
     new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),
 };

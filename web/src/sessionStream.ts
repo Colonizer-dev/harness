@@ -366,6 +366,8 @@ export class SessionStream {
   private readonly api: Api;
   private ws: SocketLike | null = null;
   private state: StreamState = initialStreamState();
+  /** The run the server is currently streaming; a change means the next run's seqs start over. */
+  private runEpoch: number | null = null;
   private listeners = new Set<() => void>();
   private retries = 0;
   private stopped = false;
@@ -428,7 +430,7 @@ export class SessionStream {
 
   private connect(): void {
     this.update((s) => ({ ...s, connection: this.retries > 0 ? "reconnecting" : "connecting" }));
-    const ws = this.api.openEvents(this.sessionId, this.state.lastSeq);
+    const ws = this.api.openEvents(this.sessionId, this.state.lastSeq, this.runEpoch ?? 0);
     this.ws = ws;
     ws.onopen = () => {
       if (this.ws !== ws) return;
@@ -444,6 +446,16 @@ export class SessionStream {
         return;
       }
       if (!frame || typeof frame !== "object" || typeof frame.type !== "string") return;
+      if (frame.type === "run_epoch") {
+        const e = frame.epoch;
+        if (typeof e === "number") {
+          if (this.runEpoch !== null && e !== this.runEpoch) {
+            this.update((s) => ({ ...s, lastSeq: 0 }));
+          }
+          this.runEpoch = e;
+        }
+        return;
+      }
       this.update((s) => reduceFrame(s, frame));
     };
     ws.onerror = () => {};
