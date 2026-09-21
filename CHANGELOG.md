@@ -95,6 +95,15 @@ setting) is called out under **Take care** rather than left for you to find.
   An installer run by hand still replaces it immediately, which is safe when
   nothing is running and not when something is. ([#112])
 
+## [v0.1.7] - 2026-09-22
+
+### Added
+
+- Overview: per-org tokens, models and cost, plus a spend history that survives
+  cleanup.
+- Red-team raids and burn-down mode are documented: [docs/red-team.md](docs/red-team.md)
+  and [docs/burn-down.md](docs/burn-down.md).
+
 ## [v0.1.5] - 2026-09-18
 
 ### Changed
