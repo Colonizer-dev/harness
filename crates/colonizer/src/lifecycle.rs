@@ -11,6 +11,7 @@
 use crate::{
     ApiResult, App, Shared, client_error, github, orgs, providers,
     sandbox::{self},
+    spend,
     util::{
         dir_size,
         faults::{self, Op},
@@ -252,10 +253,17 @@ pub async fn record_routed_usage(app: &Shared, colony: &str, provider: &provider
     if cost <= 0.0 {
         return;
     }
-    app.update_session(colony, |x| {
-        x.routed_cost_usd = Some(x.routed_cost_usd.unwrap_or_default() + cost);
-    })
-    .await;
+    let Some((session, _)) = app
+        .update_session(colony, |x| {
+            x.routed_cost_usd = Some(x.routed_cost_usd.unwrap_or_default() + cost);
+        })
+        .await
+    else {
+        return;
+    };
+    // Told to the append-only journal now, while the colony still exists to name its org: the
+    // routed dollar has to survive the cleanup or delete that will forget it.
+    spend::record_routed(app, &session.org, cost).await;
     enforce_budget(app, colony).await;
 }
 

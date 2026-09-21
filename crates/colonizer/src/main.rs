@@ -37,6 +37,7 @@ mod routing;
 mod runtime;
 mod sandbox;
 mod sessions;
+mod spend;
 mod stack;
 mod telemetry;
 mod timing;
@@ -944,6 +945,7 @@ async fn serve() -> Result<()> {
         .route("/api/models", get(providers::models))
         .route("/api/orgs", get(orgs::list))
         .route("/api/orgs/{org}", put(orgs::put))
+        .route("/api/spend/history", get(spend::history))
         .route("/api/memory", get(memory::get))
         .route("/api/memory/proposals", get(memory::list_proposals))
         .route("/api/memory/proposals/{id}/approve", post(memory::approve))

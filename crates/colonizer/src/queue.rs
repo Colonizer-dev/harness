@@ -5,7 +5,7 @@
 //! apart from the loop that applies it.
 
 use crate::{
-    Shared, orgs,
+    Shared, orgs, spend,
     stack::{self, Stacked},
 };
 use chrono::Utc;
@@ -194,6 +194,10 @@ pub(crate) async fn start_queued(app: &Shared) {
         match claimed {
             None => return,
             Some(Claim::Retire(retired, message)) => {
+                // A queued colony that can never start crosses straight into its terminal state
+                // outside `update_session` (the claim writes the record directly), so the journal
+                // hears about the return here, not there.
+                spend::record_returned(app, &retired.org).await;
                 app.persist_and_broadcast(&retired).await;
                 app.session_log(&retired.id, "warn", message).await;
                 continue;

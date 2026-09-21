@@ -84,6 +84,20 @@ describe("orgEntries", () => {
     expect(hidden.map((e) => [e.org, e.avatar])).toEqual([["octo", "https://example.com/octo.png"]]);
   });
 
+  it("carries the org's spend from /api/orgs onto the row, and leaves it off a colony-only org", () => {
+    const { visible } = orgEntries(
+      [org("acme", { spend: { cost_usd: 12.5, routed_cost_usd: 0.5, tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 }, models: [] } })],
+      [session()],
+    );
+    expect(visible[0].spend?.cost_usd).toBe(12.5);
+    expect(visible[0].spend?.routed_cost_usd).toBe(0.5);
+  });
+
+  it("keeps the spend when the org was first seen in the colony list", () => {
+    const { visible } = orgEntries([org("acme", { spend: { cost_usd: 1, routed_cost_usd: null, tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 }, models: [] } })], [session()]);
+    expect(visible[0].spend?.cost_usd).toBe(1);
+  });
+
   it("merges case-insensitively on the first spelling seen, as before", () => {
     const { visible } = orgEntries([org("Acme", { avatar_url: "https://example.com/a.png" })], [session({ repo: "acme/webshop", org: "acme" })]);
     expect(visible).toHaveLength(1);

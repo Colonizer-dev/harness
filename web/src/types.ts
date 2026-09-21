@@ -637,6 +637,59 @@ export interface OrgInfo {
    * until then. Optional so an older mothership that never sends it simply has no pending orgs.
    */
   awaiting_decision?: boolean;
+  /**
+   * The org's token and dollar tallies plus its top models (issue #209). Optional: a mothership
+   * from before it measured org spend sends none, and the overview falls back to the colony list.
+   */
+  spend?: OrgSpend;
+}
+
+/** Token tallies, per the per-turn `model_usage` but summed across the org. */
+export interface SpendTokens {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+}
+
+/** One model's share of an org's spend; the server sends them sorted by tokens descending. */
+export interface ModelSpend {
+  model: string;
+  tokens: number;
+  /** null = the model was never priced (routed through an unpriced provider). */
+  cost_usd: number | null;
+}
+
+/** GET /api/orgs `spend`: the org's measured spend and what earned it. */
+export interface OrgSpend {
+  /** Never measured (a subscription-account org): null, and rendered as "—", not "$0.00". */
+  cost_usd: number | null;
+  routed_cost_usd: number | null;
+  tokens: SpendTokens;
+  models: ModelSpend[];
+}
+
+/** GET /api/spend/history: one org's tallies for one day. */
+export interface SpendOrgDay {
+  org: string;
+  cost_usd: number | null;
+  routed_cost_usd: number | null;
+  tokens: SpendTokens;
+  models: ModelSpend[];
+  launched: number;
+  returned: number;
+}
+
+/** GET /api/spend/history: one day across the orgs that had activity. */
+export interface SpendDay {
+  /** "YYYY-MM-DD" */
+  day: string;
+  orgs: SpendOrgDay[];
+}
+
+/** GET /api/spend/history: days ascending, only days with activity included. */
+export interface SpendHistory {
+  days: SpendDay[];
 }
 
 // ---------------------------------------------------------------------------
