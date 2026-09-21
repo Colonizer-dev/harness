@@ -14,7 +14,7 @@ export type SessionStatus =
   | "stopped"
   | "failed";
 
-export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted" | "autopilot_held";
+export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted" | "autopilot_held" | "provider_quota_exhausted";
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
@@ -171,6 +171,8 @@ export interface HarnessStatus {
   host?: HostInfo | null;
   /** One entry per configured model provider, so the status poll can answer "is it the provider?" without the providers screen; older mothership builds omit it. */
   model_providers?: ModelProviderStatus[];
+  /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
+  quota?: StatusQuota | null;
 }
 
 /** GET /api/status `runtime` (issue #129): what kind of machine the mothership runs on, and what it can reach. The mothership re-probes all of it; the frontend only reads. */
@@ -311,6 +313,21 @@ export interface ModelProviderStatus {
   degraded: boolean;
 }
 
+/**
+ * GET /api/status `quota` (issue #225): whether every routable provider's plan is out, and the
+ * earliest reset. `paused` holds the colony queue; `reason` is the queue holder's own words.
+ */
+export interface StatusQuota {
+  paused: boolean;
+  reason: string | null;
+  /** The earliest reset words, e.g. "09-23 07:54 UTC"; null when no reset was named. */
+  reset_at: string | null;
+  /** The earliest reset as a unix timestamp; null when no reset was named. */
+  reset_unix: number | null;
+  /** Every exhausted provider's id. */
+  providers: string[];
+}
+
 export interface ModuleProviderInfo {
   id: string;
   name: string;
@@ -401,6 +418,8 @@ export interface ModelProvider extends ProviderLimits {
   usage?: ProviderUsage;
   /** The Mothership's read on `usage`. Optional: a Mothership from before it computed health sends neither this nor `usage`. */
   health?: ProviderUsageHealth;
+  /** The Mothership's quota record for this provider (issue #225); absent when the plan is not exhausted. */
+  quota_exhausted?: ProviderQuotaState | null;
   /** The model settings currently routed here; empty means none are, so it stays idle. */
   used_by?: ModelSetting[];
 }
@@ -442,6 +461,12 @@ export interface ProviderUsageHealth {
   rated: boolean;
   /** `rated` and at least 10% of requests failed. */
   degraded: boolean;
+}
+
+/** A provider's quota record (issue #225): when its plan refills, as words and as a timestamp. */
+export interface ProviderQuotaState {
+  reset_at: string | null;
+  reset_unix: number | null;
 }
 
 /**

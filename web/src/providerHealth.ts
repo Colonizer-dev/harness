@@ -1,7 +1,7 @@
 // The providers screen's pure half after it learned to surface a provider's failure rate (issue
 // #184): the Mothership computes the numbers and decides `degraded`, so these helpers only format
 // what it says and pick a tone from it. Kept free of React and the DOM so vitest can run them as is.
-import type { ProviderUsageHealth } from "./types";
+import type { ProviderQuotaState, ProviderUsageHealth } from "./types";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -63,4 +63,21 @@ export function avgLatencyText(health: ProviderUsageHealth | null | undefined, r
 export function usageHealthTone(health: ProviderUsageHealth | null | undefined): "err" | "ok" | null {
   if (!health?.rated) return null;
   return health.degraded ? "err" : "ok";
+}
+
+/**
+ * Quota exhaustion as a tone: `err`, so an exhausted provider reads as degraded everywhere the
+ * health tone does. Null when the plan is not exhausted.
+ */
+export function quotaTone(quota: ProviderQuotaState | null | undefined): "err" | null {
+  return quota ? "err" : null;
+}
+
+/**
+ * Quota exhaustion as shown: `quota exhausted, resets 09-23 07:54 UTC`, or `quota exhausted` when
+ * the provider named no reset. Null when the plan is not exhausted.
+ */
+export function quotaExhaustedText(quota: ProviderQuotaState | null | undefined): string | null {
+  if (!quota) return null;
+  return quota.reset_at ? `quota exhausted, resets ${quota.reset_at}` : "quota exhausted";
 }

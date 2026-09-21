@@ -8,6 +8,7 @@ use crate::{
     ApiResult, App, Shared, client_error,
     gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, health},
     orgs::effective_agent,
+    provider_quota,
     sessions::agent_env,
     util::{read_trimmed, write_secret},
 };
@@ -393,6 +394,14 @@ async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
 fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Value {
     let (in_flight, queued) = app.gateway.load(&provider.id);
     let usage = app.gateway.usage(&provider.id);
+    // An exhausted plan degrades the provider whatever its failure rate says: the verdict shares
+    // the one health rule every surface reads. The surfaced record shares it too, so a lapsed
+    // reset (or TTL) hides the badge at the same instant the provider stops reading degraded.
+    let mut health = health(&usage);
+    let quota_exhausted = app.gateway.is_quota_exhausted(&provider.id);
+    if quota_exhausted {
+        health.degraded = true;
+    }
     json!({
         "id": provider.id,
         "name": provider.name,
@@ -411,9 +420,66 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "in_flight": in_flight,
         "queued": queued,
         "usage": usage,
-        "health": health(&usage),
+        "health": health,
         "used_by": used_by(&provider.id, envs),
+        "quota_exhausted": if quota_exhausted {
+            app.gateway.quota_state(&provider.id).map(|q| json!({"reset_at": q.reset_at, "reset_unix": q.reset_unix}))
+        } else {
+            None::<Value>
+        },
     })
+}
+
+/// Quota exhaustion across providers for the status poll and the queue (issue #225): whether every
+/// routable provider is out, and the earliest reset when it is.
+pub(crate) struct QuotaStatus {
+    pub paused: bool,
+    pub reason: Option<String>,
+    pub reset_at: Option<String>,
+    pub reset_unix: Option<i64>,
+    pub providers: Vec<String>,
+}
+
+pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
+    let envs = runner_envs(app).await;
+    let providers = app.providers();
+    let exhausted = app.gateway.quota_exhausted();
+    let states: Vec<provider_quota::ProviderQuota> = providers
+        .iter()
+        .map(|p| {
+            let hit = exhausted.iter().find(|(id, _, _)| id == &p.id);
+            provider_quota::ProviderQuota {
+                id: p.id.clone(),
+                exhausted: hit.is_some(),
+                reset_at: hit.and_then(|(_, reset, _)| reset.clone()),
+                reset_unix: hit.and_then(|(_, _, unix)| *unix),
+                routable: !used_by(&p.id, &envs).is_empty(),
+            }
+        })
+        .collect();
+    let waiting = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status == crate::sessions::SessionStatus::Queued)
+        .count();
+    match provider_quota::quota_pause(&states, waiting) {
+        Some(pause) => QuotaStatus {
+            paused: true,
+            reason: Some(pause.reason),
+            reset_at: pause.reset_at,
+            reset_unix: pause.reset_unix,
+            providers: pause.providers,
+        },
+        None => QuotaStatus {
+            paused: false,
+            reason: None,
+            reset_at: None,
+            reset_unix: None,
+            providers: Vec::new(),
+        },
+    }
 }
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
@@ -599,6 +665,7 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     }
     // A provider that no longer exists must not keep its usage record forever.
     app.gateway.forget_usage(&id);
+    app.gateway.forget_quota(&id);
     Ok(Json(json!({"ok": true})))
 }
 

@@ -5,7 +5,7 @@
 //! apart from the loop that applies it.
 
 use crate::{
-    Shared, orgs, spend,
+    Shared, orgs, provider_quota, providers, spend,
     stack::{self, Stacked},
 };
 use chrono::Utc;
@@ -175,6 +175,14 @@ fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<
 }
 
 pub(crate) async fn start_queued(app: &Shared) {
+    // Quota-parked colonies whose provider recovered rejoin the queue on this same 5 s tick, ahead
+    // of admission; a colony that only just parked keeps its terminal state until its reset passes.
+    resume_quota_parked(app).await;
+    // Every routable provider's plan out: the queue holds, and `/api/status` says why. Checked per
+    // tick rather than per colony, so a recovered provider unpauses the whole queue at once.
+    if providers::quota_status(app).await.paused {
+        return;
+    }
     // Below the free-space floor: queued colonies that would start hold until the reclaim tick
     // frees room. The hold rides in `room`, not an early return: retiring a colony that can never
     // start takes no slot, and leaving it Queued would stall the queue head (and all the disk the
@@ -236,11 +244,86 @@ pub(crate) async fn start_queued(app: &Shared) {
 // agentd transport
 // ---------------------------------------------------------------------------
 
+/// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
+/// worktree never left, so the normal admission loop resumes them like any operator resume. A
+/// named provider recovers when its record lapses (reset passed) or is gone (provider deleted); an
+/// unnamed one recovers when nothing is exhausted anywhere.
+pub(crate) async fn resume_quota_parked(app: &Shared) {
+    let ids: Vec<String> = {
+        let sessions = app.sessions.read().await;
+        let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
+        let any_exhausted = !app.gateway.quota_exhausted().is_empty();
+        sessions
+            .iter()
+            .filter(|s| {
+                s.status == SessionStatus::Stopped
+                    && s.attention
+                        .as_ref()
+                        .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+                    && !s.cleaned_up
+                    && s.git_admin_dir.is_some()
+                    && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
+                        Some(pid) => !app.gateway.is_quota_exhausted(&pid),
+                        None => !any_exhausted,
+                    }
+            })
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    for id in ids {
+        // Queued holds no slot, so the flip needs no admission; the loop below boots it. The status
+        // is re-checked under the lock, so a concurrent operator resume wins instead of doubling.
+        let flipped = app
+            .update_session(&id, |x| {
+                if x.status != SessionStatus::Stopped {
+                    return false;
+                }
+                x.status = SessionStatus::Queued;
+                x.error = None;
+                x.attention = None;
+                x.updated_at = Utc::now();
+                true
+            })
+            .await
+            .is_some_and(|(_, flipped)| flipped);
+        if flipped {
+            let s = app.session(&id).await;
+            if let Some(s) = s {
+                app.persist_and_broadcast(&s).await;
+            }
+            app.session_log(&id, "info", "the provider's quota recovered; queued to resume".into())
+                .await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sessions::tests::{admit_create, admit_resume, colony, stopped_colony_with_worktree};
+    use serde_json::{Value, json};
     use std::sync::Arc;
+
+    fn write_providers(root: &std::path::Path, ids: &[&str]) {
+        let body: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({"id": id, "name": id, "base_url": "http://127.0.0.1:1", "auth": "none"}))
+            .collect();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn parked_colonies_hold_no_slots() {
+        let mut live: Vec<Session> = (0..14).map(|_| colony("acme", SessionStatus::Running)).collect();
+        assert!(!has_room(&live, "acme", 14, None), "14 live colonies fill 14 slots");
+        // Parking flips live colonies to Stopped, which holds nothing.
+        for s in &mut live {
+            s.status = SessionStatus::Stopped;
+        }
+        assert_eq!(live.iter().filter(|s| s.status.busy()).count(), 0, "no parked colony is busy");
+        assert!(has_room(&live, "acme", 14, None), "14 parked colonies hold no slots");
+    }
 
     #[test]
     fn the_queue_waits_for_a_slot_and_queued_colonies_hold_none() {
@@ -449,6 +532,69 @@ mod tests {
         let (picked, refuse) = next_queued(&sessions, |_| true).expect("the resume does not wait on its parent");
         assert_eq!(picked.id, "child");
         assert!(refuse.is_none());
+    }
+
+    #[tokio::test]
+    async fn quota_pause_holds_queued_colonies_while_every_provider_is_out() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-pause-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        let mut waiting = colony("acme", SessionStatus::Queued);
+        waiting.id = "waiting".into();
+        *app.sessions.write().await = vec![waiting];
+        app.gateway
+            .mark_quota_exhausted("bailian", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
+        start_queued(&app).await;
+        let sessions = app.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "waiting").unwrap().status,
+            SessionStatus::Queued
+        );
+        drop(sessions);
+        // The pause lifts with the record, and the queue admits again.
+        app.gateway.forget_quota("bailian");
+        assert!(
+            !crate::providers::quota_status(&app).await.paused,
+            "no exhausted provider, no pause"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn quota_parked(id: &str, error: &str) -> Session {
+        let mut s = stopped_colony_with_worktree("acme", id.into());
+        s.status = SessionStatus::Stopped;
+        s.error = Some(error.into());
+        s.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        s
+    }
+
+    #[tokio::test]
+    async fn quota_resume_requeues_only_colonies_whose_provider_recovered() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-resume-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian", "zai"]);
+        let app = crate::tests::test_app(&root);
+        *app.sessions.write().await = vec![
+            quota_parked("parked-hot", "provider quota exhausted (bailian, resets 09-23 07:54 UTC)"),
+            quota_parked("parked-cool", "provider quota exhausted (zai)"),
+        ];
+        // Bailian's reset is ahead (still out); zai's passed (recovered).
+        app.gateway
+            .mark_quota_exhausted("bailian", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
+        app.gateway
+            .mark_quota_exhausted("zai", None, Some(Utc::now().timestamp() - 10));
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let hot = sessions.iter().find(|s| s.id == "parked-hot").unwrap();
+        assert_eq!(hot.status, SessionStatus::Stopped, "still exhausted, still parked");
+        assert!(hot.attention.is_some(), "the attention stays until recovery");
+        let cool = sessions.iter().find(|s| s.id == "parked-cool").unwrap();
+        assert_eq!(cool.status, SessionStatus::Queued, "recovered, back in the queue");
+        assert!(
+            cool.attention.is_none() && cool.error.is_none(),
+            "a requeue reads like a resume"
+        );
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

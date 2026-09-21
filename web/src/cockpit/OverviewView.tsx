@@ -21,7 +21,7 @@ import { colonyFacts, hostFacts } from "./host";
 import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
 import { RedTeamCard } from "./RedTeamCard";
-import type { FleetHost, HostInfo, RedTeamRun, Session, SpendOrgDay, StartRedTeamRunRequest } from "../types";
+import type { FleetHost, HostInfo, RedTeamRun, Session, SpendOrgDay, StartRedTeamRunRequest, StatusQuota } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -161,6 +161,7 @@ export function OverviewView({
   fleet,
   runs = [],
   initialFilter = null,
+  quota = null,
   onStart,
   onStop,
   onOpenOrg,
@@ -179,6 +180,8 @@ export function OverviewView({
   runs?: RedTeamRun[];
   /** The bucket filter to start on. Null in production — the tests pin the filtered states through it because static markup cannot click. */
   initialFilter?: OverviewFilter | null;
+  /** Quota exhaustion across providers (issue #225); a paused queue banners the page. */
+  quota?: StatusQuota | null;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
   onOpenOrg: (org: string) => void;
@@ -260,6 +263,11 @@ export function OverviewView({
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
       <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-5">
+        {quota?.paused ? (
+          <div role="status" className="rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn">
+            Queue paused — {quota.reason ?? "every provider's quota is exhausted"}
+          </div>
+        ) : null}
         <div className="flex flex-wrap items-baseline justify-between gap-4">
           <div>
             <div className="mb-1.5 font-mono text-[10.5px] tracking-[0.12em] text-faint">OVERVIEW</div>

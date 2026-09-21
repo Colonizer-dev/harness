@@ -277,6 +277,32 @@ test('falls back when the gateway itself is unreachable', async () => {
   }
 });
 
+test('falls back when the gateway marks a 429/403 as quota exhaustion, and only then', async () => {
+  const gateway = await upstream((req, body, res) => {
+    const marked = JSON.parse(body).model === 'marked';
+    res.writeHead(429, { 'content-type': 'application/json', ...(marked ? { 'x-colonizer-fallback': 'provider_quota_exhausted' } : {}) });
+    res.end('{"type":"error","error":{"type":"rate_limit_error","message":"quota exhausted"}}');
+  });
+  const anthropic = await upstream();
+  const routes = [gatewayRoute(gateway.url), gatewayRoute(gateway.url, { provider: 'nofb', prefix: 'nofb/', fallback_model: null })];
+  const router = await startRouter({ routes, env: {}, anthropicBase: anthropic.url });
+  try {
+    const quota = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'strix/marked' }) });
+    assert.equal(quota.status, 200);
+    assert.equal(JSON.parse(anthropic.requests[0].body).model, 'claude-sonnet-5');
+    const bare = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'strix/unmarked' }) });
+    assert.equal(bare.status, 429);
+    assert.equal(anthropic.requests.length, 1);
+    const noFallback = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'nofb/marked' }) });
+    assert.equal(noFallback.status, 429);
+    assert.equal(anthropic.requests.length, 1);
+  } finally {
+    await router.close();
+    await gateway.close();
+    await anthropic.close();
+  }
+});
+
 test('provider errors without the gateway marker, or routes without a fallback, pass through', async () => {
   const gateway = await upstream((req, body, res) => {
     const marked = JSON.parse(body).model === 'marked';
