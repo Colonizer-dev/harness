@@ -28,6 +28,7 @@ import {
 import { pendingOrgPrompt } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
+import { refreshOnVisible, startPollInterval } from "./workerInterval";
 import type {
   FleetHost,
   HarnessStatus,
@@ -187,8 +188,15 @@ export function App() {
     void loadUpdate();
     void loadRedRuns();
     api.modules().then(applyModules).catch(() => {});
+    // Issue #159: the session poll ticks from a worker so a hidden tab is not throttled
+    // to ~1/min; becoming visible re-runs it at once so the tab catches up immediately.
+    const stopSessionPoll = startPollInterval(() => {
+      void loadSessions();
+    }, 4000);
+    const stopVisibleRefresh = refreshOnVisible(() => {
+      void loadSessions();
+    });
     const timers = [
-      setInterval(loadSessions, 4000),
       setInterval(loadRedRuns, 5000),
       setInterval(loadStatus, 30_000),
       // Fleet stats change about as slowly as the host's own, so it shares that cadence.
@@ -198,7 +206,11 @@ export function App() {
       // A release check is a request to github.com, so it runs far more slowly than the rest.
       setInterval(loadUpdate, 900_000),
     ];
-    return () => timers.forEach(clearInterval);
+    return () => {
+      stopSessionPoll();
+      stopVisibleRefresh();
+      timers.forEach(clearInterval);
+    };
   }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, loadRedRuns, applyModules]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
