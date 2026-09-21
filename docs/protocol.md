@@ -184,7 +184,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart. Also carries `runtime` (below): whether this machine can boot a colony at all, and `host` (below): what kind of machine it is and how full it is. Both are cached for 10 s, `?fresh=1` to re-probe |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` or `{ok: false, message, ts, failures}`, sticky, set by the first failed write and cleared only by a restart. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. All cached for 10 s, `?fresh=1` to re-probe |
+| `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry, polled on request |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
@@ -509,6 +510,79 @@ absent there; a disk that cannot be read drops all three disk numbers. `kvm_ok` 
 `runtime.kvm`'s truth, present only where there is a `/dev/kvm` to check). Memory figures come from
 `/proc/meminfo` in bytes (`used` = `MemTotal` − `MemAvailable`), disk bytes from `df -kP` on the data
 directory, and the probe shares the 10 s cache with `runtime`.
+
+Two more top-level keys round the payload out: `"version"` — this build's `CARGO_PKG_VERSION`, e.g.
+`"0.1.5"` — and `"queue_depth"` — how many colonies are `queued` right now, waiting for a free
+microVM slot (disjoint from `host.microvms_live`, which counts colonies that already hold one). A
+peer polling this endpoint for the fleet view (`GET /api/hosts`, below) reads everything it needs
+straight off this one response; nothing extra is asked of it.
+
+### `GET /api/hosts`
+
+Fleet visibility (issue #231): this host's own numbers, `self` first, plus one row per configured
+peer, each obtained by this host polling that peer's own `GET /api/status` (never the other way
+round — no peer reaches in). `{"hosts": [HostSummary, ...]}`:
+
+```json
+{
+  "hosts": [
+    {
+      "id": "5e1347a6-5f2e-4b8b-9c1a-0d4b7c8e9f10",
+      "name": "picard",
+      "platform": "linux-x86_64",
+      "os": "Debian",
+      "version": "0.1.5",
+      "slots_in_use": 3,
+      "slots_ceiling": 4,
+      "queue_depth": 1,
+      "disk_free_bytes": 124592496640,
+      "last_heartbeat": "2026-09-21T04:00:00+00:00",
+      "health": "online"
+    },
+    {
+      "id": "http://100.127.251.53:7878",
+      "name": "http://100.127.251.53:7878",
+      "platform": "",
+      "os": "",
+      "version": null,
+      "slots_in_use": 0,
+      "slots_ceiling": 0,
+      "queue_depth": 0,
+      "disk_free_bytes": null,
+      "last_heartbeat": null,
+      "health": "unreachable"
+    }
+  ]
+}
+```
+
+`id` is `host.id` (the same stable, per-install UUID `GET /api/status` documents above) for a peer
+that has ever answered; for one that never has, there is no id to show yet, so `id` and `name` both
+fall back to that peer's configured base URL — it still appears in the list rather than vanishing.
+`name` is otherwise the peer's `host.hostname`. `platform`, `os`, `version`, `slots_in_use`,
+`slots_ceiling`, `queue_depth` and `disk_free_bytes` are read straight out of that peer's own
+`/api/status` (`runtime.platform`, `runtime.os.name`, `version`, `host.microvms_live`,
+`host.microvms_ceiling`, `queue_depth`, `host.disk_free_bytes`); a peer never reached has zeros and
+nulls there instead. `last_heartbeat` is an RFC 3339 timestamp for when this host last confirmed the
+peer was up — `null` only for a peer that has never once answered.
+
+`health` is `"online"` (the poll just succeeded, or this is the local host) or `"unreachable"` (the
+poll failed — refused, timed out after 3 s, or answered something that was not `/api/status`'s
+shape). An unreachable peer that *has* answered before keeps showing its last-known
+`slots_in_use`/`disk_free_bytes`/etc. instead of being nulled out, so a stalled host still reads as
+"last seen doing X" rather than going blank. This is poll-on-request, not a background loop: nothing
+is cached to disk, and a peer's row is only ever as fresh as the last time `GET /api/hosts` was
+called.
+
+Peers are configured with `COLONIZER_FLEET_PEERS`, a comma-separated list of base URLs (e.g.
+`http://100.127.251.53:7878,http://10.0.0.5:7878`) — the same one-item-per-comma parsing
+`COLONIZER_ALLOWED_HOSTS` uses. No port is opened by this change on any host: this mothership only
+ever dials **out** to the URLs it is given, over whatever private network the operator already runs
+(their own tailnet, mesh, or VPN — never the public internet). `COLONIZER_BIND` stays loopback-only
+by default everywhere, exactly as before; an operator who wants a given host to answer these polls
+sets *that host's own* `COLONIZER_BIND` to a private interface IP of their choosing — never
+`0.0.0.0` — the same opt-in a Settings operator has always had to make to reach the API from another
+machine at all.
 
 ### `GET /api/version`
 

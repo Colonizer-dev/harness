@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  FleetHost,
   HarnessStatus,
   HeadroomStatus,
   Issue,
@@ -57,6 +58,8 @@ export interface Api {
    * re-probe (`?fresh=1`), which is what Setup's "Check again" uses.
    */
   status(fresh?: boolean): Promise<HarnessStatus>;
+  /** GET /api/hosts (issue #231): self plus every peer configured via COLONIZER_FLEET_PEERS, polled live on each call. */
+  hosts(): Promise<{ hosts: FleetHost[] }>;
   modules(): Promise<ModuleInfo[]>;
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
   sandboxPull(): Promise<PullStatus>;
@@ -153,6 +156,7 @@ function wsUrl(path: string): string {
 export const httpApi: Api = {
   mock: false,
   status: (fresh) => request(fresh ? "/api/status?fresh=1" : "/api/status"),
+  hosts: () => request("/api/hosts"),
   modules: () => request("/api/modules"),
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
   sandboxPull: () => post("/api/sandbox/pull"),

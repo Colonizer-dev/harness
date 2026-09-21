@@ -13,7 +13,7 @@ import { needsYou } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { buildThread, useSessionStream } from "../sessionStream";
-import type { HarnessStatus, OrgInfo, Repo, Session, UpdateStatus } from "../types";
+import type { FleetHost, HarnessStatus, OrgInfo, Repo, Session, UpdateStatus } from "../types";
 import { Header } from "./Header";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
@@ -59,6 +59,7 @@ export function Cockpit({
   onSelectSession,
   onOpenColony,
   status,
+  fleet,
   update,
   autopilotDefault,
   launchRequests,
@@ -80,6 +81,8 @@ export function Cockpit({
   /** Selecting a colony that the org filter would hide, which App resolves before selecting. */
   onOpenColony: (session: Session) => void;
   status: HarnessStatus | null;
+  /** Self plus every configured peer (issue #231); older mothership builds send an empty list. */
+  fleet?: FleetHost[];
   update: UpdateStatus | null;
   autopilotDefault: boolean;
   /** Bumped by Setup's launch row, which lives in the settings body App owns. */
@@ -253,6 +256,7 @@ export function Cockpit({
             orgs={workspaces}
             cost={sessions.length ? sessions.reduce((t, x) => t + (x.cost_usd ?? 0) + (x.routed_cost_usd ?? 0), 0) : null}
             host={status?.host ?? null}
+            fleet={fleet}
             onOpenOrg={(org) => {
               onSelectOrg(org);
               setView("home");
