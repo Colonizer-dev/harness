@@ -6,7 +6,7 @@
 // rate, since a wrapped line arrives whole whatever the display redraws at.
 import { describe, expect, it } from "vitest";
 
-import { advance, newGlide } from "./motion";
+import { advance, isScrollbarGrab, newGlide } from "./motion";
 
 const REFRESH_HZ = [60, 120, 144]; // the displays this runs on: the law must not care which
 const STEP_PX = [23, 40]; // what a wrapped line, and a paragraph step, add to the content's height
@@ -160,4 +160,81 @@ describe("advance", () => {
       expect(record[record.length - 1].gap).toBe(0);
     });
   }
+});
+
+describe("isScrollbarGrab", () => {
+  // A viewport 100 px wide with a 16 px classic scrollbar on the right (LTR).
+  const gutterEl = () => {
+    const el = {
+      offsetWidth: 100,
+      clientWidth: 84,
+      getBoundingClientRect: () => ({ left: 0, right: 100 }),
+    };
+    return el;
+  };
+  const grab = (el: ReturnType<typeof gutterEl>, clientX: number, target: unknown = el) =>
+    isScrollbarGrab(el, { target: target as EventTarget, clientX } as PointerEvent);
+  const stubDirection = (direction: string) => {
+    (globalThis as Record<string, unknown>).getComputedStyle = () => ({ direction });
+  };
+  const unstubDirection = () => {
+    delete (globalThis as Record<string, unknown>).getComputedStyle;
+  };
+
+  it("stops for an LTR click in the scrollbar gutter", () => {
+    stubDirection("ltr");
+    try {
+      expect(grab(gutterEl(), 95)).toBe(true);
+    } finally {
+      unstubDirection();
+    }
+  });
+
+  it("does not stop for an LTR click in the padding/content area", () => {
+    stubDirection("ltr");
+    try {
+      expect(grab(gutterEl(), 50)).toBe(false);
+    } finally {
+      unstubDirection();
+    }
+  });
+
+  it("does not stop for a click on an inner child, even over the gutter", () => {
+    stubDirection("ltr");
+    try {
+      const el = gutterEl();
+      expect(grab(el, 95, {})).toBe(false);
+    } finally {
+      unstubDirection();
+    }
+  });
+
+  it("does not stop for empty space below the content at a content-box X", () => {
+    stubDirection("ltr");
+    try {
+      expect(grab(gutterEl(), 40)).toBe(false);
+    } finally {
+      unstubDirection();
+    }
+  });
+
+  it("finds the scrollbar on the left in RTL", () => {
+    stubDirection("rtl");
+    try {
+      expect(grab(gutterEl(), 5)).toBe(true);
+      expect(grab(gutterEl(), 95)).toBe(false);
+    } finally {
+      unstubDirection();
+    }
+  });
+
+  it("never stops for an overlay scrollbar with no width", () => {
+    stubDirection("ltr");
+    try {
+      const el = { offsetWidth: 100, clientWidth: 100, getBoundingClientRect: () => ({ left: 0, right: 100 }) };
+      expect(grab(el, 99)).toBe(false);
+    } finally {
+      unstubDirection();
+    }
+  });
 });
