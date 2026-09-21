@@ -21,9 +21,11 @@ import type {
   PluginListing,
   ProviderHealth,
   PullStatus,
+  RedTeamRun,
   Repo,
   SaveProviderRequest,
   Session,
+  StartRedTeamRunRequest,
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
@@ -113,6 +115,10 @@ export interface Api {
   saveMem0Key(apiKey: string): Promise<Mem0Status>;
   /** Tries the saved key against the configured endpoint. */
   checkMem0(): Promise<Mem0Check>;
+  /** Red-team runs: a swarm of hunter colonies raiding one repository (issue #212). 409 without `arm` when any colony is live or a run is already active for the repo. */
+  redTeamRuns(): Promise<RedTeamRun[]>;
+  startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
+  stopRedTeamRun(id: string): Promise<RedTeamRun>;
   openEvents(sessionId: string, since: number): SocketLike;
   openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
 }
@@ -208,6 +214,9 @@ export const httpApi: Api = {
   mem0Status: () => request("/api/memory/mem0"),
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),
+  redTeamRuns: () => request("/api/redteam/runs"),
+  startRedTeamRun: (body) => post("/api/redteam/runs", body),
+  stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),
   openEvents: (id, since) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}`)),
   openTerminal: (id, cols, rows) =>
     new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),

@@ -195,6 +195,9 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped) |
+| `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
+| `POST /api/redteam/runs` | `{repo, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise). **409** when another run for the same repository is still active |
+| `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
 
@@ -1394,4 +1397,47 @@ Mothership side. The GitHub token never enters a colony, so filing happens on th
   confirmed" section and a footer naming the colony and the issue it was working on.
 - Every outcome (filed, duplicate, over the cap, rejected, failed) is a line in the colony log. The
   agent is told only that the finding was handed over.
+
+### 6.7 Red-team runs
+
+A red-team run raids one repository with up to 8 hunter colonies (default 3). Each hunter gets a
+distinct focus — error handling, concurrency, input validation, resource exhaustion, auth
+boundaries, core-flow logic, silent failures, API contract mismatches — and an explicit non-overlap
+clause listing the other focuses, so the swarm does not duplicate one another's work. Hunters report
+what they find with the findings tool (§6.6); with `autofix` unset they are briefed never to open,
+merge or autofix anything, and run with autopilot off. They go through the normal `POST /api/sessions`
+path, so the parallel limit applies: a hunter may sit `queued` until a slot frees.
+
+`RedTeamRun`:
+
+```jsonc
+{"id": "rt_ab12cd34", "repo": "owner/repo", "org": "owner",
+ "state": "armed|waiting|running|draining|done|stopped",
+ "swarm_size": 3, "modules": ["general"], "autofix": false,
+ "hunters": [{"session_id": "ab12cd34", "title": "Red-team hunter 1/3: …", "module": "general",
+              "version": null, "focus": "error handling and edge cases"}],
+ "counts": {"found": 0, "validated": 0, "rejected": 0, "filed": 0},
+ "created_at": "…", "started_at": null, "ended_at": null, "gate_reason": null}
+```
+
+The gate. A run may only *launch* while no colony is live (a ``SessionStatus::is_live()`` state
+anywhere, whatever the org). `POST` with `arm` unset/`false` ("start now") launches its hunters
+inside the handler and draws a **409** while the gate is closed, e.g. `2 colonies are live — a
+red-team run can only start when the nest is empty`. With `arm: true` the run is created `armed` and
+the background tick launches it on the next empty-nest pass; while colonies are live it waits with
+`gate_reason` set (e.g. `2 colonies are live — waiting for the nest to empty`). Only one run per
+repository may be active at a time (**409**).
+
+States. `armed` → `running` when the hunters launch — or `waiting` while every launched hunter is
+still queued for a parallel slot — with `waiting` ⇄ `running` as hunters queue and start. When no
+hunter is live but some are still in flight (publishing, PR open, queued) the run is `draining`,
+and lands `done` once every hunter is `merged`, `closed`, `no_changes`, `stopped` or `failed` — or
+its session is gone (a restart's hunt). `counts.found`/`counts.filed` are read from the hunters'
+on-record findings (§6.6); `validated` and `rejected` arrive with issues #211/#216.
+`POST /api/redteam/runs/{id}/stop` lands the run `stopped` from any non-terminal state: hunters that
+are live or queued are stopped, while one already publishing or with its pull request open settles on
+its own — the run is still marked `stopped`. Stops are idempotent once the run is terminal. Runs
+persist to `data/redteam.json` and survive a restart, where the tick re-derives their state from the
+hunter sessions it finds: hunters whose sessions are gone count as ended, so a run interrupted
+mid-launch drains to `done` rather than re-launching a duplicate swarm.
 
