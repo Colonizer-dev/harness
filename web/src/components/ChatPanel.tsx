@@ -173,7 +173,10 @@ export function ChatPanel({
             }}
             autoScroll={false}
             scrollToBottomOnRunStart={false}
-            className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2"
+            tabIndex={0}
+            role="log"
+            aria-label="Colony chat thread"
+            className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
           >
             {thread.messages.length === 0 && <EmptyChat connection={state.connection} live={live} />}
             <div
