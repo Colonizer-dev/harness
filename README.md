@@ -217,6 +217,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 | `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
+| `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](docs/burn-down.md)) | — |
 
 Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
 parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
@@ -305,6 +306,8 @@ Stated here rather than buried.
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
 | Per-colony budgets and host-disk quotas ([#86](https://github.com/Colonizer-dev/harness/issues/86)) | `SHIPPING` |
+| Red-team raids: hunters with distinct briefs raiding one repo while the nest is empty ([docs/red-team.md](docs/red-team.md), [#212](https://github.com/Colonizer-dev/harness/issues/212)) | `SHIPPING` |
+| Burn-down mode: weekly token plan spent to a reserve by paced bug-hunt colonies ([docs/burn-down.md](docs/burn-down.md), [#210](https://github.com/Colonizer-dev/harness/issues/210)) | `SHIPPING` |
 | Fleet view and network policies | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
 
