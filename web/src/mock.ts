@@ -1941,6 +1941,19 @@ export function createMockApi(): Api {
       s.log("Removed the worktree and local branch");
       return clone(s.session);
     },
+    storageSummary: () =>
+      later(() => ({
+        worktrees_bytes: 0,
+        repos_bytes: 0,
+        sessions_bytes: 0,
+        reclaimable: [],
+        unpushed: [],
+        orphans: [],
+        free_bytes: null,
+        min_free_bytes: 0,
+        retention_secs: 43200,
+        enabled: true,
+      })),
     setKeep: async (id, keep) => {
       const s = find(id);
       s.patch({ keep_worktree: keep });
