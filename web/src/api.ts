@@ -57,6 +57,21 @@ export interface SaveModuleRequest {
   settings: Record<string, unknown>;
 }
 
+/** GET /api/sessions/{id}/behind: how far the colony branch lags origin/{base} (issue #173). */
+export interface BehindInfo {
+  behind_by: number | null;
+  base: string | null;
+  branch: string;
+}
+
+/** POST /api/sessions/{id}/catch-up: merging origin/{base} into the colony branch (issue #173). */
+export interface CatchUpResult {
+  session: Session;
+  merged: boolean;
+  conflicts: string[];
+  behind_by: number | null;
+}
+
 export interface Api {
   readonly mock: boolean;
   /**
@@ -96,6 +111,10 @@ export interface Api {
   setKeep(id: string, keep: boolean): Promise<Session>;
   /** Forgets a colony: worktree, local branch, chat and logs. Its pull request stays on GitHub. */
   deleteSession(id: string): Promise<unknown>;
+  /** GET /api/sessions/{id}/behind: how far the colony branch lags origin/{base} (issue #173). */
+  behindSession(id: string): Promise<BehindInfo>;
+  /** POST /api/sessions/{id}/catch-up: merge origin/{base} into the colony branch (issue #173). */
+  catchUpSession(id: string): Promise<CatchUpResult>;
   /** GET /api/burn-down: the burn-down scheduler's read on the weekly token plan (issue #210). */
   burnDown(): Promise<BurnDownStatus>;
   /** POST /api/burn-down/stop: switches the scheduler off and stops every colony it launched. */
@@ -208,6 +227,8 @@ export const httpApi: Api = {
   storageSummary: () => request("/api/storage"),
   setKeep: (id, keep) => post(`/api/sessions/${enc(id)}/retain`, { keep }),
   deleteSession: (id) => del(`/api/sessions/${enc(id)}`),
+  behindSession: (id) => request(`/api/sessions/${enc(id)}/behind`),
+  catchUpSession: (id) => post(`/api/sessions/${enc(id)}/catch-up`),
   burnDown: () => request("/api/burn-down"),
   stopBurnDown: () => post("/api/burn-down/stop"),
   setGithubToken: (token) => post("/api/settings/github-token", { token }),

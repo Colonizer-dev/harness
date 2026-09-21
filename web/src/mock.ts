@@ -1941,24 +1941,21 @@ export function createMockApi(): Api {
       s.log("Removed the worktree and local branch");
       return clone(s.session);
     },
-    storageSummary: () =>
-      later(() => ({
-        worktrees_bytes: 0,
-        repos_bytes: 0,
-        sessions_bytes: 0,
-        reclaimable: [],
-        unpushed: [],
-        orphans: [],
-        free_bytes: null,
-        min_free_bytes: 0,
-        retention_secs: 43200,
-        enabled: true,
-      })),
     setKeep: async (id, keep) => {
       const s = find(id);
       s.patch({ keep_worktree: keep });
       s.log(keep ? "Worktree kept: automatic reclamation will skip this colony" : "Worktree released back to automatic reclamation");
       return clone(s.session);
+    },
+    // The mock has no git history to count, so every colony reads as up to date and a
+    // catch-up is a no-op merge; the UI paths (line, button, toasts) stay exercisable.
+    behindSession: async (id) => {
+      const s = find(id).session;
+      return later(() => ({ behind_by: s.base ? 0 : null, base: s.base, branch: s.branch }));
+    },
+    catchUpSession: async (id) => {
+      const s = find(id);
+      return later(() => ({ session: clone(s.session), merged: false, conflicts: [], behind_by: s.session.base ? 0 : null }));
     },
     setGithubToken: async (token) => {
       await sleep(300);

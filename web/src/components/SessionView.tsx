@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Api } from "../api";
+import { useBehind } from "../behind";
 import { errorMessage, useApi, useToast } from "../context";
 import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
@@ -29,7 +30,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep";
+type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up";
 
 export function SessionView({
   sessionId,
@@ -79,6 +80,9 @@ export function SessionView({
     if (noticeCount > seenNotices.current) onMemoryProposed();
     seenNotices.current = noticeCount;
   }, [noticeCount, onMemoryProposed]);
+
+  // How far the colony branch lags origin/{base} (issue #173). Errors hide the line, never toast.
+  const { behind, refresh: refreshBehind } = useBehind(state.session ?? fallback);
 
   const session = state.session ?? fallback;
   if (!session) {
@@ -144,6 +148,28 @@ export function SessionView({
     }
   };
 
+  // Merging origin/{base} answers a CatchUpResult, not a Session, so it gets its own small
+  // action instead of going through act(): conflicts stay in the worktree for the colony.
+  const catchUp = async () => {
+    if (behind == null || behind <= 0 || !session.base) return;
+    if (!window.confirm(`Merge origin/${session.base} into ${session.branch}? Conflicts, if any, stay in the worktree for the colony to resolve.`)) return;
+    setBusy("catch_up");
+    try {
+      const resp = await api.catchUpSession(session.id);
+      onSessionChanged(resp.session);
+      refreshBehind();
+      if (resp.conflicts.length > 0) {
+        toast(`Merge conflicts in: ${resp.conflicts.join(", ")} — left for the colony to resolve`, "error");
+      } else {
+        toast(resp.merged ? `Caught up with origin/${session.base}` : "Already up to date");
+      }
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="shrink-0 border-b border-border bg-panel px-4 py-3">
@@ -181,6 +207,15 @@ export function SessionView({
                 <IconBranch size={13} className="shrink-0" />
                 <code className="truncate font-mono">{session.branch}</code>
               </span>
+              {typeof behind === "number" && session.base && (
+                behind > 0 ? (
+                  <span title={`This branch is ${behind} commit${behind === 1 ? "" : "s"} behind origin/${session.base}`}>
+                    behind {session.base} by {behind}
+                  </span>
+                ) : (
+                  <span>up to date with {session.base}</span>
+                )
+              )}
               {session.parent &&
                 (stackParent ? (
                   <button
@@ -249,6 +284,19 @@ export function SessionView({
                 }
               >
                 {busy === "publish" ? <Spinner /> : <IconGitPR size={15} />} {finishing ? "Finish PR" : "Create PR"}
+              </Button>
+            )}
+            {session.base && (
+              <Button
+                disabled={behind == null || behind <= 0 || busy !== null}
+                onClick={catchUp}
+                title={
+                  typeof behind === "number" && behind > 0
+                    ? `Merge origin/${session.base} into ${session.branch}`
+                    : `Already up to date with origin/${session.base}`
+                }
+              >
+                {busy === "catch_up" ? <Spinner /> : <IconBranch size={15} />} Catch up
               </Button>
             )}
             {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed") && (
