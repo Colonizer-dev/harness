@@ -82,3 +82,13 @@ Nothing is checked off yet, and no gate is cleared. The roadmap is the issue tra
 is the audit's view of it. One fact worth stating plainly: the Rust test suites are not run by CI
 today — there is no test workflow, and `.github/workflows/` holds only `headroom-bundle.yml`,
 `release.yml` and `vendored-plugin-updates.yml`. That is part of what G4 asks for.
+
+## Authority controls, issue #98 (partial G2)
+
+`crates/colonizer/src/authority.rs` adds per-effect grants bound to a candidate hash
+(hex SHA-256 over length-prefixed parts, via the existing `ring` dependency): `authorize`
+denies expired, ungranted, candidate-mismatched, non-independent, or unbound approvals, all
+fail-closed. `publish.rs` splits the single publish gate into ordered `commit_allowed` →
+`push_allowed` → `pr_allowed` checks plus a PR-body binding helper, and `lifecycle.rs`
+`recover` fences restarted colonies behind fresh re-authorization. Wiring only — no gate is
+checked off until real-colony negative tests exercise these paths.

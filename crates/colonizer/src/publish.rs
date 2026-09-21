@@ -388,6 +388,13 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
 /// Whether a colony can publish: it needs its worktree on disk, no publish already in flight, and a
 /// state a publish makes sense from. A failed or no-changes publish can be retried directly — the
 /// worktree, the committed branch and the remote are all still there, so no new microVM is booted.
+///
+/// Issue #98: this single gate covers commit, push, and PR creation together today. The split is
+/// `commit_allowed` → `push_allowed` → `pr_allowed` below: each later effect needs the earlier one
+/// plus its own `authority::Effect` grant (`needs_independent_review` is true for all three), and
+/// PR creation additionally needs the candidate bound via `publish_candidate_hash` before it runs.
+/// The three helpers delegate to this gate for now, so behavior is unchanged; they exist so each
+/// external effect can grow its own grant check without re-deriving the lifecycle preconditions.
 pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     matches!(
         status,
@@ -399,6 +406,32 @@ pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree:
             | SessionStatus::NoChanges
     ) && !cleaned_up
         && has_worktree
+}
+
+/// The per-effect split of `can_publish` (issue #98): local commit first, then push, then PR —
+/// each ordered check assumes the earlier effects are granted and adds its own. They delegate to
+/// the single lifecycle gate for now, so existing callers keep their behavior; the point is that
+/// a future per-effect grant check has one named place per effect to live.
+pub(crate) fn commit_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
+    debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Commit));
+    can_publish(status, cleaned_up, has_worktree)
+}
+
+pub(crate) fn push_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
+    debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Push));
+    commit_allowed(status, cleaned_up, has_worktree)
+}
+
+pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
+    debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::OpenPr));
+    push_allowed(status, cleaned_up, has_worktree)
+}
+
+/// Binds the evidence a PR grant must name: the hex sha256 (see
+/// `authority::bind_candidate`) over the PR body bytes the approval reviewed. A
+/// grant authorizes exactly this hash — `authorize` denies any other candidate.
+pub(crate) fn publish_candidate_hash(pr_body: &[u8]) -> String {
+    crate::authority::bind_candidate(&[pr_body])
 }
 
 #[cfg(test)]
@@ -489,6 +522,27 @@ mod tests {
     fn failed_and_no_changes_colonies_can_publish_again_without_a_new_microvm() {
         assert!(can_publish(SessionStatus::Failed, false, true));
         assert!(can_publish(SessionStatus::NoChanges, false, true));
+    }
+
+    #[test]
+    fn the_per_effect_split_matches_the_single_gate_and_binds_the_pr_body() {
+        // Issue #98: the ordered commit → push → PR checks delegate to `can_publish`
+        // today, so they agree everywhere; the split is where per-effect grants attach.
+        use SessionStatus::*;
+        for status in [Running, WaitingForAnswer, Idle, Stopped, Failed, NoChanges] {
+            assert!(commit_allowed(status, false, true), "{status:?}");
+            assert!(push_allowed(status, false, true), "{status:?}");
+            assert!(pr_allowed(status, false, true), "{status:?}");
+        }
+        for status in [Queued, Starting, Publishing, PrOpened] {
+            assert!(!commit_allowed(status, false, true), "{status:?}");
+            assert!(!push_allowed(status, false, true), "{status:?}");
+            assert!(!pr_allowed(status, false, true), "{status:?}");
+        }
+        // The PR grant names exactly the body it reviewed: any other bytes bind elsewhere.
+        let bound = publish_candidate_hash(b"the reviewed pr body");
+        assert_eq!(bound, crate::authority::bind_candidate(&[b"the reviewed pr body"]));
+        assert_ne!(bound, publish_candidate_hash(b"edited after approval"));
     }
 
     #[test]
