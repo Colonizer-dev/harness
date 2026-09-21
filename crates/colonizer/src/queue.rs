@@ -165,18 +165,24 @@ fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<
 }
 
 pub(crate) async fn start_queued(app: &Shared) {
+    // Below the free-space floor: queued colonies that would start hold until the reclaim tick
+    // frees room. The hold rides in `room`, not an early return: retiring a colony that can never
+    // start takes no slot, and leaving it Queued would stall the queue head (and all the disk the
+    // tick is trying to free behind it) for as long as the floor holds.
+    let paused = crate::reclaim::admission_paused(app).await;
     let modules = app.modules.read().await.clone();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
         let sessions = app.sessions.read().await.clone();
         let Some((next, refuse)) = next_queued(&sessions, |s| {
-            has_room(
-                &sessions,
-                &s.org,
-                max_parallel,
-                orgs::org_max_parallel(&app.org_settings(&s.org)),
-            )
+            !paused
+                && has_room(
+                    &sessions,
+                    &s.org,
+                    max_parallel,
+                    orgs::org_max_parallel(&app.org_settings(&s.org)),
+                )
         }) else {
             return;
         };

@@ -457,8 +457,14 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
     },
   ];
   // Only a mothership that reports storage health gets the dot; older ones (no `storage`) show nothing new.
+  // The reclaim counts ride the same poll: "N reclaimable · M unpushed" points at per-colony cleanup.
   if (status.storage) {
-    items.push({ label: "Storage", state: status.storage.ok === false ? "bad" : "ok" });
+    const reclaim = status.reclaim;
+    const pending =
+      reclaim && (reclaim.reclaimable > 0 || reclaim.unpushed > 0)
+        ? ` · ${reclaim.reclaimable} reclaimable · ${reclaim.unpushed} unpushed`
+        : "";
+    items.push({ label: `Storage${pending}`, state: status.storage.ok === false ? "bad" : "ok" });
   }
   return (
     <button

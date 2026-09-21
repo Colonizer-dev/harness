@@ -29,7 +29,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "resume" | "stop" | "cleanup" | "delete";
+type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep";
 
 export function SessionView({
   sessionId,
@@ -277,12 +277,25 @@ export function SessionView({
               variant="danger"
               disabled={live || session.status === "publishing" || session.cleaned_up || busy !== null}
               onClick={() =>
-                act("cleanup", (a, id) => a.cleanupSession(id), "Delete this colony's worktree and local branch? Pushed branches are not affected.")
+                act("cleanup", (a, id) => a.cleanupSession(id), "Delete this colony's worktree and local branch? Pushed branches are not affected. The worktree is gone, so the colony becomes unresumable.")
               }
-              title={session.cleaned_up ? "Already cleaned up" : live ? "Stop the colony first" : "Remove the worktree and local branch"}
+              title={session.cleaned_up ? "Already cleaned up" : live ? "Stop the colony first" : "Remove the worktree and local branch — the colony becomes unresumable"}
             >
               {busy === "cleanup" ? <Spinner /> : <IconTrash size={15} />} Clean up
             </Button>
+            <label
+              className="inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted"
+              title="Kept worktrees skip automatic reclamation; cleaning up removes the worktree and makes the colony unresumable"
+            >
+              <input
+                type="checkbox"
+                className="accent-[var(--accent)]"
+                checked={session.keep_worktree}
+                disabled={busy !== null}
+                onChange={() => void act("keep", (a, id) => a.setKeep(id, !session.keep_worktree))}
+              />
+              Keep worktree (skip auto-cleanup)
+            </label>
             <Button
               variant="danger"
               disabled={live || session.status === "publishing" || busy !== null}

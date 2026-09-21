@@ -240,6 +240,8 @@ pub struct Session {
     /// microVM's root disk, which is a separate limit (microsandbox's `--root-disk`).
     pub host_disk_bytes: Option<u64>,
     pub cleaned_up: bool,
+    /// Operator opt-out of automatic worktree reclamation; manual cleanup still works.
+    pub keep_worktree: bool,
     /// Set by the watchdog: `{reason, since, nudges}`.
     pub attention: Option<Value>,
     /// Last agent progress (filled from the runtime for live colonies).
@@ -301,6 +303,7 @@ impl Default for Session {
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
+            keep_worktree: false,
             attention: None,
             last_activity_at: None,
             boot_timing: None,
@@ -945,6 +948,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         routed_cost_usd: None,
         host_disk_bytes: None,
         cleaned_up: false,
+        keep_worktree: false,
         attention: None,
         last_activity_at: None,
         boot_timing: None,
@@ -2228,6 +2232,7 @@ pub(crate) mod tests {
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
+            keep_worktree: false,
             attention: None,
             last_activity_at: None,
             boot_timing: None,

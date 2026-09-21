@@ -32,6 +32,7 @@ mod protocol;
 mod providers;
 mod publish;
 mod queue;
+mod reclaim;
 mod redteam;
 mod routing;
 mod runtime;
@@ -483,6 +484,19 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
         .iter()
         .filter(|s| s.status == sessions::SessionStatus::Queued)
         .count();
+    // Cheap, no filesystem I/O: both predicates read in-memory session fields only.
+    let (reclaimable, unpushed) = {
+        let cfg = reclaim::ReclaimConfig::from_env();
+        let now = chrono::Utc::now();
+        let sessions = app.sessions.read().await;
+        (
+            sessions
+                .iter()
+                .filter(|s| reclaim::reclaim_due(s, now, cfg.retention_secs))
+                .count(),
+            sessions.iter().filter(|s| reclaim::unpushed_work(s)).count(),
+        )
+    };
     // Computed before the `json!` literal below, which moves `runtime` into the payload: the host
     // object borrows its kvm answer, so the borrow must end before the move.
     let host_value = runtime::host_json(&host, runtime.kvm.as_ref(), microvms_live, microvms_ceiling);
@@ -518,6 +532,7 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
+        "reclaim": {"reclaimable": reclaimable, "unpushed": unpushed},
         "github": match user {
             Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
             Err(e) => json!({"connected": false, "error": format!("{e:#}")}),
@@ -963,6 +978,8 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/publish", post(publish::publish))
         .route("/api/sessions/{id}/stop", post(lifecycle::stop))
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
+        .route("/api/storage", get(reclaim::storage))
+        .route("/api/sessions/{id}/retain", post(reclaim::retain))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
         .route("/api/sessions/{id}/findings", get(findings::list))
@@ -1029,6 +1046,7 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { redteam::run(redteam).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
+    tokio::spawn(reclaim::run(app.clone()));
     let pr_watch = app.clone();
     tokio::spawn(async move { publish::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
