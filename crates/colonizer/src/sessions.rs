@@ -91,8 +91,10 @@ impl SessionStatus {
     }
 
     /// Whether this status holds a microVM slot against the parallel limit: the same "busy"
-    /// predicate `queue::has_room` counts. `Publishing` keeps its slot because the colony is working
-    /// on the worktree while the microVM is torn down; a queued colony holds nothing.
+    /// predicate `queue::has_room` counts, under the live-origin assumption — every `Publishing`
+    /// here counts as claimed from a live colony. A publish claimed from a stopped, failed or
+    /// no-changes colony boots nothing and holds nothing, so prefer [`Session::holds_slot`], which
+    /// knows the claim's origin, wherever the session record is at hand.
     pub fn busy(self) -> bool {
         self.is_live() || self == Self::Publishing
     }
@@ -142,6 +144,16 @@ impl Session {
     /// removed, if anything.
     pub(crate) fn clear_attention(&mut self) -> Option<Value> {
         self.attention.take()
+    }
+
+    /// Whether this colony holds a microVM slot against the parallel limit — the predicate
+    /// `queue::has_room` counts. Any live colony holds one, and so does a publish claimed from a
+    /// live colony: the teardown inside the publish frees the microVM, but the slot stays claimed
+    /// until the push lands, so nothing boots into the half-published worktree. A publish claimed
+    /// from a stopped, failed or no-changes colony boots nothing (host-side push only) and holds
+    /// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
+    pub fn holds_slot(&self) -> bool {
+        self.status.is_live() || (self.status == SessionStatus::Publishing && self.publishing_holds_slot)
     }
 }
 
@@ -203,6 +215,12 @@ pub struct FixFor {
     pub issue: Option<String>,
 }
 
+/// The `publishing_holds_slot` of a row written before the flag existed: holding, because every
+/// publish held its slot back then, and a row of unknown origin must not silently free one.
+fn publishing_holds_slot_legacy() -> bool {
+    true
+}
+
 /// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
 /// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
 /// making every existing file unparseable on upgrade. New fields need no annotation of their own.
@@ -253,6 +271,13 @@ pub struct Session {
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
+    /// Whether this colony's `publishing` claim holds a parallel slot: true when claimed from a live
+    /// colony, false when claimed from a stopped, failed or no-changes one (see `holds_slot`). Set
+    /// at the single claim site in `publish.rs`; terminal states hold nothing either way, so it is
+    /// never cleared. Missing on rows written before the flag existed, which were all claimed under
+    /// the old every-publish-holds rule — so those default to holding, the conservative reading.
+    #[serde(default = "publishing_holds_slot_legacy")]
+    pub publishing_holds_slot: bool,
     pub error: Option<String>,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
     /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
@@ -332,6 +357,7 @@ impl Default for Session {
             fix_for: None,
             pr_url: None,
             publish_stage: None,
+            publishing_holds_slot: false,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -1007,6 +1033,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         fix_for: None,
         pr_url: None,
         publish_stage: None,
+        // A fresh colony is starting or queued, never publishing: the flag is inert.
+        publishing_holds_slot: false,
         error: None,
         cost_usd: None,
         model_usage: None,
@@ -2251,6 +2279,16 @@ pub(crate) mod tests {
         assert_eq!(again.boot_timing, None);
     }
 
+    /// So must one saved before the publish slot flag existed: every publish held its slot back
+    /// then, so a bare `publishing` row of unknown origin keeps holding one.
+    #[test]
+    fn a_publishing_row_saved_before_the_slot_flag_still_holds_its_slot() {
+        let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"publishing","branch":"b","base":null,"worktree":"","git_admin_dir":"git","sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: Session = serde_json::from_str(saved).unwrap();
+        assert!(s.publishing_holds_slot, "unknown origin keeps the old every-publish-holds rule");
+        assert!(s.holds_slot());
+    }
+
     /// The container-level `#[serde(default)]` is the whole contract that keeps a sessions.json from
     /// an older version loadable, so it is enforced mechanically: take a fully populated record,
     /// drop one key at a time, and the rest must still load. A field added without a usable default
@@ -2371,6 +2409,9 @@ pub(crate) mod tests {
             fix_for: None,
             pr_url: None,
             publish_stage: None,
+            // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
+            // a stopped-origin publish flip this off.
+            publishing_holds_slot: status == SessionStatus::Publishing,
             error: None,
             cost_usd: None,
             model_usage: None,
