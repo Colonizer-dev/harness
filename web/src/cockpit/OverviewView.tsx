@@ -26,11 +26,14 @@ import { IconAlert, IconChevron, IconCpu, IconMemory, IconServer } from "../comp
 import { SESSION_STATUS, type Tone, attentionText, cx, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
 import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
+import { isActive, isRaiding } from "../redTeam";
 import { sortSessions } from "../sessionOrder";
 import { FleetPanel } from "./FleetPanel";
 import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
-import type { FleetHost, HostInfo, Session } from "../types";
+import { RedAnts } from "./RedAnts";
+import { RedTeamCard } from "./RedTeamCard";
+import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -168,6 +171,9 @@ export function OverviewView({
   cost,
   host,
   fleet,
+  runs = [],
+  onStart,
+  onStop,
   onOpenOrg,
   onOpenColony,
   onSelect,
@@ -180,6 +186,10 @@ export function OverviewView({
   host?: HostInfo | null;
   /** Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); absent or empty renders no fleet panel. */
   fleet?: FleetHost[];
+  /** Red-team runs (issue #212): the card lists them, and a raid paints ants over its org's card. */
+  runs?: RedTeamRun[];
+  onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
+  onStop?: (id: string) => Promise<void>;
   onOpenOrg: (org: string) => void;
   onOpenColony: (id: string) => void;
   /** Puts a chosen colony into the cockpit's inspector; its pane can answer a waiting question. */
@@ -197,6 +207,15 @@ export function OverviewView({
   // Counts come from the whole list, never the filtered one, so they keep moving on the 4s poll.
   const counts = overviewCounts(sessions);
   const shown = overviewSessions(sessions, filter);
+
+  // One raid per org colours its card; the newest active run wins when several target it.
+  const raidFor = new Map<string, RedTeamRun>();
+  for (const run of runs) {
+    if (!isActive(run)) continue;
+    const org = run.org || run.repo.split("/")[0];
+    if (!raidFor.has(org)) raidFor.set(org, run);
+  }
+  const runForOrg = (org: OrgEntry["org"]) => raidFor.get(org);
 
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
@@ -274,10 +293,14 @@ export function OverviewView({
           <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
             {orgs.map((org) => {
               const mine = sortSessions(shown.filter((s) => sameOrg(orgOf(s), org.org)));
+              const raid = runForOrg(org.org);
               // Under a filter, an org with no matching colonies drops out entirely.
               if (filter && mine.length === 0) return null;
               return (
-                <section key={org.org} className="flex flex-col overflow-hidden rounded-2xl border border-border bg-panel">
+                <section
+                  key={org.org}
+                  className="relative flex flex-col overflow-hidden rounded-2xl border border-border bg-panel"
+                >
                   <button
                     type="button"
                     onClick={() => onOpenOrg(org.org)}
@@ -311,11 +334,15 @@ export function OverviewView({
                       ))
                     )}
                   </div>
+                  {/* The raid's ants march over this org's card; the layer never takes clicks. */}
+                  {raid && <RedAnts mode={isRaiding(raid) ? "raiding" : "waiting"} count={raid.swarm_size} />}
                 </section>
               );
             })}
           </div>
         )}
+
+        <RedTeamCard runs={runs} sessions={sessions} onStart={onStart} onStop={onStop} onOpenColony={onOpenColony} />
       </div>
     </main>
   );

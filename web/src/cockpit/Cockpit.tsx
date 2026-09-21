@@ -13,7 +13,7 @@ import { needsYou } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { buildThread, useSessionStream } from "../sessionStream";
-import type { FleetHost, HarnessStatus, OrgInfo, Repo, Session, UpdateStatus } from "../types";
+import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, UpdateStatus } from "../types";
 import { Header } from "./Header";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
@@ -53,6 +53,7 @@ const CRUMB: Record<CockpitView, string> = {
 export function Cockpit({
   sessions,
   orgs,
+  redRuns = [],
   selectedOrg,
   onSelectOrg,
   selectedId,
@@ -66,6 +67,8 @@ export function Cockpit({
   settingsRequests,
   settings,
   onSessionChanged,
+  onRedStart,
+  onRedStop,
   onCreated,
   onOpenSettings,
   colony,
@@ -74,6 +77,8 @@ export function Cockpit({
   /** Every colony the mothership knows; the cockpit filters to the chosen workspace itself. */
   sessions: Session[];
   orgs: OrgInfo[];
+  /** Red-team runs; the overview card and the nest's raid overlay read them. */
+  redRuns?: RedTeamRun[];
   selectedOrg: string | null;
   onSelectOrg: (org: string | null) => void;
   selectedId: string | null;
@@ -92,6 +97,8 @@ export function Cockpit({
   /** The settings body, given the way back out — the cockpit owns the view, so it owns the exit. */
   settings: (close: () => void) => ReactNode;
   onSessionChanged: (session: Session) => void;
+  onRedStart?: (body: StartRedTeamRunRequest) => Promise<void>;
+  onRedStop?: (id: string) => Promise<void>;
   onCreated: (session: Session) => void;
   onOpenSettings: (section?: SectionId) => void;
   /** The open colony's own pane, wired by App (chat, terminal, publish). */
@@ -257,6 +264,9 @@ export function Cockpit({
             cost={sessions.length ? sessions.reduce((t, x) => t + (x.cost_usd ?? 0) + (x.routed_cost_usd ?? 0), 0) : null}
             host={status?.host ?? null}
             fleet={fleet}
+            runs={redRuns}
+            onStart={onRedStart}
+            onStop={onRedStop}
             onOpenOrg={(org) => {
               onSelectOrg(org);
               setView("home");
@@ -303,6 +313,7 @@ export function Cockpit({
             // selected stays lit, so coming back from the colony view lands somewhere familiar.
             selectedId={inspector?.kind === "colony" ? inspector.session.id : selectedId}
             mothershipSelected={inspector?.kind === "mothership"}
+            redRuns={redRuns}
             settlers={settlers}
             backlogCount={backlogCount}
             avatarFor={avatarFor}
