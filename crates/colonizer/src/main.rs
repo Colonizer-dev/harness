@@ -287,8 +287,8 @@ const CLAUDE_WALK_LIMIT: Duration = Duration::from_secs(10);
 /// to be a Linux build: on a Mac the host's own is Mach-O and `scripts/install.sh` fetches one
 /// beside the app instead.
 pub async fn resolve_guest_claude_bin(app: &App) -> Result<PathBuf> {
-    if let Ok(guest) = app.cfg.asset("bin/claude-guest") {
-        return Ok(guest);
+    if app.cfg.asset("bin/claude-guest").is_ok() {
+        return app.cfg.linux_binary("bin/claude-guest");
     }
     memoised_claude_bin(app, true, find_claude_bin(&app.cfg, true))
         .await
@@ -1576,6 +1576,36 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(found, installed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A bundled `bin/claude-guest` must still be an ELF the colony can exec: without the
+    /// enforcement the resolver would mount a stale Mach-O artefact and the colony would die
+    /// with ENOEXEC after boot instead of failing fast here with the install.sh hint.
+    #[tokio::test]
+    async fn resolve_guest_claude_bin_refuses_a_bundled_non_elf_asset() {
+        let root = temp_root();
+        let assets = root.join("assets");
+        std::fs::create_dir_all(assets.join("bin")).unwrap();
+        std::fs::write(assets.join("bin/claude-guest"), b"\xcf\xfa\xed\xfe").unwrap();
+        let app = test_app_with(&root, |cfg| cfg.assets = Some(assets.clone()));
+        let err = resolve_guest_claude_bin(&app).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("is not an ELF binary"), "{message}");
+        assert!(message.contains("scripts/install.sh"), "{message}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The bundled-asset branch resolves a valid ELF without touching the PATH walk.
+    #[tokio::test]
+    async fn resolve_guest_claude_bin_accepts_a_bundled_elf_asset() {
+        let root = temp_root();
+        let assets = root.join("assets");
+        std::fs::create_dir_all(assets.join("bin")).unwrap();
+        std::fs::write(assets.join("bin/claude-guest"), b"\x7fELF padding").unwrap();
+        let app = test_app_with(&root, |cfg| cfg.assets = Some(assets.clone()));
+        let found = resolve_guest_claude_bin(&app).await.unwrap();
+        assert_eq!(found, assets.join("bin/claude-guest"));
         let _ = std::fs::remove_dir_all(root);
     }
 
