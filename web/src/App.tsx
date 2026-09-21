@@ -28,6 +28,7 @@ import {
 import { pendingOrgPrompt } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
+import { usePollTick } from "./usePollTick";
 import type {
   FleetHost,
   HarnessStatus,
@@ -187,19 +188,37 @@ export function App() {
     void loadUpdate();
     void loadRedRuns();
     api.modules().then(applyModules).catch(() => {});
-    const timers = [
-      setInterval(loadSessions, 4000),
-      setInterval(loadRedRuns, 5000),
-      setInterval(loadStatus, 30_000),
-      // Fleet stats change about as slowly as the host's own, so it shares that cadence.
-      setInterval(loadFleet, 30_000),
-      setInterval(loadOrgs, 15_000),
-      setInterval(loadPendingMemory, 10_000),
-      // A release check is a request to github.com, so it runs far more slowly than the rest.
-      setInterval(loadUpdate, 900_000),
-    ];
-    return () => timers.forEach(clearInterval);
   }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, loadRedRuns, applyModules]);
+
+  // The poll schedule lives in a module worker (usePollTick) whose timers keep their cadence
+  // while the tab is hidden — Chrome throttles hidden-tab main-thread timers to one wake-up per
+  // minute, which used to delay notifications for colonies the open chat is not showing
+  // (issue #159). Error semantics are unchanged: every loader swallows its own failure and keeps
+  // the last data, exactly as the old setIntervals did.
+  usePollTick({
+    sessions: loadSessions,
+    redRuns: loadRedRuns,
+    status: loadStatus,
+    // Fleet stats change about as slowly as the host's own, so it shares that cadence.
+    fleet: loadFleet,
+    orgs: loadOrgs,
+    pendingMemory: loadPendingMemory,
+    // A release check is a request to github.com, so it runs far more slowly than the rest.
+    update: loadUpdate,
+  });
+
+  // A returning tab refreshes at once instead of waiting for the next tick: the worker already
+  // kept polling while hidden, so this only closes the gap since its last tick.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") {
+        void loadSessions();
+        void loadRedRuns();
+      }
+    };
+    document.addEventListener("visibilitychange", refresh);
+    return () => document.removeEventListener("visibilitychange", refresh);
+  }, [loadSessions, loadRedRuns]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
