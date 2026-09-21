@@ -1,6 +1,7 @@
 # The live map's telemetry service (docs/telemetry.md). Deploy from this directory:
-#   npx wrangler d1 migrations apply colonizer-telemetry --remote
-#   npx wrangler deploy
+#   npx --no-install wrangler d1 migrations apply colonizer-telemetry --remote
+#   npx --no-install wrangler deploy
+# Wrangler is pinned via devDependencies + package-lock.json in this directory.
 name = "colonizer-telemetry"
 main = "src/worker.js"
 compatibility_date = "2026-09-01"
