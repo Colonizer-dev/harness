@@ -417,6 +417,11 @@ pub struct Runtime {
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
     pub(crate) stop: watch::Sender<bool>,
+    /// Set once, by `resume` on the retired run's Runtime only: pre-existing event sockets hold
+    /// that Runtime and can never see the new run's events, so they close and reconnect into the
+    /// new epoch. Distinct from `stop`, which `teardown_vm` also sets on a plain stop where
+    /// sockets stay open on purpose.
+    pub(crate) retired: watch::Sender<bool>,
     pub(crate) file_lock: Mutex<()>,
     /// Serialises findings, so the per-colony cap holds when two arrive together.
     pub(crate) findings_lock: Mutex<()>,
@@ -521,6 +526,7 @@ impl Runtime {
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
+            retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
             findings_lock: Mutex::new(()),
             events_path,
@@ -2108,6 +2114,7 @@ pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult
 #[derive(Deserialize)]
 pub struct SinceQuery {
     since: Option<u64>,
+    epoch: Option<u64>,
 }
 
 pub async fn events_ws(
@@ -2120,7 +2127,7 @@ pub async fn events_ws(
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let rt = app.runtime(&id).await;
-    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), socket)))
+    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, socket)))
 }
 
 /// One replayable line of events.jsonl: the decoded line and its seq, or `None` to skip it.
@@ -2132,14 +2139,27 @@ fn replay_line(chunk: &[u8]) -> Option<(u64, &str)> {
     Some((seq, line))
 }
 
-async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, socket: WebSocket) {
+async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, client_epoch: Option<u64>, socket: WebSocket) {
     // Before this socket subscribes and the log ring is drained, so its alert lands in the
     // drained history once instead of arriving twice.
     app.report_load_error(&id, &rt).await;
     let (mut tx, mut rx) = socket.split();
     let mut subscription = rt.events.subscribe();
+    let mut retired = rt.retired.subscribe();
     let text = |s: String| Message::Text(s.into());
 
+    // First frame on the wire, before the session frame and any replay: the run epoch this
+    // connection is attached to, so a tab left open across a resume learns its cursor belongs to
+    // a retired run. It carries no `seq` field, so it passes seq filtering like `harness_log`,
+    // and old clients ignore the unknown frame.
+    let current_epoch = run_epoch_for_dir(&app.session_dir(&id));
+    if tx
+        .send(text(json!({"type": "run_epoch", "epoch": current_epoch}).to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
     let Some(session) = app.session(&id).await else { return };
     let session = with_activity(&app, session).await;
     if tx
@@ -2155,7 +2175,11 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
             return;
         }
     }
-    let mut replayed = since;
+    // A `since` from a retired run is a rank in that run's per-run numbering, meaningless in the
+    // new run: replay from the epoch-adjusted cursor instead, and seed the live dedupe cursor
+    // with it so the new run's first events are neither dropped nor duplicated.
+    let effective = effective_since(client_epoch, current_epoch, since);
+    let mut replayed = effective;
     // Byte-split, never `BufReader::lines()`: `next_line()` reports a non-UTF-8 line as an
     // `InvalidData` error, which reads exactly like EOF here and would silently truncate the
     // replay at the first corrupt line. Split chunks decode (or skip) one at a time instead.
@@ -2169,7 +2193,7 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
                 skipped += 1;
                 continue;
             };
-            if seq > since {
+            if seq > effective {
                 if tx.send(text(line.to_string())).await.is_err() {
                     return;
                 }
@@ -2211,6 +2235,12 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, so
                     return;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = retired.changed() => {
+                // The colony resumed: this socket holds the retired run's Runtime and can never
+                // see the new run's events, so close and let the client reconnect for the new epoch.
+                let _ = tx.send(Message::Close(None)).await;
+                return;
             },
             message = rx.next() => match message {
                 Some(Ok(Message::Text(body))) => client_command(&app, &id, &rt, body.as_str()).await,
