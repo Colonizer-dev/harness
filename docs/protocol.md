@@ -277,6 +277,19 @@ The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
 
+Pre-worktree boot steps retry transient failures instead of failing the colony on the first blip.
+Fetching the issue, resolving the default branch, syncing the bare clone and creating the
+worktree each retry connection errors, DNS failures, HTTP 429 and HTTP 500/502/503/504 — and any
+unrecognised error, which during boot is likelier a blip than a new permanent failure mode.
+Permanent failures (a 404 the account cannot see, refused credentials) fail fast with the same
+access wording as before. Retries back off exponentially from 1 s, capped at 30 s with jitter,
+within a single 20-minute budget shared across the whole pre-worktree phase — each step gets whatever remains (`COLONIZER_BOOT_RETRY_BUDGET_SECS` overrides it in seconds);
+when the budget is spent the colony fails naming the step, the attempts, the elapsed time and the
+last error. The budget's clock is persisted on the colony, so a harness restart resumes it: a boot
+that died before its worktree existed is re-queued on restart and continues under the same budget
+rather than starting a new one — or being left where no resume could reach it, since without a
+worktree a stopped colony can never be resumed.
+
 `routed_cost_usd` is what the provider gateway has recorded for responses it routed (§6.5), on top of
 `cost_usd`, which is only what Claude itself reports, when a turn ends. `host_disk_bytes` is what the
 colony leaves on the host (its worktree plus its session directory) as last measured; the walk runs

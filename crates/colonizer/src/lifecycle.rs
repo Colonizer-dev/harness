@@ -79,6 +79,24 @@ pub async fn recover(app: &Shared) {
             // A resume or the queue claimed the colony after the snapshot; tearing it down
             // would `msb rm --force` the microVM the boot is creating. A snapshot already
             // `Starting` is an orphaned boot instead, and falls through to the teardown below.
+            // Unless the boot died before its first durable artifact: no worktree was laid
+            // down, so leaving it stopped would abandon it where no resume can reach it. The
+            // retry clock (`boot_attempt_started_at`) is stamped when a boot actually starts,
+            // so a fresh claim (no clock yet) is left alone while a dead boot re-queues under
+            // admission on the same budget.
+            if fresh.git_admin_dir.is_none() && fresh.boot_attempt_started_at.is_some() {
+                app.update_session(&fresh.id, |x| {
+                    x.status = SessionStatus::Queued;
+                    x.error = None;
+                })
+                .await;
+                app.session_log(
+                    &fresh.id,
+                    "info",
+                    "harness restarted during boot, before the worktree existed: queued to start again".into(),
+                )
+                .await;
+            }
             continue;
         }
         if s.status == SessionStatus::Publishing {

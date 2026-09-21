@@ -231,6 +231,222 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
     }
 }
 
+/// Whether a failed boot-step read looks transient — a blip worth riding out rather than a
+/// verdict.
+///
+/// Only ever consulted after [`classify`]: anything `classify` recognises (a repository the
+/// account cannot see, a refused credential) is permanent and never transient, so those still
+/// fail fast with their access wording.
+pub fn is_transient(error: &str) -> bool {
+    if classify(error).is_some() {
+        return false;
+    }
+    let text = error.to_ascii_lowercase();
+    // `resolve host` is git's and curl's DNS failure (`Could not resolve host`); it sits safely
+    // beside `classify` because that one matches the longer `could not resolve to a repository`
+    // first, and this function never runs before that check.
+    const TRANSIENT: &[&str] = &[
+        "error connecting to",
+        "connection reset",
+        "connection refused",
+        "connection timed out",
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "name resolution",
+        "resolve host",
+        "dns",
+        "network is unreachable",
+        "broken pipe",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "service unavailable",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+    ];
+    TRANSIENT.iter().any(|m| text.contains(m))
+}
+
+/// One 20-minute budget shared across the whole pre-worktree phase: each step gets whatever remains.
+const BOOT_RETRY_BUDGET: Duration = Duration::from_secs(20 * 60);
+/// The first retry waits this long, doubling after each attempt.
+const BOOT_RETRY_BASE_BACKOFF: Duration = Duration::from_secs(1);
+/// No single wait exceeds this plus up to 25% jitter (~38s), so a stop landing mid-boot is
+/// honoured at worst ~38s late, at the boot's next `ensure_starting` checkpoint.
+const BOOT_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// The retry budget, from `COLONIZER_BOOT_RETRY_BUDGET_SECS` or the default above. A missing or
+/// unparsable value means the default; a parsed one wins, even zero.
+pub fn boot_retry_budget() -> Duration {
+    parse_retry_budget(std::env::var("COLONIZER_BOOT_RETRY_BUDGET_SECS").ok())
+}
+
+fn parse_retry_budget(raw: Option<String>) -> Duration {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(BOOT_RETRY_BUDGET)
+}
+
+/// This process's clock in unix seconds, for the retry deadline the session record carries
+/// across a harness restart.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A backoff with a little jitter, so colonies booting together do not retry in lockstep. No
+/// `rand`: an xorshift over the current time's sub-second nanos, worth up to a quarter of the
+/// backoff on top of it.
+fn jittered(backoff: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0x9e37_79b9);
+    let mut x = nanos ^ 0x9e37_79b9;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    backoff + backoff * (x % 1000) / 4000
+}
+
+/// A duration the way the retry log and the budget-spent error say it: `45s`, `20m0s`, `1h2m3s`.
+fn fmt_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let minutes = secs / 60;
+    if minutes < 60 {
+        return format!("{minutes}m{}s", secs % 60);
+    }
+    format!("{}h{}m{}s", minutes / 60, minutes % 60, secs % 60)
+}
+
+/// When the current attempt may sleep until, and how long the whole attempt has been going:
+/// the deadline resumes from the persisted clock, and the elapsed shown in the log counts the
+/// attempt from before the restart too.
+struct RetryWindow {
+    start: Instant,
+    already_elapsed: Duration,
+    deadline: Instant,
+}
+
+/// How long one wait starts at and how long none exceeds; tests shrink both to milliseconds so
+/// no test waits on a real backoff.
+struct BootRetryTuning {
+    base_backoff: Duration,
+    max_backoff: Duration,
+}
+
+/// One pre-worktree boot step (`label`, e.g. `fetching issue o/r#12`) with the boot retry
+/// policy: run it, and on failure either fail fast or sleep and try again.
+///
+/// A failure [`classify`] recognises returns immediately — the caller keeps its access wording
+/// for those. Everything else is retried: a recognised blip ([`is_transient`]) or an unknown
+/// error, which during boot is likelier a blip than a new permanent failure mode, and the
+/// budget bounds the cost either way. Waits double from the base backoff to the cap (jittered),
+/// never sleeping past the deadline. When the budget is spent the error names the step, the
+/// attempts, the elapsed time and the last failure, with that failure's chain intact.
+async fn boot_retry_loop<T, F, Fut, S, SFut>(
+    label: &str,
+    log: Option<&SessionLogger>,
+    window: RetryWindow,
+    tuning: BootRetryTuning,
+    mut f: F,
+    mut sleep: S,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+    S: FnMut(Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    let elapsed = || window.already_elapsed + window.start.elapsed();
+    let mut attempts = 0u32;
+    let mut backoff = tuning.base_backoff;
+    loop {
+        attempts += 1;
+        match f().await {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                let raw = format!("{e:#}");
+                if classify(&raw).is_some() {
+                    return Err(e);
+                }
+                // An unrecognised error rides along too: during boot a blip is likelier than a
+                // new permanent failure mode, and the budget bounds the cost either way. The log
+                // names which of the two it was, so a colony that keeps retrying says why.
+                let kind = if is_transient(&raw) { "transient" } else { "unrecognised" };
+                let now = Instant::now();
+                if now >= window.deadline {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "{label} failed after {attempts} attempt{} over {} (budget spent); last error",
+                            if attempts == 1 { "" } else { "s" },
+                            fmt_elapsed(elapsed())
+                        )
+                    });
+                }
+                let wait = jittered(backoff).min(window.deadline.saturating_duration_since(now));
+                if let Some(log) = log {
+                    log.info(format!(
+                        "retrying {label} ({kind} failure, attempt {attempts}, elapsed {}): {}",
+                        fmt_elapsed(elapsed()),
+                        truncate(&raw, 500)
+                    ))
+                    .await;
+                }
+                sleep(wait).await;
+                backoff = (backoff * 2).min(tuning.max_backoff);
+            }
+        }
+    }
+}
+
+/// Runs one pre-worktree boot step with the boot retry policy: transient failures (and unknown
+/// ones) are retried with backoff until the budget runs out, permanent ones fail fast.
+///
+/// `started_at` is the unix-seconds clock the session record carries
+/// (`Session::boot_attempt_started_at`), so a harness restart resumes the same budget instead of
+/// starting a new one; `None` starts it now. Sleeps go through `tokio`, capped so the sleeps in
+/// total respect the deadline.
+pub async fn with_boot_retry<T, F, Fut>(label: &str, log: Option<&SessionLogger>, started_at: Option<u64>, f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let budget = boot_retry_budget();
+    let now_secs = unix_now();
+    let start_secs = started_at.unwrap_or(now_secs);
+    // A clock that moved backwards (or a carried stamp from the future) still gets a full budget
+    // rather than failing on the first blip; a spent one still gets the one attempt the loop
+    // always runs before it looks at the deadline.
+    let remaining = start_secs.saturating_add(budget.as_secs()).saturating_sub(now_secs);
+    let start = Instant::now();
+    boot_retry_loop(
+        label,
+        log,
+        RetryWindow {
+            start,
+            already_elapsed: Duration::from_secs(now_secs.saturating_sub(start_secs)),
+            deadline: start + Duration::from_secs(remaining),
+        },
+        BootRetryTuning {
+            base_backoff: BOOT_RETRY_BASE_BACKOFF,
+            max_backoff: BOOT_RETRY_MAX_BACKOFF,
+        },
+        f,
+        tokio::time::sleep,
+    )
+    .await
+}
+
 pub async fn default_branch(app: &App, repo: &str) -> Result<String> {
     let path = format!("repos/{repo}");
     Ok(exec(&mut app.gh(["api", path.as_str(), "--jq", ".default_branch"]))
@@ -1271,6 +1487,189 @@ mod tests {
         );
         // Anything else keeps its own message rather than being dressed up as an access problem.
         assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);
+    }
+
+    #[test]
+    fn boot_retries_treat_blips_as_transient_and_denials_as_permanent() {
+        use super::is_transient;
+        for blip in [
+            "error connecting to api.github.com: dial tcp",
+            "connection reset by peer",
+            "connection refused",
+            "connection timed out",
+            "i/o timeout",
+            "operation timed out",
+            "temporary failure in name resolution",
+            "Could not resolve host: github.com",
+            "a dns error",
+            "network is unreachable",
+            "broken pipe",
+            "gh: Too Many Requests (HTTP 429)",
+            "gh: Internal Server Error (HTTP 500)",
+            "gh: Bad Gateway (HTTP 502)",
+            "gh: Service Unavailable (HTTP 503)",
+            "gh: Gateway Timeout (HTTP 504)",
+            "service unavailable",
+            "internal server error",
+            "bad gateway",
+            "gateway timeout",
+        ] {
+            assert!(is_transient(blip), "{blip}");
+        }
+        // Whatever `classify` recognises is permanent, whatever else it says: those fail fast.
+        for permanent in [
+            "`gh api repos/o/r --jq .default_branch` failed (exit status: 1): gh: Not Found (HTTP 404)",
+            "GraphQL: Could not resolve to a Repository with the name 'o/r'.",
+            "gh: Bad credentials (HTTP 401)",
+            "gh: Resource not accessible (HTTP 403)",
+        ] {
+            assert!(super::classify(permanent).is_some(), "{permanent}");
+            assert!(!is_transient(permanent), "{permanent}");
+        }
+    }
+
+    #[test]
+    fn the_retry_budget_comes_from_the_environment_or_the_default() {
+        use super::{BOOT_RETRY_BUDGET, parse_retry_budget};
+        use std::time::Duration;
+        assert_eq!(parse_retry_budget(None), BOOT_RETRY_BUDGET);
+        assert_eq!(parse_retry_budget(Some("60".into())), Duration::from_secs(60));
+        assert_eq!(parse_retry_budget(Some("  30  ".into())), Duration::from_secs(30));
+        assert_eq!(parse_retry_budget(Some("soon".into())), BOOT_RETRY_BUDGET);
+        assert_eq!(parse_retry_budget(Some(String::new())), BOOT_RETRY_BUDGET);
+    }
+
+    #[test]
+    fn elapsed_time_reads_the_way_the_retry_log_writes_it() {
+        use super::fmt_elapsed;
+        use std::time::Duration;
+        assert_eq!(fmt_elapsed(Duration::from_secs(0)), "0s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(45)), "45s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(90)), "1m30s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(1200)), "20m0s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(3723)), "1h2m3s");
+    }
+
+    /// Milliseconds throughout: no test waits on a real backoff.
+    fn test_tuning() -> super::BootRetryTuning {
+        super::BootRetryTuning {
+            base_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+        }
+    }
+
+    fn test_window(budget: Duration) -> super::RetryWindow {
+        let start = Instant::now();
+        super::RetryWindow {
+            start,
+            already_elapsed: Duration::ZERO,
+            deadline: start + budget,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_boot_step_that_recovers_returns_after_its_blips() {
+        use super::boot_retry_loop;
+        let mut calls = 0;
+        let out = boot_retry_loop(
+            "fetching issue o/r#1",
+            None,
+            test_window(Duration::from_secs(60)),
+            test_tuning(),
+            || {
+                calls += 1;
+                let n = calls;
+                async move {
+                    if n < 3 {
+                        Err::<u32, anyhow::Error>(anyhow!("error connecting to api.github.com"))
+                    } else {
+                        Ok(7)
+                    }
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, 7);
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test]
+    async fn a_permanent_boot_failure_fails_fast_without_sleeping() {
+        use super::boot_retry_loop;
+        let mut calls = 0;
+        let mut sleeps = 0;
+        let err = boot_retry_loop(
+            "fetching issue o/r#1",
+            None,
+            test_window(Duration::from_secs(60)),
+            test_tuning(),
+            || {
+                calls += 1;
+                async move { Err::<u32, anyhow::Error>(anyhow!("gh: Bad credentials (HTTP 401)")) }
+            },
+            |_| {
+                sleeps += 1;
+                async {}
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(calls, 1, "a refused credential is never retried");
+        assert_eq!(sleeps, 0, "and never waits before failing");
+        assert!(format!("{err:#}").contains("Bad credentials"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_boot_failure_is_retried_then_reports_attempts_elapsed_and_cause() {
+        use super::boot_retry_loop;
+        let mut calls = 0;
+        // A zero remaining budget still runs the one attempt the loop always runs, then spends.
+        let err = boot_retry_loop(
+            "fetching issue o/r#1",
+            None,
+            test_window(Duration::ZERO),
+            test_tuning(),
+            || {
+                calls += 1;
+                async move { Err::<u32, anyhow::Error>(anyhow!("gh: something nobody has seen before")) }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert_eq!(calls, 1);
+        assert!(
+            message.contains("fetching issue o/r#1 failed after 1 attempt over 0s (budget spent)"),
+            "{message}"
+        );
+        assert!(message.contains("something nobody has seen before"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_blip_that_outlasts_the_budget_fails_naming_every_attempt() {
+        use super::boot_retry_loop;
+        let mut calls = 0;
+        let err = boot_retry_loop(
+            "fetching issue o/r#1",
+            None,
+            test_window(Duration::from_millis(30)),
+            test_tuning(),
+            || {
+                calls += 1;
+                async move { Err::<u32, anyhow::Error>(anyhow!("connection reset by peer")) }
+            },
+            tokio::time::sleep,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(calls > 1, "a blip inside the budget is retried: {calls}");
+        assert!(message.contains(&format!("failed after {calls} attempts over")), "{message}");
+        assert!(message.contains("(budget spent)"), "{message}");
+        assert!(message.contains("connection reset by peer"), "{message}");
     }
 
     use super::*;
