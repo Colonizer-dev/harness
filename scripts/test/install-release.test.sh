@@ -3,8 +3,9 @@
 # what GitHub issue #90 asks for: an install interrupted at any point must leave a working colonizer,
 # and the next install must recover from whatever the interrupted one left behind.
 #
-# Runs offline. A fake release has no modules/agents/*/fetch-at-install markers, so the installer
-# downloads nothing but the archive, and guest_claude only runs on a Mac.
+# Runs offline. A fake release has no modules/agents/*/fetch-at-install markers and its node.lock
+# points at a fake runtime tarball over file://, so the installer downloads nothing but local files,
+# and guest_claude only runs on a Mac.
 #
 # Needs Linux x86_64 with /dev/kvm readable and writable, because that is the installer's own platform
 # gate and this test drives the real script. It skips with a message anywhere else.
@@ -56,7 +57,20 @@ bad() {
 }
 
 # Builds a release the installer accepts: the archive name and the sha256sum-style SHA256SUMS are the
-# real ones, and the fake app is a script that says which version it is.
+# real ones, and the fake app is a script that says which version it is. Since the guest_node step,
+# every release also carries a node.lock pinning the colony Node.js runtime, and the installer
+# refuses an archive without one — so the fake carries a lock pointing at a fake runtime tarball
+# over file://, keeping the test offline.
+make_fake_node() { # dir
+  dir=$1
+  mkdir -p "$dir/node-payload/node-fake/bin"
+  printf '#!/bin/sh\necho node-fake\n' > "$dir/node-payload/node-fake/bin/node"
+  chmod 755 "$dir/node-payload/node-fake/bin/node"
+  tar -C "$dir/node-payload" -cJf "$dir/node.tar.xz" node-fake
+  node_sha=$(sha256sum "$dir/node.tar.xz" | cut -d' ' -f1)
+  node_url="file://$dir/node.tar.xz"
+}
+
 fake_release() { # version dir
   version=$1
   dir=$2
@@ -64,6 +78,7 @@ fake_release() { # version dir
   printf '#!/bin/sh\necho colonizer %s\n' "$version" > "$dir/colonizer/bin/colonizer"
   chmod 755 "$dir/colonizer/bin/colonizer"
   printf '%s\n' "$version" > "$dir/colonizer/VERSION"
+  printf 'node 99 linux-x64 runtime %s %s\n' "$node_sha" "$node_url" > "$dir/colonizer/node.lock"
   tar -C "$dir" -czf "$dir/colonizer-linux-x86_64.tar.gz" colonizer
   (cd "$dir" && sha256sum colonizer-linux-x86_64.tar.gz > SHA256SUMS)
 }
@@ -157,6 +172,7 @@ fresh_home() {
   mkdir -p "$home"
 }
 
+make_fake_node "$versions"
 fake_release 1 "$versions/v1"
 fake_release 2 "$versions/v2"
 
