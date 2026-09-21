@@ -3,22 +3,6 @@
 //
 // The prototype's rows carry a settler count. This one does not: the mothership streams events for a
 // single colony at a time, so the only honest per-colony facts here are the ones in the list itself.
-//
-// Colonies collapse to one compact line apiece. The issue's title — the one fact that varies — waits
-// behind a click so the page reads as a roster, not a wall of issue text. The header only toggles its
-// row in place; reaching the colony's own view is the explicit "open colony →" action, so the
-// overview stays one page and the full session is still one more click deep. The colony's machine
-// facts (the microVM it booted, its mesh address, its agent) live in the same disclosure: they are
-// per-colony detail, and the collapsed line stays the roster.
-//
-// The counters at the top double as filters: a click narrows the roster to that bucket, a second
-// click on the active one clears it. The buckets themselves live in feed.ts, so the number a counter
-// shows and the rows its filter reveals can never disagree.
-//
-// Above the roster sits the host strip (issue #205): the one machine every listed colony boots on —
-// its name, how many microVMs are live against the ceiling, its cores, load, memory, disk and
-// uptime — so "why is nothing starting" is answerable without leaving the page. It is page-level by
-// nature, orthogonal to the counters and the filter: the filter narrows the roster, never the host.
 import { useId, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
@@ -28,10 +12,13 @@ import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { isActive, isRaiding } from "../redTeam";
 import { sortSessions } from "../sessionOrder";
+import { formatCost, orgCost, sumCosts } from "../spend";
+import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { FleetPanel } from "./FleetPanel";
-import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
+import { headlineFor, OVERVIEW_FILTERS, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
+import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
 import { RedTeamCard } from "./RedTeamCard";
 import type { BurnDownStatus, FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest } from "../types";
@@ -218,6 +205,36 @@ export function OverviewView({
   }
   const runForOrg = (org: OrgEntry["org"]) => raidFor.get(org);
 
+  // The daily spend history for the sparklines, loaded once (see useSpendHistory). Per org it is
+  // aligned to the full day span: a day the org has no entry becomes an empty (zero-height) slot.
+  const spendHistory = useSpendHistory();
+  const daysByOrg = useMemo(() => {
+    const span = spendHistory?.days ?? [];
+    const byOrg = new Map<string, { day: string; org: SpendOrgDay | undefined }[]>();
+    for (const day of span) {
+      for (const orgDay of day.orgs) {
+        const list = byOrg.get(orgDay.org) ?? [];
+        list.push({ day: day.day, org: orgDay });
+        byOrg.set(orgDay.org, list);
+      }
+    }
+    // Align each org to the full day span: a day the response lists with no entry for this org
+    // becomes an empty (zero-height) slot on its sparkline.
+    for (const [org, days] of byOrg) {
+      const orgByDay = new Map(days.map((d) => [d.day, d.org]));
+      byOrg.set(org, span.map((day) => ({ day: day.day, org: orgByDay.get(day.day) })));
+    }
+    return byOrg;
+  }, [spendHistory]);
+
+  // Prefer the server's per-org rollups when it reports them, so the header can never disagree with
+  // the rows it sits above; only fall back to the sessions-derived `cost` while any org carries no
+  // server spend — an older mothership, or an org the rollup has never measured a dollar for.
+  const headerCost =
+    orgs.length > 0 && orgs.every((o) => o.spend !== undefined)
+      ? sumCosts(orgs.map((o) => orgCost(o.spend)))
+      : cost;
+
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
       <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-5">
@@ -245,9 +262,9 @@ export function OverviewView({
                 </button>
               );
             })}
-            {cost !== null && (
+            {headerCost !== null && (
               <span className="whitespace-nowrap px-1" title="what every colony has spent in total">
-                ${cost.toFixed(2)} spent
+                {formatCost(headerCost)} spent
               </span>
             )}
           </div>

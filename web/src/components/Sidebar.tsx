@@ -3,6 +3,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
+import { formatCost, sessionCost } from "../spend";
 import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
 import { type ImagePull } from "../useImagePull";
 import { Avatar } from "./Avatar";
@@ -585,6 +586,7 @@ function SessionList({
     <ul className="space-y-0.5">
       {sessions.map((session) => {
         const active = session.id === selectedId;
+        const sessionSpend = sessionCost(session);
         return (
           <li key={session.id}>
             <button
@@ -611,9 +613,7 @@ function SessionList({
                   <span className="rounded-md bg-panel-3 px-1.5 text-[11px] font-medium leading-[18px] text-muted">{orgOf(session)}</span>
                 )}
                 <span>{timeAgo(session.updated_at)}</span>
-                {(session.cost_usd != null || (session.routed_cost_usd ?? 0) > 0) && (
-                  <span>· ${((session.cost_usd ?? 0) + (session.routed_cost_usd ?? 0)).toFixed(2)}</span>
-                )}
+                {sessionSpend != null && <span>· {formatCost(sessionSpend)}</span>}
                 {session.parent && <span>· stacked</span>}
                 {session.cleaned_up && <span>· cleaned up</span>}
                 <AttentionBadge attention={session.attention} />

@@ -19,10 +19,12 @@ import type {
   MemoryProposal,
   ModelOption,
   ModelProvider,
+  ModelSpend,
   ModelTokens,
   ModuleInfo,
   OrgInfo,
   OrgSettings,
+  OrgSpend,
   PullStatus,
   Question,
   RedTeamRun,
@@ -30,6 +32,10 @@ import type {
   RuntimeInfo,
   Session,
   SessionStatus,
+  SpendDay,
+  SpendHistory,
+  SpendOrgDay,
+  SpendTokens,
   StartRedTeamRunRequest,
   TelemetryStatus,
   UpdateStatus,
@@ -1063,6 +1069,31 @@ let mockUsage: UsageStatus = {
     ],
     providers: "1",
     error_kinds: { vm_stopped: "1" },
+  },
+};
+
+const isoDay = (offsetFromToday: number): string => {
+  const d = new Date(Date.now() - offsetFromToday * 86_400_000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+// Per-org spend (issue #209), served both by GET /api/orgs `spend` and rolled up by
+// GET /api/spend/history. octocat is the subscription case: its colonies run on unpriced models, so
+// the costs are all null and the org card and sparkline must render "—", never "$0.00".
+const MOCK_SPEND_MODELS: ModelSpend[] = [
+  { model: "claude-opus-5", tokens: 4_632_000, cost_usd: 41.28 },
+  { model: "deepseek/deepseek-flash", tokens: 1_204_000, cost_usd: 2.91 },
+  { model: "strix/ds4-flash", tokens: 810_400, cost_usd: null },
+  { model: "claude-haiku-4-5", tokens: 212_000, cost_usd: 0.18 },
+];
+const MOCK_SPEND_TOKENS: SpendTokens = { input: 4_320_000, output: 1_140_000, cache_read: 3_200_000, cache_write: 180_000 };
+const mockOrgSpend: Record<string, OrgSpend> = {
+  acme: { cost_usd: 44.37, routed_cost_usd: 0, tokens: MOCK_SPEND_TOKENS, models: MOCK_SPEND_MODELS },
+  octocat: {
+    cost_usd: null,
+    routed_cost_usd: null,
+    tokens: { input: 88_000, output: 14_000, cache_read: 0, cache_write: 0 },
+    models: [{ model: "claude-sonnet-5", tokens: 102_000, cost_usd: null }],
   },
 };
 
@@ -2109,8 +2140,46 @@ export function createMockApi(): Api {
             settings: orgSettings[org] ?? {},
             avatar_url: orgAvatars[org],
             ...(awaitingDecision.has(org.toLowerCase()) ? { awaiting_decision: true } : null),
+            ...(mockOrgSpend[org] ? { spend: mockOrgSpend[org] } : null),
           };
         });
+      }),
+    spendHistory: () =>
+      later((): SpendHistory => {
+        // Eight deterministic days, oldest first. acme is measured and roars some days; octocat is
+        // measured-but-never-priced so its costs stay null. Two days only octocat appears, so acme's
+        // sparkline has zero-height (gap) slots.
+        const dayCount = 8;
+        const acmeCosts = [0.35, 1.1, 0.8, 2.3, 0.6, 1.7, 0.4, 0.9];
+        const acmeAway = new Set([1, 5]);
+        const days: SpendDay[] = Array.from({ length: dayCount }, (_, i) => {
+          const orgs: SpendOrgDay[] = [];
+          if (!acmeAway.has(i)) {
+            const cost = acmeCosts[i];
+            orgs.push({
+              org: "acme",
+              cost_usd: cost,
+              routed_cost_usd: 0,
+              tokens: { input: 40_000 * (cost + 1), output: 8_000 * (cost + 1), cache_read: 0, cache_write: 0 },
+              models: MOCK_SPEND_MODELS,
+              launched: i % 2 === 0 ? 1 : 0,
+              returned: i % 3 === 0 ? 1 : 0,
+            });
+          }
+          if (i % 2 === 1) {
+            orgs.push({
+              org: "octocat",
+              cost_usd: null,
+              routed_cost_usd: null,
+              tokens: { input: 12_000, output: 2_000, cache_read: 0, cache_write: 0 },
+              models: [{ model: "claude-sonnet-5", tokens: 14_000, cost_usd: null }],
+              launched: 0,
+              returned: 1,
+            });
+          }
+          return { day: isoDay(dayCount - 1 - i), orgs };
+        });
+        return { days };
       }),
     saveOrg: async (org, settings) => {
       await sleep(250);
