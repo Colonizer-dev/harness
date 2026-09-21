@@ -43,6 +43,10 @@ export interface Session {
   mesh: { name: string; ip: string | null } | null;
   agent: string;
   autopilot: boolean;
+  /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */
+  autofix?: boolean;
+  /** Whether a fix colony's review-passing pull request merges itself; absent until the operator answers, when the publish module's `automerge` setting decides (§6.6). */
+  automerge?: boolean;
   pr_url: string | null;
   /** How far the last publish attempt got; absent when no publish has made progress. */
   publish_stage?: "committed" | "pushed" | "pr_opened";
@@ -739,10 +743,37 @@ export interface NewSessionRequest {
   title?: string;
   instructions?: string;
   autopilot?: boolean;
+  /** Whether a filed finding from this colony spawns a fix colony; omitted uses the publish module's `autofix` setting (§6.6). */
+  autofix?: boolean;
+  /** Whether a fix colony's review-passing pull request merges itself; omitted uses the publish module's `automerge` setting (§6.6). */
+  automerge?: boolean;
   /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
   allow_duplicate?: boolean;
   /** Stack the new colony on another's branch: the parent session's id, which becomes `parent` and whose branch becomes `base`. Launching a stack is API-only; no form picker yet. */
   after?: string;
+}
+
+/**
+ * One line of a colony's finding ledger (GET /api/sessions/{id}/findings). The ledger is append-only:
+ * as a finding moves validated → filed (or rejected/duplicate) → fix_colony → review → merged, a new
+ * line is written and nothing is rewritten, so one finding — keyed by `title` — is the several lines
+ * that mention it. The present is the last line's state; `error` and `rejected` lines carry a
+ * `reason`, and `cockpit/findings.ts` folds the lines into one chain per title.
+ */
+export interface FindingRecord {
+  session: string;
+  repo?: string;
+  title: string;
+  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "error";
+  ts?: string;
+  reason?: string;
+  severity?: "low" | "medium" | "high" | "critical";
+  issue?: string;
+  duplicate_of?: string;
+  fix_session?: string;
+  review_session?: string;
+  verdict?: "pass" | "fail";
+  pr?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -90,6 +90,13 @@ pub async fn publish_session(app: Shared, id: String) {
                 x.publish_stage = Some(PublishStage::PrOpened);
             })
             .await;
+            // A fix colony's pull request is reviewed as it opens: a fresh independent session
+            // judges the change (validation.rs) and merges it only when the review passes and the
+            // operator asked for that. Off the publish path: the review reads the session fresh, so
+            // nothing stale from this moment travels with it.
+            if s.fix_for.is_some() {
+                tokio::spawn(crate::validation::review_fix_pr(app.clone(), id.clone()));
+            }
         }
         Err(e) => {
             let message = format!("{e:#}");

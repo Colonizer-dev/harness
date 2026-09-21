@@ -99,6 +99,12 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
     errors_logged: 0,
     longest_silence_ms: 0,
     findings: 0,
+    validated: 0,
+    rejected: 0,
+    fix_colonies: 0,
+    reviews: 0,
+    review_passed: 0,
+    merged: 0,
     memory_proposals: 0,
     repeated_reads: [],
     repeated_commands: [],
@@ -187,6 +193,22 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
       case 'finding':
         r.findings += 1;
         break;
+      case 'validated':
+        r.validated += 1;
+        break;
+      case 'rejected':
+        r.rejected += 1;
+        break;
+      case 'fix_colony':
+        r.fix_colonies += 1;
+        break;
+      case 'review':
+        r.reviews += 1;
+        if (e.verdict === 'pass') r.review_passed += 1;
+        break;
+      case 'merged':
+        r.merged += 1;
+        break;
       case 'memory_proposal':
         r.memory_proposals += 1;
         break;
@@ -212,10 +234,12 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
 /** Why a colony is worth reading, strongest reason first. Empty when nothing stands out. */
 export function reasons(r, costThreshold = Infinity) {
   const out = [];
+  const failedReviews = r.reviews - r.review_passed;
   if (r.status === 'failed') out.push('ended failed');
   if (r.failed_turns > 0) out.push(`${r.failed_turns} failed turn${r.failed_turns === 1 ? '' : 's'}`);
   if (r.status === 'no_changes') out.push('ended with no changes');
   if (r.watchdog_nudges > 0) out.push(`watchdog nudged ${r.watchdog_nudges}×`);
+  if (failedReviews > 0) out.push(`${failedReviews} fix review${failedReviews === 1 ? '' : 's'} failed`);
   if (r.rate_limit_hits > 0) out.push(`${r.rate_limit_hits} rate-limit hit${r.rate_limit_hits === 1 ? '' : 's'}`);
   if (r.longest_silence_ms >= 5 * 60_000) out.push(`silent ${duration(r.longest_silence_ms)} while working`);
   if (r.tool_calls >= 10 && r.tool_errors / r.tool_calls >= 0.2) out.push(`${pct(r.tool_errors / r.tool_calls)} of tool calls failed`);
@@ -267,6 +291,12 @@ export function summarize(reports) {
     rate_limit_hits: sum('rate_limit_hits'),
     failed_turns: sum('failed_turns'),
     findings: sum('findings'),
+    validated: sum('validated'),
+    rejected: sum('rejected'),
+    fix_colonies: sum('fix_colonies'),
+    reviews: sum('reviews'),
+    review_passed: sum('review_passed'),
+    merged: sum('merged'),
     memory_proposals: sum('memory_proposals'),
     subagents: sum('subagents'),
     tools: Object.entries(tools)
@@ -303,6 +333,19 @@ function duration(msValue) {
 const pct = (x) => (x == null ? '–' : `${Math.round(x * 100)}%`);
 const usd = (x) => (typeof x === 'number' ? `$${x.toFixed(2)}` : '–');
 
+/** The finding chain counts worth naming in the findings sentence, nonzero terms only. */
+function findingChain(summary) {
+  const parts = [];
+  if (summary.validated) parts.push(`${summary.validated} validated`);
+  if (summary.rejected) parts.push(`${summary.rejected} rejected`);
+  if (summary.fix_colonies) parts.push(`${summary.fix_colonies} fix${summary.fix_colonies === 1 ? '' : 'es'}`);
+  if (summary.reviews) {
+    parts.push(`${summary.reviews} review${summary.reviews === 1 ? '' : 's'}${summary.review_passed ? `, ${summary.review_passed} passed` : ''}`);
+  }
+  if (summary.merged) parts.push(`merged: ${summary.merged}`);
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
 function table(headers, rows) {
   const line = (cells) => `| ${cells.join(' | ')} |`;
   return [line(headers), line(headers.map(() => '---')), ...rows.map((row) => line(row.map((c) => String(c ?? '–').replace(/\|/g, '\\|'))))].join('\n');
@@ -331,7 +374,7 @@ export function formatReport(summary, reports, worst = 10) {
   out.push(`- Claude cost in total: ${usd(summary.claude_cost_usd)}. Routed models (with a \`/\`) aren't priced; see the JSON for their tokens.`);
   out.push(`- Questions: ${summary.questions.total}, waiting ${duration(summary.answer_wait_ms.total)} in total for answers (longest ${duration(summary.answer_wait_ms.longest)}).`);
   out.push(`- Asked in plain text and re-prompted: ${summary.plain_text_reprompts}. Watchdog nudges: ${summary.watchdog_nudges}. Failed turns: ${summary.failed_turns}. Rate-limit hits: ${summary.rate_limit_hits}.`);
-  out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}. Memory proposals: ${summary.memory_proposals}.`);
+  out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}${findingChain(summary)}. Memory proposals: ${summary.memory_proposals}.`);
   out.push('', '## Tools', '');
   out.push(table(['Tool', 'Calls', 'Failed', 'Failure rate'], summary.tools.slice(0, 15).map((t) => [t.name, t.calls, t.errors, pct(t.error_rate)])));
   out.push('', '## Colonies', '');
@@ -437,6 +480,21 @@ export function formatTranscript({ session = {}, events = [], logs = [] }) {
         break;
       case 'finding':
         lines.push(`${at}◆ finding: ${excerpt(e.title, 160)}`);
+        break;
+      case 'validated':
+        lines.push(`${at}✓ validated: ${excerpt(e.title, 160)}${e.severity ? ` (${e.severity})` : ''}`);
+        break;
+      case 'rejected':
+        lines.push(`${at}✗ rejected: ${excerpt(e.title, 160)} — ${excerpt(e.reason, 120)}`);
+        break;
+      case 'fix_colony':
+        lines.push(`${at}⚒ fix colony ${e.session} for: ${excerpt(e.title, 160)}`);
+        break;
+      case 'review':
+        lines.push(`${at}⚖ review ${e.session} of ${excerpt(e.pr, 120)}: ${e.verdict}`);
+        break;
+      case 'merged':
+        lines.push(`${at}✔ merged ${excerpt(e.pr, 120)}`);
         break;
       case 'memory_proposal':
         lines.push(`${at}◇ memory proposal (${e.scope}): ${excerpt(e.title, 160)}`);

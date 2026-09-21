@@ -42,6 +42,7 @@ mod timing;
 mod update;
 mod usage;
 mod util;
+mod validation;
 mod version;
 mod watchdog;
 
@@ -961,6 +962,8 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
+        .route("/api/sessions/{id}/findings", get(findings::list))
+        .route("/api/findings", get(findings::list_all))
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
         .route("/api/redteam/runs/{id}/stop", post(redteam::stop));

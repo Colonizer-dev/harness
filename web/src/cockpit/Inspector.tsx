@@ -1,20 +1,21 @@
 // The pane that slides in beside the nest when you pick the mothership or a chamber: what it is,
 // what it costs, what it is waiting for, and the one or two things worth doing about it.
 //
-// Everything here comes from the colony list and /api/status, plus the live question a waiting
-// colony asked on its event stream. There is deliberately no other per-colony event history: the
-// mothership keeps none for the browser, and a made-up one would read as fact.
-import type { ReactElement } from "react";
+// Everything here comes from the colony list and /api/status, plus live findings from hunter runs.
+// There is deliberately no other per-colony event history: the mothership keeps none for the browser, and a made-up one would read as fact.
+import { useEffect, useState, type ReactElement } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../components/AskUserCard";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
+import { useApi } from "../context";
 import { needsYou } from "../notifications";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { HarnessStatus, Question, Session, UpdateStatus } from "../types";
+import type { FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
+import { chains, type FindingChain } from "./findings";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -87,6 +88,133 @@ const STAGE: Record<string, string> = {
   pushed: "pushed",
   pr_opened: "opened",
 };
+
+// ---------------------------------------------------------------------------
+// Findings, folded from the colony's ledger (see findings.ts)
+// ---------------------------------------------------------------------------
+
+/** A stage on a finding's card: its chip label and how strong the color should be. */
+interface FindingStage {
+  label: string;
+  tone: Tone;
+}
+
+/** The order a finding's stages read in; lines the ledger lacks are simply skipped. */
+const STAGE_ORDER: FindingRecord["state"][] = [
+  "validated",
+  "filed",
+  "fix_colony",
+  "review",
+  "merged",
+  "duplicate",
+  "rejected",
+  "error",
+];
+
+/** The chip a record line earns on its own; the fix colony and the verdict read off the fold. */
+const STAGE_LABEL: Record<FindingRecord["state"], string> = {
+  validated: "validated",
+  filed: "filed",
+  fix_colony: "fix",
+  review: "review",
+  merged: "merged",
+  duplicate: "duplicate",
+  rejected: "rejected",
+  error: "error",
+};
+
+/** The trail a chain actually walked, judged by the record lines that built it. */
+function trail(chain: FindingChain): FindingStage[] {
+  const seen = new Set(chain.records.map((r) => r.state));
+  const stages: FindingStage[] = [{ label: "found", tone: "neutral" }];
+  for (const state of STAGE_ORDER) {
+    if (!seen.has(state)) continue;
+    let label = STAGE_LABEL[state];
+    let tone: Tone = "neutral";
+    if (state === "fix_colony" && chain.fix_session) label = `fix ${chain.fix_session}`;
+    if (state === "review") {
+      label = chain.verdict ? `review ${chain.verdict}` : "review";
+      tone = chain.verdict === "fail" ? "err" : "neutral";
+    }
+    if (state === "merged") tone = "ok";
+    if (state === "duplicate" || state === "rejected") tone = "warn";
+    if (state === "error") tone = "err";
+    stages.push({ label, tone });
+  }
+  return stages;
+}
+
+const isUrl = (value: string) => /^https?:\/\//.test(value);
+
+/** The one line under the trail that explains a terminal: why it was rejected, the error, or the finding it duplicated. */
+function noteFor(chain: FindingChain): { text: string; tone: Tone; href: string | null } | null {
+  const states = new Set(chain.records.map((r) => r.state));
+  if (states.has("rejected") && chain.reason) return { text: chain.reason, tone: "warn", href: null };
+  if (states.has("error") && chain.reason) return { text: chain.reason, tone: "err", href: null };
+  if (states.has("duplicate") && chain.duplicate_of)
+    return { text: chain.duplicate_of, tone: "warn", href: isUrl(chain.duplicate_of) ? chain.duplicate_of : null };
+  return null;
+}
+
+/** One finding's whole career, folded; a status readout, not a log viewer. */
+function FindingRow({ chain }: { chain: FindingChain }): ReactElement {
+  const stages = trail(chain);
+  const note = noteFor(chain);
+  const links = [
+    ...(chain.issue && isUrl(chain.issue) ? [{ href: chain.issue, label: "issue" }] : []),
+    ...(chain.pr && isUrl(chain.pr) ? [{ href: chain.pr, label: "pr" }] : []),
+  ];
+  return (
+    <div className="rounded-[10px] bg-panel-2 px-3 py-2">
+      <div className="text-[12.5px] font-semibold leading-snug" title={chain.title}>
+        {chain.title}
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+        {stages.map((stage, i) => (
+          <span key={`${i}-${stage.label}`} className="flex items-center gap-1.5">
+            {i > 0 && (
+              <span aria-hidden="true" className="font-mono text-[10px] text-faint">
+                →
+              </span>
+            )}
+            <span
+              className="rounded-[5px] border border-border px-1.5 py-px font-mono text-[10px] tracking-wide"
+              style={{ color: TONE_VAR[stage.tone] }}
+            >
+              {stage.label}
+            </span>
+          </span>
+        ))}
+      </div>
+      {note && (
+        <div className={`mt-1.5 text-[11px] leading-snug ${note.tone === "err" ? "text-err" : "text-warn"}`}>
+          {note.href ? (
+            <a href={note.href} target="_blank" rel="noreferrer" className="no-underline hover:underline">
+              duplicate of {note.href}
+            </a>
+          ) : (
+            note.text
+          )}
+        </div>
+      )}
+      {links.length > 0 && (
+        <div className="mt-1 flex gap-3">
+          {links.map((link) => (
+            <a
+              key={link.label}
+              href={link.href}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11.5px] font-semibold text-accent no-underline hover:underline"
+            >
+              {link.label} ↗
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Inspector({
   target,
@@ -176,6 +304,26 @@ export function Inspector({
   const stackedOn = stackParent
     ? `${stackParent.repo}${stackParent.issue != null ? `#${stackParent.issue}` : ""} · ${stackParent.branch}`
     : (session?.parent ?? null);
+
+  // The finding ledger is a separate call, keyed by colony: the event stream does not carry it, and
+  // a colony that never validated a finding has none, so an error reads as "nothing yet".
+  const api = useApi();
+  const [findings, setFindings] = useState<FindingChain[]>([]);
+  useEffect(() => {
+    if (!session) return;
+    let active = true;
+    api.findings(session.id).then(
+      (records) => {
+        if (active) setFindings(chains(records));
+      },
+      () => {
+        if (active) setFindings([]);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, session?.id]);
 
   // Only rows the mothership actually reported: an absent fact is left out rather than guessed at.
   const connections: { label: string; dot: string; section: SectionId }[] = [];
@@ -433,6 +581,18 @@ export function Inspector({
                       <span className="w-14 shrink-0 font-mono text-[11px]">error</span>
                       <span className="min-w-0 [overflow-wrap:anywhere]">{session.error}</span>
                     </div>
+                  )}
+                </div>
+              </Section>
+
+              <Section title="FINDINGS">
+                <div className="flex flex-col gap-2">
+                  {findings.length === 0 ? (
+                    <div className="rounded-[9px] bg-panel-2 px-3 py-2 text-[12px] text-faint">
+                      nothing validated into findings yet
+                    </div>
+                  ) : (
+                    findings.map((chain) => <FindingRow key={chain.title} chain={chain} />)
                   )}
                 </div>
               </Section>
