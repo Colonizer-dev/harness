@@ -112,6 +112,18 @@ export function isScrollbarGrab(
 }
 
 /**
+ * Whether a keydown on the scroll container means the reader is moving up through the thread, and following new
+ * content down should stop. ArrowUp/PageUp/Home always scroll up; Space scrolls down unless Shift is held, in
+ * which case it scrolls up (Shift+Space). Kept as a pure helper so it is testable without a browser.
+ */
+export function shouldStopFollowing(key: string, shiftKey: boolean): boolean {
+  if (["ArrowUp", "PageUp", "Home"].includes(key)) return true;
+  if (key === " " && shiftKey) return true;
+  return false;
+}
+}
+
+/**
  * Keeps a scrolling thread at its bottom while content grows, at a steady pace rather than a burst per line.
  *
  * The view moves at the content's own pace, plus whatever closing the distance still behind needs: a new line
@@ -226,7 +238,7 @@ export function useFollowBottom() {
       if (touchY !== null && y !== undefined && y > touchY + 4) stop();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (["ArrowUp", "PageUp", "Home"].includes(e.key)) stop();
+      if (shouldStopFollowing(e.key, e.shiftKey)) stop();
     };
     // Grabbing the scrollbar lands on the container itself rather than on anything inside it — but so do
     // taps on its padding and on empty space below a short thread, so only a real scrollbar-gutter grab stops.
