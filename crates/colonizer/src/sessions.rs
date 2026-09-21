@@ -1228,9 +1228,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         Some(number) => {
             let label = format!("fetching issue {}#{number}", s.repo);
             log.info(label.clone()).await;
-            let fetched =
-                github::with_boot_retry(&label, Some(&log), boot_started_at, || github::fetch_issue(app, &s.repo, number))
-                    .await;
+            let fetched = github::with_boot_retry(&label, Some(&log), boot_started_at, || {
+                github::fetch_issue(app, &s.repo, number)
+            })
+            .await;
             match fetched {
                 Ok(issue) => Some(issue),
                 Err(e) => return Err(github::access_error(app, &s.repo, e).await),
