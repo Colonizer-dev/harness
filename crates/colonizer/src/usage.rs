@@ -16,6 +16,7 @@
 use crate::{
     Shared, client_error,
     config::{ModulesConfig, setting_str},
+    events::AGENT_FAILED,
     modules::{AgentModule, KINDS, schema_for},
     presets,
     sessions::{self, Session, SessionStatus},
@@ -54,6 +55,8 @@ const BOOT_PHASES: [&str; 8] = [
 ];
 
 /// The attention reason autopilot sets when it holds a colony back from publishing (sessions.rs).
+/// `AGENT_FAILED` (events.rs) is the sibling setter-owned hold for a runner that never started:
+/// the watchdog neither sets nor clears either of them.
 const AUTOPILOT_HELD: &str = "autopilot_held";
 
 /// The fixed messages sessions.rs records verbatim, each with its closed label. Matched whole: any
@@ -246,8 +249,8 @@ fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
 }
 
 /// A colony's attention reason, when it is one the harness set: the watchdog's reasons, autopilot's
-/// hold, or the gateway's model/provider error. Anything else in the attention blob — a hand-edited
-/// sessions.json can carry anything — is ignored rather than sent.
+/// hold, the gateway's model/provider error, or the runner-never-started hold. Anything else in the
+/// attention blob — a hand-edited sessions.json can carry anything — is ignored rather than sent.
 fn attention_reason(session: &Session) -> Option<&'static str> {
     let reason = session.attention.as_ref().and_then(|a| a["reason"].as_str())?;
     if reason == AUTOPILOT_HELD {
@@ -255,6 +258,9 @@ fn attention_reason(session: &Session) -> Option<&'static str> {
     }
     if reason == crate::gateway::MODEL_ERROR_REASON {
         return Some(crate::gateway::MODEL_ERROR_REASON);
+    }
+    if reason == AGENT_FAILED {
+        return Some(AGENT_FAILED);
     }
     crate::watchdog::WATCHDOG_REASONS
         .iter()
@@ -785,6 +791,7 @@ mod tests {
         "waiting_for_answer",
         "nudges_exhausted",
         "autopilot_held",
+        "agent_failed",
         // Setting names this install set (schema-declared keys, never values).
         "agent.model",
         "sandbox.image",
@@ -941,6 +948,24 @@ mod tests {
         );
         assert_eq!(value["payload_version"], 1);
         assert_eq!(value["usage_id"], Value::Null, "no id when none was minted to ride on");
+    }
+
+    #[test]
+    fn attention_reason_counts_the_runner_never_started_hold() {
+        // Setter-owned like autopilot_held: counted, never mistaken for a watchdog reason.
+        let mut failed = session(SessionStatus::Idle);
+        failed.attention = Some(json!({"reason": "agent_failed", "since": Utc::now(), "nudges": 0}));
+        assert_eq!(attention_reason(&failed), Some("agent_failed"));
+        let mut held = session(SessionStatus::Idle);
+        held.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+        assert_eq!(attention_reason(&held), Some("autopilot_held"));
+        let mut unknown = session(SessionStatus::Idle);
+        unknown.attention = Some(json!({"reason": "DROP TABLE sessions;", "since": Utc::now()}));
+        assert_eq!(attention_reason(&unknown), None);
+        assert_eq!(attention_reason(&session(SessionStatus::Idle)), None);
+        // And it reaches the batch under its closed label.
+        let kinds = error_kinds(&[failed]);
+        assert_eq!(kinds.get("agent_failed"), Some(&"1"));
     }
 
     #[test]
