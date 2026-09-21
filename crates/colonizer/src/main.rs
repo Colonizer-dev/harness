@@ -470,12 +470,12 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
         runtime::status_host(&app, fresh),
     );
     let modules = app.modules.read().await.clone();
-    // The same "busy" definition `queue::has_room` counts against the parallel limit — a live colony
-    // or one mid-publish keeps its microVM claimed. Kept in step with it; `sessions::SessionStatus::busy`
-    // is the shared predicate both sides express.
-    let microvms_live = app.sessions.read().await.iter().filter(|s| s.status.busy()).count();
+    // The same "holds a slot" definition `queue::has_room` counts against the parallel limit — a live colony
+    // or a live-origin publish keeps its microVM claimed, while a publish from a stopped colony holds
+    // nothing. Kept in step with it; `Session::holds_slot` is the shared predicate both sides express.
+    let microvms_live = app.sessions.read().await.iter().filter(|s| s.holds_slot()).count();
     let microvms_ceiling = orgs::global_max_parallel(&modules);
-    // Queued colonies hold no microVM (see `SessionStatus::busy`), so this is disjoint from
+    // Queued colonies hold no microVM (see `Session::holds_slot`), so this is disjoint from
     // `microvms_live`. Carried in `/api/status` so a fleet peer-poll of this endpoint (issue #231)
     // gets everything `fleet::HostSummary` needs without a second round trip.
     let queue_depth = app

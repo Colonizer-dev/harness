@@ -676,6 +676,7 @@ mod tests {
             sandbox: "colonizer-a1b2c3d4".into(),
             // Added on main while this branch was open; a batch must stay blind to both.
             publish_stage: None,
+            publishing_holds_slot: false,
             app_slot: None,
             mesh: None,
             local_port: None,

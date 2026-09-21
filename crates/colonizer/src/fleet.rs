@@ -66,7 +66,7 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
     let modules = app.modules.read().await.clone();
     let (runtime, host) = tokio::join!(runtime::status_runtime(app, false), runtime::status_host(app, false),);
     let sessions = app.sessions.read().await;
-    let slots_in_use = sessions.iter().filter(|s| s.status.busy()).count();
+    let slots_in_use = sessions.iter().filter(|s| s.holds_slot()).count();
     let queue_depth = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
     drop(sessions);
     let slots_ceiling = orgs::global_max_parallel(&modules) as usize;
