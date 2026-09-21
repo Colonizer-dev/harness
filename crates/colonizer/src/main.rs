@@ -12,6 +12,7 @@ mod burn_down;
 mod claude_login;
 mod config;
 mod events;
+mod execution;
 mod findings;
 mod fleet;
 mod gateway;
