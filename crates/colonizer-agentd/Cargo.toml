@@ -1,6 +1,6 @@
 [package]
 name = "colonizer-agentd"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Daemon inside every Colonizer microVM: agent runner bridge, event log, terminals"
 license = "MIT"
