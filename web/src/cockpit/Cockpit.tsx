@@ -252,6 +252,7 @@ export function Cockpit({
             sessions={sessions}
             orgs={workspaces}
             cost={sessions.length ? sessions.reduce((t, x) => t + (x.cost_usd ?? 0) + (x.routed_cost_usd ?? 0), 0) : null}
+            host={status?.host ?? null}
             onOpenOrg={(org) => {
               onSelectOrg(org);
               setView("home");
