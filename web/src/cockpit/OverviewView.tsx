@@ -16,7 +16,7 @@ import { formatCost, orgCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { FleetPanel } from "./FleetPanel";
-import { headlineFor, OVERVIEW_FILTERS, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
+import { headlineFor, OVERVIEW_FILTERS, matchesOverviewFilter, overviewCounts, overviewSessions, overviewVisibleSessions, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
 import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
@@ -160,6 +160,7 @@ export function OverviewView({
   host,
   fleet,
   runs = [],
+  initialFilter = null,
   onStart,
   onStop,
   onOpenOrg,
@@ -176,6 +177,8 @@ export function OverviewView({
   fleet?: FleetHost[];
   /** Red-team runs (issue #212): the card lists them, and a raid paints ants over its org's card. */
   runs?: RedTeamRun[];
+  /** The bucket filter to start on. Null in production — the tests pin the filtered states through it because static markup cannot click. */
+  initialFilter?: OverviewFilter | null;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
   onOpenOrg: (org: string) => void;
@@ -185,16 +188,35 @@ export function OverviewView({
 }): ReactElement {
   // The filter lives here, not in the cockpit: toggling a counter narrows the page, and a second
   // click on the active one (or the counts themselves) clears it. State is per-visit on purpose.
-  const [filter, setFilter] = useState<OverviewFilter | null>(null);
+  const [filter, setFilter] = useState<OverviewFilter | null>(initialFilter ?? null);
   // Which rows are unfolded, by session id. The 4 s poll hands this component brand-new session
   // objects, so the set is keyed on the id and lives here — a re-render must not close the row a
   // person is reading. Filtering narrows which rows render but never touches this set, so a row
   // stays expanded across a filter switch and is still open when its bucket comes back.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (id: string) => setExpanded((rows) => flipExpanded(rows, id));
-  // Counts come from the whole list, never the filtered one, so they keep moving on the 4s poll.
-  const counts = overviewCounts(sessions);
-  const shown = overviewSessions(sessions, filter);
+  // The page renders one card per entry of `orgs` (the visible workspaces), so the counters cover
+  // exactly that set — never the whole list. Counting switched-off orgs in the chips while their
+  // colonies have no card is the divergence behind issue #246: bare global numbers over a list
+  // that cannot show them. The chips keep moving on the 4s poll; a bucket filter narrows the
+  // cards, never these, and each chip navigates to what it counts.
+  const visibleSessions = overviewVisibleSessions(sessions, orgs);
+  const counts = overviewCounts(visibleSessions);
+  const shown = overviewSessions(visibleSessions, filter);
+  // Colonies the chips deliberately do not count: their org is switched off, so no card can show
+  // them. They are named in the scope line below instead of being silently hidden.
+  const hiddenSessions = sessions.filter((session) => !visibleSessions.includes(session));
+  const hiddenCounts = overviewCounts(hiddenSessions);
+  const hiddenOrgs = [...new Set(
+    hiddenSessions
+      .filter((session) => matchesOverviewFilter(session, "live") || matchesOverviewFilter(session, "need you"))
+      .map((session) => orgOf(session))
+      .filter((org) => org !== ""),
+  )].sort((a, b) => a.localeCompare(b));
+  const hiddenParts = [
+    hiddenCounts.live > 0 ? `${hiddenCounts.live} live` : null,
+    hiddenCounts["need you"] > 0 ? `${hiddenCounts["need you"]} need you` : null,
+  ].filter((part): part is string => part !== null);
 
   // One raid per org colours its card; the newest active run wins when several target it.
   const raidFor = new Map<string, RedTeamRun>();
@@ -270,6 +292,29 @@ export function OverviewView({
           </div>
         </div>
 
+        {(filter || hiddenOrgs.length > 0) && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11.5px] text-muted" role="status">
+            {filter && (
+              <span>
+                filter &quot;{filter}&quot; · showing {shown.length} of {visibleSessions.length}
+                <button
+                  type="button"
+                  onClick={() => setFilter(null)}
+                  className="ml-2 cursor-pointer text-accent hover:underline"
+                >
+                  clear ×
+                </button>
+              </span>
+            )}
+            {hiddenOrgs.length > 0 && (
+              <span>
+                + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")}) —
+                re-enable {hiddenOrgs.length === 1 ? "it" : "them"} in the org switcher
+              </span>
+            )}
+          </div>
+        )}
+
         {host && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border bg-panel px-3.5 py-2">
             <span
@@ -307,7 +352,22 @@ export function OverviewView({
 
         {filter && shown.length === 0 ? (
           <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">
-            nothing here under this filter
+            <div>
+              nothing under &quot;{filter}&quot; in these workspaces
+              {visibleSessions.length > 0 && (
+                <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>
+              )}
+              {hiddenOrgs.length > 0 && (
+                <> · + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")})</>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setFilter(null)}
+              className="mt-1.5 cursor-pointer font-semibold text-accent hover:underline"
+            >
+              clear filter ×
+            </button>
           </div>
         ) : (
           <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
