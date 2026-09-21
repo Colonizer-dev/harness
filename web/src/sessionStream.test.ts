@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   END_OF_THREAD,
   WATCHDOG_PREFIX,
+  SessionStream,
   buildThread,
   initialStreamState,
   isWatchdogMessageId,
@@ -19,6 +20,7 @@ import {
   type TurnSummary,
 } from "./sessionStream";
 import type { AgentEventBody, AgentRef, MemoryProposal, ServerFrame } from "./types";
+import type { Api, SocketLike } from "./api";
 
 const SENT_AT = "2026-09-17T10:00:00Z";
 
@@ -657,5 +659,91 @@ describe("buildThread", () => {
       );
       expect(Object.keys(view.notices)).toEqual(["m1", END_OF_THREAD]);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run_epoch (issue #96): a resumed run restarts its seqs, so the stream tracks which run it is
+// following and drops the old watermark when the run changes, keeping the transcript.
+// ---------------------------------------------------------------------------
+
+describe("run_epoch", () => {
+  const setup = () => {
+    const opened: { sessionId: string; since: number; epoch: number | undefined }[] = [];
+    const sockets: { onmessage: ((event: { data: string }) => void) | null }[] = [];
+    const api = {
+      openEvents: (sessionId: string, since: number, epoch?: number): SocketLike => {
+        opened.push({ sessionId, since, epoch });
+        const socket = {
+          binaryType: "blob",
+          readyState: 1,
+          onopen: null,
+          onmessage: null,
+          onclose: null,
+          onerror: null,
+          send: () => {},
+          close: () => {},
+        };
+        sockets.push(socket);
+        return socket as unknown as SocketLike;
+      },
+    } as unknown as Api;
+    const stream = new SessionStream(api, "s1");
+    stream.start();
+    const deliver = (frame: ServerFrame): void => {
+      sockets[sockets.length - 1]?.onmessage?.({ data: JSON.stringify(frame) });
+    };
+    return { stream, opened, deliver };
+  };
+
+  it("the first connect asks from the start with no epoch yet", () => {
+    const { opened } = setup();
+    expect(opened).toEqual([{ sessionId: "s1", since: 0, epoch: 0 }]);
+  });
+
+  it("a run_epoch frame records the run without touching the watermark or the transcript", () => {
+    const { stream, deliver } = setup();
+    deliver(event({ type: "status", state: "working" }, 41));
+    expect(stream.getState().lastSeq).toBe(41);
+    deliver({ type: "run_epoch", epoch: 7 });
+    expect(stream.getState().lastSeq).toBe(41);
+    expect(stream.getState().messages).toEqual([]);
+  });
+
+  it("a new epoch drops the watermark but keeps the old run's messages", () => {
+    const { stream, deliver } = setup();
+    deliver({ type: "run_epoch", epoch: 7 });
+    deliver(event({ type: "user_message", id: "u1", text: "Hi" }, 50));
+    expect(stream.getState().messages.map((m) => m.id)).toEqual(["u1"]);
+    deliver({ type: "run_epoch", epoch: 8 });
+    expect(stream.getState().lastSeq).toBe(0);
+    expect(stream.getState().messages.map((m) => m.id)).toEqual(["u1"]);
+  });
+
+  it("the same epoch twice leaves the watermark alone", () => {
+    const { stream, deliver } = setup();
+    deliver({ type: "run_epoch", epoch: 7 });
+    deliver(event({ type: "status", state: "working" }, 50));
+    deliver({ type: "run_epoch", epoch: 7 });
+    expect(stream.getState().lastSeq).toBe(50);
+  });
+
+  it("the new run's low-numbered events pass the guard after a reset", () => {
+    const { stream, deliver } = setup();
+    deliver({ type: "run_epoch", epoch: 7 });
+    deliver(event({ type: "status", state: "working" }, 50));
+    deliver({ type: "run_epoch", epoch: 8 });
+    deliver(event({ type: "assistant_text", message_id: "m2", block_index: 0, text: "Fresh run." }, 1));
+    expect(stream.getState().messages.map((m) => m.id)).toEqual(["m2"]);
+    expect(stream.getState().lastSeq).toBe(1);
+  });
+
+  it("a reconnect replays from the watermark with the current epoch", () => {
+    const { stream, opened, deliver } = setup();
+    deliver({ type: "run_epoch", epoch: 7 });
+    deliver(event({ type: "status", state: "working" }, 50));
+    stream.stop();
+    stream.start();
+    expect(opened[opened.length - 1]).toEqual({ sessionId: "s1", since: 50, epoch: 7 });
   });
 });

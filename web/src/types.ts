@@ -864,7 +864,8 @@ export type ServerFrame =
   | AgentEvent
   | { type: "session"; session: Session }
   | { type: "harness_log"; level: LogLevel; message: string; ts: string }
-  | { type: "memory_proposed"; proposal: MemoryProposal };
+  | { type: "memory_proposed"; proposal: MemoryProposal }
+  | { type: "run_epoch"; epoch: number };
 
 export type ClientCommand =
   | { type: "user_message"; text: string }

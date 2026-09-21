@@ -794,14 +794,23 @@ status. Switching on creates a random `install_id` and sends a heartbeat within 
 Switching off sends `{"install_id", "online": false}` and forgets the id. `PUT` returns `409` while the
 environment keeps it off.
 
-### `GET /api/sessions/{id}/events?since=<seq>` (WebSocket)
+### `GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>` (WebSocket)
 
 Server → client:
 
-- On connect: `{"type":"session","session":Session}`, then the last ≤200 harness logs as
+- On connect, first: `{"type":"run_epoch","epoch":N}` — the run epoch this connection is attached
+  to, with no `seq` field (old clients ignore the unknown frame). Then
+  `{"type":"session","session":Session}`, then the last ≤200 harness logs as
   `{"type":"harness_log","level":"info|error","message":"…","ts":"…"}`, then agent events with
-  `seq > since` (same objects as §3, including `seq`/`ts`), then live.
+  `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then live.
+- Each resume rotates the event log aside (`events.jsonl` → `events-N.jsonl`) and bumps the epoch,
+  and the new run's `seq` numbering starts from 1 again. The effective cursor is `0` when the
+  client's `epoch` names a retired run — its `since` is a rank in that run's numbering, meaningless
+  in the new run — and `since` when `epoch` is absent (legacy clients), `0` ("unknown"), or current,
+  so a tab left open across a resume replays the new run from the start instead of dropping its
+  first events.
 - Whenever the session changes: `{"type":"session","session":Session}`.
+- When the colony resumes, pre-existing sockets are closed so they reconnect into the new epoch.
 
 Client → server:
 
