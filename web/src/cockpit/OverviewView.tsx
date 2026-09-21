@@ -28,12 +28,13 @@ import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { isActive, isRaiding } from "../redTeam";
 import { sortSessions } from "../sessionOrder";
+import { BurnDownCard } from "./BurnDownCard";
 import { FleetPanel } from "./FleetPanel";
 import { OVERVIEW_FILTERS, headlineFor, overviewCounts, overviewSessions, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
 import { RedAnts } from "./RedAnts";
 import { RedTeamCard } from "./RedTeamCard";
-import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest } from "../types";
+import type { BurnDownStatus, FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -284,6 +285,8 @@ export function OverviewView({
         )}
 
         <FleetPanel hosts={fleet ?? []} />
+
+        <BurnDownCard />
 
         {filter && shown.length === 0 ? (
           <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">
