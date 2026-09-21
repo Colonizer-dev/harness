@@ -52,41 +52,50 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
 /// Reconnects to microVMs that kept running while the harness was down.
 pub async fn recover(app: &Shared) {
     let running = sandbox::running(&app.cfg.msb).await.unwrap_or_default();
+    // Both this list and the running set above are a snapshot, and the list moves under it while
+    // this loop works down the colonies — the HTTP API keeps serving through a restart. Each
+    // colony is handled the way `watch_sandboxes` handles its own: under the colony's lifecycle
+    // lock, re-read fresh, and only then decide. The `running` check stays on the snapshot — it
+    // is the detection, and a microVM does not come back — but every status flip below is a
+    // compare-and-set, so a publish, resume or stop that claimed the colony in between is not
+    // clobbered.
     let sessions = app.sessions.read().await.clone();
     for s in sessions {
         // The snapshot above moves under this loop: the HTTP API admits resumes, stops and
         // publishes while it works down the colonies. Take the colony's lifecycle lock and
         // re-read it, and branch on that fresh record — a colony already claimed, stopped or
         // deleted in the meantime is not this pass's to touch. The `running` check stays on
-        // the snapshot — it is the detection, and a microVM does not come back — but both
-        // flips below are compare-and-set, so a publish that claimed the colony in between
-        // (it holds no lifecycle lock) is not clobbered.
+        // the snapshot — it is the detection, and a microVM does not come back — but every
+        // status flip below is a compare-and-set, so a publish, resume or stop that claimed
+        // the colony in between is not clobbered. A resume admitted by a flip below waits on
+        // this same lock and finds the teardown finished rather than booting a microVM that
+        // the in-flight `msb rm --force` then removes.
         let lifecycle = app.session_lock(&s.id).await;
         let _lifecycle = lifecycle.lock().await;
         let Some(fresh) = app.session(&s.id).await else {
             continue;
         };
-        // A boot is in flight — a resume admitted after the snapshot claimed it. Neither reap
-        // its microVM nor clobber the claim.
-        if fresh.status == SessionStatus::Starting {
+        if claimed_boot_after_snapshot(&s, &fresh) {
+            // A resume or the queue claimed the colony after the snapshot; tearing it down
+            // would `msb rm --force` the microVM the boot is creating. A snapshot already
+            // `Starting` is an orphaned boot instead, and falls through to the teardown below.
             continue;
         }
         if s.status == SessionStatus::Publishing {
             // The kill may have landed between persisting `publishing` and the teardown inside it, so a
             // microVM can still be running — and after a restart nothing would reap it: the runtimes map
             // is empty, so no later publish removes it, and `watch_sandboxes` skips non-live statuses.
-            if fresh.status != SessionStatus::Publishing {
+            // Only an orphaned push from before the restart is this pass's to reap: a publish that
+            // claimed the colony after the snapshot owns the worktree now and is left alone.
+            if !orphaned_publish(&s, &fresh) {
                 continue;
             }
             teardown_vm(app, &fresh).await;
-            let at = fresh.status;
             let mut attention = None;
             app.update_session(&fresh.id, |x| {
-                if x.status != at {
+                if !mark_failed_after_restart(x) {
                     return false;
                 }
-                x.status = SessionStatus::Failed;
-                x.error = Some(PUBLISH_LOST_TO_RESTART.into());
                 attention = x.clear_attention();
                 true
             })
@@ -100,8 +109,13 @@ pub async fn recover(app: &Shared) {
         if !fresh.status.is_live() {
             continue;
         }
+        if claimed_boot_after_snapshot(&s, &fresh) {
+            // A resume or the queue claimed the colony after the snapshot; tearing it down would
+            // `msb rm --force` the microVM the boot is creating.
+            continue;
+        }
         let reachable = fresh.mesh.as_ref().is_some_and(|m| m.ip.is_some()) || fresh.local_port.is_some();
-        if running.contains(&fresh.sandbox) && reachable {
+        if fresh.status != SessionStatus::Starting && running.contains(&fresh.sandbox) && reachable {
             if fresh.mesh.is_some() {
                 match app.mesh().await {
                     Ok(mesh) => {
@@ -121,15 +135,16 @@ pub async fn recover(app: &Shared) {
             .await;
             start_link(app, &fresh.id).await;
         } else {
+            // A snapshot already `Starting` is an orphaned boot — its owner died with the restart
+            // and nothing else reaps `Starting` — so it falls through here instead of stranding
+            // the colony forever.
             teardown_vm(app, &fresh).await;
             let at = fresh.status;
             let mut attention = None;
             app.update_session(&fresh.id, |x| {
-                if x.status != at {
+                if !mark_stopped_after_restart(x, at) {
                     return false;
                 }
-                x.status = SessionStatus::Stopped;
-                x.error = Some(VM_GONE_AFTER_RESTART.into());
                 attention = x.clear_attention();
                 true
             })
@@ -137,6 +152,44 @@ pub async fn recover(app: &Shared) {
             app.note_cleared_attention(&fresh.id, attention).await;
         }
     }
+}
+
+/// A push this restart orphaned: the snapshot already had the colony `Publishing`, so the publish
+/// died with the restart and nothing will reap its microVM. A colony the snapshot saw live that a
+/// publish claimed in the meantime is not orphaned — it owns the worktree now.
+fn orphaned_publish(snap: &Session, fresh: &Session) -> bool {
+    snap.status == SessionStatus::Publishing && fresh.status == SessionStatus::Publishing
+}
+
+/// A boot this pass must not touch: the snapshot did not have the colony `Starting`, so a resume
+/// or the queue claimed it after the snapshot and is creating its microVM now. A snapshot already
+/// `Starting` is an orphaned boot instead, and falls through to the teardown above.
+fn claimed_boot_after_snapshot(snap: &Session, fresh: &Session) -> bool {
+    fresh.status == SessionStatus::Starting && snap.status != SessionStatus::Starting
+}
+
+/// This pass's flip of an orphaned push it has just torn down: a compare-and-set against
+/// `Publishing`, so a publish that claimed the colony while the teardown was in flight — it
+/// holds no lifecycle lock — keeps its claim. Returns whether the flip landed.
+fn mark_failed_after_restart(x: &mut Session) -> bool {
+    if x.status != SessionStatus::Publishing {
+        return false;
+    }
+    x.status = SessionStatus::Failed;
+    x.error = Some(PUBLISH_LOST_TO_RESTART.into());
+    true
+}
+
+/// This pass's flip of a colony whose microVM it has just removed: a compare-and-set against the
+/// status the re-read saw, so a publish that claimed the colony while the teardown was in flight
+/// keeps its claim. Returns whether the flip landed.
+fn mark_stopped_after_restart(x: &mut Session, at_teardown: SessionStatus) -> bool {
+    if x.status != at_teardown {
+        return false;
+    }
+    x.status = SessionStatus::Stopped;
+    x.error = Some(VM_GONE_AFTER_RESTART.into());
+    true
 }
 
 /// microsandbox stops a colony's microVM on its own when the sandbox's max session length runs out, and the
@@ -1416,6 +1469,146 @@ mod tests {
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.status, SessionStatus::Stopped, "the colony keeps the status it moved to");
         assert_eq!(s.error, None, "and the pass paints no failed error over it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_a_push_orphaned_before_the_restart_is_recovers_to_reap() {
+        assert!(
+            orphaned_publish(
+                &colony("acme", SessionStatus::Publishing),
+                &colony("acme", SessionStatus::Publishing)
+            ),
+            "a push the snapshot already held died with the restart, so nothing else reaps it"
+        );
+        assert!(
+            !orphaned_publish(
+                &colony("acme", SessionStatus::Idle),
+                &colony("acme", SessionStatus::Publishing)
+            ),
+            "a publish that claimed the colony after the snapshot owns the worktree now"
+        );
+        assert!(
+            !orphaned_publish(
+                &colony("acme", SessionStatus::Publishing),
+                &colony("acme", SessionStatus::Idle)
+            ),
+            "a push the restart did not orphan finished on its own"
+        );
+    }
+
+    #[test]
+    fn only_a_boot_claimed_after_the_snapshot_is_skipped_not_an_orphaned_one() {
+        assert!(
+            claimed_boot_after_snapshot(&colony("acme", SessionStatus::Idle), &colony("acme", SessionStatus::Starting)),
+            "a resume that claimed the colony after the snapshot is creating its microVM now"
+        );
+        assert!(
+            claimed_boot_after_snapshot(
+                &colony("acme", SessionStatus::Queued),
+                &colony("acme", SessionStatus::Starting)
+            ),
+            "the queue admitting the colony after the snapshot is the same claim"
+        );
+        assert!(
+            !claimed_boot_after_snapshot(
+                &colony("acme", SessionStatus::Starting),
+                &colony("acme", SessionStatus::Starting)
+            ),
+            "a boot the snapshot already held is orphaned, and falls through to the teardown"
+        );
+        assert!(
+            !claimed_boot_after_snapshot(
+                &colony("acme", SessionStatus::Starting),
+                &colony("acme", SessionStatus::Running)
+            ),
+            "a colony past its boot is judged on its own status, not this rule"
+        );
+    }
+
+    #[test]
+    fn a_restart_failed_flip_lands_on_publishing_and_not_on_a_claim_that_moved_in_the_meantime() {
+        let mut orphaned = colony("acme", SessionStatus::Publishing);
+        assert!(
+            mark_failed_after_restart(&mut orphaned),
+            "the flip lands while the colony still holds the orphaned push"
+        );
+        assert_eq!(orphaned.status, SessionStatus::Failed, "the colony reads failed");
+        assert_eq!(orphaned.error, Some(PUBLISH_LOST_TO_RESTART.into()), "the flip says why");
+        // A publish holds no lifecycle lock, so it can reclaim the colony while this pass's
+        // teardown is still in flight; the flip must leave that claim standing.
+        let mut reclaimed = colony("acme", SessionStatus::Idle);
+        assert!(
+            !mark_failed_after_restart(&mut reclaimed),
+            "the flip refuses a colony that moved off publishing"
+        );
+        assert_eq!(reclaimed.status, SessionStatus::Idle, "the claim keeps its status");
+        assert_eq!(reclaimed.error, None, "and the restart's error is not painted over it");
+    }
+
+    #[test]
+    fn a_restart_stopped_flip_lands_on_the_teardown_status_and_not_on_a_publish_that_claimed_in_the_meantime() {
+        let mut gone = colony("acme", SessionStatus::Idle);
+        assert!(
+            mark_stopped_after_restart(&mut gone, SessionStatus::Idle),
+            "the flip lands while the colony is still on the status the re-read saw"
+        );
+        assert_eq!(gone.status, SessionStatus::Stopped, "the colony reads stopped");
+        assert_eq!(gone.error, Some(VM_GONE_AFTER_RESTART.into()), "the flip says why");
+        let mut claimed = colony("acme", SessionStatus::Publishing);
+        assert!(
+            !mark_stopped_after_restart(&mut claimed, SessionStatus::Idle),
+            "the flip refuses a colony that moved off its teardown status"
+        );
+        assert_eq!(claimed.status, SessionStatus::Publishing, "the publish keeps its claim");
+        assert_eq!(claimed.error, None, "and the restart's error is not painted over it");
+    }
+
+    #[tokio::test]
+    async fn recover_reaps_what_the_restart_orphaned_and_leaves_a_finished_colony_alone() {
+        // Safe without KVM: the fixture colonies have no mesh address and no local port, so none
+        // is reachable and the reconnect branch (which would spawn the agent link) never runs;
+        // `msb` is absent here, so the running set is empty and the removals fail silently.
+        use crate::tests::test_app;
+        let root = std::env::temp_dir().join(format!("colonizer-recover-{}", short_id()));
+        let app = test_app(&root);
+        for (id, status) in [
+            ("boot", SessionStatus::Starting),
+            ("push", SessionStatus::Publishing),
+            ("idle", SessionStatus::Idle),
+            ("done", SessionStatus::Stopped),
+        ] {
+            let mut s = colony("acme", status);
+            s.id = id.into();
+            s.sandbox = format!("sandbox-{id}");
+            app.sessions.write().await.push(s);
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        recover(&app).await;
+        let boot = app.session("boot").await.unwrap();
+        assert_eq!(
+            boot.status,
+            SessionStatus::Stopped,
+            "an orphaned boot is not stranded forever"
+        );
+        assert_eq!(boot.error.as_deref(), Some(VM_GONE_AFTER_RESTART), "the reaped boot says why");
+        let push = app.session("push").await.unwrap();
+        assert_eq!(push.status, SessionStatus::Failed, "an orphaned push is reaped");
+        assert_eq!(
+            push.error.as_deref(),
+            Some(PUBLISH_LOST_TO_RESTART),
+            "the reaped push says why"
+        );
+        let idle = app.session("idle").await.unwrap();
+        assert_eq!(idle.status, SessionStatus::Stopped, "a live colony with no microVM is reaped");
+        assert_eq!(
+            idle.error.as_deref(),
+            Some(VM_GONE_AFTER_RESTART),
+            "the reaped colony says why"
+        );
+        let done = app.session("done").await.unwrap();
+        assert_eq!(done.status, SessionStatus::Stopped, "a finished colony is skipped");
+        assert_eq!(done.error, None, "and the skip does not repaint its error");
         let _ = std::fs::remove_dir_all(root);
     }
 }
