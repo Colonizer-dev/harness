@@ -425,7 +425,13 @@ pub async fn stop(State(app): State<Shared>) -> impl IntoResponse {
         if s.status == SessionStatus::Queued {
             // A queued colony never started, so there is no microVM to remove — the same shape the
             // session stop handler uses.
-            app.update_session(&s.id, |x| x.status = SessionStatus::Stopped).await;
+            let mut attention = None;
+            app.update_session(&s.id, |x| {
+                x.status = SessionStatus::Stopped;
+                attention = x.clear_attention();
+            })
+            .await;
+            app.note_cleared_attention(&s.id, attention).await;
             app.session_log(
                 &s.id,
                 "info",

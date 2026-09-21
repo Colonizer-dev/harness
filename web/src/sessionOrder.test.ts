@@ -1,6 +1,6 @@
 // sessionRank, after "needs you" was extracted for the notifications: the extraction must not have
-// moved anything — a colony that needs a person still ranks 0 ahead of every group, whatever its
-// status, and unflagged colonies still sort by the status table.
+// moved anything — a live colony that needs a person still ranks 0 ahead of every group, and
+// unflagged colonies still sort by the status table. Terminal colonies never rank 0, even flagged.
 import { describe, expect, it } from "vitest";
 
 import { sessionRank } from "./sessionOrder";
@@ -39,9 +39,15 @@ describe("sessionRank", () => {
     expect(sessionRank(session({ status: "waiting_for_answer" }))).toBe(0);
   });
 
-  it("ranks any attention flag first, whatever its reason", () => {
+  it("ranks a live attention flag first, whatever its reason", () => {
     for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
-      expect(sessionRank(session({ status: "failed", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(0);
+      expect(sessionRank(session({ status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(0);
+    }
+  });
+
+  it("leaves flagged terminal colonies to the status table — a dead colony never ranks 0", () => {
+    for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
+      expect(sessionRank(session({ status: "failed", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(4);
     }
   });
 
