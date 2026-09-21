@@ -26,6 +26,7 @@ function session(overrides: Partial<Session> = {}): Session {
     error: null,
     cost_usd: null,
     cleaned_up: false,
+    keep_worktree: false,
     created_at: "2026-09-18T09:00:00Z",
     updated_at: "2026-09-18T09:05:00Z",
     ...overrides,

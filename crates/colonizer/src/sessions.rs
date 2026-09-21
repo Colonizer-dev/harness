@@ -806,6 +806,7 @@ fn duplicate_message(held: &Session, issue: u64) -> String {
 /// inserts — this re-check closes that window, and the loser gets its holder back for a 409.
 /// `Ok` carries the admitted colony, whether it queued, and how many were already waiting;
 /// `Err` carries the colony already holding the issue, and nothing is inserted.
+#[allow(clippy::result_large_err)]
 fn try_claim_session(
     sessions: &mut Vec<Session>,
     room: bool,
@@ -944,6 +945,7 @@ pub(crate) fn autopilot_default(agents: &[AgentModule], modules: &ModulesConfig)
         .unwrap_or(false)
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
@@ -1129,7 +1131,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // read lock, so two launches can both pass it before either inserts — the loser is refused with
     // the same 409 inside the lock, where check and insert are one atomic step.
     let claimed = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
-        try_claim_session(sessions, room, session, &repo, req.issue, req.allow_duplicate, wait_for_parent)
+        try_claim_session(
+            sessions,
+            room,
+            session,
+            &repo,
+            req.issue,
+            req.allow_duplicate,
+            wait_for_parent,
+        )
     })
     .await;
     let (session, queued, waiting) = match claimed {
@@ -1752,9 +1762,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if agent.needs_claude {
         // The colony's own account, recorded at launch — never the install default by accident.
         let account = s.claude_account.clone().unwrap_or_else(|| "default".into());
-        let cred = app.claude_cred_for(s.claude_account.as_deref()).with_context(|| {
-            format!("log in with Claude in Settings first (account '{account}')")
-        })?;
+        let cred = app
+            .claude_cred_for(s.claude_account.as_deref())
+            .with_context(|| format!("log in with Claude in Settings first (account '{account}')"))?;
         mounts.push(Mount {
             source: resolve_guest_claude_bin(app).await?,
             target: "/opt/claude/bin/claude".into(),
@@ -2118,9 +2128,7 @@ pub async fn events_ws(
 /// line outside the JSON contract costs itself, not the rest of the transcript.
 fn replay_line(chunk: &[u8]) -> Option<(u64, &str)> {
     let line = std::str::from_utf8(chunk).ok()?;
-    let seq = serde_json::from_str::<Value>(line)
-        .ok()
-        .and_then(|v| v["seq"].as_u64())?;
+    let seq = serde_json::from_str::<Value>(line).ok().and_then(|v| v["seq"].as_u64())?;
     Some((seq, line))
 }
 
@@ -3047,6 +3055,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[allow(clippy::result_large_err)]
     async fn two_simultaneous_claims_on_one_issue_let_exactly_one_through() {
         // The TOCTOU window this guards: two launches both passing the read-locked pre-check before
         // either inserts. Both collide here inside the write lock instead, through the same
