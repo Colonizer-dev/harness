@@ -1037,6 +1037,14 @@ body {
 @keyframes ck-grow { from { opacity: 0; transform: scale(0.2); } }
 @keyframes ck-slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 
+/* Red-team raids (issue #212): the red ant column that marches onto a nest under attack.
+   The travel is `left` in %, so the same keyframes scale from an overview card to the whole
+   plot; the ants are positioned at the edge inline, which is exactly where a frozen
+   animation (reduced motion) leaves them. */
+@keyframes rt-march { 0% { left: -4%; opacity: 0; transform: translateY(0); } 8% { opacity: 0.9; } 25% { transform: translateY(-4px) rotate(2deg); } 50% { transform: translateY(3px) rotate(-2deg); } 75% { transform: translateY(-2px) rotate(2deg); } 92% { opacity: 0.9; } 100% { left: 58%; opacity: 0.9; transform: translateY(0); } }
+@keyframes rt-twitch { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes rt-pulse { 0%, 100% { opacity: 0.9; transform: scale(0.88); } 50% { opacity: 0.3; transform: scale(1.12); } }
+
 /* The ck-* animations are applied inline or as arbitrary utilities (durations and offsets are computed
    per colony), so there is no per-animation class to switch off. The guard works off the cockpit root
    instead, which covers the nest's ants and tunnels as well as the panels that slide and fade. */
@@ -1046,5 +1054,13 @@ body {
     animation: none !important;
     transition: none !important;
     offset-distance: 0 !important;
+  }
+  /* Belt and braces for the red-team columns: their travel is `left`, so a frozen march must
+     keep the ants at the edge the inline position already puts them at. This also covers a
+     RedAnts layer rendered outside a .cockpit subtree, where the guard above cannot reach. */
+  .rt-march,
+  .rt-twitch,
+  .rt-pulse {
+    animation: none !important;
   }
 }
