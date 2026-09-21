@@ -31,3 +31,14 @@ describe("mock saveOrg", () => {
     expect(saved.settings.max_parallel).toBeNull();
   });
 });
+
+describe("mock startRedTeamRun", () => {
+  it("rejects an armed create on a repo another run is already active on, like the server", async () => {
+    const api = createMockApi();
+    // The seed has a running raid on acme/webshop, so an armed create there must be refused too —
+    // the server's one-active-run-per-repo check does not care how the create is armed.
+    await expect(api.startRedTeamRun({ repo: "acme/webshop", arm: true })).rejects.toThrow(
+      "a red-team run is already active on this repo",
+    );
+  });
+});
