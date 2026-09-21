@@ -40,6 +40,7 @@ mod sandbox;
 mod sessions;
 mod spend;
 mod stack;
+mod stale;
 mod telemetry;
 mod timing;
 mod update;
@@ -983,6 +984,8 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))
         .route("/api/sessions/{id}/publish", post(publish::publish))
+        .route("/api/sessions/{id}/behind", get(stale::behind))
+        .route("/api/sessions/{id}/catch-up", post(stale::catch_up))
         .route("/api/sessions/{id}/stop", post(lifecycle::stop))
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/storage", get(reclaim::storage))
