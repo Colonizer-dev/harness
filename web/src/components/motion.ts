@@ -85,6 +85,33 @@ export function advance(g: Glide, target: number, dt: number): number {
 const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /**
+ * True only for a grab of a classic vertical scrollbar on `el`.
+ *
+ * Padding belongs to the container's own box, so a tap on the side gutters,
+ * the top/bottom strips, or the empty space below a short thread also lands
+ * with `target === el` — as do children only insofar as they start inside the
+ * content box. The scrollbar gutter is the strip a classic scrollbar occupies
+ * (right side in LTR, left side in RTL); overlay scrollbars take no width and
+ * never count. Element and event are structural so tests can pass fakes.
+ */
+export function isScrollbarGrab(
+  el: Pick<HTMLElement, "offsetWidth" | "clientWidth"> & {
+    getBoundingClientRect(): Pick<DOMRect, "left" | "right">;
+  },
+  e: Pick<PointerEvent, "target" | "clientX">,
+): boolean {
+  if (e.target !== (el as unknown as EventTarget)) return false;
+  const gutter = el.offsetWidth - el.clientWidth;
+  if (gutter <= 0) return false;
+  let rtl = false;
+  if (typeof getComputedStyle === "function") {
+    rtl = getComputedStyle(el as unknown as Element).direction === "rtl";
+  }
+  const rect = el.getBoundingClientRect();
+  return rtl ? e.clientX - rect.left < gutter : rect.right - e.clientX < gutter;
+}
+
+/**
  * Keeps a scrolling thread at its bottom while content grows, at a steady pace rather than a burst per line.
  *
  * The view moves at the content's own pace, plus whatever closing the distance still behind needs: a new line
@@ -201,9 +228,10 @@ export function useFollowBottom() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (["ArrowUp", "PageUp", "Home"].includes(e.key)) stop();
     };
-    // Grabbing the scrollbar lands on the container itself rather than on anything inside it.
+    // Grabbing the scrollbar lands on the container itself rather than on anything inside it — but so do
+    // taps on its padding and on empty space below a short thread, so only a real scrollbar-gutter grab stops.
     const onPointerDown = (e: PointerEvent) => {
-      if (e.target === el) stop();
+      if (isScrollbarGrab(el, e)) stop();
     };
     const onScroll = () => {
       if (!follow.current && atBottom()) {
