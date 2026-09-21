@@ -1026,6 +1026,7 @@ async fn proxy(
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`. The usage
 /// the translation already extracted is teed out to `record_routed_usage` on both paths.
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
+#[allow(clippy::too_many_arguments)]
 async fn openai_response(
     upstream: reqwest::Response,
     guards: Guards,
