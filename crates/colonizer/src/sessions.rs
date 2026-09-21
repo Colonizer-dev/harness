@@ -675,6 +675,54 @@ fn issue_held_by(sessions: &[Session], repo: &str, issue: u64) -> Option<Session
         .cloned()
 }
 
+/// The 409 message for a second colony on an issue another colony still holds: the holder, where
+/// its work stands, and the way out. One function, so the fast-path pre-check and the authoritative
+/// in-lock re-check refuse with the same words.
+fn duplicate_message(held: &Session, issue: u64) -> String {
+    let where_it_is = match held.pr_url.as_deref() {
+        Some(url) => format!("its pull request is open at {url}"),
+        None => format!("it is {}", held.status.as_str()),
+    };
+    format!(
+        "colony {} is already on #{issue} and {where_it_is}. Starting a second one duplicates its \
+         work: read that colony first, or pass allow_duplicate to start another anyway.",
+        held.id
+    )
+}
+
+/// The authoritative duplicate-colony claim, run while the admission write lock is held: the
+/// pre-check in `create` reads under a read lock, so two launches can both pass it before either
+/// inserts — this re-check closes that window, and the loser gets its holder back for a 409.
+/// `Ok` carries the admitted colony, whether it queued, and how many were already waiting;
+/// `Err` carries the colony already holding the issue, and nothing is inserted.
+fn try_claim_session(
+    sessions: &mut Vec<Session>,
+    room: bool,
+    mut session: Session,
+    repo: &str,
+    issue: Option<u64>,
+    allow_duplicate: bool,
+    wait_for_parent: bool,
+) -> Result<(Session, bool, usize), Session> {
+    if let (Some(number), false) = (issue, allow_duplicate)
+        && let Some(held) = issue_held_by(sessions, repo, number)
+    {
+        return Err(held);
+    }
+    // A colony still waiting for its parent's branch queues even when a slot is free: booting now
+    // would branch from the default branch, which is exactly what stacking exists to avoid. A
+    // queued colony holds no slot, so nothing is wasted by the wait.
+    session.status = if room && !wait_for_parent {
+        SessionStatus::Starting
+    } else {
+        SessionStatus::Queued
+    };
+    let queued = session.status == SessionStatus::Queued;
+    let waiting = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
+    sessions.push(session.clone());
+    Ok((session, queued, waiting))
+}
+
 /// Whether colonies may file validated findings as issues. On unless switched off in Settings.
 pub(crate) fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, &app.agents);
@@ -876,18 +924,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     if let (Some(issue), false) = (req.issue, req.allow_duplicate)
         && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
     {
-        let where_it_is = match held.pr_url.as_deref() {
-            Some(url) => format!("its pull request is open at {url}"),
-            None => format!("it is {}", held.status.as_str()),
-        };
-        return Err(client_error(
-            StatusCode::CONFLICT,
-            &format!(
-                "colony {} is already on #{issue} and {where_it_is}. Starting a second one duplicates its \
-                 work: read that colony first, or pass allow_duplicate to start another anyway.",
-                held.id
-            ),
-        ));
+        return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
     }
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
@@ -959,22 +996,23 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     tokio::fs::create_dir_all(dir.join("out")).await?;
     // The room check and the push share one write lock, so two launches colliding on the last free slot
     // cannot both take it. Counted before the push, so this colony is never waiting behind itself.
-    let (session, queued, waiting) = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
-        let mut session = session;
-        // A colony still waiting for its parent's branch queues even when a slot is free: booting now
-        // would branch from the default branch, which is exactly what stacking exists to avoid. A
-        // queued colony holds no slot, so nothing is wasted by the wait.
-        session.status = if room && !wait_for_parent {
-            SessionStatus::Starting
-        } else {
-            SessionStatus::Queued
-        };
-        let queued = session.status == SessionStatus::Queued;
-        let waiting = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
-        sessions.push(session.clone());
-        (session, queued, waiting)
+    // The duplicate-issue check is re-checked here too: the fast-path pre-check above reads under a
+    // read lock, so two launches can both pass it before either inserts — the loser is refused with
+    // the same 409 inside the lock, where check and insert are one atomic step.
+    let claimed = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
+        try_claim_session(sessions, room, session, &repo, req.issue, req.allow_duplicate, wait_for_parent)
     })
     .await;
+    let (session, queued, waiting) = match claimed {
+        Ok(admitted) => admitted,
+        Err(held) => {
+            // The colony directories created above belong to a colony that never was; take them back
+            // out, best effort, before refusing.
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            let issue = req.issue.unwrap_or_default();
+            return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
+        }
+    };
     if let Err(e) = app.persist_sessions().await {
         // Nothing has been reported as done yet — no boot, no log line, no reply — so the record
         // comes back out rather than leaving a colony only memory has heard of, and the caller
@@ -2595,6 +2633,74 @@ pub(crate) mod tests {
             issue_held_by(&sessions, "acme/repo", 7).map(|s| s.id),
             Some("other-repo".to_string()),
             "the colony on this repo's #7 is the one that holds it"
+        );
+    }
+
+    #[test]
+    fn a_stopped_or_failed_colony_frees_its_issue_for_an_explicit_retry() {
+        // The sweep above covers every terminal state; stopped and failed get their own assertion
+        // because they are the retries that matter — a run that died halfway, not one that shipped.
+        for status in [SessionStatus::Stopped, SessionStatus::Failed] {
+            let sessions = vec![on_issue("dead", 7, status)];
+            assert!(
+                issue_held_by(&sessions, "acme/repo", 7).is_none(),
+                "{} is done with #7, so a retry is not a duplicate",
+                status.as_str()
+            );
+            // And the atomic claim the handler admits with lets that retry through.
+            let mut sessions = sessions;
+            let mut retry = colony("acme", SessionStatus::Starting);
+            retry.id = "retry".into();
+            retry.issue = Some(7);
+            let claimed = try_claim_session(&mut sessions, true, retry, "acme/repo", Some(7), false, false);
+            assert!(claimed.is_ok(), "a retry after {} is admitted, not refused", status.as_str());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn two_simultaneous_claims_on_one_issue_let_exactly_one_through() {
+        // The TOCTOU window this guards: two launches both passing the read-locked pre-check before
+        // either inserts. Both collide here inside the write lock instead, through the same
+        // `try_claim_session` the handler admits with — one is admitted, the other gets its holder.
+        let sessions = std::sync::Arc::new(RwLock::new(Vec::new()));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let mut tasks = Vec::new();
+        for i in 0..2 {
+            let (sessions, barrier) = (sessions.clone(), barrier.clone());
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let mut fresh = colony("acme", SessionStatus::Starting);
+                fresh.id = format!("racer-{i}");
+                fresh.issue = Some(7);
+                with_slot(&sessions, "acme", 8, None, |guard, room| {
+                    try_claim_session(guard, room, fresh, "acme/repo", Some(7), false, false)
+                })
+                .await
+            }));
+        }
+        let mut admitted = 0;
+        let mut refused = 0;
+        for task in tasks {
+            match task.await.expect("claim task joined") {
+                Ok(_) => admitted += 1,
+                Err(_) => refused += 1,
+            }
+        }
+        assert_eq!(admitted, 1, "exactly one racer is admitted");
+        assert_eq!(refused, 1, "the other gets the holder back for its 409");
+        let done = sessions.read().await;
+        assert_eq!(done.len(), 1, "the loser inserted nothing");
+        let held = issue_held_by(&done, "acme/repo", 7).expect("the winner holds #7");
+        assert!(
+            held.id == "racer-0" || held.id == "racer-1",
+            "the holder is the admitted racer, not a stranger: {}",
+            held.id
+        );
+        // And the loser's 409 reads the way the handler's does.
+        let message = duplicate_message(&held, 7);
+        assert!(
+            message.contains(&format!("colony {} is already on #7", held.id)) && message.contains("allow_duplicate"),
+            "{message}"
         );
     }
 

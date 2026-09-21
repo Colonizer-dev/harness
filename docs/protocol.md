@@ -204,6 +204,19 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
 
+### Duplicate-colony prevention
+
+`POST /api/sessions` refuses a second colony on the same `(repo, issue)` while another colony
+holds it: one `queued`, live (`starting`, `running`, `waiting_for_answer`, `idle`), `publishing`,
+or `pr_opened` — answered **409** naming the holder, its state, and its PR URL when one is open.
+Terminal states (`stopped`, `failed`, `no_changes`, `merged`, `closed`) free the issue for a retry.
+A fast pre-check reads under a read lock and the authoritative claim re-checks while the admission
+write lock is held, so two launches racing each other cannot both slip through; the loser gets its
+holder back for the 409. `allow_duplicate: true` in the request body starts a second colony anyway. The
+cockpit warns inline before submit — "already held by `<id>`", with a link to that colony — and
+offers the override as an Allow-duplicate checkbox. Scope is per-host only: fleet peers listed by
+`GET /api/hosts` are not consulted, so two motherships can still launch on the same issue.
+
 Module `schema` is a JSON Schema subset (also used for `settings` in agent `module.json` manifests):
 
 ```json
