@@ -88,6 +88,64 @@ prebuilt_bin() {
   echo "using prebuilt $1 from $prebuilt"
 }
 
+# $app is a symlink to the slot directory beside it (app-a/app-b), so installing is a single rename:
+# whenever the script stops, $app is either the whole old app or the whole new one, never nothing.
+# Same layout as scripts/install-release.sh, whose relink/restore_app/cleanup_install these mirror.
+relink() {
+  rm -f "$2.new"
+  ln -s "$1" "$2.new"
+  mv -T "$2.new" "$2" 2>/dev/null || mv -h "$2.new" "$2" 2>/dev/null ||
+    { rm -f "$2.new"; ln -sfn "$1" "$2"; }
+}
+
+# An install killed between parking the old app and linking the new one (SIGKILL runs no traps, and
+# installers before the symlink layout had none) leaves the only copy at $app.old, with either
+# nothing or a dangling symlink at $app. [ -e ] follows links, so one condition covers both; a
+# dangling link has to go first, since a rename cannot replace a directory with one. The old
+# --install path staged its copy at $app.new instead, so a copy parked there is moved into place too.
+restore_app() {
+  if [ -e "$app.old" ] && [ ! -e "$app" ]; then
+    rm -f "$app"
+    mv "$app.old" "$app"
+    echo "put back the app an interrupted install left at $app.old"
+  elif [ -e "$app.new" ] && [ ! -e "$app" ]; then
+    mv "$app.new" "$app"
+    echo "put back the app an interrupted install left at $app.new"
+  fi
+}
+
+cleanup_install() {
+  [ -z "$parked" ] || [ -e "$app" ] || mv "$parked" "$app"
+}
+
+# Stages $1 beside $app, into whichever of the two slots $app is not using, and points $app at it
+# with one rename. A legacy install left the app in the directory itself, and no rename can replace
+# a directory with a symlink, so it is parked at $app.old first, and the traps put it back if we are
+# killed before the new link lands. Reads and writes the $app/$parked globals.
+swap_app() {
+  src=$1
+  dir=$(dirname "$app")
+  name=$(basename "$app")
+  mkdir -p "$dir"
+  restore_app
+  rm -rf "$app.new" "$app.old"
+  previous=$(readlink "$app" || true)
+  slot=$name-a
+  [ "$previous" != "$name-a" ] || slot=$name-b
+  rm -rf "${dir:?}/$slot"
+  cp -a "$src" "$dir/$slot"
+  if [ -L "$app" ] || [ ! -e "$app" ]; then
+    relink "$slot" "$app"
+  else
+    parked=$app.old
+    mv "$app" "$parked"
+    relink "$slot" "$app"
+    parked=
+    rm -rf "$app.old"
+  fi
+  case "$previous" in "$name-a" | "$name-b") rm -rf "${dir:?}/$previous" ;; esac
+}
+
 echo "==> colonizer-agentd (static musl build inside a microVM)"
 prebuilt_bin colonizer-agentd || MSB="$msb" "$root/scripts/build-agentd.sh"
 
@@ -142,13 +200,13 @@ fi
 if [ "$install_app" = 1 ]; then
   app="$HOME/.local/share/colonizer/app"
   echo "==> installing to $app"
-  mkdir -p "$(dirname "$app")"
-  rm -rf "$app.new"
-  cp -a "$dist" "$app.new"
-  rm -rf "$app"
-  mv "$app.new" "$app"
+  parked=
+  trap cleanup_install EXIT
+  # dash runs a trap and then carries on, so a signal has to end the script here.
+  trap 'cleanup_install; exit 1' INT TERM
+  swap_app "$dist"
   mkdir -p "$HOME/.local/bin"
-  ln -sf "$app/bin/colonizer" "$HOME/.local/bin/colonizer"
+  relink "$app/bin/colonizer" "$HOME/.local/bin/colonizer"
   echo "installed: run 'colonizer' and open http://127.0.0.1:7878"
 else
   echo "built: run '$dist/bin/colonizer' and open http://127.0.0.1:7878"
