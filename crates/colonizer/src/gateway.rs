@@ -586,6 +586,7 @@ fn anthropic_usage(usage: &Value) -> Usage {
         output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
         cache_read_tokens: usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
         cache_write_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        thinking_tokens: usage["output_tokens_details"]["thinking_tokens"].as_u64().unwrap_or(0),
     }
 }
 
@@ -643,10 +644,14 @@ impl SseTap {
                 self.usage.cache_read_tokens = message.cache_read_tokens;
                 self.usage.cache_write_tokens = message.cache_write_tokens;
             }
-            // Deltas carry the running output total, so the last one seen is the final count.
+            // Deltas carry the running output and thinking totals, so the last one seen is the final count.
             Some("message_delta") => {
                 let output = event["usage"]["output_tokens"].as_u64().unwrap_or(0);
                 self.usage.output_tokens = self.usage.output_tokens.max(output);
+                let thinking = event["usage"]["output_tokens_details"]["thinking_tokens"]
+                    .as_u64()
+                    .unwrap_or(0);
+                self.usage.thinking_tokens = self.usage.thinking_tokens.max(thinking);
             }
             _ => {}
         }
@@ -1667,7 +1672,8 @@ mod tests {
                 input_tokens: 25,
                 output_tokens: 15,
                 cache_read_tokens: 40,
-                cache_write_tokens: 5
+                cache_write_tokens: 5,
+                thinking_tokens: 0
             })
         );
     }
@@ -1688,7 +1694,8 @@ mod tests {
                 input_tokens: 25,
                 output_tokens: 15,
                 cache_read_tokens: 40,
-                cache_write_tokens: 5
+                cache_write_tokens: 5,
+                thinking_tokens: 0
             }),
             "a data line split across chunks is waited for, not half-read"
         );
@@ -1709,8 +1716,40 @@ mod tests {
                 input_tokens: 12,
                 output_tokens: 9,
                 cache_read_tokens: 80,
-                cache_write_tokens: 2
+                cache_write_tokens: 2,
+                thinking_tokens: 0
             })
+        );
+    }
+
+    /// Meta's Anthropic-wire responses (and any other reasoning model on that wire) report thinking
+    /// tokens spent from the output budget in `usage.output_tokens_details.thinking_tokens`; a response
+    /// without the field (every provider before Meta) must still count as zero, not error.
+    #[test]
+    fn anthropic_usage_reads_thinking_tokens_when_present() {
+        let with_thinking = json!({"input_tokens": 12, "output_tokens": 9, "output_tokens_details": {"thinking_tokens": 40}});
+        assert_eq!(anthropic_usage(&with_thinking).thinking_tokens, 40);
+
+        let without = json!({"input_tokens": 12, "output_tokens": 9});
+        assert_eq!(anthropic_usage(&without).thinking_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_json_body_with_thinking_tokens_prices_them() {
+        let body = br#"{"id":"msg_1","type":"message","usage":{"input_tokens":12,"output_tokens":9,"output_tokens_details":{"thinking_tokens":40}}}"#;
+        let (_, counted) = counted(vec![Ok(Bytes::from_static(body))], false).await;
+        assert_eq!(counted.map(|u| u.thinking_tokens), Some(40));
+    }
+
+    #[tokio::test]
+    async fn message_delta_carries_the_running_thinking_total() {
+        let body = message_start(25, 40, 5)
+            + "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":15,\"output_tokens_details\":{\"thinking_tokens\":6}}}\n\n";
+        let (_, counted) = counted(vec![Ok(Bytes::from(body))], true).await;
+        assert_eq!(
+            counted.map(|u| (u.output_tokens, u.thinking_tokens)),
+            Some((15, 6)),
+            "message_delta's usage carries thinking tokens the same way it carries output tokens"
         );
     }
 

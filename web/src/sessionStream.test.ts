@@ -362,12 +362,13 @@ describe("reduceFrame", () => {
       expect(s.turns[0].afterMessageId).toBeNull();
     });
 
-    /** One model's cumulative usage; the cache halves stay zero here. */
+    /** One model's cumulative usage; the cache halves and thinking tokens stay zero here. */
     const tokens = (input: number, output: number) => ({
       input_tokens: input,
       output_tokens: output,
       cache_read_tokens: 0,
       cache_write_tokens: 0,
+      thinking_tokens: 0,
     });
 
     it("names the models that served this turn, the biggest share first", () => {
