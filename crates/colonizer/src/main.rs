@@ -9,6 +9,7 @@
 
 mod autonomy;
 mod burn_down;
+mod claude_accounts;
 mod claude_login;
 mod config;
 mod events;
@@ -176,17 +177,27 @@ impl App {
     }
 
     pub fn claude_cred(&self) -> Option<ClaudeCred> {
-        if let Some(token) = read_trimmed(&self.claude_token_file()) {
-            let env = if token.starts_with("sk-ant-api") {
-                "ANTHROPIC_API_KEY"
+        self.claude_cred_for(None)
+    }
+
+    /// The credential for one Claude account: the requested account's stored secret, else the
+    /// single-token file a pre-accounts install left behind, else the environment. `None` selects
+    /// the install default, so `claude_cred` — every existing caller — keeps working unchanged.
+    pub fn claude_cred_for(&self, account: Option<&str>) -> Option<ClaudeCred> {
+        let _ = claude_accounts::migrate_legacy(&self.cfg.config_dir);
+        let meta = claude_accounts::load_meta(&self.cfg.config_dir);
+        let id = account.filter(|a| !a.is_empty()).map(str::to_string).unwrap_or_else(|| {
+            if meta.default.is_empty() {
+                "default".to_string()
             } else {
-                "CLAUDE_CODE_OAUTH_TOKEN"
-            };
-            let source = if env == "ANTHROPIC_API_KEY" {
-                "saved API key"
-            } else {
-                "Claude subscription"
-            };
+                meta.default.clone()
+            }
+        });
+        let token = claude_accounts::cred_for(&self.cfg.config_dir, &id)
+            .map(|(_, token)| token)
+            .or_else(|| read_trimmed(&self.claude_token_file()));
+        if let Some(token) = token {
+            let (env, source) = claude_accounts::sniff(&token);
             return Some(ClaudeCred {
                 env,
                 value: token,
@@ -965,6 +976,8 @@ async fn serve() -> Result<()> {
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
+        .route("/api/claude-accounts", get(claude_accounts::list).post(claude_accounts::create))
+        .route("/api/claude-accounts/{id}", delete(claude_accounts::delete))
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
