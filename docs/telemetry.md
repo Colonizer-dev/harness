@@ -111,12 +111,13 @@ Both switches keep [usage data](usage-data.md) off too; that page also names one
 
 ## Running the service
 
-From `services/telemetry`:
+From `services/telemetry` (run `npm ci` first on a fresh checkout, so deploys use the
+wrangler version pinned in the committed lockfile):
 
 ```sh
 node --test                                                 # the privacy-relevant logic
-npx wrangler d1 migrations apply colonizer-telemetry --remote
-npx wrangler deploy
+npx --no-install wrangler d1 migrations apply colonizer-telemetry --remote
+npx --no-install wrangler deploy
 ```
 
 The prune rides on requests to either route, at most once every 10 minutes per isolate. There is no
