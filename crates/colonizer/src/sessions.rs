@@ -2285,7 +2285,10 @@ pub(crate) mod tests {
     fn a_publishing_row_saved_before_the_slot_flag_still_holds_its_slot() {
         let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"publishing","branch":"b","base":null,"worktree":"","git_admin_dir":"git","sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
         let s: Session = serde_json::from_str(saved).unwrap();
-        assert!(s.publishing_holds_slot, "unknown origin keeps the old every-publish-holds rule");
+        assert!(
+            s.publishing_holds_slot,
+            "unknown origin keeps the old every-publish-holds rule"
+        );
         assert!(s.holds_slot());
     }
 
