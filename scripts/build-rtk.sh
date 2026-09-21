@@ -65,7 +65,7 @@ else
   tar -xzf "$archive" -C "$SRC" --strip-components 1
   if [ "${COLONIZER_BUILD_HERE:-}" = 1 ]; then
     echo "building rtk $version ($target) here..."
-    (cd "$SRC" && cargo build --release --locked --target-dir "$REPO/target/alpine-rtk")
+    (cd "$SRC" && cargo build --release --target-dir "$REPO/target/alpine-rtk")
   else
     echo "building rtk $version ($target) in a rust:1-alpine microVM..."
     "$MSB" run --no-tty -q -m 4G -c 8 \
@@ -73,7 +73,7 @@ else
       -v "$REPO/target/alpine-rtk:/build-target" \
       -v "$REPO/target/alpine-cargo-registry:/usr/local/cargo/registry" \
       -w /src \
-      rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release --locked --target-dir /build-target'
+      rust:1-alpine -- sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release --target-dir /build-target'
   fi
   elf_or_die "$REPO/target/alpine-rtk/release/rtk"
   install -m 755 "$REPO/target/alpine-rtk/release/rtk" "$OUT"
