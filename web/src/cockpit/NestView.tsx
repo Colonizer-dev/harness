@@ -15,6 +15,8 @@ import { needsYou } from "../notifications";
 import { isActive, isRaiding } from "../redTeam";
 import type { SubagentView } from "../sessionStream";
 import type { RedTeamRun, Session, SessionStatus } from "../types";
+import { KIND_DOT } from "./InboxView";
+import { feedEntry } from "./feed";
 import { RedAnts } from "./RedAnts";
 import {
   MAX_CHAMBERS,
@@ -80,12 +82,55 @@ function chamberLabel(session: Session, diameter: number): string {
   return diameter >= 112 ? `${short}#${session.issue}` : `#${session.issue}`;
 }
 
+/**
+ * Per-chamber text balloons (issue #218), tier (a)+(b): every chamber reads its colony-level
+ * `feedEntry(session).text`, and the selected chamber escalates to the live `agentDetail` from
+ * the mothership's single event stream when it is non-empty. No per-chamber websocket fan-out.
+ */
+export interface BalloonAnchor {
+  id: string;
+  x: number;
+  y: number;
+  r: number;
+  diameter: number;
+  updatedAt: string;
+  selected: boolean;
+}
+
+/**
+ * Balloons only where the chamber has room for them: the same 112px threshold the chamber label
+ * and avatar already use, so a balloon never hangs off a chamber too small to read.
+ */
+export const BALLOON_MIN_DIAMETER = 112;
+
+/** Balloons whose anchors sit closer than this are the same scribble: keep one. */
+const BALLOON_MIN_SEPARATION_PX = 120;
+
+/**
+ * Density rule, deterministic: drop chambers too small for a balloon, always keep the selected
+ * chamber, then take the rest newest-first (`updated_at`, `id` breaking ties exactly like
+ * `feedEntries`) and skip any whose anchor is within BALLOON_MIN_SEPARATION_PX of one already
+ * shown. Pure so the tests can pin it without laying the nest out.
+ */
+export function planBalloons(anchors: BalloonAnchor[]): BalloonAnchor[] {
+  const roomy = anchors.filter((a) => a.selected || a.diameter >= BALLOON_MIN_DIAMETER);
+  const rest = roomy
+    .filter((a) => !a.selected)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const shown = roomy.filter((a) => a.selected);
+  for (const anchor of rest) {
+    if (shown.every((s) => Math.hypot(s.x - anchor.x, s.y - anchor.y) >= BALLOON_MIN_SEPARATION_PX)) shown.push(anchor);
+  }
+  return shown;
+}
+
 export function NestView({
   sessions,
   selectedId,
   mothershipSelected,
   redRuns = [],
   settlers,
+  liveDetail = null,
   backlogCount,
   avatarFor,
   onSelect,
@@ -101,6 +146,12 @@ export function NestView({
   redRuns?: RedTeamRun[];
   /** Real settlers, and only for `selectedId` — the harness streams one colony at a time. */
   settlers: SubagentView[];
+  /**
+   * The live `agentDetail` from the mothership's single event stream (tier (b)). It belongs to
+   * the streamed colony, so only the selected chamber reads it — and only while non-empty, with
+   * the colony-level feed line as the fallback.
+   */
+  liveDetail?: string | null;
   /** Open issues across the workspace's repositories; the frontier's badge. */
   backlogCount: number;
   /** The org's avatar, for the chamber's own badge; null when nothing knows one. */
@@ -146,6 +197,35 @@ export function NestView({
     return { session, slot, index, edge: TONE_VAR[tone], path: tunnelPath(slot, box, seed), branches };
   });
 
+  // One text balloon per chamber: the colony-level feed line, except the selected chamber
+  // escalates to the live stream detail while it has one. KIND_DOT keeps the dot reading the
+  // same as the inbox and the timeline; the border reuses the chamber's own tone edge.
+  const balloonEntries = placed.map(({ session, slot }) => {
+    const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
+    const entry = feedEntry(session);
+    return {
+      session,
+      slot,
+      diameter: slot.r * 2,
+      edge: TONE_VAR[tone],
+      dot: KIND_DOT[entry.kind],
+      text: session.id === selectedId && liveDetail ? liveDetail : entry.text,
+    };
+  });
+  const visibleBalloonIds = new Set(
+    planBalloons(
+      balloonEntries.map(({ session, slot, diameter }) => ({
+        id: session.id,
+        x: slot.x,
+        y: slot.y,
+        r: slot.r,
+        diameter,
+        updatedAt: session.updated_at,
+        selected: session.id === selectedId,
+      })),
+    ).map((a) => a.id),
+  );
+  const balloons = balloonEntries.filter(({ session }) => visibleBalloonIds.has(session.id));
   // The raid a red-team run is staging on this nest: the first active one whose org is ours.
   // Its ants render only while the run is live — a done or stopped run has isActive() false,
   // so the column vanishes with it.
@@ -431,6 +511,30 @@ export function NestView({
               </button>
             );
           })}
+
+          {/* Per-chamber text balloons: a sibling overlay above the carriers (z-[3]), never inside
+              the chamber buttons, and pointer-events-none so chambers and tunnels stay clickable.
+              One short line each — truncate clips it, the title keeps the full string — toned by
+              the chamber's state. No animation of their own, so the `.cockpit`
+              prefers-reduced-motion kill-switch has nothing to cover; aria-hidden because the
+              chambers' title/aria-label already convey the text. */}
+          <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-[4]">
+            {balloons.map(({ session, slot, diameter, edge, dot, text }) => (
+              <span
+                key={`balloon-${session.id}`}
+                title={text}
+                className="absolute -translate-x-1/2 -translate-y-full truncate rounded-full border bg-panel px-2 py-0.5 font-mono text-[10px] text-muted"
+                style={{ left: slot.x, top: slot.y - slot.r - 6, maxWidth: diameter, borderColor: edge }}
+              >
+                <span
+                  aria-hidden="true"
+                  className="mr-1 inline-block h-[7px] w-[7px] rounded-full"
+                  style={{ background: dot }}
+                />
+                {text}
+              </span>
+            ))}
+          </div>
 
           {freeSlot && (
             <button
