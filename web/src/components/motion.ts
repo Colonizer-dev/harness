@@ -121,7 +121,6 @@ export function shouldStopFollowing(key: string, shiftKey: boolean): boolean {
   if (key === " " && shiftKey) return true;
   return false;
 }
-}
 
 /**
  * Keeps a scrolling thread at its bottom while content grows, at a steady pace rather than a burst per line.

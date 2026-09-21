@@ -11,6 +11,11 @@
 //! its length as 8 little-endian bytes (so `["ab","c"]` and `["a","bc"]` bind
 //! differently). An approval names one hash; `authorize` grants exactly that
 //! candidate and nothing else.
+//!
+//! Scaffolding (issue #98): the call-site wiring lands in follow-ups, so the
+//! module is allow(dead_code) until the first check is bound.
+
+#![allow(dead_code)]
 
 use ring::digest;
 

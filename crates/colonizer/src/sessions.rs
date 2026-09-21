@@ -806,6 +806,7 @@ fn duplicate_message(held: &Session, issue: u64) -> String {
 /// inserts — this re-check closes that window, and the loser gets its holder back for a 409.
 /// `Ok` carries the admitted colony, whether it queued, and how many were already waiting;
 /// `Err` carries the colony already holding the issue, and nothing is inserted.
+#[allow(clippy::result_large_err)]
 fn try_claim_session(
     sessions: &mut Vec<Session>,
     room: bool,
@@ -944,6 +945,7 @@ pub(crate) fn autopilot_default(agents: &[AgentModule], modules: &ModulesConfig)
         .unwrap_or(false)
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
@@ -3047,6 +3049,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[allow(clippy::result_large_err)]
     async fn two_simultaneous_claims_on_one_issue_let_exactly_one_through() {
         // The TOCTOU window this guards: two launches both passing the read-locked pre-check before
         // either inserts. Both collide here inside the write lock instead, through the same
