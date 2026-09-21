@@ -6,7 +6,7 @@
 // rate, since a wrapped line arrives whole whatever the display redraws at.
 import { describe, expect, it } from "vitest";
 
-import { advance, isScrollbarGrab, newGlide } from "./motion";
+import { advance, isScrollbarGrab, newGlide, shouldStopFollowing } from "./motion";
 
 const REFRESH_HZ = [60, 120, 144]; // the displays this runs on: the law must not care which
 const STEP_PX = [23, 40]; // what a wrapped line, and a paragraph step, add to the content's height
@@ -55,6 +55,27 @@ const mean = (values: number[]): number => values.reduce((a, b) => a + b, 0) / v
 /** The value a fraction `q` of the way through the sorted list, so 0.95 is the p95. */
 const quantile = (values: number[], q: number): number =>
   [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(q * values.length))];
+
+describe("shouldStopFollowing", () => {
+  it("stops on keys that scroll the thread up", () => {
+    for (const key of ["ArrowUp", "PageUp", "Home"]) {
+      expect(shouldStopFollowing(key, false)).toBe(true);
+      expect(shouldStopFollowing(key, true)).toBe(true);
+    }
+  });
+
+  it("stops on Shift+Space, which scrolls up, but not on plain Space, which scrolls down", () => {
+    expect(shouldStopFollowing(" ", true)).toBe(true);
+    expect(shouldStopFollowing(" ", false)).toBe(false);
+  });
+
+  it("does not stop on keys that scroll down or do anything else", () => {
+    for (const key of ["ArrowDown", "PageDown", "End", "Enter", "a"]) {
+      expect(shouldStopFollowing(key, false)).toBe(false);
+      expect(shouldStopFollowing(key, true)).toBe(false);
+    }
+  });
+});
 
 describe("newGlide", () => {
   it("starts at rest, remembering nothing but where it is and where the bottom is", () => {
