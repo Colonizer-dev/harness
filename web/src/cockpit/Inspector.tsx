@@ -10,6 +10,7 @@ import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../co
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
+import { useBehind } from "../behind";
 import { useApi } from "../context";
 import { needsYou } from "../notifications";
 import { formatCost } from "../spend";
@@ -309,6 +310,8 @@ export function Inspector({
   // The finding ledger is a separate call, keyed by colony: the event stream does not carry it, and
   // a colony that never validated a finding has none, so an error reads as "nothing yet".
   const api = useApi();
+  // How far the colony branch lags origin/{base} (issue #173); display-only, like everything here.
+  const { behind } = useBehind(session);
   const [findings, setFindings] = useState<FindingChain[]>([]);
   useEffect(() => {
     if (!session) return;
@@ -526,6 +529,8 @@ export function Inspector({
                   <div className="truncate font-mono text-[11.5px] text-muted">
                     {session.branch}
                     {session.base ? ` → ${session.base}` : ""}
+                    {session.base && typeof behind === "number" && behind > 0 ? ` · behind by ${behind}` : ""}
+                    {session.base && behind === 0 ? " · up to date" : ""}
                   </div>
                   <a
                     href={session.pr_url}
