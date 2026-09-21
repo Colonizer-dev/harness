@@ -676,7 +676,15 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         app.storage_failed("save the session list", &e).await;
         return Err(e.into());
     }
-    app.runtimes.lock().await.remove(&id);
+    if let Some(rt) = app.runtimes.lock().await.remove(&id) {
+        rt.stop.send_replace(true);
+    }
+    // The colony was non-live (`deletable` refused live ones), so any microVM still under its
+    // deterministic sandbox name is an orphan no reaper will collect — e.g. a stop that raced a
+    // boot's unguarded stretch — and the id is never reused, so `--replace` never masks it. Reap
+    // it now that the record is gone. `teardown_vm` swallows its own errors, so this can neither
+    // fail the deletion nor trigger the re-insert paths above.
+    teardown_vm(&app, &s).await;
     // The record is gone, so drop its lifecycle lock slot and the map does not grow without bound on a
     // long-running mothership. A bound, not a guarantee: `watch_sandboxes` takes this lock before its
     // existence re-check, so a reaper tick that snapshotted the colony before this delete can
@@ -711,6 +719,23 @@ mod tests {
         for status in [Starting, Running, WaitingForAnswer, Idle, Publishing] {
             assert!(!deletable(status), "{status:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_stopped_colony_runs_the_vm_teardown_and_forgets_the_record() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        // Already cleaned up, so no worktree removal stands between the record and the
+        // teardown: the test exercises the reap path (`msb` is absent here, and
+        // `sandbox::remove` swallows that, with no mesh or local port there is no agentd
+        // call either) and the deletion must still succeed.
+        app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
+        let out = delete(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert_eq!(out.0["deleted"], json!("abc"), "the deletion reports the colony");
+        assert!(
+            app.session("abc").await.is_none(),
+            "the record is gone, so the id is never reused"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
