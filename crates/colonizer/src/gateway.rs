@@ -5,7 +5,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error, openai,
-    providers::{Provider, Usage, Wire, strip_oauth_betas},
+    providers::{Provider, ProviderQuirks, Usage, Wire, strip_oauth_betas},
     util::read_trimmed,
 };
 use axum::{
@@ -745,6 +745,86 @@ fn forward_headers(incoming: &HeaderMap, credential: Option<(HeaderName, HeaderV
     out
 }
 
+/// Attention reason set when a colony's last turn failed on the model/provider side (upstream 4xx/5xx).
+/// Owned by the gateway — the watchdog owns `WATCHDOG_REASONS`, autopilot owns its hold — and shared
+/// with usage.rs, which buckets it as a closed failure label. This is the hook point the proxy calls;
+/// fuller session wiring (clearing rules and the like) stays with its owner (#230).
+pub(crate) const MODEL_ERROR_REASON: &str = "model_error";
+
+/// Flags a colony for attention after a model/provider error, leaving an existing flag alone: the
+/// watchdog's or autopilot's reason describes the colony better than a fresh error does.
+pub(crate) async fn flag_model_error(app: &Shared, colony: &str) {
+    app.update_session(colony, |x| {
+        if x.attention.is_none() {
+            x.attention = Some(json!({"reason": MODEL_ERROR_REASON, "since": Utc::now()}));
+        }
+    })
+    .await;
+}
+
+/// Rewrites an Anthropic-wire request body for a provider with dialect quirks
+/// ([`Provider::quirks`]). Returns `None` when the body needs nothing changed, so the caller keeps
+/// the original bytes and the passthrough stays byte-identical for providers without quirks. A body
+/// that is not JSON is also left alone: only real requests are rewritten, never anything else.
+/// Currently: strips `ttl` from every `cache_control` object — system blocks, message content blocks,
+/// tools — via a whole-body walk, so no location is special-cased — and raises `max_tokens` below the
+/// provider's floor. Returns the rewritten bytes plus a short human summary of what changed.
+pub fn normalize_anthropic_body(body: &Bytes, quirks: ProviderQuirks) -> Option<(Bytes, String)> {
+    if !quirks.needs_normalize() {
+        return None;
+    }
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let mut stripped = 0u64;
+    if quirks.strip_cache_ttl {
+        strip_cache_ttl(&mut value, &mut stripped);
+    }
+    let mut raised = false;
+    if let Some(min) = quirks.min_max_tokens
+        && let Some(max) = value.get("max_tokens").and_then(Value::as_u64)
+        && max < min
+    {
+        value["max_tokens"] = json!(min);
+        raised = true;
+    }
+    if stripped == 0 && !raised {
+        return None;
+    }
+    let mut notes = Vec::new();
+    if stripped > 0 {
+        notes.push(format!("stripped cache_control.ttl from {stripped} block(s)"));
+    }
+    if raised {
+        notes.push(format!("raised max_tokens to {}", quirks.min_max_tokens.unwrap_or_default()));
+    }
+    let out = serde_json::to_vec(&value).ok()?;
+    Some((Bytes::from(out), notes.join("; ")))
+}
+
+/// Drops `ttl` from every `{"type":"ephemeral",…}` cache_control object in the value, counting removals.
+fn strip_cache_ttl(value: &mut Value, stripped: &mut u64) {
+    match value {
+        Value::Object(map) => {
+            if let Some(cc) = map.get_mut("cache_control")
+                && cc.get("type").and_then(Value::as_str) == Some("ephemeral")
+                && cc.get("ttl").is_some()
+                && let Some(cc) = cc.as_object_mut()
+            {
+                cc.remove("ttl");
+                *stripped += 1;
+            }
+            for value in map.values_mut() {
+                strip_cache_ttl(value, stripped);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_cache_ttl(item, stripped);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn proxy(
     State(app): State<Shared>,
     Path((id, _)): Path<(String, String)>,
@@ -793,6 +873,14 @@ async fn proxy(
                     None,
                 );
             };
+            // Preemptive, not a retry: the provider's quirks say which fields its dialect rejects, so a
+            // request carrying them is rewritten once, up front, and the rewrite is logged with the field
+            // named. Anything without quirks skips this entirely and stays byte-identical.
+            let mut body = body;
+            if let Some((normalized, note)) = normalize_anthropic_body(&body, provider.quirks()) {
+                eprintln!("gateway: provider \"{id}\": normalized request body preemptively ({note})");
+                body = normalized;
+            }
             (url, forward_headers(&headers, credential_header(&app, &provider)), body, None)
         }
         Wire::Openai => {
@@ -896,12 +984,17 @@ async fn proxy(
     let guards = (busy, in_flight, permit, timed);
     if let Some(info) = translation {
         let record = usage_recorder(&app, &colony, &provider);
-        return openai_response(upstream, guards, usage, record, timeout, &info, &id).await;
+        return openai_response(upstream, guards, usage, record, timeout, &info, &id, Some((&app, &colony))).await;
     }
 
     let status = upstream.status();
     if status.as_u16() >= 400 {
         usage.add_failure();
+        // Named, not invisible: a 400 here is usually a field the provider's dialect rejects (notably
+        // `cache_control.ttl`, normalized preemptively above when the quirks say so), and any 4xx/5xx
+        // flags the colony for attention instead of leaving it idle with a failed turn.
+        eprintln!("gateway: provider \"{id}\" answered {status} for colony {colony}");
+        flag_model_error(&app, &colony).await;
     }
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
@@ -933,6 +1026,7 @@ async fn proxy(
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`. The usage
 /// the translation already extracted is teed out to `record_routed_usage` on both paths.
 /// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
+#[allow(clippy::too_many_arguments)]
 async fn openai_response(
     upstream: reqwest::Response,
     guards: Guards,
@@ -941,6 +1035,8 @@ async fn openai_response(
     timeout: Duration,
     info: &openai::RequestInfo,
     id: &str,
+    // Who to flag for attention on an upstream 4xx/5xx; `None` in tests, which have no session store.
+    attention: Option<(&Shared, &str)>,
 ) -> Response {
     let status = upstream.status();
     let retry_after = upstream.headers().get("retry-after").cloned();
@@ -998,6 +1094,10 @@ async fn openai_response(
     } else {
         if status.as_u16() >= 400 {
             usage.add_failure();
+            if let Some((app, colony)) = attention {
+                eprintln!("gateway: provider \"{id}\" answered {status} for colony {colony}");
+                flag_model_error(app, colony).await;
+            }
         }
         let (status, kind, message) = openai::translate_error(status, &bytes, id);
         api_error(status, kind, message, None)
@@ -1076,6 +1176,49 @@ mod tests {
         assert!(upstream_url("http://h", "/v1/../admin", None).is_none());
         assert!(upstream_url("http://h", "/v1/%2e%2e/admin", None).is_none());
         assert!(upstream_url("http://h", "v1/messages", None).is_none());
+    }
+
+    #[test]
+    fn anthropic_bodies_are_normalized_only_for_providers_with_quirks() {
+        let meta = ProviderQuirks {
+            strip_cache_ttl: true,
+            min_max_tokens: Some(16),
+        };
+        let body = Bytes::from(
+            r#"{"model":"m","max_tokens":4,
+                "system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+                "messages":[{"role":"user","content":[
+                    {"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}},
+                    {"type":"text","text":"plain"}]}],
+                "tools":[{"name":"Bash","input_schema":{"type":"object"},
+                    "cache_control":{"type":"ephemeral","ttl":"1h"}}]}"#,
+        );
+        let (out, note) = normalize_anthropic_body(&body, meta).expect("meta strips ttl and raises max_tokens");
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["max_tokens"], 16, "below the provider floor");
+        assert!(
+            !String::from_utf8_lossy(&out).contains("ttl"),
+            "system blocks, message content blocks and tools all lose ttl"
+        );
+        assert_eq!(value["system"][0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(
+            value["messages"][0]["content"][1],
+            json!({"type": "text", "text": "plain"}),
+            "blocks without cache_control are untouched"
+        );
+        assert!(note.contains("cache_control.ttl"), "the log names the field, got: {note}");
+        assert!(note.contains("max_tokens"), "got: {note}");
+
+        // No quirks: the body passes through untouched (None keeps the original bytes).
+        assert_eq!(normalize_anthropic_body(&body, ProviderQuirks::default()), None);
+        // Quirks but nothing to rewrite: also untouched.
+        let clean = Bytes::from(r#"{"model":"m","max_tokens":100,"messages":[]}"#);
+        assert_eq!(normalize_anthropic_body(&clean, meta), None);
+        // Not JSON at all: never rewritten.
+        assert_eq!(normalize_anthropic_body(&Bytes::from("not json"), meta), None);
+        // A max_tokens already above the floor stays as the colony sent it.
+        let ample = Bytes::from(r#"{"model":"m","max_tokens":1024,"messages":[]}"#);
+        assert_eq!(normalize_anthropic_body(&ample, meta), None);
     }
 
     #[test]
@@ -1333,6 +1476,7 @@ mod tests {
             Duration::from_secs(30),
             &info,
             "strix",
+            None,
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -1347,6 +1491,7 @@ mod tests {
             Duration::from_secs(30),
             &info,
             "strix",
+            None,
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);

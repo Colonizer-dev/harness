@@ -85,6 +85,43 @@ impl Pricing {
     }
 }
 
+/// Per-provider dialect quirks: what one endpoint rejects that the Anthropic wire otherwise allows.
+/// Data, not branches: the next dialect gap becomes a row in [`PRESET_QUIRKS`], consulted at proxy
+/// time, instead of another `if id == ...` in gateway.rs. Keyed by the provider's `preset` (the
+/// catalogue id it was added from), so a hand-pointed custom endpoint keeps default behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderQuirks {
+    /// Drop `ttl` from `cache_control` blocks (`{"type":"ephemeral","ttl":…}` → `{"type":"ephemeral"}`).
+    pub strip_cache_ttl: bool,
+    /// Floor for `max_tokens`; a request below it is raised to it. Meta answers 400 below 16.
+    pub min_max_tokens: Option<u64>,
+}
+
+impl ProviderQuirks {
+    /// Whether any rewrite applies: without quirks the gateway keeps the body byte-identical.
+    pub fn needs_normalize(self) -> bool {
+        self.strip_cache_ttl || self.min_max_tokens.is_some()
+    }
+}
+
+/// One row per preset with a known dialect gap. `custom` (and anything unlisted) gets defaults.
+const PRESET_QUIRKS: &[(&str, ProviderQuirks)] = &[(
+    "meta",
+    ProviderQuirks {
+        strip_cache_ttl: true,
+        min_max_tokens: Some(16),
+    },
+)];
+
+/// The quirks for a preset id, or defaults when the preset has no known gaps.
+pub fn quirks_for_preset(preset: &str) -> ProviderQuirks {
+    PRESET_QUIRKS
+        .iter()
+        .find(|(id, _)| *id == preset)
+        .map(|(_, quirks)| *quirks)
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
@@ -123,6 +160,11 @@ impl Provider {
 
     pub fn queue_timeout_secs(&self) -> u64 {
         self.queue_timeout_secs.unwrap_or_else(|| self.timeout_secs())
+    }
+
+    /// This provider's dialect quirks, from its preset. See [`ProviderQuirks`].
+    pub fn quirks(&self) -> ProviderQuirks {
+        quirks_for_preset(self.preset.as_str())
     }
 
     /// What one routed response costs here: $0 when the provider has no pricing configured, whose tokens
@@ -765,6 +807,27 @@ mod tests {
         assert!(!valid_id("Deep Seek"));
         assert!(valid_model("deepseek-ai/DeepSeek-V4.1-Flash"));
         assert!(!valid_model("has space"));
+    }
+
+    #[test]
+    fn quirks_are_data_keyed_by_preset_not_provider_branches() {
+        assert_eq!(
+            quirks_for_preset("meta"),
+            ProviderQuirks {
+                strip_cache_ttl: true,
+                min_max_tokens: Some(16),
+            }
+        );
+        assert_eq!(quirks_for_preset("custom"), ProviderQuirks::default());
+        assert_eq!(quirks_for_preset(""), ProviderQuirks::default());
+        assert_eq!(quirks_for_preset("deepseek"), ProviderQuirks::default());
+        assert!(quirks_for_preset("meta").needs_normalize());
+        assert!(!ProviderQuirks::default().needs_normalize());
+
+        let mut meta = provider("meta");
+        meta.preset = "meta".into();
+        assert!(meta.quirks().needs_normalize());
+        assert!(!provider("deepseek").quirks().needs_normalize());
     }
 
     #[test]
