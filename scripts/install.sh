@@ -59,16 +59,27 @@ echo "==> vendored binaries (pinned, sha256-verified)"
 
 # A colony is a Linux microVM, so the agent binary mounted into it has to be a Linux one. On Linux that
 # is the host's own install; a Mac's is Mach-O and cannot run in the guest, so fetch the Linux build.
+# (There is no host fallback for it on a Mac, and none needed on Linux.)
 if [ "$(uname -s)" = "Darwin" ] && [ "$bundle" = 0 ]; then
   echo "==> Claude Code for the guest (Linux build, sha256-verified)"
   "$root/scripts/fetch-agent-binary.sh"
 fi
 
+# The Node runtime has no host fallback on any host — unlike the agent binary above, which Linux
+# reuses from the host install. sessions.rs mounts dist/bin/node-guest into every colony whose agent
+# command starts with `node` and fails the boot when it is missing, so the pinned Linux build is
+# fetched on Darwin and Linux alike: at install time, never at runtime.
+if [ "$bundle" = 0 ]; then
+  echo "==> Node.js for the guest (Linux build, sha256-verified)"
+  "$root/scripts/fetch-node-binary.sh"
+fi
+
 # Both locks ride in dist/: the installed app reads them back at install time (install-release.sh
-# fetches the guest agent against claude-code.lock) and at --pull-image time (the image digest in
+# fetches the guest agent against claude-code.lock and the guest runtime against node.lock) and at --pull-image time (the image digest in
 # images.lock), so a release has to carry its pins to stay reproducible.
 mkdir -p "$dist"
 install -m 644 "$root/vendor/claude-code.lock" "$dist/claude-code.lock"
+install -m 644 "$root/vendor/node.lock" "$dist/node.lock"
 install -m 644 "$root/crates/colonizer/images.lock" "$dist/images.lock"
 
 # microsandbox ships with the app, so there is nothing to install separately. COLONIZER_MSB still

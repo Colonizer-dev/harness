@@ -18,6 +18,14 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
 };
 
+/// The status-event detail for a spawn failure: it names the binary, so the surfaced
+/// error/attention says what failed to start instead of reading as a bare harness complaint.
+/// (The log line already names it; this keeps the status detail — the one events.rs matches on —
+/// just as explicit.)
+fn spawn_failure_detail(program: &str, err: &std::io::Error) -> String {
+    format!("cannot start agent runner `{program}`: {err}")
+}
+
 const MAX_INVALID_LINE: usize = 500;
 
 pub struct Runner {
@@ -85,7 +93,7 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
         Ok(child) => child,
         Err(e) => {
             store.append(log_event("error", format!("cannot start agent runner `{program}`: {e}")));
-            store.append(status_event("error", Some(format!("cannot start agent runner: {e}"))));
+            store.append(status_event("error", Some(spawn_failure_detail(program, &e))));
             return runner;
         }
     };
@@ -186,5 +194,25 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect::<String>() + "…"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_failure_detail_names_the_binary() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
+        let detail = spawn_failure_detail("node", &err);
+        assert!(
+            detail.contains("cannot start agent runner"),
+            "marker events.rs matches on: {detail}"
+        );
+        assert!(detail.contains("`node`"), "the binary must be named: {detail}");
+        assert!(
+            detail.contains("No such file or directory"),
+            "the cause must survive: {detail}"
+        );
     }
 }
