@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -77,12 +77,208 @@ pub fn read_trimmed(path: &Path) -> Option<String> {
 }
 
 /// Writes a secret with 0600 permissions, tightening the parent directory to 0700.
+///
+/// When `COLONIZER_MASTER_KEY` is set, the value is envelope-encrypted (ChaCha20-Poly1305 via
+/// ring, key = SHA256 of the env value) and stored as `<path>.enc`, and any stale plaintext at
+/// `path` is removed. Without the env var the value is stored as plaintext at `path` and any
+/// stale `.enc` is removed, so a downgrade never leaves a shadowing ciphertext behind.
+///
+/// What this protects, honestly: a copied, synced or backed-up config dir no longer leaks the
+/// secrets. What it does not: a process running as the user can read the env var and the files,
+/// so this is not a defense against local malware or the user themselves. A second machine with
+/// a copy of the config dir needs the same `COLONIZER_MASTER_KEY` or its copy is dead by design.
+/// Rotation means setting a new key value and re-saving each secret; if the old key is lost,
+/// delete the `.enc` files and re-enter the secrets.
 pub fn write_secret(path: &Path, value: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    write_private(path, value.as_bytes())
+    if let Some(key) = master_key() {
+        let envelope = seal(value, &key)?;
+        write_private(&enc_path(path), envelope.as_bytes())?;
+        let _ = std::fs::remove_file(path);
+        return Ok(());
+    }
+    write_private(path, value.as_bytes())?;
+    let _ = std::fs::remove_file(enc_path(path));
+    Ok(())
+}
+
+/// Removes both the plaintext secret at `path` and its encrypted sibling `<path>.enc`,
+/// ignoring errors. Every secret delete must go through here: removing only the plaintext
+/// would leave the `.enc` behind shadowing (and resurrecting) the secret.
+pub fn delete_secret(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(enc_path(path));
+}
+
+/// Reads a secret written by [`write_secret`]. If `<path>.enc` holds any non-empty content the
+/// master key is required and the envelope must open, otherwise `None` is returned — fail
+/// closed, never falling back to a stale plaintext and never returning ciphertext as if it
+/// were the key (which would surface as silent 401s). With no `.enc` file the plaintext at
+/// `path` is read, so pre-encryption secrets keep working.
+pub fn read_secret(path: &Path) -> Option<String> {
+    let enc = enc_path(path);
+    match std::fs::read(&enc) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+        Ok(bytes) => {
+            let envelope = String::from_utf8(bytes).ok()?;
+            if envelope.trim().is_empty() {
+                // Empty/whitespace-only .enc counts as absent: fall back to plaintext below.
+            } else {
+                let key = master_key()?;
+                return open_envelope(&envelope, &key);
+            }
+        }
+    }
+    read_trimmed(path)
+}
+
+/// The encrypted sibling of a secret path: `<name>.enc` next to `<name>`. Versioned by
+/// filename, so an older binary that does not know about encryption sees a missing key
+/// (fail closed) rather than mistaking ciphertext for the key.
+pub fn enc_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".enc");
+    PathBuf::from(name)
+}
+
+/// The envelope-encryption key: SHA256 of the raw `COLONIZER_MASTER_KEY` bytes. Supply a long
+/// random value; hashing preserves its entropy and keeps key handling to these few lines.
+/// A low-entropy `COLONIZER_MASTER_KEY` value is offline-brute-forceable from a copied `.enc`
+/// file, so the value must be a long random string (e.g. 32+ random bytes); the single SHA256
+/// derivation is a binding, not a stretching KDF.
+/// `None` when the env var is unset or blank, meaning plaintext storage.
+fn master_key() -> Option<[u8; 32]> {
+    env_nonempty("COLONIZER_MASTER_KEY").map(|v| {
+        let digest = ring::digest::digest(&ring::digest::SHA256, v.as_bytes());
+        let mut key = [0u8; 32];
+        key.copy_from_slice(digest.as_ref());
+        key
+    })
+}
+
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 (alphabet `A–Z a–z 0–9 + /` with `=` padding), implemented by hand so no
+/// new crate is needed.
+fn b64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i] as u32;
+        let b1 = if i + 1 < bytes.len() { bytes[i + 1] as u32 } else { 0 };
+        let b2 = if i + 2 < bytes.len() { bytes[i + 2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(B64_ALPHABET[((n >> 12) & 63) as usize] as char);
+        if i + 1 < bytes.len() {
+            out.push(B64_ALPHABET[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if i + 2 < bytes.len() {
+            out.push(B64_ALPHABET[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        i += 3;
+    }
+    out
+}
+
+/// Inverse of [`b64_encode`]. Outer whitespace is trimmed first; anything else outside the
+/// standard alphabet (including inner whitespace) is rejected with `None`.
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let s = s.trim();
+    if s.is_empty() || !s.len().is_multiple_of(4) || !s.is_ascii() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let pad = bytes.iter().rev().take_while(|&&c| c == b'=').count();
+    if pad > 2 || bytes[..bytes.len() - pad].contains(&b'=') {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.as_chunks::<4>().0 {
+        let mut n = 0u32;
+        for (j, &c) in chunk.iter().enumerate() {
+            let v = if c == b'=' { 0 } else { val(c)? };
+            n |= v << (18 - 6 * j);
+        }
+        out.push(((n >> 16) & 0xff) as u8);
+        if chunk[2] != b'=' {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if chunk[3] != b'=' {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Seals `plaintext` under `key` with ChaCha20-Poly1305 (fresh `SystemRandom` nonce per seal,
+/// empty additional data) and returns the envelope line `v1:<base64-nonce12>:<base64-ct+tag>`.
+fn seal(plaintext: &str, key: &[u8; 32]) -> Result<String> {
+    use ring::{aead, rand::SecureRandom};
+    let mut nonce_bytes = [0u8; 12];
+    ring::rand::SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("could not generate an encryption nonce"))?;
+    let unbound = aead::UnboundKey::new(&aead::CHACHA20_POLY1305, key).map_err(|_| anyhow::anyhow!("bad master key"))?;
+    let less = aead::LessSafeKey::new(unbound);
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+    let mut data = plaintext.as_bytes().to_vec();
+    less.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut data)
+        .map_err(|_| anyhow::anyhow!("could not encrypt the secret"))?;
+    Ok(format!("v1:{}:{}", b64_encode(&nonce_bytes), b64_encode(&data)))
+}
+
+/// Opens an envelope line made by [`seal`]. Returns `None` on any malformed input, failed
+/// authentication, non-UTF-8 plaintext or an empty/whitespace-only secret.
+fn open_envelope(envelope: &str, key: &[u8; 32]) -> Option<String> {
+    let rest = envelope.trim().strip_prefix("v1:")?;
+    let (nonce_b64, ct_b64) = rest.split_once(':')?;
+    if ct_b64.contains(':') {
+        return None;
+    }
+    let nonce_bytes = b64_decode(nonce_b64)?;
+    if nonce_bytes.len() != 12 {
+        return None;
+    }
+    let mut data = b64_decode(ct_b64)?;
+    if data.is_empty() {
+        return None;
+    }
+    let unbound = ring::aead::UnboundKey::new(&ring::aead::CHACHA20_POLY1305, key).ok()?;
+    let less = ring::aead::LessSafeKey::new(unbound);
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_bytes);
+    let plain = less
+        .open_in_place(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut data,
+        )
+        .ok()?;
+    let text = std::str::from_utf8(plain).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Writes a file with 0600 permissions without touching the parent directory's mode.
@@ -713,5 +909,150 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("sleep 5"), "the command is named: {message}");
         assert!(message.contains("timed out"), "{message}");
+    }
+
+    /// Serialises tests that mutate `COLONIZER_MASTER_KEY`: the harness runs tests in parallel
+    /// in one process, so two env-mutating tests at once would read each other's key.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Runs `f` with `COLONIZER_MASTER_KEY` set to `key` (or removed when `None`), restoring
+    /// whatever was there before. Callers must already hold `ENV_LOCK`.
+    fn with_master_key_env(key: Option<&str>, f: impl FnOnce()) {
+        let prev = std::env::var("COLONIZER_MASTER_KEY").ok();
+        // SAFETY: env-mutating tests are serialised on ENV_LOCK, so no other test in this
+        // process can observe the variable mid-change.
+        unsafe {
+            match key {
+                Some(k) => std::env::set_var("COLONIZER_MASTER_KEY", k),
+                None => std::env::remove_var("COLONIZER_MASTER_KEY"),
+            }
+        }
+        f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("COLONIZER_MASTER_KEY", v),
+                None => std::env::remove_var("COLONIZER_MASTER_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn secret_roundtrip_with_master_key() {
+        // The crypto core, without touching the process env: a fixed key seals and opens.
+        let key = [7u8; 32];
+        let envelope = seal("sk-ant-test-secret", &key).unwrap();
+        assert!(envelope.starts_with("v1:"), "the envelope names its version: {envelope}");
+        assert_eq!(open_envelope(&envelope, &key).as_deref(), Some("sk-ant-test-secret"));
+        // A wrong key fails authentication instead of returning garbage.
+        assert_eq!(open_envelope(&envelope, &[8u8; 32]), None);
+        // Tampering with any version/nonce/ciphertext part fails closed too.
+        assert_eq!(open_envelope("v2:AAAA:BBBB", &key), None);
+        assert_eq!(open_envelope("v1:!!!:!!!", &key), None);
+        assert_eq!(open_envelope(&envelope[..envelope.len() - 4], &key), None);
+
+        // And the file layer, with the env var set and restored inside the lock.
+        let _lock = ENV_LOCK.lock().unwrap();
+        with_master_key_env(Some("test-master-key-for-roundtrip-0123456789"), || {
+            let dir = temp_root("secret-roundtrip");
+            let path = dir.join("provider-key");
+            write_secret(&path, "sk-ant-test-secret").unwrap();
+            assert_eq!(read_secret(&path).as_deref(), Some("sk-ant-test-secret"));
+            delete_secret(&path);
+            assert_eq!(read_secret(&path), None, "delete removes both files");
+            assert!(!enc_path(&path).exists());
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn secret_fails_closed_without_key() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = temp_root("secret-fail-closed");
+        let path = dir.join("github-token");
+        with_master_key_env(Some("test-master-key-for-fail-closed-0123456789"), || {
+            write_secret(&path, "ghp_testsecret").unwrap();
+            assert!(enc_path(&path).exists());
+        });
+        // The key is gone: the reader must return None, never the ciphertext.
+        with_master_key_env(None, || {
+            assert_eq!(read_secret(&path), None);
+            let raw = std::fs::read_to_string(enc_path(&path)).unwrap();
+            assert!(raw.starts_with("v1:"), "what is on disk is an envelope, not the secret");
+            assert!(!raw.contains("ghp_testsecret"));
+        });
+        // A wrong key also fails closed.
+        with_master_key_env(Some("a-different-key-0000000000000000000000"), || {
+            assert_eq!(read_secret(&path), None);
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn secret_plaintext_fallback() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        with_master_key_env(None, || {
+            let dir = temp_root("secret-plaintext");
+            let path = dir.join("notify-secret");
+            write_secret(&path, "webhook-secret").unwrap();
+            assert_eq!(read_secret(&path).as_deref(), Some("webhook-secret"));
+            assert!(
+                !enc_path(&path).exists(),
+                "no master key means no .enc file beside the plaintext"
+            );
+            // A secret saved before encryption existed reads back unchanged.
+            std::fs::write(&path, "  legacy-token  \n").unwrap();
+            assert_eq!(read_secret(&path).as_deref(), Some("legacy-token"));
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn secret_versioned_filename() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        with_master_key_env(Some("test-master-key-for-filename-012345678900"), || {
+            let dir = temp_root("secret-filename");
+            let path = dir.join("github-token");
+            // A stale plaintext must not survive the move to encryption.
+            std::fs::write(&path, "old-plaintext").unwrap();
+            write_secret(&path, "ghp_newsecret").unwrap();
+            assert!(!path.exists(), "the plaintext file is gone once the secret is encrypted");
+            let enc = enc_path(&path);
+            assert!(enc.exists());
+            let raw = std::fs::read_to_string(&enc).unwrap();
+            assert!(raw.starts_with("v1:"), "the envelope is versioned: {raw}");
+            assert_eq!(read_secret(&path).as_deref(), Some("ghp_newsecret"));
+            // Downgrading (key removed) writes plaintext and drops the stale .enc,
+            // so it can never shadow the new value. Afterwards the outer key is
+            // restored, but with no .enc left the plaintext reads back either way.
+            with_master_key_env(None, || {
+                write_secret(&path, "plain-again").unwrap();
+            });
+            assert_eq!(read_secret(&path).as_deref(), Some("plain-again"));
+            assert!(!enc.exists(), "the stale .enc is removed on downgrade");
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn b64_roundtrip() {
+        for (plain, encoded) in [
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+            ("hello world", "aGVsbG8gd29ybGQ="),
+        ] {
+            assert_eq!(b64_encode(plain.as_bytes()), encoded, "encode {plain:?}");
+            assert_eq!(b64_decode(encoded).unwrap(), plain.as_bytes(), "decode {encoded:?}");
+        }
+        // Twelve zero bytes (a nonce) round-trip, and outer whitespace is tolerated.
+        let nonce = [0u8; 12];
+        assert_eq!(b64_decode(&format!("  {}  ", b64_encode(&nonce))).unwrap(), nonce);
+        // Malformed input is rejected, never decoded into something adjacent.
+        for bad in ["", "abc", "Zg", "====", "Zg===", "Z g==", "Zg==\nZg==", "!!!=", "v1:Zg=="] {
+            assert_eq!(b64_decode(bad), None, "{bad:?} must not decode");
+        }
     }
 }
