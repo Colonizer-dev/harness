@@ -39,19 +39,7 @@ pub async fn publish_session(app: Shared, id: String) {
         return;
     }
     // The claim captures whether a microVM was live, because the status it leaves behind is `publishing`.
-    let Some((s, (claimed, was_live))) = app
-        .update_session(&id, |x| {
-            let allowed = can_publish(x.status, x.cleaned_up, x.git_admin_dir.is_some());
-            // Before the mutation: `publishing` itself is not a live status.
-            let was_live = allowed && x.status.is_live();
-            if allowed {
-                x.status = SessionStatus::Publishing;
-                x.error = None;
-            }
-            (allowed, was_live)
-        })
-        .await
-    else {
+    let Some((s, (claimed, was_live))) = app.update_session(&id, claim_publish).await else {
         return;
     };
     if !claimed {
@@ -379,6 +367,24 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     Ok(Json(s))
 }
 
+/// Claims a colony for the background publish: the status flip, the slot decision and the error
+/// clear, as one step. A live-origin claim keeps its parallel slot (`Session::holds_slot`) — the
+/// teardown inside the publish frees the microVM, but nothing may boot into the half-published
+/// worktree. A stopped, failed or no-changes claim boots nothing (host-side push only) and holds
+/// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
+/// Returns whether the claim landed, and whether a microVM was live under it.
+pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
+    let allowed = can_publish(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+    // Before the mutation: `publishing` itself is not a live status.
+    let was_live = allowed && x.status.is_live();
+    if allowed {
+        x.status = SessionStatus::Publishing;
+        x.publishing_holds_slot = was_live;
+        x.error = None;
+    }
+    (allowed, was_live)
+}
+
 /// Whether a colony can publish: it needs its worktree on disk, no publish already in flight, and a
 /// state a publish makes sense from. A failed or no-changes publish can be retried directly — the
 /// worktree, the committed branch and the remote are all still there, so no new microVM is booted.
@@ -398,6 +404,40 @@ pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::tests::colony;
+
+    #[test]
+    fn the_publish_claim_holds_a_slot_only_when_the_colony_was_live() {
+        let mut running = colony("acme", SessionStatus::Running);
+        running.git_admin_dir = Some("git".into());
+        let (claimed, was_live) = claim_publish(&mut running);
+        assert!(claimed && was_live, "a live colony is claimed with its microVM under it");
+        assert_eq!(running.status, SessionStatus::Publishing);
+        assert!(
+            running.publishing_holds_slot && running.holds_slot(),
+            "a live colony's publish keeps its slot"
+        );
+        // A second claim finds the publish already in flight.
+        assert_eq!(
+            claim_publish(&mut running),
+            (false, false),
+            "publishing itself is not publishable"
+        );
+
+        // A stopped, failed or no-changes colony publishes its kept worktree with no new microVM,
+        // so its claim holds nothing.
+        for status in [SessionStatus::Stopped, SessionStatus::Failed, SessionStatus::NoChanges] {
+            let mut s = colony("acme", status);
+            s.git_admin_dir = Some("git".into());
+            let (claimed, was_live) = claim_publish(&mut s);
+            assert!(claimed && !was_live, "{status:?} is claimed with no microVM under it");
+            assert_eq!(s.status, SessionStatus::Publishing);
+            assert!(
+                !s.publishing_holds_slot && !s.holds_slot(),
+                "{status:?} never takes a slot another colony is waiting for"
+            );
+        }
+    }
 
     #[test]
     fn only_colonies_with_a_live_pr_are_watched_and_merged_is_never_polled() {

@@ -16,9 +16,10 @@ use tokio::sync::RwLock;
 use crate::{events::*, lifecycle::*, publish::*, sessions::*};
 
 /// Whether another colony can start right now. A queued colony holds no microVM, so it counts towards
-/// neither the global limit nor the org's.
+/// neither the global limit nor the org's — and neither does a publish claimed from a stopped, failed
+/// or no-changes colony, which boots nothing (`Session::holds_slot`).
 pub(crate) fn has_room(sessions: &[Session], org: &str, max_parallel: usize, org_limit: Option<u64>) -> bool {
-    let busy = |s: &&Session| s.status.is_live() || s.status == SessionStatus::Publishing;
+    let busy = |s: &&Session| s.holds_slot();
     if sessions.iter().filter(busy).count() >= max_parallel {
         return false;
     }
@@ -268,6 +269,28 @@ mod tests {
         ];
         assert!(!has_room(&mixed, "acme", 5, Some(1)), "acme is at its own limit");
         assert!(has_room(&mixed, "third", 5, Some(1)), "another org still has room");
+    }
+
+    #[test]
+    fn a_publish_from_a_stopped_colony_holds_no_slot_but_a_live_origin_one_does() {
+        // `colony()` builds a live-origin claim, which keeps its slot; a stopped-origin claim boots
+        // nothing (host-side push only) and must not block anyone.
+        let mut stopped_origin = colony("acme", SessionStatus::Publishing);
+        stopped_origin.publishing_holds_slot = false;
+        let live_origin = colony("acme", SessionStatus::Publishing);
+        assert!(
+            has_room(&[stopped_origin.clone()], "acme", 1, None),
+            "a stopped colony's publish holds no slot"
+        );
+        assert!(
+            !has_room(&[live_origin], "acme", 1, None),
+            "a live colony's publish keeps its slot"
+        );
+        // The org limit counts the same way.
+        assert!(
+            has_room(&[stopped_origin], "acme", 5, Some(1)),
+            "a stopped colony's publish counts against neither limit"
+        );
     }
 
     #[test]
