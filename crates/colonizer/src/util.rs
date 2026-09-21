@@ -203,7 +203,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     let s = s.trim();
-    if s.is_empty() || s.len() % 4 != 0 || !s.is_ascii() {
+    if s.is_empty() || !s.len().is_multiple_of(4) || !s.is_ascii() {
         return None;
     }
     let bytes = s.as_bytes();
@@ -212,7 +212,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         let mut n = 0u32;
         for (j, &c) in chunk.iter().enumerate() {
             let v = if c == b'=' { 0 } else { val(c)? };
