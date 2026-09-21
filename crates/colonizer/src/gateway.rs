@@ -1768,6 +1768,7 @@ mod tests {
                     &strix,
                     model.is_some(),
                     "strix",
+                    None,
                 )
                 .await
             }
