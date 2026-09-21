@@ -2142,6 +2142,15 @@ function presetDraft(preset: ProviderPreset): ProviderDraft {
   };
 }
 
+/** A second (third, …) instance of a preset gets a free id and a suffixed name. */
+function uniqueDraft(preset: ProviderPreset, takenIds: string[]): ProviderDraft {
+  const base = presetDraft(preset);
+  if (!takenIds.includes(base.id)) return base;
+  let n = 2;
+  while (takenIds.includes(`${base.id}-${n}`)) n++;
+  return { ...base, id: `${base.id}-${n}`, name: `${base.name} (${n})` };
+}
+
 /** A catalogue entry's label, for the form header and the mark's fallback initials. */
 function presetLabel(preset: ProviderPreset): string {
   return PRESET_LABEL[preset] ?? CATALOG_BY_ID.get(preset)?.name ?? "Provider";
@@ -2201,7 +2210,6 @@ function ProvidersPane({
     }
   };
 
-  const has = (id: string) => providers?.some((p) => p.id === id) ?? false;
   const upsert = (saved: ModelProvider) =>
     setProviders((list) => {
       const rest = (list ?? []).filter((p) => p.id !== saved.id);
@@ -2302,13 +2310,11 @@ function ProvidersPane({
           </span>
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
             {ADD_PRESETS.map(({ preset, label }) => {
-              const configured = preset !== "custom" && has(preset);
               return (
                 <button
                   key={preset}
                   type="button"
-                  disabled={addDisabled || configured}
-                  title={configured ? `${label} is already configured` : undefined}
+                  disabled={addDisabled}
                   onClick={() => setEditing({ mode: "new", preset })}
                   className={cx(
                     "flex cursor-pointer select-none flex-col items-center gap-2 rounded-xl border border-border bg-panel px-1.5 py-3",
@@ -2338,7 +2344,7 @@ function ProvidersPane({
               <span className="w-full truncate text-center">{browsing ? "Close" : "More"}</span>
             </button>
           </div>
-          {browsing && <CatalogBrowser query={catalogQuery} onQuery={setCatalogQuery} taken={has} disabled={addDisabled} onPick={(id) => {
+          {browsing && <CatalogBrowser query={catalogQuery} onQuery={setCatalogQuery} disabled={addDisabled} onPick={(id) => {
             setBrowsing(false);
             setCatalogQuery("");
             setEditing({ mode: "new", preset: id });
@@ -2674,20 +2680,18 @@ function hostOf(url: string): string {
 function CatalogBrowser({
   query,
   onQuery,
-  taken,
   disabled,
   onPick,
 }: {
   query: string;
   onQuery: (value: string) => void;
-  taken: (id: string) => boolean;
   disabled: boolean;
   onPick: (id: string) => void;
 }) {
   const needle = query.trim().toLowerCase();
   const matches = PROVIDER_CATALOG.filter(
     (entry: CatalogEntry) =>
-      !taken(entry.id) && (!needle || entry.name.toLowerCase().includes(needle) || entry.base_url.toLowerCase().includes(needle)),
+      !needle || entry.name.toLowerCase().includes(needle) || entry.base_url.toLowerCase().includes(needle),
   );
   return (
     <div className="space-y-2 rounded-xl border border-border bg-panel p-2.5">
@@ -2744,7 +2748,7 @@ function ProviderForm({
 }) {
   const api = useApi();
   const toast = useToast();
-  const start = initial ?? presetDraft(preset);
+  const start = initial ?? uniqueDraft(preset, takenIds);
   const wire = initial?.wire ?? presetDraft(preset).wire;
   const [id, setId] = useState(start.id);
   const [name, setName] = useState(start.name);

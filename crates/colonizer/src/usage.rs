@@ -688,6 +688,7 @@ mod tests {
             host_disk_bytes: None,
             model_usage: None,
             model_tier: None,
+            claude_account: None,
             model_routing: None,
             cleaned_up: false,
             attention: None,

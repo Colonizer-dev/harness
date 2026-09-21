@@ -228,6 +228,11 @@ pub struct Session {
     /// The tier this colony was started on, when the operator named one instead of letting the rule choose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_tier: Option<String>,
+    /// The Claude account this colony bills to (issue #95): the per-colony choice, else the org's
+    /// override, else the install default, resolved at launch. Like `model_tier`, a launch record.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_account: Option<String>,
     /// The routing decision this colony booted with: the tier, the tier the rule would have chosen, and
     /// the signals behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,6 +302,7 @@ impl Default for Session {
             cost_usd: None,
             model_usage: None,
             model_tier: None,
+            claude_account: None,
             model_routing: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
@@ -637,6 +643,9 @@ pub struct NewSession {
     /// routing rule picks for the task.
     #[serde(default)]
     pub model_tier: Option<String>,
+    /// Bill this colony to a named Claude account instead of the org's override or install default.
+    #[serde(default)]
+    pub claude_account: Option<String>,
     /// Stack this colony on another one: it queues until that colony has pushed its branch, then
     /// starts from that branch instead of the default one, and its pull request is a diff against it.
     #[serde(default)]
@@ -805,8 +814,21 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         .iter()
         .find(|a| a.id == modules.agent.provider)
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "the selected agent module is not installed"))?;
-    if agent.needs_claude && app.claude_cred().is_none() {
-        return Err(client_error(StatusCode::BAD_REQUEST, "log in with Claude in Settings first"));
+    // The colony's account: the request's explicit choice, else the org's override, else the
+    // install default. Resolved before the gate so the refusal can name the account that is missing.
+    let claude_account = crate::claude_accounts::resolve_account(
+        req.claude_account.as_deref(),
+        app.org_settings(owner)
+            .agent
+            .as_ref()
+            .and_then(|a| a.claude_account.as_deref()),
+        &crate::claude_accounts::load_meta(&app.cfg.config_dir),
+    );
+    if agent.needs_claude && app.claude_cred_for(Some(&claude_account)).is_none() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("log in with Claude in Settings first (account '{claude_account}')"),
+        ));
     }
     if let Err(e) = app.cfg.linux_binary("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
@@ -941,6 +963,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         cost_usd: None,
         model_usage: None,
         model_tier,
+        claude_account: Some(claude_account),
         model_routing: None,
         routed_cost_usd: None,
         host_disk_bytes: None,
@@ -1506,7 +1529,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     let mut secrets = Vec::new();
     if agent.needs_claude {
-        let cred = app.claude_cred().context("log in with Claude in Settings first")?;
+        // The colony's own account, recorded at launch — never the install default by accident.
+        let account = s.claude_account.clone().unwrap_or_else(|| "default".into());
+        let cred = app.claude_cred_for(s.claude_account.as_deref()).with_context(|| {
+            format!("log in with Claude in Settings first (account '{account}')")
+        })?;
         mounts.push(Mount {
             source: resolve_guest_claude_bin(app).await?,
             target: "/opt/claude/bin/claude".into(),
@@ -2224,6 +2251,7 @@ pub(crate) mod tests {
             cost_usd: None,
             model_usage: None,
             model_tier: None,
+            claude_account: None,
             model_routing: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
@@ -2670,6 +2698,7 @@ pub(crate) mod tests {
                 automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
+                claude_account: None,
                 after: None,
                 origin: None,
             }),
@@ -2747,6 +2776,7 @@ pub(crate) mod tests {
                 automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
+                claude_account: None,
                 after: None,
                 origin: None,
             }),
@@ -2863,6 +2893,7 @@ pub(crate) mod tests {
             automerge: None,
             allow_duplicate: false,
             model_tier: None,
+            claude_account: None,
             after,
             origin: None,
         })
