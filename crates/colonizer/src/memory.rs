@@ -15,7 +15,8 @@ use crate::{
     mem0::{self, Mem0},
     modules::schema_for,
     orgs::valid_org,
-    util::{env_nonempty, read_trimmed, short_id, truncate, valid_repo, write_secret},
+    secrets,
+    util::{env_nonempty, short_id, truncate, valid_repo},
 };
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -270,7 +271,7 @@ fn mem0_key_file(app: &App) -> PathBuf {
 /// The saved mem0 key, else `MEM0_API_KEY`. Lives beside the model provider keys and, like them,
 /// is never written to modules.json, never returned by the API and never sent into a colony.
 fn mem0_key(app: &App) -> Option<(String, &'static str)> {
-    read_trimmed(&mem0_key_file(app))
+    secrets::read_secret(&mem0_key_file(app))
         .map(|key| (key, "saved"))
         .or_else(|| env_nonempty("MEM0_API_KEY").map(|key| (key, "MEM0_API_KEY")))
 }
@@ -558,11 +559,11 @@ pub async fn put_mem0_key(State(app): State<Shared>, Json(req): Json<Mem0Key>) -
     let key = req.api_key.trim();
     let path = mem0_key_file(&app);
     if key.is_empty() {
-        let _ = std::fs::remove_file(&path);
+        secrets::clear_secret(&path);
     } else if key.len() > 512 || !key.chars().all(|c| c.is_ascii_graphic()) {
         return Err(client_error(StatusCode::BAD_REQUEST, "that doesn't look like a mem0 API key"));
     } else {
-        write_secret(&path, key)?;
+        secrets::write_secret_value(&path, key)?;
     }
     Ok(mem0_status(State(app)).await)
 }

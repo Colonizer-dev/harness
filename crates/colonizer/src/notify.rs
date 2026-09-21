@@ -13,8 +13,9 @@ use crate::{
     gateway::{ProviderUsage, UsageHealth, health},
     orgs::{OrgSettings, effective_notify},
     providers::Provider,
+    secrets,
     sessions::{Session, SessionStatus},
-    util::{env_nonempty, read_trimmed, truncate, write_secret},
+    util::{env_nonempty, truncate},
 };
 use anyhow::{Result, bail};
 use axum::{Json, extract::State, http::StatusCode};
@@ -476,7 +477,7 @@ fn secret_file(app: &App) -> PathBuf {
 /// and, like them, is never written to modules.json, never returned by the API and never sent into
 /// a colony.
 fn secret(app: &App) -> Option<(String, &'static str)> {
-    read_trimmed(&secret_file(app))
+    secrets::read_secret(&secret_file(app))
         .map(|key| (key, "file"))
         .or_else(|| env_nonempty("COLONIZER_NOTIFY_SECRET").map(|key| (key, "env")))
 }
@@ -497,7 +498,7 @@ pub async fn put_secret(State(app): State<Shared>, Json(req): Json<NotifySecret>
     let path = secret_file(&app);
     match req.secret.as_deref().map(str::trim) {
         None | Some("") => {
-            let _ = std::fs::remove_file(&path);
+            secrets::clear_secret(&path);
         }
         Some(value) if value.len() > 512 || !value.chars().all(|c| c.is_ascii_graphic()) => {
             return Err(client_error(
@@ -505,7 +506,7 @@ pub async fn put_secret(State(app): State<Shared>, Json(req): Json<NotifySecret>
                 "that doesn't look like a signing secret",
             ));
         }
-        Some(value) => write_secret(&path, value)?,
+        Some(value) => secrets::write_secret_value(&path, value)?,
     }
     Ok(secret_status(State(app)).await)
 }

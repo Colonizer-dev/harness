@@ -41,6 +41,7 @@ mod redteam;
 mod routing;
 mod runtime;
 mod sandbox;
+mod secrets;
 mod sessions;
 mod spend;
 mod stack;
@@ -83,7 +84,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use tower_http::services::{ServeDir, ServeFile};
-use util::{env_nonempty, exec_within, is_elf, is_plain_name, read_trimmed};
+use util::{env_nonempty, exec_within, is_elf, is_plain_name};
 
 pub const CLAUDE_API_HOST: &str = "api.anthropic.com";
 
@@ -196,7 +197,7 @@ impl App {
         });
         let token = claude_accounts::cred_for(&self.cfg.config_dir, &id)
             .map(|(_, token)| token)
-            .or_else(|| read_trimmed(&self.claude_token_file()));
+            .or_else(|| secrets::read_secret(&self.claude_token_file()));
         if let Some(token) = token {
             let (env, source) = claude_accounts::sniff(&token);
             return Some(ClaudeCred {
@@ -611,12 +612,12 @@ async fn set_claude_token(State(app): State<Shared>, Json(body): Json<Value>) ->
             "expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)",
         ));
     }
-    util::write_secret(&app.claude_token_file(), token)?;
+    secrets::write_secret_value(&app.claude_token_file(), token)?;
     Ok(Json(json!({"ok": true})))
 }
 
 async fn delete_claude_token(State(app): State<Shared>) -> ApiResult<Value> {
-    let _ = std::fs::remove_file(app.claude_token_file());
+    secrets::clear_secret(&app.claude_token_file());
     Ok(Json(json!({"ok": true})))
 }
 

@@ -155,6 +155,15 @@ If the three mesh binaries are absent, colonies fall back to a loopback port, as
 
 Every setting is listed under [Configuration](https://github.com/Colonizer-dev/harness#configuration) in the README.
 
+Saved credentials (the GitHub, Claude and provider keys) are plaintext files in `~/.config/colonizer`
+by default. For opt-in at-rest encryption, generate a master key with `openssl rand -hex 32`, export
+it as `COLONIZER_MASTER_KEY`, and restart: existing plaintext secrets migrate to encrypted `.enc`
+sidecars on first read, and new saves go straight there. Old binaries only look at the plaintext
+path, so they read "unset" rather than garbage — rollback is safe. Honest limits: this keeps a bare
+copy of the config dir from yielding working credentials, nothing more — it is no defense against
+code running as your user, and a second mothership sharing the config dir with a different key reads
+those secrets as unset.
+
 ## Updating
 
 A running mothership can update itself: Settings offers the newer release, installs it and restarts into

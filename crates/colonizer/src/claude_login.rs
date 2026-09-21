@@ -3,8 +3,8 @@
 //! resulting long-lived OAuth token is saved on the host and never sent to the browser.
 
 use crate::{
-    ApiResult, App, ClaudeCred, Shared, client_error, resolve_host_claude_bin,
-    util::{fingerprint, shell_quote, truncate, write_secret},
+    ApiResult, App, ClaudeCred, Shared, client_error, resolve_host_claude_bin, secrets,
+    util::{fingerprint, shell_quote, truncate},
 };
 use anyhow::Context;
 use axum::{Json, extract::State, http::StatusCode};
@@ -196,7 +196,7 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
     };
     session.stdin = None;
     session.view = match outcome {
-        Ok(token) => match write_secret(&app.claude_token_file(), &token) {
+        Ok(token) => match secrets::write_secret_value(&app.claude_token_file(), &token) {
             Ok(()) => LoginView {
                 state: "done",
                 url: None,

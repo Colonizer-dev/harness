@@ -1,10 +1,10 @@
 //! GitHub source and publish modules: repositories, issues, worktrees and pull requests.
 
 use crate::{
-    ApiResult, App, Shared, client_error, orgs,
+    ApiResult, App, Shared, client_error, orgs, secrets,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
-    util::{env_nonempty, exec, exec_status, exec_within, fingerprint, read_trimmed, truncate, valid_repo, write_secret},
+    util::{env_nonempty, exec, exec_status, exec_within, fingerprint, truncate, valid_repo},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -29,7 +29,7 @@ impl App {
 
     /// Explicit token (saved in settings or env); `None` means "use the gh CLI login".
     pub fn github_token(&self) -> Option<String> {
-        read_trimmed(&self.github_token_file())
+        secrets::read_secret(&self.github_token_file())
             .or_else(|| env_nonempty("GH_TOKEN"))
             .or_else(|| env_nonempty("GITHUB_TOKEN"))
     }
@@ -156,7 +156,7 @@ async fn lookup(app: &App) -> Result<Value> {
 /// Computed fresh per poll: a cheap file/env read, and the viewer cache is keyed on the same
 /// token, so the named source and the cached answer cannot disagree.
 pub fn token_source(app: &App) -> &'static str {
-    if read_trimmed(&app.github_token_file()).is_some() {
+    if secrets::read_secret(&app.github_token_file()).is_some() {
         "saved token"
     } else if env_nonempty("GH_TOKEN").is_some() || env_nonempty("GITHUB_TOKEN").is_some() {
         "environment"
@@ -1328,12 +1328,12 @@ pub async fn set_token(State(app): State<Shared>, Json(body): Json<TokenBody>) -
     )
     .await
     .map_err(|_| client_error(StatusCode::BAD_REQUEST, "GitHub rejected this token"))?;
-    write_secret(&app.github_token_file(), token)?;
+    secrets::write_secret_value(&app.github_token_file(), token)?;
     Ok(Json(json!({"login": login.trim()})))
 }
 
 pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
-    let _ = std::fs::remove_file(app.github_token_file());
+    secrets::clear_secret(&app.github_token_file());
     Ok(Json(json!({"ok": true})))
 }
 

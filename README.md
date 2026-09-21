@@ -349,6 +349,7 @@ built. Process settings come from the environment:
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | Provider gateway; colonies reach it through `host.microsandbox.internal` |
 | `COLONIZER_DATA_DIR` | `~/.local/share/colonizer` | Clones, worktrees, colonies, mesh state |
 | `COLONIZER_CONFIG_DIR` | `~/.config/colonizer` | Module config and saved tokens |
+| `COLONIZER_MASTER_KEY` | – | Opt-in at-rest encryption for saved tokens: 64 hex chars (32 bytes); when set, tokens are stored as encrypted `.enc` sidecars instead of plaintext |
 | `COLONIZER_CLAUDE_BIN` | auto-detected | Native Claude Code binary to mount |
 | `COLONIZER_HOME` | next to the binary, or `dist/` | Bundled app assets |
 | `COLONIZER_APP` | `~/.local/share/colonizer/app` | The symlink an install moves; what an [update](docs/updates.md) follows |
@@ -357,6 +358,11 @@ built. Process settings come from the environment:
 | `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) off whatever Settings says |
 | `CI=true` | – | Also keeps [usage data](docs/usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
+
+Saved tokens are plaintext by default. Set `COLONIZER_MASTER_KEY` to 64 hex chars (`openssl rand -hex 32`)
+and they are stored encrypted instead, so a copy of the config dir alone yields no working credentials.
+It is no defense against code running as your user, and a second mothership sharing the config dir with
+a different key reads those secrets as unset.
 
 Two limits bound one colony, both sandbox module settings (Settings → Modules → sandbox) with an override
 per org. Both default to `0` — unlimited — on purpose: there is no dollar figure or byte count that suits
