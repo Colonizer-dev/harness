@@ -1,18 +1,20 @@
 // The pane that slides in beside the nest when you pick the mothership or a chamber: what it is,
 // what it costs, what it is waiting for, and the one or two things worth doing about it.
 //
-// Everything here comes from the colony list and /api/status. There is deliberately no per-colony
-// event history: the mothership keeps none for the browser, and a made-up one would read as fact.
+// Everything here comes from the colony list and /api/status, plus the live question a waiting
+// colony asked on its event stream. There is deliberately no other per-colony event history: the
+// mothership keeps none for the browser, and a made-up one would read as fact.
 import type { ReactElement } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
+import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../components/AskUserCard";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
-import type { SubagentView } from "../sessionStream";
+import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { HarnessStatus, Session, UpdateStatus } from "../types";
+import type { HarnessStatus, Question, Session, UpdateStatus } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -24,6 +26,34 @@ const TONE_VAR: Record<Tone, string> = {
 };
 
 export type InspectorTarget = { kind: "mothership" } | { kind: "colony"; session: Session };
+
+/** A question the colony asked that the operator has not answered yet. */
+export interface PendingQuestion {
+  id: string;
+  questions: Question[];
+  /** The frame's `ts` when the question opened; null when the replay omitted one. */
+  asked_at: string | null;
+}
+
+/**
+ * The questions still waiting in a stream, in the order they were asked. An answered block carries
+ * its `.answer`, so it drops out here and the pane clears on its own as `question_answered` arrives.
+ */
+export function pendingQuestionsOf(state: StreamState): PendingQuestion[] {
+  const pending: PendingQuestion[] = [];
+  for (const message of state.messages) {
+    for (const block of message.blocks) {
+      if (block.kind === "question" && !block.answer) {
+        pending.push({ id: block.id, questions: block.questions, asked_at: block.asked_at ?? null });
+      }
+    }
+  }
+  return pending;
+}
+
+/** AskUserCard declares assistant-ui's injected part props; the chat runtime supplies the rest,
+    and the card itself only reads the three fields set here. Cast like the stream adapter does. */
+type AskUserCardProps = Parameters<typeof AskUserCard>[0];
 
 function Fact({ label, value, className, title }: { label: string; value: string; className?: string; title?: string }): ReactElement {
   return (
@@ -62,6 +92,8 @@ export function Inspector({
   target,
   avatarUrl,
   settlers,
+  pendingQuestions,
+  questionActions,
   sessions,
   status,
   liveCount,
@@ -77,11 +109,16 @@ export function Inspector({
   onLaunch,
   onOpenSettings,
 }: {
-  target: InspectorTarget;
+  /** Null while nothing is picked: the pane stays mounted and explains itself instead of blinking out. */
+  target: InspectorTarget | null;
   /** The colony's org avatar; null when nothing knows one and the initial stands in. */
   avatarUrl: string | null;
   /** Real settlers, present only while this colony's stream is open; empty otherwise. */
   settlers: SubagentView[];
+  /** The colony's unanswered questions, straight from its stream; empty until one opens. */
+  pendingQuestions: PendingQuestion[];
+  /** How to answer from here — the same actions the chat card uses. */
+  questionActions: QuestionActions;
   /** Every colony the mothership knows; the stack fact resolves the parent against it. */
   sessions: Session[];
   status: HarnessStatus | null;
@@ -99,6 +136,35 @@ export function Inspector({
   onLaunch: () => void;
   onOpenSettings: (section: SectionId) => void;
 }): ReactElement {
+  if (!target) {
+    return (
+      <aside
+        className="cockpit flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-panel"
+        style={{ animation: "ck-slide 0.28s cubic-bezier(.2,.7,.2,1) both" }}
+        aria-label="nothing selected"
+      >
+        <div className="flex items-center gap-3 border-b border-border px-4 pb-3 pt-4">
+          <div className="min-w-0 flex-1">
+            <div className="font-mono text-[11.5px] text-muted">inspector</div>
+            <div className="mt-0.5 text-[14.5px] font-semibold leading-tight">nothing selected</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="close"
+            className="grid h-[26px] w-[26px] shrink-0 cursor-pointer place-items-center rounded-[7px] text-faint hover:bg-panel-2 hover:text-text"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+        <div className="grid flex-1 place-items-center px-8 text-center text-[12.5px] leading-relaxed text-muted">
+          pick a chamber in the nest and its question, status and cost land here.
+        </div>
+      </aside>
+    );
+  }
   const mothership = target.kind === "mothership";
   const session = target.kind === "colony" ? target.session : null;
   const tone = session ? (SESSION_STATUS[session.status]?.tone ?? "neutral") : "neutral";
@@ -140,7 +206,7 @@ export function Inspector({
     <aside
       className="cockpit flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-panel"
       style={{ animation: "ck-slide 0.28s cubic-bezier(.2,.7,.2,1) both" }}
-      aria-label={mothership ? "mothership" : "colony"}
+      aria-label={mothership ? "mothership" : session ? "colony" : "unknown target"}
     >
       <div className="flex items-start gap-3 border-b border-border px-4 pb-3 pt-4">
         {mothership ? (
@@ -223,7 +289,7 @@ export function Inspector({
             )}
           </>
         ) : (
-          session && (
+          session ? (
             <>
               <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.1em]" style={{ color: edge }}>
                 <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: edge }} />
@@ -235,9 +301,41 @@ export function Inspector({
                 <div className="rounded-xl border border-warn bg-warn-soft px-3.5 py-3">
                   <div className="font-mono text-[10.5px] tracking-[0.14em] text-warn">WAITING ON YOU</div>
                   <div className="mt-1.5 text-[13.5px] font-semibold">
-                    {session.attention ? "the watchdog flagged this colony" : "the colony asked you a question"}
+                    {session.attention ? "the watchdog flagged this colony" : "the colony is waiting on your answer"}
                   </div>
-                  {/* Answering belongs with the question, which is in the colony's own chat. */}
+
+                  {/* The question itself, answered from the pane. The frame's `ts` is when it was asked;
+                      an attention row stands in when the stream had no timestamp to carry. */}
+                  {pendingQuestions.length > 0 && (
+                    <div className="mt-3 flex flex-col gap-4">
+                      {pendingQuestions.map((q) => {
+                        const askedAt =
+                          q.asked_at ?? (session.attention?.reason === "waiting_for_answer" ? session.attention.since : null);
+                        return (
+                          <div key={q.id} className="flex flex-col gap-1.5">
+                            <div className="text-[11.5px] text-muted">
+                              {askedAt ? `asked ${timeAgo(askedAt)}` : "waiting for your answer"}
+                            </div>
+                            <QuestionActionsContext.Provider value={questionActions}>
+                              <AskUserCard
+                                {...({ toolCallId: q.id, args: { questions: q.questions }, result: undefined } as unknown as AskUserCardProps)}
+                              />
+                            </QuestionActionsContext.Provider>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* The list says this colony needs you but the stream has not shown the question yet (or
+                      anymore): name what is happening instead of leaving the box blank. */}
+                  {pendingQuestions.length === 0 && (
+                    <div className="mt-3 rounded-[9px] border border-warn/30 bg-panel px-3 py-2.5 text-[12.5px] text-muted">
+                      {questionActions.blockedBy === "disconnected" ? "loading the question…" : "this colony has no pending question"}
+                    </div>
+                  )}
+
+                  {/* The full chat is still the deeper answer: the card is the quick one. */}
                   <button
                     type="button"
                     onClick={() => onOpenColony(session.id)}
@@ -339,6 +437,10 @@ export function Inspector({
                 </div>
               </Section>
             </>
+          ) : (
+            <div className="grid flex-1 place-items-center px-8 text-center text-[12.5px] leading-relaxed text-muted">
+              a target the cockpit doesn't know — nothing to show here yet.
+            </div>
           )
         )}
       </div>

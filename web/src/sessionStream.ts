@@ -46,6 +46,8 @@ export interface QuestionBlock {
   id: string;
   questions: Question[];
   answer: { answers: Answers; response: string | null } | null;
+  /** When the question event arrived (the frame's `ts`); null when the replay omitted one. */
+  asked_at: string | null;
 }
 
 export type Block = TextBlock | ThinkingBlock | ToolBlock | QuestionBlock;
@@ -306,7 +308,7 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
       const last = s.messages[s.messages.length - 1];
       const targetId = ev.message_id ?? (last?.role === "assistant" ? last.id : `q-${ev.question_id}`);
       const [messages, message] = upsertAssistant(s.messages, targetId, ts);
-      message.blocks.push({ kind: "question", id: ev.question_id, questions: ev.questions ?? [], answer: null });
+      message.blocks.push({ kind: "question", id: ev.question_id, questions: ev.questions ?? [], answer: null, asked_at: ts });
       return { ...s, messages };
     }
 

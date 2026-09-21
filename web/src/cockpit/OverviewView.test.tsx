@@ -58,7 +58,7 @@ describe("flipExpanded", () => {
 
 describe("ColonyRow", () => {
   it("collapsed: one compact line with no issue title, and aria-expanded false", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open={false} onToggle={noop} onOpenColony={noop} />);
+    const markup = renderToStaticMarkup(<ColonyRow session={session()} open={false} onToggle={noop} onOpenColony={noop} onSelect={noop} />);
     expect(markup).not.toContain("Checkout fails for guest users");
     expect(markup).toContain("webshop#42");
     expect(markup).not.toContain("open colony →");
@@ -67,7 +67,7 @@ describe("ColonyRow", () => {
   });
 
   it("expanded: reveals the issue title and a real link to the issue, and keeps the way in", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} />);
+    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
     expect(markup).toContain("Checkout fails for guest users");
     expect(markup).toContain('href="https://github.com/acme/webshop/issues/42"');
     expect(markup).toContain("acme/webshop #42");
@@ -76,15 +76,27 @@ describe("ColonyRow", () => {
   });
 
   it("never invents an issue link for a colony with no issue", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session({ issue: null, issue_title: "" })} open onToggle={noop} onOpenColony={noop} />);
+    const markup = renderToStaticMarkup(<ColonyRow session={session({ issue: null, issue_title: "" })} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
     expect(markup).not.toContain("/issues/");
     expect(markup).toContain("acme/webshop");
   });
 
   it("says why a flagged colony needs attention", () => {
     const flagged = session({ attention: { reason: "stalled", since: "2026-09-18T09:05:00Z", nudges: 2 } });
-    const markup = renderToStaticMarkup(<ColonyRow session={flagged} open onToggle={noop} onOpenColony={noop} />);
+    const markup = renderToStaticMarkup(<ColonyRow session={flagged} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
     expect(markup).toContain("No progress, nudged 2×");
+  });
+
+  it("a colony that needs you gets a shortcut that opens it in the inspector pane", () => {
+    const markup = renderToStaticMarkup(
+      <ColonyRow session={session({ status: "waiting_for_answer" })} open onToggle={noop} onOpenColony={noop} onSelect={noop} />,
+    );
+    expect(markup).toContain("answer in the pane →");
+  });
+
+  it("a colony that does not need you has no pane shortcut", () => {
+    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
+    expect(markup).not.toContain("answer in the pane →");
   });
 });
 
@@ -97,6 +109,7 @@ describe("OverviewView", () => {
         cost={null}
         onOpenOrg={noop}
         onOpenColony={noop}
+        onSelect={noop}
       />,
     );
     expect(markup).not.toContain("Checkout fails for guest users");
