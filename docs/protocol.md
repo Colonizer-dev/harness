@@ -767,6 +767,44 @@ The decision is recorded three ways:
 An operator override is §4's `model_tier` on `POST /api/sessions`; it wins over the rule for that
 colony, whether or not routing is on.
 
+### 6.1c Jev second opinion (shadow mode)
+
+An optional, default-off external classifier ("Jev", `crates/colonizer/src/jev.rs`) can be consulted
+for a second opinion on the tier §6.1b's rule already picked, in shadow mode only: the opinion is
+attached to `Signals`/`Decision` as `jev: Option<JevOpinion>` (tier, model, confidence, an estimated
+cost) and recorded alongside the rule's own decision, but `decide` never reads it — it stays exactly
+the synchronous, pure function §6.1b describes, with no model and no network call inside it. The
+network call happens once, in the async boot path in `sessions.rs`, before `decide` runs.
+
+Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` (a `claude-code`
+module setting, default `false`) and a `JEV_API_KEY` secret, declared in `module.json`'s `secrets`
+scoped to `api.typesafe.ai` — like every other secret, it reaches only the host-side TLS proxy
+(§3/sandbox.rs), never a plain guest environment variable. A missing key, the setting left off, or any
+failure of the call all resolve to `jev: None`; none of them is an error, and none of them blocks or
+meaningfully slows boot. The whole exchange is bounded by a roughly 1.8-second hard timeout, with a
+short retry (two attempts, backing off 150ms then 300ms) only on a 429 or 529 response — anything else
+non-2xx, a network error, or a malformed response returns `None` immediately.
+
+What is sent is condensed and metadata-only, never file contents, never the raw task body and never
+credentials: the issue title with credential-looking tokens redacted, its labels, a bucketed body size
+(`small`/`medium`/`large`/`huge` rather than a character count), the checklist and path counts,
+`one_directory` and `known_preset`. The model asked is pinned explicitly (`jev-1.13.0`), never a
+"latest" alias, since a second opinion's calibration is specific to one model version and is not
+assumed to carry over to the next. Each call's `estimated_cost_usd` is a rough token estimate against
+an unverified per-token price, logged so the cost of asking stays visible — it is not metered billing,
+and it is not folded into a colony's own routed cost, since this opinion never chooses a model.
+
+This ships shadow mode only: zero applied decisions. Promoting Jev's tier to an actual input to
+`decide` is a separate, later change, and needs measured evidence first — comparing `routing.jsonl`
+records where `jev.tier` disagreed with `rule` against those sessions' eventual `total_cost_usd` and
+misroute outcomes over a meaningful sample, to show the second opinion would have beaten the heuristic
+before anything is asked to act on it.
+
+A caveat worth stating plainly: this integration's specific vendor claims — the endpoint, its pricing,
+its latency — could not be independently verified while it was built. The design leans on that: with
+no key and no flag set, it is inert, so an unverified or even nonexistent vendor causes no harm to a
+real deployment. It only ever degrades to "no shadow opinion," every time.
+
 ### 6.2 Shared memory (runner ⇄ mothership)
 
 Approved notes are mounted read-only in every colony:
