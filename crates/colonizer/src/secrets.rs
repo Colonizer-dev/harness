@@ -114,7 +114,11 @@ fn open(key: &[u8; 32], envelope: &str) -> Option<Vec<u8>> {
     let mut in_out = unhex(ct_hex)?;
     let aead = aead::LessSafeKey::new(UnboundKey::new(&aead::CHACHA20_POLY1305, key).ok()?);
     let plain = aead
-        .open_in_place(Nonce::try_assume_unique_for_key(&nonce).ok()?, aead::Aad::empty(), &mut in_out)
+        .open_in_place(
+            Nonce::try_assume_unique_for_key(&nonce).ok()?,
+            aead::Aad::empty(),
+            &mut in_out,
+        )
         .ok()?;
     Some(plain.to_vec())
 }
@@ -218,7 +222,11 @@ mod tests {
         assert_eq!(read_secret_with(&path, Some(KEY_A)).as_deref(), Some("padded-value"));
         let envelope = seal(&KEY_A, b"   \n ").unwrap();
         std::fs::write(enc_path(&path), envelope).unwrap();
-        assert_eq!(read_secret_with(&path, Some(KEY_A)), None, "whitespace-only decrypts to unset, as read_trimmed does");
+        assert_eq!(
+            read_secret_with(&path, Some(KEY_A)),
+            None,
+            "whitespace-only decrypts to unset, as read_trimmed does"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -235,7 +243,11 @@ mod tests {
         let last = tampered.pop().unwrap();
         tampered.push(if last == '0' { '1' } else { '0' });
         assert_ne!(tampered, envelope);
-        assert_eq!(open(&KEY_A, &tampered), None, "flipping one hex digit breaks the Poly1305 tag");
+        assert_eq!(
+            open(&KEY_A, &tampered),
+            None,
+            "flipping one hex digit breaks the Poly1305 tag"
+        );
         let truncated = &envelope[..envelope.len() - 4];
         assert_eq!(open(&KEY_A, truncated), None);
     }
@@ -262,19 +274,32 @@ mod tests {
         assert_eq!(parse_key(&"ab".repeat(32)), Some([0xab; 32]));
         assert_eq!(parse_key(&"AB".repeat(32)), Some([0xab; 32]), "uppercase hex parses too");
         assert_eq!(parse_key(&format!("  {} \n", "ab".repeat(32))), Some([0xab; 32]));
-        for bad in ["", "abc", &"0".repeat(63), &"0".repeat(65), &"z".repeat(64), &"0".repeat(62).chars().chain("zz".chars()).collect::<String>()] {
+        for bad in [
+            "",
+            "abc",
+            &"0".repeat(63),
+            &"0".repeat(65),
+            &"z".repeat(64),
+            &"0".repeat(62).chars().chain("zz".chars()).collect::<String>(),
+        ] {
             assert_eq!(parse_key(bad), None, "{bad:?} is not a key");
         }
     }
 
     #[test]
     fn encrypted_sidecars_append_dot_enc_without_replacing_the_file_extension() {
-        assert_eq!(enc_path(Path::new("/cfg/github-token")).to_string_lossy(), "/cfg/github-token.enc");
+        assert_eq!(
+            enc_path(Path::new("/cfg/github-token")).to_string_lossy(),
+            "/cfg/github-token.enc"
+        );
         assert_eq!(
             enc_path(Path::new("/cfg/provider-keys/deepseek")).to_string_lossy(),
             "/cfg/provider-keys/deepseek.enc"
         );
-        assert_eq!(enc_path(Path::new("/cfg/archive.tar")).to_string_lossy(), "/cfg/archive.tar.enc");
+        assert_eq!(
+            enc_path(Path::new("/cfg/archive.tar")).to_string_lossy(),
+            "/cfg/archive.tar.enc"
+        );
     }
 
     #[test]
@@ -304,7 +329,11 @@ mod tests {
         let dir = temp_root("no-key");
         let path = dir.join("token");
         write_secret_with(&path, "s3cr3t-value", Some(KEY_A)).unwrap();
-        assert_eq!(read_secret_with(&path, None), None, "missing key is unset, never ciphertext-as-key");
+        assert_eq!(
+            read_secret_with(&path, None),
+            None,
+            "missing key is unset, never ciphertext-as-key"
+        );
         assert_eq!(read_secret_with(&path, Some(KEY_B)), None, "and so is the wrong key");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -327,8 +356,16 @@ mod tests {
         std::fs::write(&path, "legacy-value\n").unwrap();
         assert_eq!(read_secret_with(&path, Some(KEY_A)).as_deref(), Some("legacy-value"));
         assert!(!path.exists(), "the plaintext is gone after migration");
-        assert_eq!(read_secret_with(&path, Some(KEY_A)).as_deref(), Some("legacy-value"), "the sidecar answers alone now");
-        assert_eq!(read_secret_with(&path, None), None, "and without the key the migrated secret is unset");
+        assert_eq!(
+            read_secret_with(&path, Some(KEY_A)).as_deref(),
+            Some("legacy-value"),
+            "the sidecar answers alone now"
+        );
+        assert_eq!(
+            read_secret_with(&path, None),
+            None,
+            "and without the key the migrated secret is unset"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

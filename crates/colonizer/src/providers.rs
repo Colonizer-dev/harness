@@ -8,8 +8,7 @@ use crate::{
     ApiResult, App, Shared, client_error,
     gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, health},
     orgs::effective_agent,
-    provider_quota,
-    secrets,
+    provider_quota, secrets,
     sessions::agent_env,
 };
 use axum::{
