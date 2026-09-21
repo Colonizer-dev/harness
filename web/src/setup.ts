@@ -91,7 +91,7 @@ export function setupView(input: SetupInput): SetupView {
     rows,
     progress: setupProgress(rows),
     firstActionable: firstActionableRow(rows),
-    autoOpen: shouldAutoOpen(rows),
+    autoOpen: shouldAutoOpen(rows, input.sessionCount),
     launchEnabled: launchEnabled(rows),
   };
 }
@@ -143,10 +143,21 @@ export function firstActionableRow(rows: SetupRow[]): SetupRow | null {
   return rows.find((row) => row.state === "todo" || row.state === "blocked") ?? null;
 }
 
-/** Setup auto-opens when a blocking condition is unmet — the runtime failures the old
- *  `!github.connected || !claude.configured` check never saw. Advisories do not open it. */
-export function shouldAutoOpen(rows: SetupRow[]): boolean {
-  return rows.some((row) => row.state === "blocked" && row.gatesLaunch);
+/**
+ * Setup auto-opens when a blocking condition is unmet — the runtime failures the old
+ * `!github.connected || !claude.configured` check never saw. Advisories do not open it.
+ *
+ * The one exception is a blocked machine row on a mothership that already has colonies: nothing
+ * there was ever about launching into them (KVM is genuinely required to boot a microVM), so
+ * once there are colonies to inspect, Setup must not steal the view from them — it was replacing
+ * the nest/overview with Settings on every load for platforms Setup calls unsupported and for
+ * Linux boxes without a usable /dev/kvm (issue #214). `sessionCount > 0` suppresses exactly that
+ * one row: first-run guidance on a truly fresh box (no sessions) still fires, the GitHub and
+ * Claude rows keep auto-opening with colonies present, and the blocked row itself plus the
+ * disabled Launch stay inside Setup for whoever reaches it.
+ */
+export function shouldAutoOpen(rows: SetupRow[], sessionCount = 0): boolean {
+  return rows.some((row) => row.state === "blocked" && row.gatesLaunch && (row.id !== "machine" || sessionCount === 0));
 }
 
 /** Whether Launch may fire: rows 1, 3 and 4 green. Deliberately not gated on the image pull —
