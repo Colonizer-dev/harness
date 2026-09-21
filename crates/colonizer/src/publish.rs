@@ -412,16 +412,19 @@ pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree:
 /// each ordered check assumes the earlier effects are granted and adds its own. They delegate to
 /// the single lifecycle gate for now, so existing callers keep their behavior; the point is that
 /// a future per-effect grant check has one named place per effect to live.
+#[allow(dead_code)]
 pub(crate) fn commit_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Commit));
     can_publish(status, cleaned_up, has_worktree)
 }
 
+#[allow(dead_code)]
 pub(crate) fn push_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Push));
     commit_allowed(status, cleaned_up, has_worktree)
 }
 
+#[allow(dead_code)]
 pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::OpenPr));
     push_allowed(status, cleaned_up, has_worktree)
@@ -430,6 +433,7 @@ pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: 
 /// Binds the evidence a PR grant must name: the hex sha256 (see
 /// `authority::bind_candidate`) over the PR body bytes the approval reviewed. A
 /// grant authorizes exactly this hash — `authorize` denies any other candidate.
+#[allow(dead_code)]
 pub(crate) fn publish_candidate_hash(pr_body: &[u8]) -> String {
     crate::authority::bind_candidate(&[pr_body])
 }
