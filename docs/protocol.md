@@ -189,8 +189,10 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, autofix?, automerge?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
+| `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
+| `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
@@ -1397,6 +1399,34 @@ Mothership side. The GitHub token never enters a colony, so filing happens on th
   confirmed" section and a footer naming the colony and the issue it was working on.
 - Every outcome (filed, duplicate, over the cap, rejected, failed) is a line in the colony log. The
   agent is told only that the finding was handed over.
+
+Validation. A finding is filed only after the mothership validates it with a fresh host-side call on
+the orchestrator model — the agent module's `model` setting (§6.1). The call is a session of its own:
+same model, no shared context with the colony, and nothing it sees is written back into the colony. It
+reads the finding's `title`, `body` and `evidence` and answers with a verdict. Nothing reaches GitHub
+without a `validated` event, and a `rejected` finding is recorded with its reason and shown, never
+dropped — a rejection a human disagrees with stays visible in the ledger and the transcripts.
+
+Each transition is appended to the hunter colony's own `sessions/<id>/events.jsonl` — the same file
+`scripts/colony-report.mjs` reads — with the usual `seq` and `ts`, so the colony's report and
+transcript show the whole chain:
+
+```jsonc
+{"type":"validated","title":"…","severity":"low|medium|high|critical"}
+{"type":"rejected","title":"…","reason":"…"}
+{"type":"fix_colony","title":"…","session":"<fix colony id>","issue":"<issue url>"}
+{"type":"review","title":"…","session":"<review session id>","verdict":"pass|fail","pr":"<pr url>"}
+{"type":"merged","title":"…","session":"<fix colony id>","pr":"<pr url>"}
+```
+
+These five are host-generated: the mothership appends them to the hunter colony's events.jsonl, the
+runner never emits them, and the runner-event schema in `docs/agent-events.schema.json` is unchanged —
+the runner events stay the §2 set plus `finding`. Every transition is also one line of the ledger,
+`sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records
+`{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?,
+verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|error`. A
+good run is `validated → filed → fix_colony → review → merged`; rejections and failures stay too —
+append-only, one line per stage transition, folded by title in the UI.
 
 ### 6.7 Red-team runs
 
