@@ -511,6 +511,58 @@ describe("shouldAutoOpen", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Issue #214: a machine that cannot boot colonies is a launch problem, and it must
+// never hijack the inspection view of a mothership that already has colonies.
+// ---------------------------------------------------------------------------
+
+describe("shouldAutoOpen with colonies present (issue #214)", () => {
+  it("scopes the machine row to fresh boxes: /dev/kvm blocked + sessions present → no force-open, launch still disabled", () => {
+    const withColonies = input({
+      sessionCount: 2,
+      status: status({ runtime: { ...LINUX, kvm: { ok: false, error: "/dev/kvm: Permission denied" } } }),
+    });
+    const rows = setupRows(withColonies);
+    expect(row(withColonies, "machine").state).toBe("blocked");
+    // Default sessionCount 0 keeps the old two-argument-less calls' behavior; setupView passes the real count.
+    expect(shouldAutoOpen(rows)).toBe(true);
+    expect(shouldAutoOpen(rows, withColonies.sessionCount)).toBe(false);
+    expect(setupView(withColonies).autoOpen).toBe(false);
+    expect(setupView(withColonies).launchEnabled).toBe(false);
+  });
+
+  it("scopes the platform gate the same way: platform other + kvm null (the ?runtime=other shape) + sessions → no force-open", () => {
+    const other = input({
+      sessionCount: 1,
+      status: status({ runtime: { ...LINUX, platform: "other", kvm: null } }),
+    });
+    const rows = setupRows(other);
+    expect(row(other, "machine").state).toBe("blocked");
+    expect(row(other, "machine").error).toContain("other");
+    expect(shouldAutoOpen(rows, other.sessionCount)).toBe(false);
+    expect(setupView(other).autoOpen).toBe(false);
+    expect(setupView(other).launchEnabled).toBe(false);
+  });
+
+  it("still auto-opens on a truly fresh box: a blocked machine with zero sessions keeps the first-run guidance", () => {
+    for (const host of [
+      { runtime: { ...LINUX, platform: "other", kvm: null } },
+      { runtime: { ...LINUX, kvm: { ok: false, error: "/dev/kvm: Permission denied" } } },
+    ]) {
+      const fresh = input({ sessionCount: 0, status: status(host) });
+      expect(setupView(fresh).autoOpen).toBe(true);
+      expect(setupView(fresh).launchEnabled).toBe(false);
+    }
+  });
+
+  it("leaves the other launch gates (GitHub, Claude) auto-opening with colonies present — only the machine row is scoped", () => {
+    const noGithub = input({ sessionCount: 3, status: status({ github: { connected: false } }) });
+    expect(setupView(noGithub).autoOpen).toBe(true);
+    const noClaude = input({ sessionCount: 3, status: status({ claude: { configured: false, source: null, kind: null } }) });
+    expect(setupView(noClaude).autoOpen).toBe(true);
+  });
+});
+
 describe("launchEnabled", () => {
   it("needs rows 1, 3 and 4 green and nothing else", () => {
     expect(launchEnabled(setupRows(input()))).toBe(true);

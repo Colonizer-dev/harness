@@ -854,7 +854,9 @@ const mockMeshParam = () => {
 /**
  * `?runtime=` models the machines Setup has to tell apart (issue #129): `mac` is an Apple-silicon
  * Mac, `kvm` a Linux box whose `/dev/kvm` this user cannot use, `old` a mothership from before it
- * probed the machine at all. Anything else — the default — is a healthy Linux box.
+ * probed the machine at all, `other` a platform Setup calls unsupported (issue #214) — it also
+ * carries the existing demo colonies, so the nest being replaced by Settings (before the fix) and
+ * staying put (after) is reproducible in one load. Anything else — the default — is a healthy Linux box.
  */
 const mockRuntimeParam = () => {
   try {
@@ -889,6 +891,19 @@ function mockRuntime(): RuntimeInfo | undefined {
       return linux({ ok: false, error: "/dev/kvm: Permission denied" });
     case "old":
       return undefined;
+    case "other":
+      // A platform Setup must call unsupported (issue #214) — e.g. ARM Linux, which the
+      // platform gate blocks the same way a KVM-less x86 box does; KVM reads null, as it
+      // does wherever the mothership does not probe it.
+      return {
+        platform: "other",
+        kvm: null,
+        git: { ok: true, version: "2.45.0" },
+        gh: { ok: true, version: "2.60.0" },
+        host_claude_bin: "/usr/local/bin/claude",
+        host_claude_bin_error: null,
+        os: { vendor: "unknown", name: "Other", version: null, id: null },
+      };
     default:
       return linux({ ok: true, error: null });
   }

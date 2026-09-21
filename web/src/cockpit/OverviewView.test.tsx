@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { OrgEntry } from "../orgs";
-import type { Session } from "../types";
+import type { HarnessStatus, Session } from "../types";
 import { ColonyRow, OverviewView, flipExpanded } from "./OverviewView";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -73,6 +73,35 @@ describe("ColonyRow", () => {
     expect(markup).toContain("acme/webshop #42");
     expect(markup).toContain("open colony →");
     expect(markup).toMatch(/aria-expanded="true"/);
+  });
+
+  it("offers the open-colony affordance as a real enabled button, whatever the host Setup calls the machine", () => {
+    // The overview never reads which platform the mothership is on — the affordance is a plain,
+    // ungated <button>. The fixture only names the shape the ?runtime=other mock produces
+    // (platform "other", kvm null — issue #214's unsupported-host scenario); with a colony to
+    // inspect the way in must be present and live, not replaced by Settings.
+    const unsupportedHost: HarnessStatus = {
+      github: { connected: true, login: "octocat", name: "The Octocat", source: "gh CLI login" },
+      claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" },
+      sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+      mesh: { enabled: true, provider: "headscale", state: "running", harness_ip: "100.64.0.1", nodes: 1, error: null },
+      runtime: {
+        platform: "other",
+        kvm: null,
+        git: { ok: true, version: "2.45.0" },
+        gh: { ok: true, version: "2.60.0" },
+        host_claude_bin: "/usr/local/bin/claude",
+        host_claude_bin_error: null,
+        os: { vendor: "unknown", name: "Other", version: null, id: null },
+      },
+    };
+    expect(unsupportedHost.runtime?.platform).toBe("other");
+    expect(unsupportedHost.runtime?.kvm).toBeNull();
+
+    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} />);
+    // A real focusable button — never a clickable div — and never disabled.
+    expect(markup).toMatch(/<button type="button"[^>]*>open colony →<\/button>/);
+    expect(markup).not.toContain("disabled");
   });
 
   it("never invents an issue link for a colony with no issue", () => {
