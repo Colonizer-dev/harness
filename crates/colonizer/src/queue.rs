@@ -118,11 +118,14 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         // onto a worktree that no longer exists, and `can_resume` would never take it back afterwards.
         s.status = SessionStatus::Failed;
         s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
+        let cleared = s.clear_attention();
         s.updated_at = Utc::now();
-        return Some(Claim::Retire(
-            s.clone(),
-            "was cleaned up while it waited in the queue, so it can never start".into(),
-        ));
+        let mut message = String::from("was cleaned up while it waited in the queue, so it can never start");
+        if let Some(note) = cleared_attention_message(&cleared) {
+            message.push_str("; ");
+            message.push_str(&note);
+        }
+        return Some(Claim::Retire(s.clone(), message));
     }
     s.status = SessionStatus::Starting;
     s.updated_at = Utc::now();
@@ -138,8 +141,14 @@ fn claim_refused(s: &mut Session, reason: &str) -> Option<Claim> {
     }
     s.status = SessionStatus::Failed;
     s.error = Some(reason.to_string());
+    let cleared = s.clear_attention();
     s.updated_at = Utc::now();
-    Some(Claim::Retire(s.clone(), format!("can never start: {reason}")))
+    let mut message = format!("can never start: {reason}");
+    if let Some(note) = cleared_attention_message(&cleared) {
+        message.push_str("; ");
+        message.push_str(&note);
+    }
+    Some(Claim::Retire(s.clone(), message))
 }
 
 /// The queued colony this tick acts on, oldest first: the first one nothing holds back and that fits.

@@ -86,6 +86,25 @@ describe("needsYou", () => {
     }
   });
 
+  it("is false for a terminal colony even when a stale attention flag is still set", () => {
+    const terminal = ["pr_opened", "merged", "closed", "no_changes", "stopped", "failed"] as const;
+    for (const status of terminal) {
+      for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
+        expect(needsYou(session({ status, attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(false);
+      }
+    }
+  });
+
+  it("stays true for attention on live colonies", () => {
+    for (const status of ["starting", "running", "waiting_for_answer", "idle"] as const) {
+      expect(needsYou(session({ status, attention: stalled() }))).toBe(true);
+    }
+  });
+
+  it("stays true for a bare waiting_for_answer with no flag", () => {
+    expect(needsYou(session({ status: "waiting_for_answer", attention: null }))).toBe(true);
+  });
+
   it("is false for a colony that is merely working, finished or failed unflagged", () => {
     expect(needsYou(session({ status: "running" }))).toBe(false);
     expect(needsYou(session({ status: "failed" }))).toBe(false);

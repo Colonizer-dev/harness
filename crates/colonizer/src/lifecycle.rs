@@ -80,15 +80,18 @@ pub async fn recover(app: &Shared) {
             }
             teardown_vm(app, &fresh).await;
             let at = fresh.status;
+            let mut attention = None;
             app.update_session(&fresh.id, |x| {
                 if x.status != at {
                     return false;
                 }
                 x.status = SessionStatus::Failed;
                 x.error = Some(PUBLISH_LOST_TO_RESTART.into());
+                attention = x.clear_attention();
                 true
             })
             .await;
+            app.note_cleared_attention(&fresh.id, attention).await;
             continue;
         }
         if !s.status.is_live() {
@@ -120,15 +123,18 @@ pub async fn recover(app: &Shared) {
         } else {
             teardown_vm(app, &fresh).await;
             let at = fresh.status;
+            let mut attention = None;
             app.update_session(&fresh.id, |x| {
                 if x.status != at {
                     return false;
                 }
                 x.status = SessionStatus::Stopped;
                 x.error = Some(VM_GONE_AFTER_RESTART.into());
+                attention = x.clear_attention();
                 true
             })
             .await;
+            app.note_cleared_attention(&fresh.id, attention).await;
         }
     }
 }
@@ -174,7 +180,16 @@ pub async fn watch_sandboxes(app: Shared) {
             )
             .await;
             teardown_vm(&app, &s).await;
-            app.update_session(&s.id, |x| mark_stopped_after_teardown(x, s.status)).await;
+            // The snapshot's attention flag, logged only when the flip below lands: a publish that
+            // claimed the colony in the meantime keeps both its status and its flag.
+            let had_attention = s.attention.clone();
+            let landed = app
+                .update_session(&s.id, |x| mark_stopped_after_teardown(x, s.status))
+                .await
+                .is_some_and(|(_, landed)| landed);
+            if landed {
+                app.note_cleared_attention(&s.id, had_attention).await;
+            }
         }
     }
 }
@@ -207,6 +222,9 @@ fn mark_stopped_after_teardown(x: &mut Session, at_teardown: SessionStatus) -> b
     }
     x.status = SessionStatus::Stopped;
     x.error = Some(VM_STOPPED_EARLY.into());
+    // Only on the landed flip: a publish that claimed the colony mid-teardown keeps its claim,
+    // and its attention flag with it.
+    x.attention = None;
     true
 }
 
@@ -235,12 +253,14 @@ pub(crate) async fn stop_colony(
     // booting a microVM that this in-flight removal then takes with it.
     let lifecycle = app.session_lock(&s.id).await;
     let _lifecycle = lifecycle.lock().await;
+    let mut attention = None;
     let claimed = app
         .update_session(&s.id, |x| {
             let due = x.status.is_live() && due(x);
             if due {
                 x.status = SessionStatus::Stopped;
                 x.error = Some(error);
+                attention = x.clear_attention();
             }
             due
         })
@@ -248,6 +268,7 @@ pub(crate) async fn stop_colony(
         .is_some_and(|(_, due)| due);
     if claimed {
         app.session_log(&s.id, "warn", warn).await;
+        app.note_cleared_attention(&s.id, attention).await;
         teardown_vm(app, s).await;
     }
     claimed
@@ -563,11 +584,13 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     // prove the VM is gone) for the next stop or a publish to collect.
     let lifecycle = app.session_lock(&id).await;
     let _lifecycle = lifecycle.lock().await;
+    let mut attention = None;
     let Some((s, was)) = app
         .update_session(&id, |x| {
             let was = x.status;
             if was.is_live() || was == SessionStatus::Queued {
                 x.status = SessionStatus::Stopped;
+                attention = x.clear_attention();
             }
             was
         })
@@ -575,6 +598,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
+    app.note_cleared_attention(&id, attention).await;
     // A queued colony never started, so there is no microVM to remove.
     if was == SessionStatus::Queued {
         app.session_log(&id, "info", "left the queue before it started".into()).await;
@@ -1034,6 +1058,43 @@ mod tests {
             |s| s.status == SessionStatus::Queued,
         )
         .await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_colony_clears_its_attention_flag_and_keeps_the_reason_in_its_log() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        app.update_session("abc", |s| {
+            s.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+        })
+        .await
+        .unwrap();
+        let stopped = stop(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert_eq!(
+            stopped.status,
+            SessionStatus::Stopped,
+            "the stop answers with the stopped colony"
+        );
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped);
+        assert!(
+            s.attention.is_none(),
+            "a stopped colony carries no attention flag into sessions.json"
+        );
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(
+            log.contains("autopilot_held"),
+            "the cleared flag's reason stays in the colony's log: {log}"
+        );
+        // The cleared flag stays cleared across a persist and reload of the session list.
+        app.persist_sessions().await.unwrap();
+        let reloaded: Vec<Session> = serde_json::from_slice(&std::fs::read(app.sessions_file()).unwrap()).unwrap();
+        let reloaded = reloaded.iter().find(|s| s.id == "abc").unwrap();
+        assert_eq!(reloaded.status, SessionStatus::Stopped);
+        assert!(
+            reloaded.attention.is_none(),
+            "a reloaded stopped colony still carries no attention flag"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
