@@ -678,6 +678,7 @@ mod tests {
             publish_stage: None,
             publishing_holds_slot: false,
             app_slot: None,
+            boot_attempt_started_at: None,
             mesh: None,
             local_port: None,
             agent: "claude-code".into(),

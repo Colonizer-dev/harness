@@ -321,6 +321,11 @@ pub struct Session {
     /// The app directory this colony's mounts came from. An update keeps that
     /// directory until no live colony still names it (`update::sweep_slots`).
     pub app_slot: Option<String>,
+    /// When this boot attempt's retry clock started, in unix seconds. Set before the first
+    /// pre-worktree step and cleared once the worktree exists, so a harness restart resumes the
+    /// same retry budget instead of starting a new one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_attempt_started_at: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -373,6 +378,7 @@ impl Default for Session {
             boot_cpus: None,
             boot_memory: None,
             app_slot: None,
+            boot_attempt_started_at: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
         }
@@ -1050,6 +1056,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         boot_cpus: None,
         boot_memory: None,
         app_slot: None,
+        boot_attempt_started_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -1182,8 +1189,12 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
 }
 
 /// The repository's default branch, with access failures worded the way boots report them.
-async fn default_base(app: &Shared, repo: &str) -> Result<String> {
-    match github::default_branch(app, repo).await {
+/// Transient blips ride out the boot retry budget first; only a lasting or permanent failure
+/// reaches the caller.
+async fn default_base(app: &Shared, repo: &str, log: &SessionLogger, started_at: Option<u64>) -> Result<String> {
+    let label = format!("resolving the default branch of {repo}");
+    let branch = github::with_boot_retry(&label, Some(log), started_at, || github::default_branch(app, repo)).await;
+    match branch {
         Ok(base) => Ok(base),
         Err(e) => Err(github::access_error(app, repo, e).await),
     }
@@ -1194,6 +1205,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
     let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
+    // The retry clock starts before the first pre-worktree step and is persisted, so a harness
+    // restart resumes the same budget instead of starting a new one: `lifecycle::recover`
+    // re-queues a boot that died before its worktree existed, carrying this stamp with it.
+    let boot_started_at = match s.boot_attempt_started_at {
+        Some(started_at) => Some(started_at),
+        None => {
+            let started_at = github::unix_now();
+            app.update_session(id, |x| x.boot_attempt_started_at = Some(started_at)).await;
+            Some(started_at)
+        }
+    };
     let modules = app.modules.read().await.clone();
     let agent = app
         .agents
@@ -1204,8 +1226,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     let issue = match s.issue {
         Some(number) => {
-            log.info(format!("fetching issue {}#{number}", s.repo)).await;
-            match github::fetch_issue(app, &s.repo, number).await {
+            let label = format!("fetching issue {}#{number}", s.repo);
+            log.info(label.clone()).await;
+            let fetched = github::with_boot_retry(&label, Some(&log), boot_started_at, || {
+                github::fetch_issue(app, &s.repo, number)
+            })
+            .await;
+            match fetched {
                 Ok(issue) => Some(issue),
                 Err(e) => return Err(github::access_error(app, &s.repo, e).await),
             }
@@ -1237,7 +1264,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             stacked_on = Some(branch.clone());
             branch
         }
-        stack::BootBase::Default => default_base(app, &s.repo).await?,
+        stack::BootBase::Default => default_base(app, &s.repo, &log, boot_started_at).await?,
         stack::BootBase::Wait { colony } => {
             bail!("the colony `{colony}` this one is stacked on has no branch to build on yet")
         }
@@ -1264,13 +1291,29 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
-        github::sync_repo(app, &s.repo, &bare, &log).await?;
+        github::with_boot_retry(
+            &format!("syncing the local clone of {}", s.repo),
+            Some(&log),
+            boot_started_at,
+            || github::sync_repo(app, &s.repo, &bare, &log),
+        )
+        .await?;
         log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
             .await;
-        github::create_worktree(app, &bare, &wt, &s.branch, &base).await?
+        github::with_boot_retry(
+            &format!("creating the worktree for branch {}", s.branch),
+            Some(&log),
+            boot_started_at,
+            || github::create_worktree(app, &bare, &wt, &s.branch, &base),
+        )
+        .await?
     };
-    app.update_session(id, |x| x.git_admin_dir = Some(admin.display().to_string()))
-        .await;
+    app.update_session(id, |x| {
+        x.git_admin_dir = Some(admin.display().to_string());
+        // The first durable artifact is down; the retry clock has nothing left to budget.
+        x.boot_attempt_started_at = None;
+    })
+    .await;
     let s = ensure_starting(app, id).await?;
 
     // The worktree exists by now — freshly checked out or kept from before — so a configured `auto`
@@ -2430,6 +2473,7 @@ pub(crate) mod tests {
             boot_cpus: None,
             boot_memory: None,
             app_slot: None,
+            boot_attempt_started_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
