@@ -52,7 +52,7 @@ export function feedKind(session: Session): FeedKind {
   }
 }
 
-function textFor(session: Session, kind: FeedKind): string {
+export function textFor(session: Session, kind: FeedKind): string {
   const short = session.repo.split("/")[1] ?? session.repo;
   const at = session.issue != null ? `${short}#${session.issue}` : short;
   if (kind === "question") {

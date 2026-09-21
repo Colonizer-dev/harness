@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Session } from "../types";
-import { NestView } from "./NestView";
+import { NestView, planBalloons, type BalloonAnchor } from "./NestView";
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -81,5 +81,100 @@ describe("NestView", () => {
     expect(markup).toContain('aria-label="acme/webshop #42, Working"');
     expect(markup).toContain('aria-label="acme/design-system #7, Working"');
     expect(markup).not.toContain("disabled");
+  });
+
+  it("shows every chamber's feed line in a visible balloon, no hover needed", () => {
+    const markup = renderToStaticMarkup(
+      <NestView
+        sessions={[session({ id: "s1" }), session({ id: "s2", status: "failed" })]}
+        selectedId={null}
+        mothershipSelected={false}
+        settlers={[]}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+      />,
+    );
+    // The colony-level feed lines render as static text, toned by state, above the carriers.
+    expect(markup).toContain('title="webshop#42 is working"');
+    expect(markup).toContain('title="webshop#42 failed"');
+    expect(markup).toContain("pointer-events-none absolute inset-0 z-[4]");
+    // The overlay swallows no clicks and hides nothing from assistive tech: the chambers'
+    // own title/aria-label already convey the text.
+    expect(markup).toContain('aria-hidden="true"');
+  });
+
+  it("escalates the selected chamber to the live stream detail, falling back to feed text", () => {
+    const props = {
+      sessions: [session({ id: "s1" }), session({ id: "s2", status: "failed" })],
+      selectedId: "s1" as string | null,
+      mothershipSelected: false,
+      settlers: [],
+      backlogCount: 3,
+      avatarFor: () => null,
+      onSelect: noop,
+      onOpen: noop,
+      onSelectMothership: noop,
+      onLaunch: noop,
+    };
+    const live = renderToStaticMarkup(<NestView {...props} liveDetail="Cloning acme/webshop" />);
+    expect(live).toContain('title="Cloning acme/webshop"');
+    expect(live).toContain('title="webshop#42 failed"');
+    const quiet = renderToStaticMarkup(<NestView {...props} liveDetail="" />);
+    expect(quiet).toContain('title="webshop#42 is working"');
+  });
+
+  it("clips long balloon text to one truncated line keeping the full string in the title", () => {
+    const long = "Cloning acme/webshop and then running the whole migration suite end to end";
+    const markup = renderToStaticMarkup(
+      <NestView
+        sessions={[session({ id: "s1" })]}
+        selectedId="s1"
+        mothershipSelected={false}
+        settlers={[]}
+        liveDetail={long}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+      />,
+    );
+    expect(markup).toContain(`title="${long}"`);
+    expect(markup).toContain("truncate");
+    expect(markup).toContain("max-width");
+  });
+});
+
+describe("planBalloons", () => {
+  function anchor(overrides: Partial<BalloonAnchor> = {}): BalloonAnchor {
+    return { id: "a", x: 100, y: 300, r: 70, diameter: 140, updatedAt: "2026-09-18T09:10:00Z", selected: false, ...overrides };
+  }
+
+  it("suppresses balloons on chambers too small to read, but always keeps the selected one", () => {
+    const shown = planBalloons([
+      anchor({ id: "small", diameter: 80, x: 100 }),
+      anchor({ id: "tiny-selected", diameter: 80, x: 400, selected: true }),
+      anchor({ id: "roomy", diameter: 140, x: 700 }),
+    ]).map((a) => a.id);
+    expect(shown).not.toContain("small");
+    expect(shown).toContain("tiny-selected");
+    expect(shown).toContain("roomy");
+  });
+
+  it("resolves overlaps newest-first, skipping balloons anchored near one already shown", () => {
+    const shown = planBalloons([
+      anchor({ id: "old", x: 100, updatedAt: "2026-09-18T09:00:00Z" }),
+      // 50px from "old": the newer one wins, the older is skipped.
+      anchor({ id: "new", x: 150, updatedAt: "2026-09-18T09:20:00Z" }),
+      anchor({ id: "far", x: 600, updatedAt: "2026-09-18T08:00:00Z" }),
+    ]).map((a) => a.id);
+    expect(shown).toContain("new");
+    expect(shown).not.toContain("old");
+    expect(shown).toContain("far");
   });
 });
