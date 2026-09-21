@@ -28,6 +28,23 @@ enum Autopilot {
     Hold(&'static str),
 }
 
+/// The attention reason set when the agent runner never started: the colony stays live (Idle)
+/// but has no agent behind it, so it must read as held — the autopilot_held pattern — and never
+/// as idle/None.
+pub(crate) const AGENT_FAILED: &str = "agent_failed";
+
+/// The marker agentd's spawn-failure status detail carries (colonizer-agentd runner.rs).
+const RUNNER_START_FAILURE: &str = "cannot start agent runner";
+
+/// The attention blob for a runner that never started, or nothing for any other failure. Takes the
+/// already-built `Session.error` string so the test pins the real mapping; pure so it needs no app
+/// state.
+fn runner_start_failure_attention(error: Option<&str>) -> Option<Value> {
+    error
+        .filter(|e| e.contains(RUNNER_START_FAILURE))
+        .map(|_| json!({"reason": AGENT_FAILED, "since": Utc::now(), "nudges": 0}))
+}
+
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
 fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
     if open_question {
@@ -233,6 +250,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 )),
                 _ => None,
             };
+            // A runner that never started leaves the colony live-but-agentless: hold it visibly,
+            // the way autopilot_held holds a colony, so it never reads as idle/None. Status
+            // events never clear attention (only non-status progress does), so this survives.
+            let attention = match state {
+                AgentState::Error | AgentState::Exited => runner_start_failure_attention(error.as_deref()),
+                _ => None,
+            };
             if let Some(current) = app.session(id).await
                 && current.status.is_live()
                 && (current.status != next || error.is_some())
@@ -241,6 +265,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     x.status = next;
                     if error.is_some() {
                         x.error = error;
+                    }
+                    if attention.is_some() {
+                        x.attention = attention;
                     }
                 })
                 .await;
@@ -627,5 +654,24 @@ mod tests {
         assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
         assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
         assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+    }
+
+    #[test]
+    fn runner_start_failure_holds_the_colony_visibly() {
+        // The handler's exact mapping at the pure level: the error the Error/Exited arm builds,
+        // then the attention derived from it.
+        let detail = "cannot start agent runner `node`: No such file or directory (os error 2)";
+        let error = Some(format!("agent {}: {detail}", AgentState::Error.as_str()));
+        assert!(error.is_some());
+        let attention = runner_start_failure_attention(error.as_deref());
+        assert_eq!(
+            attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some("agent_failed"),
+            "a spawn failure must name its attention reason, never idle/None"
+        );
+        // Any other failure is error-only: no attention.
+        let exited = Some(format!("agent {}: exit code 1", AgentState::Exited.as_str()));
+        assert!(runner_start_failure_attention(exited.as_deref()).is_none());
+        assert!(runner_start_failure_attention(None).is_none());
     }
 }

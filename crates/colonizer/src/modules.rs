@@ -410,6 +410,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_agent_entry_leaves_node_to_path() {
+        // The runner command is `["node", "/opt/colonizer/agent/runner.mjs"]`:
+        // `node` is not a file in the module directory, so `vm_command` leaves
+        // it bare for the VM's `PATH` (`/opt/node/bin` first) to resolve, while
+        // the runner script maps to its read-only mount. That split is the
+        // premise issue #249's vendored Node runtime exists for.
+        let dir = std::env::temp_dir().join(format!("colonizer-vm-command-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("runner.mjs"), "// test fixture").unwrap();
+        let module = AgentModule {
+            id: "claude-code".into(),
+            name: String::new(),
+            description: String::new(),
+            dir,
+            entry: vec!["node".into(), "runner.mjs".into()],
+            needs_claude: true,
+            schema: Value::Null,
+        };
+        let command = module.vm_command();
+        assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
+        assert_eq!(
+            command.get(1).map(String::as_str),
+            Some("/opt/colonizer/agent/runner.mjs"),
+            "{command:?}"
+        );
+        // End to end without KVM: that bare `node` is exactly what mounts the
+        // vendored runtime (sessions::agent_needs_node over the resolved command).
+        assert!(
+            crate::sessions::agent_needs_node(&command),
+            "a bare `node` entrypoint must mount the vendored runtime: {command:?}"
+        );
+        std::fs::remove_dir_all(&module.dir).ok();
+    }
+
+    #[test]
     fn settings_validation_filters_and_checks() {
         let schema = providers("sandbox", &[]).remove(0).schema;
         let mut input = Map::new();

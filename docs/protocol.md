@@ -24,6 +24,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/agent/` | ro | Active agent module directory |
 | `/opt/colonizer/plugins/<name>/` | ro | Claude Code plugin directories, one per entry in `COLONIZER_PLUGIN_DIRS`. Absent when none are configured |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
+| `/opt/node/bin/node` | ro | Vendored Node runtime for the agent runner, pinned in `vendor/node.lock` and fetched at install by `scripts/fetch-node-binary.sh`, mounted read-only beside agentd |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
 | `/var/lib/colonizer/events.jsonl` | VM-local | agentd event log (replay source) |
@@ -43,6 +44,26 @@ must be ignored (forward compatibility).
   "initial_prompt": "You are resolving GitHub issue #12 ..."
 }
 ```
+
+### Where the agent runtime comes from
+
+Every colony ships two things: its stack toolchain image (the preset's image — Node, Python,
+Rust or Go, chosen per repository as §4's `POST /api/sandbox/pull` describes) *plus* a vendored
+Node binary. No custom images, no per-boot download: the Node runtime is pinned in
+`vendor/node.lock`, fetched once at install by `scripts/fetch-node-binary.sh` into
+`dist/bin/node-guest`, and mounted read-only at `/opt/node/bin/node`, beside agentd.
+
+The runner command `["node", "/opt/colonizer/agent/runner.mjs"]` resolves `node` via `PATH`,
+with `/opt/node/bin` first — so the agent entry runs on the vendored runtime even on a non-Node
+stack image. A Rust colony boots `rust:1-bookworm` for its toolchain and still runs its runner
+on Node; the colony keeps its own toolchain and the brief (§6.1's `COLONIZER_IMAGE`) names the
+resolved image, so the agent knows which toolchains are native and which need installing.
+
+A host missing `bin/node-guest` fails the boot fast instead of launching a colony whose runner
+cannot start; a runner that fails to start sets attention `agent_failed` (the boot half of this,
+owned by the sessions/runner side). Both hosts fetch it at install time, never at runtime — a Mac
+alongside the guest Claude Code build (which a Linux host skips in favour of its native install),
+a Linux host for node alone, since there is no host Node binary a colony can reuse.
 
 ---
 

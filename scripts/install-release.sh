@@ -27,7 +27,10 @@
 # - on a Mac, the Linux build of Claude Code that colonies run: the build pinned by checksum in the
 #   release (claude-code.lock, which scripts/update-runtime-pins.mjs refreshes by pull request), not
 #   whatever Anthropic's `stable` channel points at that day. A colony is a Linux microVM, so the
-#   Mac's own binary cannot run in it.
+#   Mac's own binary cannot run in it. (A Linux host reuses its own Claude Code install instead.)
+# - on every host, the Linux Node.js runtime colonies run (node.lock, fetched by the guest_node step
+#   below): unlike Claude Code there is no host install to reuse, and sessions.rs fails the boot
+#   without bin/node-guest, so a Linux install fetches it just like a Mac one does.
 #
 #   COLONIZER_VERSION=v0.1.0   install that release instead of the latest
 #   COLONIZER_APP=<dir>        install the app there instead of ~/.local/share/colonizer/app (the symlink)
@@ -105,6 +108,11 @@ main() {
   done
   if [ "$platform" = darwin-arm64 ]; then
     guest_claude "$tmp/unpack/colonizer/bin/claude-guest" "$app/bin/claude-guest" "$tmp/unpack/colonizer/claude-code.lock"
+    guest_node "$tmp/unpack/colonizer/bin/node-guest" "$tmp/unpack/colonizer/node.lock" "linux-arm64"
+  elif [ "$platform" = linux-x86_64 ]; then
+    # No host fallback for node: unlike claude-guest, which a Linux host reuses from its own
+    # install, sessions.rs fails the boot without bin/node-guest — so Linux installs fetch it too.
+    guest_node "$tmp/unpack/colonizer/bin/node-guest" "$tmp/unpack/colonizer/node.lock" "linux-x64"
   fi
 
   # $app is a symlink to the directory this version lives in, so installing it is a single rename:
@@ -326,6 +334,34 @@ guest_claude() {
     fetch "$cc_url" "$out"
     [ "$(sha256_of "$out")" = "$cc_sha" ] || fail "checksum mismatch for Claude Code $cc_version; nothing was installed"
   fi
+  chmod 755 "$out"
+}
+
+# The Linux Node.js runtime for the guest, as scripts/fetch-node-binary.sh fetches it for a source
+# build: the tarball pinned in the node.lock that shipped inside this release. The lock pins the
+# tarball, so its checksum is verified before bin/node is extracted — the installed file itself has
+# no pin, and a previous copy is never reused sight unseen.
+guest_node() {
+  out=$1 lock=$2 want=$3
+  [ -f "$lock" ] || fail "the release has no $lock; nothing was installed"
+  node_version="" node_sha="" node_url=""
+  while read -r lock_name lock_version lock_plat lock_kind lock_sha lock_url; do
+    case "$lock_name" in ''|'#'*) continue ;; esac
+    [ "$lock_plat" = "$want" ] || continue
+    [ "$lock_kind" = "runtime" ] || continue
+    [ -n "$lock_url" ] || continue
+    node_version=$lock_version node_sha=$lock_sha node_url=$lock_url
+    break
+  done < "$lock"
+  [ -n "$node_url" ] || fail "no $want Node.js runtime pinned in $lock"
+  say "downloading Node.js $node_version for colonies ($want)"
+  fetch "$node_url" "$tmp/node.tar.xz"
+  [ "$(sha256_of "$tmp/node.tar.xz")" = "$node_sha" ] || fail "checksum mismatch for Node.js $node_version; nothing was installed"
+  rm -rf "$tmp/node.unpack" && mkdir -p "$tmp/node.unpack"
+  entry=$(tar -tf "$tmp/node.tar.xz" | grep '/bin/node$' | head -n 1)
+  [ -n "$entry" ] || fail "Node.js $node_version for colonies has no bin/node"
+  tar -xJf "$tmp/node.tar.xz" -C "$tmp/node.unpack" "$entry"
+  mv -f "$tmp/node.unpack/$entry" "$out"
   chmod 755 "$out"
 }
 
