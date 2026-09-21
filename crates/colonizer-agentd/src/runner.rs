@@ -205,8 +205,14 @@ mod tests {
     fn spawn_failure_detail_names_the_binary() {
         let err = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
         let detail = spawn_failure_detail("node", &err);
-        assert!(detail.contains("cannot start agent runner"), "marker events.rs matches on: {detail}");
+        assert!(
+            detail.contains("cannot start agent runner"),
+            "marker events.rs matches on: {detail}"
+        );
         assert!(detail.contains("`node`"), "the binary must be named: {detail}");
-        assert!(detail.contains("No such file or directory"), "the cause must survive: {detail}");
+        assert!(
+            detail.contains("No such file or directory"),
+            "the cause must survive: {detail}"
+        );
     }
 }
