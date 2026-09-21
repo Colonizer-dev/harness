@@ -443,7 +443,7 @@ impl Gateway {
     pub fn quota_fallback_enabled() -> bool {
         std::env::var("COLONIZER_QUOTA_FALLBACK")
             .ok()
-            .map_or(true, |v| !matches!(v.as_str(), "0" | "false"))
+            .is_none_or(|v| !matches!(v.as_str(), "0" | "false"))
     }
 
     fn colony_counter(&self, colony: &str) -> Arc<AtomicU64> {
