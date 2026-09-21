@@ -290,6 +290,8 @@ export function Cockpit({
             statusKnown={status !== null}
             autopilotDefault={autopilotDefault}
             maxParallel={status?.sandbox.max_parallel ?? null}
+            sessions={sessions}
+            onOpenColony={(session) => openColonyById(session.id)}
             onCreated={(session) => {
               onCreated(session);
               setView("home");

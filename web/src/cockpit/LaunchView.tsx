@@ -14,6 +14,8 @@ export function LaunchView({
   statusKnown,
   autopilotDefault,
   maxParallel,
+  sessions,
+  onOpenColony,
   onCreated,
   onOpenSettings,
 }: {
@@ -22,6 +24,10 @@ export function LaunchView({
   statusKnown: boolean;
   autopilotDefault: boolean;
   maxParallel: number | null;
+  /** The mothership's colony list, for the launch form's pre-submit duplicate check. */
+  sessions: Session[];
+  /** Opens a colony holding an issue, from that issue's inline warning. */
+  onOpenColony: (session: Session) => void;
   onCreated: (session: Session) => void;
   onOpenSettings: () => void;
 }): ReactElement {
@@ -34,12 +40,17 @@ export function LaunchView({
           one colony each, in its own microvm on a fresh worktree
           {maxParallel != null ? ` · queued past ${maxParallel} in parallel` : ""}.
         </p>
+        <p className="mt-1 text-[12px] text-faint">
+          Duplicate check is per-host; other motherships in the fleet are not consulted.
+        </p>
         <div className="mt-5 rounded-2xl border border-border bg-panel">
           <NewSession
             org={org}
             githubConnected={githubConnected}
             statusKnown={statusKnown}
             autopilotDefault={autopilotDefault}
+            sessions={sessions}
+            onOpenColony={onOpenColony}
             onCreated={onCreated}
             onOpenSettings={onOpenSettings}
           />

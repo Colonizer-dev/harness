@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ApiError, heldByFor } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
@@ -182,6 +183,8 @@ export function Sidebar({
             statusKnown={status !== null}
             onOpenSettings={onOpenSettings}
             autopilotDefault={autopilotDefault}
+            sessions={sessions}
+            onOpenColony={onOpenColony}
             onCreated={(session) => {
               onTab("sessions");
               onCreated(session);
@@ -643,6 +646,8 @@ export function NewSession({
   statusKnown,
   onOpenSettings,
   autopilotDefault,
+  sessions = [],
+  onOpenColony,
   onCreated,
 }: {
   org: string | null;
@@ -650,6 +655,10 @@ export function NewSession({
   statusKnown: boolean;
   onOpenSettings: () => void;
   autopilotDefault: boolean;
+  /** The mothership's colony list, for the pre-submit duplicate check (`heldByFor`). */
+  sessions?: Session[];
+  /** Opens a colony holding an issue, from that issue's inline warning. */
+  onOpenColony?: (session: Session) => void;
   onCreated: (session: Session) => void;
 }) {
   const api = useApi();
@@ -664,6 +673,8 @@ export function NewSession({
   const [issueQuery, setIssueQuery] = useState("");
   const [openIssue, setOpenIssue] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const [blockedByDuplicate, setBlockedByDuplicate] = useState(false);
   const [launching, setLaunching] = useState(false);
 
   const inOrg = (name: string) => !org || sameOrg(name.split("/")[0], org);
@@ -757,6 +768,7 @@ export function NewSession({
     if (!activeRepo) return;
     const batch = matchingIssues.filter((i) => selected.has(i.number));
     setLaunching(true);
+    setBlockedByDuplicate(false);
     let started = 0;
     let queued = 0;
     const failures: string[] = [];
@@ -768,6 +780,7 @@ export function NewSession({
           issue: issue.number,
           title: issue.title,
           autopilot: autopilotDefault,
+          allow_duplicate: allowDuplicate || undefined,
         });
         if (session.status === "queued") {
           queued += 1;
@@ -776,6 +789,8 @@ export function NewSession({
         }
         last = session;
       } catch (error) {
+        // A 409 names the colony already holding the issue; the fix is the override below, not a retry.
+        if (error instanceof ApiError && error.status === 409) setBlockedByDuplicate(true);
         failures.push(`#${issue.number}: ${errorMessage(error)}`);
       }
     }
@@ -853,17 +868,34 @@ export function NewSession({
             {issues && <span className="text-[11.5px] text-faint">{issues.length}</span>}
           </div>
           {selected.size > 0 && (
-            <div className="flex items-center gap-2 rounded-xl border border-border bg-panel px-2.5 py-2 shadow-[var(--shadow)]">
-              <span className="min-w-0 flex-1 text-[12.5px]">
-                {selected.size} selected
-                <span className="block text-[11.5px] text-faint">one colony each, queued past the limit</span>
-              </span>
-              <Button size="sm" variant="ghost" disabled={launching} onClick={() => setSelected(new Set())}>
-                Clear
-              </Button>
-              <Button size="sm" variant="primary" disabled={launching} onClick={launchSelected}>
-                {launching ? <Spinner /> : <IconPlus size={14} />} Launch {selected.size}
-              </Button>
+            <div className="space-y-1.5 rounded-xl border border-border bg-panel px-2.5 py-2 shadow-[var(--shadow)]">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 text-[12.5px]">
+                  {selected.size} selected
+                  <span className="block text-[11.5px] text-faint">one colony each, queued past the limit</span>
+                </span>
+                <Button size="sm" variant="ghost" disabled={launching} onClick={() => setSelected(new Set())}>
+                  Clear
+                </Button>
+                <Button size="sm" variant="primary" disabled={launching} onClick={launchSelected}>
+                  {launching ? <Spinner /> : <IconPlus size={14} />} Launch {selected.size}
+                </Button>
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 px-0.5 text-[12px] text-muted">
+                <input
+                  type="checkbox"
+                  checked={allowDuplicate}
+                  onChange={(e) => setAllowDuplicate(e.target.checked)}
+                  aria-label="Allow a second colony on an issue another colony already holds"
+                  className="size-3.5 cursor-pointer accent-[var(--accent)]"
+                />
+                Allow duplicate — start even where another colony already holds the issue
+              </label>
+              {blockedByDuplicate && !allowDuplicate && (
+                <p className="px-0.5 text-[12px] text-warn">
+                  A colony already holds one of these issues — check Allow duplicate to launch anyway.
+                </p>
+              )}
             </div>
           )}
           {issues && issues.length > 6 && (
@@ -893,6 +925,10 @@ export function NewSession({
                 onSelect={(on) => toggleSelected(issue.number, on)}
                 open={openIssue === issue.number}
                 onToggle={() => setOpenIssue(openIssue === issue.number ? null : issue.number)}
+                holder={heldByFor(sessions, activeRepo, issue.number)}
+                allowDuplicate={allowDuplicate}
+                onAllowDuplicate={setAllowDuplicate}
+                onOpenColony={onOpenColony}
                 onCreated={onCreated}
               />
             ))}
@@ -995,6 +1031,10 @@ function IssueRow({
   onSelect,
   open,
   onToggle,
+  holder,
+  allowDuplicate,
+  onAllowDuplicate,
+  onOpenColony,
   onCreated,
 }: {
   repo: string;
@@ -1004,6 +1044,11 @@ function IssueRow({
   onSelect: (on: boolean) => void;
   open: boolean;
   onToggle: () => void;
+  /** The colony already holding this issue, if any — launching without the override answers 409. */
+  holder: Session | null;
+  allowDuplicate: boolean;
+  onAllowDuplicate: (on: boolean) => void;
+  onOpenColony?: (session: Session) => void;
   onCreated: (session: Session) => void;
 }) {
   const api = useApi();
@@ -1011,9 +1056,11 @@ function IssueRow({
   const [instructions, setInstructions] = useState("");
   const [autopilot, setAutopilot] = useState<boolean | null>(null);
   const [starting, setStarting] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
 
   const start = async () => {
     setStarting(true);
+    setLaunchError(null);
     try {
       const session = await api.createSession({
         repo,
@@ -1021,6 +1068,7 @@ function IssueRow({
         title: issue.title,
         instructions: instructions.trim() || undefined,
         autopilot: autopilot ?? undefined,
+        allow_duplicate: allowDuplicate || undefined,
       });
       toast(
         session.status === "queued"
@@ -1029,7 +1077,9 @@ function IssueRow({
       );
       onCreated(session);
     } catch (error) {
-      toast(errorMessage(error), "error");
+      // A 409 names the holder; keep its message on screen so the override below reads as the fix.
+      if (error instanceof ApiError && error.status === 409) setLaunchError(errorMessage(error));
+      else toast(errorMessage(error), "error");
     } finally {
       setStarting(false);
     }
@@ -1072,6 +1122,11 @@ function IssueRow({
                 </span>
               ))}
               <span>{timeAgo(issue.updatedAt)}</span>
+              {holder && (
+                <span className="text-warn" title={`Already held by ${holder.id} (${holder.status})`}>
+                  held by {holder.id}
+                </span>
+              )}
             </span>
           </span>
           <IconChevron size={14} className={cx("mt-1 shrink-0 text-faint transition-transform", open && "rotate-90")} />
@@ -1085,6 +1140,47 @@ function IssueRow({
           <a href={issue.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[12.5px] text-accent hover:underline">
             View on GitHub <IconExternal size={12} />
           </a>
+          {holder && (
+            <p className="rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-2 text-[12.5px] text-muted">
+              Already held by{" "}
+              {onOpenColony ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenColony(holder)}
+                  className="cursor-pointer font-mono text-accent hover:underline"
+                >
+                  {holder.id}
+                </button>
+              ) : (
+                <span className="font-mono">{holder.id}</span>
+              )}{" "}
+              ({holder.status.replace(/_/g, " ")}
+              {holder.pr_url ? (
+                <>
+                  ,{" "}
+                  <a href={holder.pr_url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                    PR
+                  </a>
+                </>
+              ) : (
+                ", no PR yet"
+              )}
+              ).
+            </p>
+          )}
+          {(holder || launchError) && (
+            <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+              <input
+                type="checkbox"
+                checked={allowDuplicate}
+                onChange={(e) => onAllowDuplicate(e.target.checked)}
+                aria-label={`Allow a second colony on issue #${issue.number}`}
+                className="size-3.5 cursor-pointer accent-[var(--accent)]"
+              />
+              Allow duplicate on #{issue.number}
+            </label>
+          )}
+          {launchError && <p className="text-[12.5px] text-err [overflow-wrap:anywhere]">{launchError}</p>}
           <textarea
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
