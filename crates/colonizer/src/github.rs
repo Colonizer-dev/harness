@@ -4,7 +4,9 @@ use crate::{
     ApiResult, App, Shared, client_error, orgs,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
-    util::{delete_secret, env_nonempty, exec, exec_status, exec_within, fingerprint, read_secret, truncate, valid_repo, write_secret},
+    util::{
+        delete_secret, env_nonempty, exec, exec_status, exec_within, fingerprint, read_secret, truncate, valid_repo, write_secret,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{

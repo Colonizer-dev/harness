@@ -237,8 +237,7 @@ fn seal(plaintext: &str, key: &[u8; 32]) -> Result<String> {
     ring::rand::SystemRandom::new()
         .fill(&mut nonce_bytes)
         .map_err(|_| anyhow::anyhow!("could not generate an encryption nonce"))?;
-    let unbound =
-        aead::UnboundKey::new(&aead::CHACHA20_POLY1305, key).map_err(|_| anyhow::anyhow!("bad master key"))?;
+    let unbound = aead::UnboundKey::new(&aead::CHACHA20_POLY1305, key).map_err(|_| anyhow::anyhow!("bad master key"))?;
     let less = aead::LessSafeKey::new(unbound);
     let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
     let mut data = plaintext.as_bytes().to_vec();
