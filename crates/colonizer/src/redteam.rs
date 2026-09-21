@@ -4,13 +4,13 @@
 //! while every launched hunter is still queued) → draining → done; a stop marks the run `stopped`
 //! and stops the hunters it started that are still live or queued.
 
+#[cfg(not(test))]
+use crate::sessions::{self, NewSession};
 use crate::{
-    App, ApiResult, Shared, client_error,
+    ApiResult, App, Shared, client_error,
     sessions::{Session, SessionStatus},
     util::{short_id, valid_repo, write_atomic},
 };
-#[cfg(not(test))]
-use crate::sessions::{self, NewSession};
 use anyhow::Result;
 use axum::{
     Json,
@@ -179,7 +179,10 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
     let data = match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            eprintln!("redteam: could not read {}: {e}; starting with no red-team runs", path.display());
+            eprintln!(
+                "redteam: could not read {}: {e}; starting with no red-team runs",
+                path.display()
+            );
             return Vec::new();
         }
         Ok(data) => data,
@@ -187,7 +190,10 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
     match serde_json::from_slice::<Vec<RedTeamRun>>(&data) {
         Ok(runs) => runs,
         Err(e) => {
-            eprintln!("redteam: could not parse {}: {e}; starting with no red-team runs", path.display());
+            eprintln!(
+                "redteam: could not parse {}: {e}; starting with no red-team runs",
+                path.display()
+            );
             Vec::new()
         }
     }
@@ -391,7 +397,9 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
             }
             Err(message) => eprintln!(
                 "redteam: hunter {}/{} of run {} could not be created: {message}",
-                i + 1, n, run.id
+                i + 1,
+                n,
+                run.id
             ),
         }
     }
@@ -400,7 +408,11 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
     run.hunters = hunters;
     run.gate_reason = None;
     if flipped {
-        run.state = if any_live { RedTeamState::Running } else { RedTeamState::Waiting };
+        run.state = if any_live {
+            RedTeamState::Running
+        } else {
+            RedTeamState::Waiting
+        };
     }
     app.redteam
         .update(&id, |r| {
@@ -416,11 +428,7 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
 fn is_ended(status: SessionStatus) -> bool {
     matches!(
         status,
-        SessionStatus::Merged
-            | SessionStatus::Closed
-            | SessionStatus::NoChanges
-            | SessionStatus::Stopped
-            | SessionStatus::Failed
+        SessionStatus::Merged | SessionStatus::Closed | SessionStatus::NoChanges | SessionStatus::Stopped | SessionStatus::Failed
     )
 }
 
@@ -434,7 +442,13 @@ fn finish(run: &mut RedTeamRun) {
 /// tests drive it without I/O. Launching (the `armed` branch) creates sessions, so the tick handles
 /// it and only hands the wait state down here.
 fn advance_state(run: &mut RedTeamRun, sessions: &[Session]) {
-    let status_of = |sid: &str| sessions.iter().find(|s| s.id == sid).map(|s| s.status).unwrap_or(SessionStatus::Stopped);
+    let status_of = |sid: &str| {
+        sessions
+            .iter()
+            .find(|s| s.id == sid)
+            .map(|s| s.status)
+            .unwrap_or(SessionStatus::Stopped)
+    };
     let total = run.hunters.len();
     let live_hunters = run.hunters.iter().filter(|h| status_of(&h.session_id).is_live()).count();
     let queued_all = total > 0 && run.hunters.iter().all(|h| status_of(&h.session_id) == SessionStatus::Queued);
@@ -791,7 +805,12 @@ mod tests {
         let hunters: Vec<&Session> = run
             .hunters
             .iter()
-            .map(|h| sessions.iter().find(|s| s.id == h.session_id).expect("the hunter session exists"))
+            .map(|h| {
+                sessions
+                    .iter()
+                    .find(|s| s.id == h.session_id)
+                    .expect("the hunter session exists")
+            })
             .collect();
         assert_eq!(hunters.len(), 3);
         for h in &run.hunters {
@@ -830,7 +849,10 @@ mod tests {
         tick_once(&app).await;
         let run = get(State(app.clone()), Path(run.id.clone())).await.unwrap().0;
         assert_eq!(run.state, RedTeamState::Armed);
-        assert!(run.hunters.is_empty(), "the armed run must not launch while colonies are live");
+        assert!(
+            run.hunters.is_empty(),
+            "the armed run must not launch while colonies are live"
+        );
         // The nest empties: the next tick launches the swarm.
         app.sessions.write().await.clear();
         tick_once(&app).await;

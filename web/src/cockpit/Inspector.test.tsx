@@ -7,9 +7,13 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { QuestionActions } from "../components/AskUserCard";
+import { ApiContext } from "../context";
+import { createMockApi } from "../mock";
 import { initialStreamState, reduceFrame, type StreamState } from "../sessionStream";
 import type { ServerFrame, Session } from "../types";
 import { Inspector, pendingQuestionsOf, type PendingQuestion } from "./Inspector";
+
+const api = createMockApi();
 
 const ASKED_AT = "2026-09-01T09:00:00Z";
 
@@ -50,27 +54,29 @@ const CONNECTING: QuestionActions = { answer: () => false, submitting: {}, canAn
 
 function renderInspector(props: { pendingQuestions?: PendingQuestion[]; questionActions?: QuestionActions }): string {
   return renderToStaticMarkup(
-    <Inspector
-      target={{ kind: "colony", session: session() }}
-      avatarUrl={null}
-      settlers={[]}
-      pendingQuestions={props.pendingQuestions ?? []}
-      questionActions={props.questionActions ?? CONNECTED}
-      sessions={[session()]}
-      status={null}
-      liveCount={0}
-      queuedCount={0}
-      needCount={1}
-      spend={null}
-      maxParallel={null}
-      update={null}
-      onClose={noop}
-      onOpenColony={noop}
-      onStop={noop}
-      onResume={noop}
-      onLaunch={noop}
-      onOpenSettings={noop}
-    />,
+    <ApiContext.Provider value={api}>
+      <Inspector
+        target={{ kind: "colony", session: session() }}
+        avatarUrl={null}
+        settlers={[]}
+        pendingQuestions={props.pendingQuestions ?? []}
+        questionActions={props.questionActions ?? CONNECTED}
+        sessions={[session()]}
+        status={null}
+        liveCount={0}
+        queuedCount={0}
+        needCount={1}
+        spend={null}
+        maxParallel={null}
+        update={null}
+        onClose={noop}
+        onOpenColony={noop}
+        onStop={noop}
+        onResume={noop}
+        onLaunch={noop}
+        onOpenSettings={noop}
+      />
+    </ApiContext.Provider>,
   );
 }
 
@@ -106,27 +112,29 @@ describe("Inspector", () => {
 
   it("nothing selected is its own labelled state", () => {
     const markup = renderToStaticMarkup(
-      <Inspector
-        target={null}
-        avatarUrl={null}
-        settlers={[]}
-        pendingQuestions={[]}
-        questionActions={CONNECTING}
-        sessions={[]}
-        status={null}
-        liveCount={0}
-        queuedCount={0}
-        needCount={0}
-        spend={null}
-        maxParallel={null}
-        update={null}
-        onClose={noop}
-        onOpenColony={noop}
-        onStop={noop}
-        onResume={noop}
-        onLaunch={noop}
-        onOpenSettings={noop}
-      />,
+      <ApiContext.Provider value={api}>
+        <Inspector
+          target={null}
+          avatarUrl={null}
+          settlers={[]}
+          pendingQuestions={[]}
+          questionActions={CONNECTING}
+          sessions={[]}
+          status={null}
+          liveCount={0}
+          queuedCount={0}
+          needCount={0}
+          spend={null}
+          maxParallel={null}
+          update={null}
+          onClose={noop}
+          onOpenColony={noop}
+          onStop={noop}
+          onResume={noop}
+          onLaunch={noop}
+          onOpenSettings={noop}
+        />
+      </ApiContext.Provider>,
     );
     expect(markup).toMatch(/aria-label="nothing selected"/);
     expect(markup).toContain("nothing selected");
