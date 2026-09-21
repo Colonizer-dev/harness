@@ -54,14 +54,39 @@ pub async fn recover(app: &Shared) {
     let running = sandbox::running(&app.cfg.msb).await.unwrap_or_default();
     let sessions = app.sessions.read().await.clone();
     for s in sessions {
+        // The snapshot above moves under this loop: the HTTP API admits resumes, stops and
+        // publishes while it works down the colonies. Take the colony's lifecycle lock and
+        // re-read it, and branch on that fresh record — a colony already claimed, stopped or
+        // deleted in the meantime is not this pass's to touch. The `running` check stays on
+        // the snapshot — it is the detection, and a microVM does not come back — but both
+        // flips below are compare-and-set, so a publish that claimed the colony in between
+        // (it holds no lifecycle lock) is not clobbered.
+        let lifecycle = app.session_lock(&s.id).await;
+        let _lifecycle = lifecycle.lock().await;
+        let Some(fresh) = app.session(&s.id).await else {
+            continue;
+        };
+        // A boot is in flight — a resume admitted after the snapshot claimed it. Neither reap
+        // its microVM nor clobber the claim.
+        if fresh.status == SessionStatus::Starting {
+            continue;
+        }
         if s.status == SessionStatus::Publishing {
             // The kill may have landed between persisting `publishing` and the teardown inside it, so a
             // microVM can still be running — and after a restart nothing would reap it: the runtimes map
             // is empty, so no later publish removes it, and `watch_sandboxes` skips non-live statuses.
-            teardown_vm(app, &s).await;
-            app.update_session(&s.id, |x| {
+            if fresh.status != SessionStatus::Publishing {
+                continue;
+            }
+            teardown_vm(app, &fresh).await;
+            let at = fresh.status;
+            app.update_session(&fresh.id, |x| {
+                if x.status != at {
+                    return false;
+                }
                 x.status = SessionStatus::Failed;
                 x.error = Some(PUBLISH_LOST_TO_RESTART.into());
+                true
             })
             .await;
             continue;
@@ -69,26 +94,39 @@ pub async fn recover(app: &Shared) {
         if !s.status.is_live() {
             continue;
         }
-        let reachable = s.mesh.as_ref().is_some_and(|m| m.ip.is_some()) || s.local_port.is_some();
-        if running.contains(&s.sandbox) && reachable && s.status != SessionStatus::Starting {
-            if s.mesh.is_some() {
+        if !fresh.status.is_live() {
+            continue;
+        }
+        let reachable = fresh.mesh.as_ref().is_some_and(|m| m.ip.is_some()) || fresh.local_port.is_some();
+        if running.contains(&fresh.sandbox) && reachable {
+            if fresh.mesh.is_some() {
                 match app.mesh().await {
                     Ok(mesh) => {
                         if let Err(e) = mesh.ensure_started().await {
-                            app.session_log(&s.id, "error", format!("mesh failed to start: {e:#}")).await;
+                            app.session_log(&fresh.id, "error", format!("mesh failed to start: {e:#}"))
+                                .await;
                         }
                     }
-                    Err(e) => app.session_log(&s.id, "error", format!("{e:#}")).await,
+                    Err(e) => app.session_log(&fresh.id, "error", format!("{e:#}")).await,
                 }
             }
-            app.session_log(&s.id, "info", "harness restarted: reconnecting to the running microVM".into())
-                .await;
-            start_link(app, &s.id).await;
+            app.session_log(
+                &fresh.id,
+                "info",
+                "harness restarted: reconnecting to the running microVM".into(),
+            )
+            .await;
+            start_link(app, &fresh.id).await;
         } else {
-            teardown_vm(app, &s).await;
-            app.update_session(&s.id, |x| {
+            teardown_vm(app, &fresh).await;
+            let at = fresh.status;
+            app.update_session(&fresh.id, |x| {
+                if x.status != at {
+                    return false;
+                }
                 x.status = SessionStatus::Stopped;
                 x.error = Some(VM_GONE_AFTER_RESTART.into());
+                true
             })
             .await;
         }
@@ -1227,6 +1265,59 @@ mod tests {
             the_colony_to_stop(&app, "claimed").await.is_none(),
             "a colony claimed off its snapshot status in the meantime is not the tick's to stop"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- recover after a harness restart -------------------------------------------------------
+
+    /// Parks a `recover` pass behind a colony's lifecycle lock, flips the colony in that window —
+    /// as a resume, stop or publish admitted by the HTTP API would — then lets the pass through.
+    /// Purely cooperative, so there is no timing bet: each yield lets the pass advance to the
+    /// lock it cannot take, and the flip always lands after the pass's snapshot.
+    async fn recover_after_a_concurrent_flip(app: &Shared, id: &str, flip: impl FnOnce(&mut Session)) {
+        let lifecycle = app.session_lock(id).await;
+        let held = lifecycle.lock().await;
+        let owned = app.clone();
+        let recovered = tokio::spawn(async move { recover(&owned).await });
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert!(
+                !recovered.is_finished(),
+                "the recover pass waits for the colony's lifecycle lock"
+            );
+        }
+        app.update_session(id, flip).await.unwrap();
+        drop(held);
+        recovered.await.expect("recover task joined");
+    }
+
+    #[tokio::test]
+    async fn a_recover_does_not_clobber_a_resume_that_claimed_the_colony_after_its_snapshot() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        recover_after_a_concurrent_flip(&app, "abc", |x| x.status = SessionStatus::Starting).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Starting, "the boot in flight keeps its claim");
+        assert_eq!(s.error, None, "and the pass paints no stopped error over it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_recover_does_not_clobber_a_publish_that_claimed_the_colony_after_its_snapshot() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        recover_after_a_concurrent_flip(&app, "abc", |x| x.status = SessionStatus::Publishing).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Publishing, "the publish keeps its claim");
+        assert_eq!(s.error, None, "and the pass paints no stopped error over it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_recover_leaves_a_publishing_colony_alone_once_it_moves_off_publishing() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Publishing).await;
+        recover_after_a_concurrent_flip(&app, "abc", |x| x.status = SessionStatus::Stopped).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped, "the colony keeps the status it moved to");
+        assert_eq!(s.error, None, "and the pass paints no failed error over it");
         let _ = std::fs::remove_dir_all(root);
     }
 }
