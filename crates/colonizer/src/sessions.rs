@@ -1052,7 +1052,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
-    let task_signals = crate::routing::signals(
+    let mut task_signals = crate::routing::signals(
         &s.issue_title,
         issue.as_ref().and_then(|i| i["body"].as_str()).unwrap_or(&s.instructions),
         &task_labels,
@@ -1061,6 +1061,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // and refuse it the cheapest tier — including the ones detection identified exactly.
         crate::presets::find(&stack).is_some(),
     );
+    // Jev shadow mode (jev.rs): an optional external classifier's second opinion, fetched here in
+    // the async boot path — never inside `routing::decide`, which stays synchronous and pure. Off by
+    // default, and a silent no-op without both the setting and a `JEV_API_KEY` secret: it is recorded
+    // for later comparison and never changes the tier a colony runs on.
+    let jev_enabled = setting(&agent_choice, &agent.schema, "jev_shadow_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    task_signals.jev = crate::jev::shadow_opinion(jev_enabled, &s.issue_title, &task_labels, &task_signals).await;
     let tier_decision = crate::routing::decide(&route_settings, &task_signals);
     let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
     let model = setting_str(&agent_choice, &agent.schema, "model");
@@ -1087,6 +1095,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         message.push_str(&format!("; misroute: the rule wants {}", tier_decision.rule.as_str()));
     }
     log.info(message).await;
+    // A shadow opinion that disagrees with the rule is worth a low-key note for later promotion
+    // analysis; it never blocks boot or looks like an error.
+    if tier_decision.jev_agrees() == Some(false) {
+        log.info(format!(
+            "jev shadow mode: the second opinion says {} where the rule says {}",
+            tier_decision.jev.as_ref().map(|jev| jev.tier.as_str()).unwrap_or("?"),
+            tier_decision.rule.as_str()
+        ))
+        .await;
+    }
     let record = json!({
         "tier": tier_decision.tier,
         "rule": tier_decision.rule,
@@ -1096,6 +1114,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "model": if model_changed { json!(routed_model) } else { Value::Null },
         "misroute": tier_decision.misroute(),
         "signals": task_signals,
+        "jev": tier_decision.jev,
     });
     app.update_session(id, |x| x.model_routing = Some(record.clone())).await;
     let line = json!({

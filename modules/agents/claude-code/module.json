@@ -23,6 +23,14 @@
       "hosts": [
         "api.anthropic.com"
       ]
+    },
+    {
+      "env": [
+        "JEV_API_KEY"
+      ],
+      "hosts": [
+        "api.typesafe.ai"
+      ]
     }
   ],
   "settings": {
@@ -68,6 +76,12 @@
         "description": "Model for large tasks such as cross-cutting changes, migrations and new subsystems: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
         "default": "",
         "env": "COLONIZER_MODEL_HIGH"
+      },
+      "jev_shadow_mode": {
+        "type": "boolean",
+        "title": "Jev shadow mode (experimental)",
+        "description": "Ask an optional external classifier for a second opinion on model-tier routing and record it for comparison — never applied to the actual decision. Off by default; requires a JEV_API_KEY secret. Vendor unverified as of this writing — enable only if you have a real account with the provider.",
+        "default": false
       },
       "delegate": {
         "type": "string",

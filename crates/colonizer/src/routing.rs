@@ -56,7 +56,7 @@ impl Tier {
 }
 
 /// What the rule knows about a task. Everything here is read off the issue, so the decision costs nothing.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Signals {
     /// The strongest tier-bearing label on the issue, if it carries one.
     pub label: Option<&'static str>,
@@ -71,6 +71,21 @@ pub struct Signals {
     /// Whether the colony boots on a sandbox preset the harness knows. A custom stack means the
     /// harness supplies no defaults for it, so such a colony never routes down to the cheapest tier.
     pub known_preset: bool,
+    /// An optional second opinion from the external Jev classifier (`jev.rs`), fetched by the boot
+    /// path before `decide` runs. Recorded only — it never changes the rule's score or `decide`'s
+    /// output tier.
+    pub jev: Option<JevOpinion>,
+}
+
+/// A recorded-but-not-applied second opinion from an optional external classifier ("Jev"), fetched
+/// by the boot path before `decide` runs. `decide` copies it through unchanged into `Decision` — it
+/// never affects `tier`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct JevOpinion {
+    pub tier: Tier,
+    pub model: String,
+    pub confidence: f64,
+    pub estimated_cost_usd: f64,
 }
 
 /// Per-task routing as configured. Resolved by the caller from module settings and the colony record.
@@ -95,7 +110,7 @@ pub enum Source {
 
 /// The tier a colony will run on, with everything that chose it, so the choice can be logged and
 /// later measured against what it should have been.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Decision {
     /// The tier in force.
     pub tier: Tier,
@@ -107,6 +122,9 @@ pub struct Decision {
     pub score: i32,
     /// One clause naming the tier and the signals behind it, for the session log.
     pub reason: String,
+    /// Jev's second opinion, copied through from `Signals` unchanged. Shadow mode only: never read
+    /// by `decide` to pick `tier`.
+    pub jev: Option<JevOpinion>,
 }
 
 impl Decision {
@@ -115,6 +133,12 @@ impl Decision {
     /// own error, but an override against its advice is worth counting on its own.
     pub fn misroute(&self) -> bool {
         self.source == Source::Override && self.tier != self.rule
+    }
+
+    /// Whether Jev's tier agrees with the rule's own tier — `None` when no opinion was recorded.
+    /// Shadow-mode comparison only: this never feeds back into `tier`.
+    pub fn jev_agrees(&self) -> Option<bool> {
+        Some(self.jev.as_ref()?.tier == self.rule)
     }
 }
 
@@ -136,6 +160,7 @@ pub fn signals(title: &str, text: &str, labels: &[String], known_preset: bool) -
         paths: named.len(),
         one_directory,
         known_preset,
+        jev: None,
     }
 }
 
@@ -156,6 +181,7 @@ pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
                 chosen.as_str(),
                 rule.as_str()
             ),
+            jev: signals.jev.clone(),
         };
     }
     if !settings.enabled {
@@ -165,6 +191,7 @@ pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
             source: Source::Off,
             score,
             reason: "per-task routing is off, so the colony runs on the module's model".to_string(),
+            jev: signals.jev.clone(),
         };
     }
     Decision {
@@ -173,6 +200,7 @@ pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
         source: Source::Rule,
         score,
         reason: format!("{} tier, {detail}", rule.as_str()),
+        jev: signals.jev.clone(),
     }
 }
 
@@ -371,6 +399,7 @@ mod tests {
             paths,
             one_directory,
             known_preset: true,
+            jev: None,
         }
     }
 
@@ -400,6 +429,7 @@ mod tests {
                 score: 1,
                 reason: "low tier, score 1: a 76-character body, no checklist items, 5 paths named across directories, and the typo label"
                     .to_string(),
+                jev: None,
             }
         );
         let plain = signals("fix a typo", text, &[], true);
@@ -510,6 +540,7 @@ mod tests {
             paths: 0,
             one_directory: true,
             known_preset: false,
+            jev: None,
         };
         assert_eq!(
             routed(&tiny),
@@ -520,6 +551,7 @@ mod tests {
                 score: -2,
                 reason: "medium tier, score -2: a 12-character body, no checklist items, no paths named, and the typo label, kept off low because the sandbox preset is unknown"
                     .to_string(),
+                jev: None,
             }
         );
 
@@ -549,6 +581,7 @@ mod tests {
             paths: 5,
             one_directory: false,
             known_preset: true,
+            jev: None,
         };
         assert_eq!(
             decide(
@@ -564,6 +597,7 @@ mod tests {
                 source: Source::Off,
                 score: 10,
                 reason: "per-task routing is off, so the colony runs on the module's model".to_string(),
+                jev: None,
             }
         );
     }
@@ -577,6 +611,7 @@ mod tests {
             paths: 5,
             one_directory: false,
             known_preset: true,
+            jev: None,
         };
         let decided = decide(
             &RoutingSettings {
@@ -594,6 +629,7 @@ mod tests {
                 score: 10,
                 reason: "low tier, set for this colony; the rule says high at score 10: a 5000-character body, 6 checklist items, 5 paths named across directories, and the epic label"
                     .to_string(),
+                jev: None,
             }
         );
         // The rule is off, but an override against its recorded tier is still a misroute label.
@@ -630,6 +666,7 @@ mod tests {
                 score: 0,
                 reason: "low tier, set for this colony; the rule says low at score 0: a 180-character body, no checklist items, 1 path named"
                     .to_string(),
+                jev: None,
             }
         );
         assert!(!agreed.misroute());
@@ -650,6 +687,7 @@ mod tests {
                 score: 0,
                 reason: "high tier, set for this colony; the rule says low at score 0: a 180-character body, no checklist items, 1 path named"
                     .to_string(),
+                jev: None,
             }
         );
         assert!(overruled.misroute());
@@ -754,5 +792,89 @@ mod tests {
         assert_eq!(Tier::parse("Medium"), Some(Tier::Medium));
         assert_eq!(Tier::parse("cheap"), None);
         assert_eq!(Tier::parse(""), None);
+    }
+
+    fn jev(tier: Tier) -> JevOpinion {
+        JevOpinion {
+            tier,
+            model: "jev-1.13.0".to_string(),
+            confidence: 0.9,
+            estimated_cost_usd: 0.0001,
+        }
+    }
+
+    #[test]
+    fn a_jev_opinion_on_signals_is_copied_into_the_rule_based_decision_and_never_changes_its_tier() {
+        let with_opinion = Signals {
+            jev: Some(jev(Tier::High)),
+            ..signals_with(180, 0, 1, true, None)
+        };
+        let decision = routed(&with_opinion);
+        // The rule alone would put this small task at low; a disagreeing Jev opinion is recorded but
+        // changes nothing about the tier actually chosen.
+        assert_eq!(decision.tier, Tier::Low);
+        assert_eq!(decision.jev, Some(jev(Tier::High)));
+    }
+
+    #[test]
+    fn a_jev_opinion_on_signals_is_copied_into_the_off_decision_and_never_changes_its_tier() {
+        let with_opinion = Signals {
+            jev: Some(jev(Tier::Low)),
+            ..signals_with(180, 0, 1, true, None)
+        };
+        let decision = decide(
+            &RoutingSettings {
+                enabled: false,
+                chosen: None,
+            },
+            &with_opinion,
+        );
+        assert_eq!(decision.tier, Tier::Medium);
+        assert_eq!(decision.jev, Some(jev(Tier::Low)));
+    }
+
+    #[test]
+    fn a_jev_opinion_on_signals_is_copied_into_the_override_decision_and_never_changes_its_tier() {
+        let with_opinion = Signals {
+            jev: Some(jev(Tier::Medium)),
+            ..signals_with(180, 0, 1, true, None)
+        };
+        let decision = decide(
+            &RoutingSettings {
+                enabled: true,
+                chosen: Some(Tier::High),
+            },
+            &with_opinion,
+        );
+        assert_eq!(decision.tier, Tier::High);
+        assert_eq!(decision.jev, Some(jev(Tier::Medium)));
+    }
+
+    #[test]
+    fn jev_agrees_compares_the_opinion_against_the_rule_tier_not_the_chosen_one() {
+        // No opinion recorded: nothing to compare.
+        assert_eq!(routed(&signals_with(180, 0, 1, true, None)).jev_agrees(), None);
+
+        // The rule lands on low for this task; a matching opinion agrees...
+        let matching = Signals {
+            jev: Some(jev(Tier::Low)),
+            ..signals_with(180, 0, 1, true, None)
+        };
+        assert_eq!(routed(&matching).jev_agrees(), Some(true));
+
+        // ...and a disagreeing one does not, even once an override changes the tier actually chosen.
+        let disagreeing = Signals {
+            jev: Some(jev(Tier::High)),
+            ..signals_with(180, 0, 1, true, None)
+        };
+        let overridden = decide(
+            &RoutingSettings {
+                enabled: true,
+                chosen: Some(Tier::Medium),
+            },
+            &disagreeing,
+        );
+        assert_eq!(overridden.rule, Tier::Low);
+        assert_eq!(overridden.jev_agrees(), Some(false));
     }
 }

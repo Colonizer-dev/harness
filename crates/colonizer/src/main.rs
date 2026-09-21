@@ -15,6 +15,7 @@ mod findings;
 mod gateway;
 mod github;
 mod headroom;
+mod jev;
 mod lifecycle;
 mod mem0;
 mod memory;
