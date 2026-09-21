@@ -977,7 +977,10 @@ async fn serve() -> Result<()> {
         .route("/api/claude-login/start", post(claude_login::start))
         .route("/api/claude-login/code", post(claude_login::submit_code))
         .route("/api/claude-login/cancel", post(claude_login::cancel))
-        .route("/api/claude-accounts", get(claude_accounts::list).post(claude_accounts::create))
+        .route(
+            "/api/claude-accounts",
+            get(claude_accounts::list).post(claude_accounts::create),
+        )
         .route("/api/claude-accounts/{id}", delete(claude_accounts::delete))
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/headroom", get(headroom::status))

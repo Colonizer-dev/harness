@@ -4,7 +4,10 @@
 //! Installs that predate this module keep a single `<config>/claude-token`, which `migrate_legacy`
 //! moves into the `default` account on first use.
 
-use crate::{ApiResult, Shared, client_error, util::{read_trimmed, write_secret}};
+use crate::{
+    ApiResult, Shared, client_error,
+    util::{read_trimmed, write_secret},
+};
 use axum::{
     Json,
     extract::{Path, State},
@@ -24,9 +27,7 @@ pub const ACCOUNTS_DIR: &str = "claude-accounts";
 /// Lowercase letters, digits and dashes, 1-40 chars — the providers.rs `valid_id` shape, widened
 /// from 32 to 40 chars for human labels-turned-ids.
 pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 40
-        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -146,10 +147,7 @@ pub fn in_use_msg(is_default: bool, orgs: &[String], sessions: &[String]) -> Opt
         return Some("this is the default account; make another account the default first".to_string());
     }
     if !orgs.is_empty() {
-        return Some(format!(
-            "org settings still name this account ({})",
-            orgs.join(", ")
-        ));
+        return Some(format!("org settings still name this account ({})", orgs.join(", ")));
     }
     if !sessions.is_empty() {
         return Some(format!("live colonies still run on this account ({})", sessions.join(", ")));
@@ -272,9 +270,7 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let orgs: Vec<String> = app
         .all_org_settings()
         .into_iter()
-        .filter(|(_, settings)| {
-            settings.agent.as_ref().and_then(|a| a.claude_account.as_deref()) == Some(id.as_str())
-        })
+        .filter(|(_, settings)| settings.agent.as_ref().and_then(|a| a.claude_account.as_deref()) == Some(id.as_str()))
         .map(|(org, _)| org)
         .collect();
     let sessions: Vec<String> = app
