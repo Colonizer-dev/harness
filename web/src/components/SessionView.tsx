@@ -171,6 +171,7 @@ export function SessionView({
               <AttentionBadge attention={attention} />
               {session.issue == null && <Badge>No issue</Badge>}
               {session.autopilot && <Badge>Autopilot</Badge>}
+              {session.origin === "burn_down" && <Badge tone="accent">Burn-down</Badge>}
             </div>
             <h1 className="mt-1 text-[17px] font-semibold leading-snug [overflow-wrap:anywhere]">
               {session.issue_title || (session.issue != null ? `Issue #${session.issue}` : "Open colony")}

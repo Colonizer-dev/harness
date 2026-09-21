@@ -36,6 +36,8 @@ export interface Session {
   base: string | null;
   /** The colony this one is stacked on: it branched from that colony's branch instead of the default one, which is what `base` then holds. null for an unstacked colony — absent in live data, since the backend omits the field when there is no parent. */
   parent?: string | null;
+  /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
+  origin?: string | null;
   worktree: string;
   /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
   git_admin_dir: string | null;
@@ -70,6 +72,40 @@ export interface Session {
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+}
+
+/** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
+export type BurnDownState =
+  | "disabled"
+  | "unconfigured"
+  | "unknown_allowance"
+  | "outside_window"
+  | "burning"
+  | "at_reserve";
+
+/**
+ * GET /api/burn-down: the burn-down scheduler's read on the weekly token plan — how long until the
+ * reset, and whether the estimated allowance has been spent down to the reserve. `now` is the
+ * backend's clock, so the frontend can measure drift between its own time and the scheduler's.
+ */
+export interface BurnDownStatus {
+  /** The scheduler is switched on and configured. */
+  enabled: boolean;
+  state: BurnDownState;
+  /** Always true — the allowance is a measured-window estimate, never a real plan limit. */
+  estimate: boolean;
+  /** RFC3339, the backend's read of when it answered. */
+  now: string;
+  next_reset: string | null;
+  window_start: string | null;
+  spent_usd: number;
+  /** null = the operator has not set an estimate. */
+  allowance_usd: number | null;
+  remaining_usd: number | null;
+  reserve_usd: number | null;
+  colonies: { live: number; queued: number; total: number };
+  launches_needed: number | null;
+  launches_done: number;
 }
 
 export interface ModelTokens {

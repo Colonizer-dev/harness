@@ -8,6 +8,7 @@
 //! provider keys are added by the mothership's provider gateway.
 
 mod autonomy;
+mod burn_down;
 mod claude_login;
 mod config;
 mod events;
@@ -966,7 +967,9 @@ async fn serve() -> Result<()> {
         .route("/api/findings", get(findings::list_all))
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
-        .route("/api/redteam/runs/{id}/stop", post(redteam::stop));
+        .route("/api/redteam/runs/{id}/stop", post(redteam::stop))
+        .route("/api/burn-down", get(burn_down::status))
+        .route("/api/burn-down/stop", post(burn_down::stop));
     let router = api
         .merge(web_router(app.cfg.assets.as_deref()))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
@@ -1028,6 +1031,7 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { publish::watch_pull_requests(pr_watch).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(autonomy::run(app.clone()));
+    tokio::spawn(burn_down::run(app.clone()));
     tokio::spawn(notify::run(app.clone()));
     tokio::spawn(telemetry::run(app.clone()));
     tokio::spawn(version::run(app.clone()));

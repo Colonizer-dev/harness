@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  BurnDownStatus,
   FleetHost,
   FindingRecord,
   HarnessStatus,
@@ -89,6 +90,10 @@ export interface Api {
   cleanupSession(id: string): Promise<Session>;
   /** Forgets a colony: worktree, local branch, chat and logs. Its pull request stays on GitHub. */
   deleteSession(id: string): Promise<unknown>;
+  /** GET /api/burn-down: the burn-down scheduler's read on the weekly token plan (issue #210). */
+  burnDown(): Promise<BurnDownStatus>;
+  /** POST /api/burn-down/stop: switches the scheduler off and stops every colony it launched. */
+  stopBurnDown(): Promise<void>;
   setGithubToken(token: string): Promise<{ login: string }>;
   deleteGithubToken(): Promise<unknown>;
   setClaudeToken(token: string): Promise<unknown>;
@@ -193,6 +198,8 @@ export const httpApi: Api = {
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   deleteSession: (id) => del(`/api/sessions/${enc(id)}`),
+  burnDown: () => request("/api/burn-down"),
+  stopBurnDown: () => post("/api/burn-down/stop"),
   setGithubToken: (token) => post("/api/settings/github-token", { token }),
   deleteGithubToken: () => del("/api/settings/github-token"),
   setClaudeToken: (token) => post("/api/settings/claude-token", { token }),

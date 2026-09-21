@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 11] = [
     "source",
     "sandbox",
     "mesh",
@@ -25,6 +25,7 @@ pub const KINDS: [&str; 10] = [
     "watchdog",
     "autonomy",
     "notify",
+    "burn_down",
 ];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
@@ -251,6 +252,22 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and it is unsigned unless a signing secret is set in Settings", "default": ""}
             }}),
         )],
+        "burn_down" => vec![p(
+            "default",
+            "Burn down",
+            "Maxes out the weekly plan: near the weekly reset it launches bug-hunt colonies, paced across the window, until the allowance is down to whatever reserve you set",
+            json!({"type": "object", "properties": {
+                "reset_weekday": {"type": "string", "title": "Weekly reset day (UTC)", "description": "The day of the week your plan's allowance resets", "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], "default": "Monday"},
+                "reset_time": {"type": "string", "title": "Weekly reset time (UTC)", "description": "24-hour HH:MM in UTC", "default": "00:00"},
+                "lead_hours": {"type": "number", "title": "Hours before reset to start burning", "description": "How long before the weekly reset burn-down starts launching colonies", "minimum": 1, "maximum": 168, "default": 48},
+                "reserve_pct": {"type": "number", "title": "Reserve (percent of allowance)", "description": "Percent of the weekly allowance left untouched when the reset lands", "minimum": 0, "maximum": 90, "default": 5},
+                "allowance_usd": {"type": "number", "title": "Weekly allowance (USD, your estimate)", "description": "Your estimate of the weekly plan allowance. Burn-down never launches without it — an invented number would be worse than no number at all"},
+                "spend_usd_per_colony": {"type": "number", "title": "Estimated spend per colony (USD)", "description": "What one bug-hunt colony roughly burns, used to pace launches across the window", "minimum": 0.5, "default": 5},
+                "max_live": {"type": "integer", "title": "Concurrent live burn-down colonies", "description": "Cap on how many burn-down colonies run at once", "minimum": 1, "maximum": 8, "default": 2},
+                "repos": {"type": "string", "title": "Repositories to hunt in", "description": "Comma-separated owner/repo list. Empty means burn-down is not configured and launches nothing", "default": ""},
+                "instructions": {"type": "string", "title": "Custom hunt instructions", "description": "When empty, a built-in bug-hunt prompt is used", "default": ""}
+            }}),
+        )],
         _ => Vec::new(),
     }
 }
@@ -465,5 +482,34 @@ mod tests {
         assert!(KINDS.contains(&"notify"));
         assert!(!is_required("notify"), "announcing colonies to the world is opt-in by design");
         assert!(is_required("source") && is_required("publish"));
+    }
+
+    #[test]
+    fn burn_down_is_a_kind_and_it_is_opt_in() {
+        assert!(KINDS.contains(&"burn_down"));
+        assert!(!is_required("burn_down"), "spending a plan is opt-in by design");
+        // The settings schema carries its defaults, so the cockpit can render it automatically.
+        let schema = providers("burn_down", &[]).remove(0).schema;
+        for (key, default) in [
+            ("reset_weekday", json!("Monday")),
+            ("reset_time", json!("00:00")),
+            ("lead_hours", json!(48)),
+            ("reserve_pct", json!(5)),
+            ("spend_usd_per_colony", json!(5)),
+            ("max_live", json!(2)),
+            ("repos", json!("")),
+            ("instructions", json!("")),
+        ] {
+            assert_eq!(schema["properties"][key]["default"], default, "{key}");
+        }
+        assert_eq!(
+            schema["properties"]["allowance_usd"].get("default"),
+            None,
+            "the allowance is the one setting with no default: burn-down must never invent a budget"
+        );
+        // An invalid weekday saved by hand is refused at save time by the enum check.
+        let mut input = Map::new();
+        input.insert("reset_weekday".into(), json!("Funday"));
+        assert!(validate_settings(&providers("burn_down", &[]).remove(0).schema, &input).is_err());
     }
 }
