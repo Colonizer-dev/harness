@@ -245,13 +245,16 @@ fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
         .collect()
 }
 
-/// A colony's attention reason, when it is one the harness set: the watchdog's reasons or autopilot's
-/// hold. Anything else in the attention blob — a hand-edited sessions.json can carry anything — is
-/// ignored rather than sent.
+/// A colony's attention reason, when it is one the harness set: the watchdog's reasons, autopilot's
+/// hold, or the gateway's model/provider error. Anything else in the attention blob — a hand-edited
+/// sessions.json can carry anything — is ignored rather than sent.
 fn attention_reason(session: &Session) -> Option<&'static str> {
     let reason = session.attention.as_ref().and_then(|a| a["reason"].as_str())?;
     if reason == AUTOPILOT_HELD {
         return Some(AUTOPILOT_HELD);
+    }
+    if reason == crate::gateway::MODEL_ERROR_REASON {
+        return Some(crate::gateway::MODEL_ERROR_REASON);
     }
     crate::watchdog::WATCHDOG_REASONS
         .iter()
@@ -1250,6 +1253,17 @@ mod tests {
             "a failure or reason the harness did not name contributes no kind"
         );
         assert_eq!(batch.autopilot.held, "0");
+    }
+
+    #[test]
+    fn the_gateway_model_error_reason_is_a_named_kind() {
+        let mut errored = session(SessionStatus::Running);
+        errored.attention = Some(json!({"reason": crate::gateway::MODEL_ERROR_REASON, "since": Utc::now()}));
+        assert_eq!(
+            error_kinds(&[errored]),
+            BTreeMap::from([(crate::gateway::MODEL_ERROR_REASON, "1")]),
+            "a colony the gateway flagged after an upstream 4xx/5xx buckets under model_error"
+        );
     }
 
     #[test]
