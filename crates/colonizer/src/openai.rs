@@ -246,6 +246,7 @@ fn usage_of(usage: &Value) -> Usage {
         output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
         cache_read_tokens: cached,
         cache_write_tokens: 0,
+        thinking_tokens: usage["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
     }
 }
 
@@ -905,7 +906,8 @@ mod tests {
                 input_tokens: 18,
                 output_tokens: 4,
                 cache_read_tokens: 12,
-                cache_write_tokens: 0
+                cache_write_tokens: 0,
+                thinking_tokens: 0
             })
         );
     }

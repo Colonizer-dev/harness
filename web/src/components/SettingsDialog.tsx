@@ -1910,7 +1910,16 @@ function SettingField({
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------
 
-type ProviderDraft = ProviderLimits & { id: string; name: string; base_url: string; auth: ProviderAuth; wire: ProviderWire; models: string[] };
+type ProviderDraft = ProviderLimits & {
+  id: string;
+  name: string;
+  base_url: string;
+  auth: ProviderAuth;
+  wire: ProviderWire;
+  models: string[];
+  /** Prefilled from a catalogue entry's verified rates, if it has any; a built-in preset never sets this. */
+  pricing?: ProviderPricing;
+};
 
 const DEFAULT_TIMEOUT = 600;
 const DEFAULT_LIMITS: ProviderLimits = { timeout_secs: DEFAULT_TIMEOUT, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
@@ -1988,9 +1997,15 @@ const limitText = (value: number | null | undefined) => (value == null ? "" : St
 /** The four pricing rates, as they sit in the form's text fields. */
 type PricingDraft = Record<keyof ProviderPricing, string>;
 
-const PRICING_KEYS = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok"] as const;
+const PRICING_KEYS = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok", "thinking_per_mtok"] as const;
 
-const emptyPricingDraft = (): PricingDraft => ({ input_per_mtok: "", output_per_mtok: "", cache_read_per_mtok: "", cache_write_per_mtok: "" });
+const emptyPricingDraft = (): PricingDraft => ({
+  input_per_mtok: "",
+  output_per_mtok: "",
+  cache_read_per_mtok: "",
+  cache_write_per_mtok: "",
+  thinking_per_mtok: "",
+});
 
 const pricingDraftOf = (pricing: ProviderPricing | null | undefined): PricingDraft =>
   pricing ? Object.fromEntries(PRICING_KEYS.map((key) => [key, String(pricing[key] ?? "")])) as PricingDraft : emptyPricingDraft();
@@ -2112,7 +2127,18 @@ function presetDraft(preset: ProviderPreset): ProviderDraft {
   if (built) return built;
   const entry = CATALOG_BY_ID.get(preset);
   if (!entry) return PRESETS.custom;
-  return { ...PRESETS.custom, id: entry.id, name: entry.name, base_url: entry.base_url, auth: entry.auth, wire: entry.wire };
+  return {
+    ...PRESETS.custom,
+    id: entry.id,
+    name: entry.name,
+    base_url: entry.base_url,
+    auth: entry.auth,
+    wire: entry.wire,
+    context_tokens: entry.context_tokens ?? PRESETS.custom.context_tokens,
+    models: entry.models ?? PRESETS.custom.models,
+    max_concurrent: entry.max_concurrent ?? PRESETS.custom.max_concurrent,
+    pricing: entry.pricing ?? PRESETS.custom.pricing,
+  };
 }
 
 /** A catalogue entry's label, for the form header and the mark's fallback initials. */
@@ -2736,7 +2762,7 @@ function ProviderForm({
   const [fallback, setFallback] = useState(start.fallback_model ?? "");
   // The saved rates sit in the fields; `pricing` only goes on the save once they differ from them, the
   // same convention as the key: omitted keeps what is saved, so a save never silently rezeros a rate.
-  const [pricingDraft, setPricingDraft] = useState<PricingDraft>(() => pricingDraftOf(initial?.pricing));
+  const [pricingDraft, setPricingDraft] = useState<PricingDraft>(() => pricingDraftOf(start.pricing));
   // A catalogue entry whose base URL has ${…} holes: ask for them, and the URL follows.
   const template = initial ? [] : (CATALOG_BY_ID.get(preset)?.variables ?? []);
   const [vars, setVars] = useState<Record<string, string>>(() =>
@@ -2767,6 +2793,7 @@ function ProviderForm({
     output_per_mtok: parsePrice(pricingDraft.output_per_mtok),
     cache_read_per_mtok: parsePrice(pricingDraft.cache_read_per_mtok),
     cache_write_per_mtok: parsePrice(pricingDraft.cache_write_per_mtok),
+    thinking_per_mtok: parsePrice(pricingDraft.thinking_per_mtok),
   };
   const pricingInvalid = Object.values(pricing).some((rate) => rate.error);
   const setPricing = (k: keyof ProviderPricing, value: string) => setPricingDraft((d) => ({ ...d, [k]: value }));

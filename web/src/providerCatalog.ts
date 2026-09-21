@@ -12,6 +12,8 @@
  * Referral parameters the source carries on some links (`aff=`, `utm_content=`, `from=`) are not
  * reproduced here: a link from this list credits nobody.
  */
+import type { ProviderPricing } from "./types";
+
 export interface CatalogEntry {
   id: string;
   name: string;
@@ -24,6 +26,11 @@ export interface CatalogEntry {
   site: string;
   /** Asked for when the provider is added, then substituted into `base_url`. */
   variables?: CatalogVariable[];
+  /** Verified runtime defaults, prefilled when adding this provider. Absent entries leave the form's own defaults. */
+  context_tokens?: number;
+  models?: string[];
+  max_concurrent?: number;
+  pricing?: ProviderPricing;
 }
 
 export interface CatalogVariable {
@@ -75,6 +82,7 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "kimi", name: "Kimi", base_url: "https://api.moonshot.cn/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.kimi.com" },
   { id: "kimi-for-coding", name: "Kimi For Coding", base_url: "https://api.kimi.com/coding", auth: "bearer", wire: "anthropic", site: "https://www.kimi.com/code/" },
   { id: "longcat", name: "Longcat", base_url: "https://api.longcat.chat/anthropic", auth: "bearer", wire: "anthropic", site: "https://longcat.chat/platform" },
+  { id: "meta", name: "Meta Model API", base_url: "https://api.meta.ai", auth: "bearer", wire: "anthropic", site: "https://dev.meta.ai/docs", context_tokens: 1_048_576, models: ["muse-spark-1.3-contributor", "muse-spark-1.2-contributor"], max_concurrent: 4 },
   { id: "micu", name: "Micu", base_url: "https://www.micuapi.ai", auth: "bearer", wire: "anthropic", site: "https://www.micuapi.ai" },
   { id: "minimax", name: "MiniMax", base_url: "https://api.minimaxi.com/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.minimaxi.com" },
   { id: "minimax-en", name: "MiniMax en", base_url: "https://api.minimax.io/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.minimax.io" },
