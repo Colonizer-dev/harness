@@ -12,6 +12,7 @@ mod claude_login;
 mod config;
 mod events;
 mod findings;
+mod fleet;
 mod gateway;
 mod github;
 mod headroom;
@@ -137,6 +138,10 @@ pub struct App {
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
     /// bypasses it.
     pub host_cache: Mutex<Option<runtime::HostCached>>,
+    /// The fleet view's peer half (issue #231): last-known `HostSummary` per configured peer base URL,
+    /// so a peer that goes quiet still shows its last real numbers instead of nulls. This machine's
+    /// own entry is never cached here — `fleet::self_summary` always computes it live.
+    pub fleet_cache: fleet::FleetCache,
     /// The most recent background image pull, so Settings can show it.
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
@@ -449,6 +454,16 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
     // is the shared predicate both sides express.
     let microvms_live = app.sessions.read().await.iter().filter(|s| s.status.busy()).count();
     let microvms_ceiling = orgs::global_max_parallel(&modules);
+    // Queued colonies hold no microVM (see `SessionStatus::busy`), so this is disjoint from
+    // `microvms_live`. Carried in `/api/status` so a fleet peer-poll of this endpoint (issue #231)
+    // gets everything `fleet::HostSummary` needs without a second round trip.
+    let queue_depth = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status == sessions::SessionStatus::Queued)
+        .count();
     // Computed before the `json!` literal below, which moves `runtime` into the payload: the host
     // object borrows its kvm answer, so the borrow must end before the move.
     let host_value = runtime::host_json(&host, runtime.kvm.as_ref(), microvms_live, microvms_ceiling);
@@ -482,6 +497,8 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
         })
         .collect();
     Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "queue_depth": queue_depth,
         "github": match user {
             Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
             Err(e) => json!({"connected": false, "error": format!("{e:#}")}),
@@ -866,6 +883,7 @@ async fn serve() -> Result<()> {
         claude_bins: Mutex::new(HashMap::new()),
         runtime_cache: Mutex::new(None),
         host_cache: Mutex::new(None),
+        fleet_cache: fleet::FleetCache::new(),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
@@ -877,6 +895,7 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/api/status", get(status))
+        .route("/api/hosts", get(fleet::list_hosts_handler))
         .route("/api/modules", get(modules::list))
         .route("/api/modules/{kind}", put(modules::update))
         .route(
@@ -1067,6 +1086,7 @@ pub(crate) mod tests {
             claude_bin: None,
             gateway_bind: "127.0.0.1:0".into(),
             allowed_hosts: Vec::new(),
+            fleet_peers: Vec::new(),
         };
         settings(&mut cfg);
         Arc::new(App {
@@ -1088,6 +1108,7 @@ pub(crate) mod tests {
             claude_bins: Mutex::new(HashMap::new()),
             runtime_cache: Mutex::new(None),
             host_cache: Mutex::new(None),
+            fleet_cache: fleet::FleetCache::new(),
             usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),
             updater: update::Updater::new(),

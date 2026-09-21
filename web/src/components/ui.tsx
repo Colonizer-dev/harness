@@ -351,9 +351,9 @@ export function ModelInput({
   );
 }
 
-export function timeAgo(ts: string | null | undefined): string {
+export function timeAgo(ts: string | null | undefined, now: Date = new Date()): string {
   if (!ts) return "";
-  const seconds = Math.max(0, (Date.now() - new Date(ts).getTime()) / 1000);
+  const seconds = Math.max(0, (now.getTime() - new Date(ts).getTime()) / 1000);
   if (seconds < 45) return "just now";
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
   if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
