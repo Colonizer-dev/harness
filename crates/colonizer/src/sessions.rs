@@ -1103,7 +1103,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
-    let org_limit = orgs::org_max_parallel(&app.org_settings(owner));
+    let org_settings = app.org_settings(owner);
+    let org_limit = orgs::org_max_parallel(&org_settings);
+    let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
 
     let id = short_id();
     let slug = match req.issue {
@@ -1177,17 +1179,25 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // The duplicate-issue check is re-checked here too: the fast-path pre-check above reads under a
     // read lock, so two launches can both pass it before either inserts — the loser is refused with
     // the same 409 inside the lock, where check and insert are one atomic step.
-    let claimed = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
-        try_claim_session(
-            sessions,
-            room,
-            session,
-            &repo,
-            req.issue,
-            req.allow_duplicate,
-            wait_for_parent,
-        )
-    })
+    let claimed = with_slot(
+        &app.sessions,
+        owner,
+        &repo,
+        max_parallel,
+        org_limit,
+        repo_limit,
+        |sessions, room| {
+            try_claim_session(
+                sessions,
+                room,
+                session,
+                &repo,
+                req.issue,
+                req.allow_duplicate,
+                wait_for_parent,
+            )
+        },
+    )
     .await;
     let (session, queued, waiting) = match claimed {
         Ok(admitted) => admitted,
@@ -1237,8 +1247,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             } else {
                 format!(", behind {waiting} already waiting")
             };
-            app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}"))
-                .await;
+            let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
+            app.session_log(&id, "info", format!("queued: {limits}{ahead}")).await;
         }
     } else {
         tokio::spawn(boot(app.clone(), id, false));
@@ -2695,7 +2705,20 @@ pub(crate) mod tests {
         org_limit: Option<u64>,
         id: String,
     ) {
-        with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
+        admit_create_in(sessions, &format!("{org}/repo"), max_parallel, org_limit, 32, id).await
+    }
+
+    /// `admit_create` for a colony of a named repository, under a per-repository limit as well.
+    pub(crate) async fn admit_create_in(
+        sessions: &RwLock<Vec<Session>>,
+        repo: &str,
+        max_parallel: usize,
+        org_limit: Option<u64>,
+        repo_limit: u64,
+        id: String,
+    ) {
+        let org = repo.split_once('/').map_or(repo, |(org, _)| org);
+        with_slot(sessions, org, repo, max_parallel, org_limit, repo_limit, |sessions, room| {
             let mut s = colony(
                 org,
                 if room {
@@ -2705,6 +2728,7 @@ pub(crate) mod tests {
                 },
             );
             s.id = id;
+            s.repo = repo.into();
             sessions.push(s);
         })
         .await
@@ -2718,7 +2742,8 @@ pub(crate) mod tests {
         org_limit: Option<u64>,
         id: &str,
     ) {
-        with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
+        let repo = format!("{org}/repo");
+        with_slot(sessions, org, &repo, max_parallel, org_limit, 32, |sessions, room| {
             let Some(s) = sessions.iter_mut().find(|s| s.id == id) else {
                 return;
             };
@@ -3141,7 +3166,7 @@ pub(crate) mod tests {
                 let mut fresh = colony("acme", SessionStatus::Starting);
                 fresh.id = format!("racer-{i}");
                 fresh.issue = Some(7);
-                with_slot(&sessions, "acme", 8, None, |guard, room| {
+                with_slot(&sessions, "acme", "acme/repo", 8, None, 8, |guard, room| {
                     try_claim_session(guard, room, fresh, "acme/repo", Some(7), false, false)
                 })
                 .await
