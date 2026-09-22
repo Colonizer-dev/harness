@@ -112,23 +112,30 @@ pub fn issue_body(finding: &Finding, s: &Session) -> String {
 
 /// How many findings a colony has already filed or matched, from its record on disk.
 ///
-/// Only lines that carry `issue` or `duplicate_of` count: a finding that was validated but never
-/// filed consumed nothing, so a colony that keeps submitting junk is stopped by the cap while one
-/// whose findings the orchestrator rejects is not punished for trying.
+/// Only the line that filed or matched counts: a finding that was validated but never filed consumed
+/// nothing, so a colony that keeps submitting junk is stopped by the cap while one whose findings the
+/// orchestrator rejects is not punished for trying. The later stages of a filed finding — its fix
+/// colony (which carries the `issue` again), review, merge, or an error along the way — are the same
+/// finding, so they do not count a second time. A legacy line with no `state` counts when it carries
+/// `issue` or `duplicate_of`, which is how filing was recorded before states existed.
 pub fn count(record: &Path) -> usize {
     std::fs::read_to_string(record)
         .map(|content| {
             content
                 .lines()
                 .filter(|l| !l.trim().is_empty())
-                .filter(|line| {
-                    serde_json::from_str::<Value>(line)
-                        .ok()
-                        .is_some_and(|v| v.get("issue").is_some() || v.get("duplicate_of").is_some())
-                })
+                .filter(|line| serde_json::from_str::<Value>(line).ok().is_some_and(|v| used_the_cap(&v)))
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// Whether one ledger line is the one that filed or matched its finding.
+fn used_the_cap(line: &Value) -> bool {
+    match line.get("state").and_then(Value::as_str) {
+        Some(state) => matches!(state, "filed" | "duplicate"),
+        None => line.get("issue").is_some() || line.get("duplicate_of").is_some(),
+    }
 }
 
 /// One line of a session's findings ledger (`sessions/<id>/findings.jsonl`), read back. The ledger
@@ -364,6 +371,21 @@ mod tests {
         // A colony that files two findings is at 2 of its 5, however many more it validated or
         // had rejected in between: those stages never consume the cap.
         assert_eq!(count(&record), 2);
+        // A filed finding's later stages are the same finding: the fix colony line carries `issue`
+        // again, but neither it nor the review, the merge or an error uses another slot.
+        std::fs::write(
+            &record,
+            concat!(
+                "{\"title\":\"e\",\"state\":\"validated\",\"severity\":\"high\"}\n",
+                "{\"title\":\"e\",\"state\":\"filed\",\"issue\":\"https://x/3\"}\n",
+                "{\"title\":\"e\",\"state\":\"fix_colony\",\"fix_session\":\"f\",\"issue\":\"https://x/3\"}\n",
+                "{\"title\":\"e\",\"state\":\"review\",\"review_session\":\"r\",\"verdict\":\"approve\",\"pr\":\"https://x/pull/4\"}\n",
+                "{\"title\":\"e\",\"state\":\"merged\",\"pr\":\"https://x/pull/4\"}\n",
+                "{\"title\":\"f\",\"state\":\"error\",\"reason\":\"could not start the fix colony\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(count(&record), 1, "one filed finding, however far its fix got");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
