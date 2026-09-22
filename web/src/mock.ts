@@ -1,6 +1,7 @@
 // In-browser mock of the harness API and event streams, enabled with `?mock=1`.
 import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
+import { isTerminal } from "./notifications";
 import type {
   AgentEvent,
   AgentEventBody,
@@ -1922,11 +1923,19 @@ export function createMockApi(): Api {
     },
     stopSession: async (id) => {
       const s = find(id);
-      if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
+      // Like the server: a colony already over answers `already_stopped` untouched, a queued one
+      // leaves the queue, and only a publishing one is refused.
+      if (isTerminal(s.session.status)) return { ...clone(s.session), result: "already_stopped" };
+      if (s.session.status === "queued") {
+        s.patch({ status: "stopped" });
+        s.log("Left the queue before it started");
+        return { ...clone(s.session), result: "stopped" };
+      }
+      if (!isLive(s.session.status)) throw new ApiError("session is not running", 409);
       s.halt();
       s.patch({ status: "stopped", mesh: null });
       s.log("microVM stopped and removed; the worktree was kept");
-      return clone(s.session);
+      return { ...clone(s.session), result: "stopped" };
     },
     deleteSession: async (id) => {
       const s = find(id);
