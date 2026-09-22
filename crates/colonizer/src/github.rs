@@ -787,12 +787,10 @@ pub enum PrState {
     Closed,
 }
 
-/// Maps what `gh pr view --json state,merged` reported to a `PrState`. `merged` wins over `state`,
-/// case is tolerated, and an unrecognised state is `None` so callers leave the colony's status alone.
-pub fn pr_state_from(state: &str, merged: bool) -> Option<PrState> {
-    if merged {
-        return Some(PrState::Merged);
-    }
+/// Maps the `state` `gh pr view` reported to a `PrState`. GitHub reports a merged pull request as
+/// `MERGED`, so the state alone tells all three apart. Case is tolerated, and an unrecognised state is
+/// `None` so callers leave the colony's status alone.
+pub fn pr_state_from(state: &str) -> Option<PrState> {
     match state.trim().to_ascii_uppercase().as_str() {
         "OPEN" => Some(PrState::Open),
         "MERGED" => Some(PrState::Merged),
@@ -801,11 +799,18 @@ pub fn pr_state_from(state: &str, merged: bool) -> Option<PrState> {
     }
 }
 
+/// The fields `pr_state` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
+/// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
+/// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
+/// the struct and a test holds the two together.
+const PR_VIEW_FIELDS: &str = "state";
+
+/// Unknown fields are refused so the test below catches a requested field this struct would ignore;
+/// `gh --json` prints only the fields it was asked for, so real output never trips it.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrView {
     state: String,
-    #[serde(default)]
-    merged: bool,
 }
 
 /// Asks GitHub for one pull request's state through the user's `gh` login. A deleted PR, no `gh`
@@ -813,12 +818,17 @@ struct PrView {
 pub async fn pr_state(app: &App, url: &str) -> Result<PrState> {
     let out = tokio::time::timeout(
         Duration::from_secs(20),
-        exec(&mut app.gh(["pr", "view", url, "--json", "state,merged"])),
+        exec(&mut app.gh(["pr", "view", url, "--json", PR_VIEW_FIELDS])),
     )
     .await
     .context("GitHub API timed out")??;
-    let view: PrView = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
-    pr_state_from(&view.state, view.merged).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
+    pr_state_from_json(&out)
+}
+
+/// Reads `gh pr view --json` output into a `PrState`, split from `pr_state` so it is tested without `gh`.
+fn pr_state_from_json(out: &str) -> Result<PrState> {
+    let view: PrView = serde_json::from_str(out).context("could not parse `gh pr view` output")?;
+    pr_state_from(&view.state).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
 }
 
 /// Points an open pull request at a different base branch: the moment a colony's stack resolves. A
@@ -2011,18 +2021,38 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_requests_state_comes_from_ghs_state_and_merged_fields() {
-        assert_eq!(pr_state_from("OPEN", false), Some(PrState::Open));
-        assert_eq!(pr_state_from("CLOSED", false), Some(PrState::Closed));
-        assert_eq!(pr_state_from("MERGED", false), Some(PrState::Merged));
+    fn a_pull_requests_state_comes_from_ghs_state_field() {
+        assert_eq!(pr_state_from("OPEN"), Some(PrState::Open));
+        assert_eq!(pr_state_from("CLOSED"), Some(PrState::Closed));
+        assert_eq!(pr_state_from("MERGED"), Some(PrState::Merged));
         // Case and surrounding whitespace are tolerated.
-        assert_eq!(pr_state_from(" open ", false), Some(PrState::Open));
-        // `merged` wins over `state`, whatever the state says.
-        assert_eq!(pr_state_from("OPEN", true), Some(PrState::Merged));
-        assert_eq!(pr_state_from("CLOSED", true), Some(PrState::Merged));
+        assert_eq!(pr_state_from(" open "), Some(PrState::Open));
         // An unrecognised state is no news, so a colony's status is left alone.
-        assert_eq!(pr_state_from("DRAFT", false), None);
-        assert_eq!(pr_state_from("", false), None);
+        assert_eq!(pr_state_from("DRAFT"), None);
+        assert_eq!(pr_state_from(""), None);
+    }
+
+    #[test]
+    fn gh_pr_view_output_reads_into_the_right_state() {
+        assert_eq!(pr_state_from_json(r#"{"state":"MERGED"}"#).unwrap(), PrState::Merged);
+        assert_eq!(pr_state_from_json(r#"{"state":"CLOSED"}"#).unwrap(), PrState::Closed);
+        assert_eq!(pr_state_from_json(r#"{"state":"OPEN"}"#).unwrap(), PrState::Open);
+        assert!(pr_state_from_json(r#"{"state":"DRAFT"}"#).is_err());
+        assert!(pr_state_from_json("not json").is_err());
+    }
+
+    #[test]
+    fn every_requested_pr_view_field_is_one_the_struct_reads() {
+        // A field `gh` does not know fails the whole call, so request nothing PrView would not read:
+        // PrView refuses unknown fields, so an object with every requested field only parses when the
+        // struct reads each one.
+        let fields: Vec<&str> = PR_VIEW_FIELDS.split(',').collect();
+        let sample: serde_json::Map<String, Value> = fields
+            .iter()
+            .map(|f| (f.to_string(), Value::String("MERGED".into())))
+            .collect();
+        let view: PrView = serde_json::from_value(Value::Object(sample)).unwrap();
+        assert_eq!(view.state, "MERGED");
     }
 
     // ----- run_publish against a fake repository -----
