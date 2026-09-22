@@ -474,17 +474,44 @@ impl Runtime {
         // chain event keeps its true seq in `a_seq`). Host chain events are cut out by their type —
         // the five this build emits and the protocol reserves — so a restart mid-life asks agentd to
         // replay exactly the events it has missed, and cannot skip the ones that never landed.
-        let agent_seq = events_bytes
+        //
+        // The same pass restores the open question. It is otherwise set only while live events are
+        // handled (`events.rs`), and agentd replays only what is past the cursor, so after a restart a
+        // question asked before it would be forgotten: the judge would never answer it and autopilot
+        // would publish over it. The last question with no later `question_answered` for its id is
+        // still open, with its own timestamp as the start of the wait.
+        let mut agent_seq = 0;
+        let mut open_question: Option<(String, Vec<Value>, Option<DateTime<Utc>>)> = None;
+        for v in events_bytes
             .split(|b| *b == b'\n')
             .filter_map(|line| serde_json::from_str::<Value>(std::str::from_utf8(line).ok()?).ok())
-            .filter(|v| {
-                v.get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|t| !crate::validation::is_host_chain_type(t))
-            })
-            .filter_map(|v| v.get("a_seq").and_then(Value::as_u64).or_else(|| v["seq"].as_u64()))
-            .max()
-            .unwrap_or(0);
+        {
+            let Some(kind) = v.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            if crate::validation::is_host_chain_type(kind) {
+                continue;
+            }
+            if let Some(seq) = v.get("a_seq").and_then(Value::as_u64).or_else(|| v["seq"].as_u64()) {
+                agent_seq = agent_seq.max(seq);
+            }
+            let question_id = v.get("question_id").and_then(Value::as_str);
+            match (kind, question_id) {
+                ("question", Some(id)) => {
+                    let questions = v.get("questions").and_then(Value::as_array).cloned().unwrap_or_default();
+                    let asked = v
+                        .get("ts")
+                        .and_then(Value::as_str)
+                        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                        .map(|ts| ts.with_timezone(&Utc));
+                    open_question = Some((id.to_string(), questions, asked));
+                }
+                ("question_answered", Some(id)) if open_question.as_ref().is_some_and(|(open, ..)| open == id) => {
+                    open_question = None;
+                }
+                _ => {}
+            }
+        }
         let (logs_bytes, logs_err) = read_jsonl(&logs_path);
         // The take counts parsed entries, not raw split segments: `append_line` ends every entry
         // with a newline, so a well-formed file always yields one empty trailing segment, and
@@ -522,7 +549,11 @@ impl Runtime {
             agent_seq: AtomicU64::new(agent_seq),
             last_seq: AtomicU64::new(last_seq),
             logs: Mutex::new(logs),
-            open_question: Mutex::new(None),
+            open_question: Mutex::new(
+                open_question
+                    .as_ref()
+                    .map(|(id, questions, _)| (id.clone(), questions.clone())),
+            ),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
@@ -531,7 +562,13 @@ impl Runtime {
             findings_lock: Mutex::new(()),
             events_path,
             logs_path,
-            activity: Mutex::new(Activity::new(Utc::now())),
+            activity: Mutex::new({
+                let now = Utc::now();
+                let mut activity = Activity::new(now);
+                // A question with no readable timestamp starts its wait now, as the live path does.
+                activity.question_since = open_question.map(|(_, _, asked)| asked.unwrap_or(now));
+                activity
+            }),
             load_error: Mutex::new((!read_errors.is_empty()).then_some(read_errors.join("; "))),
         }
     }
@@ -3156,6 +3193,46 @@ pub(crate) mod tests {
                 "as_str drifted from serde for {status:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_question_still_open_on_disk_is_restored_on_load() {
+        let dir = std::env::temp_dir().join(format!("colonizer-open-question-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let question = r#"{"seq":3,"ts":"2026-09-21T09:30:00.000Z","type":"question","question_id":"q1","questions":[{"header":"pin","options":[]}]}"#;
+
+        // Asked and never answered: the question is open, and its wait started when it was asked.
+        std::fs::write(
+            dir.join("events.jsonl"),
+            format!("{{\"seq\":1,\"type\":\"status\",\"state\":\"working\"}}\n{question}\n"),
+        )
+        .unwrap();
+        let rt = Runtime::load(&dir);
+        let (id, questions) = rt
+            .open_question
+            .try_lock()
+            .unwrap()
+            .clone()
+            .expect("the question is still open");
+        assert_eq!(id, "q1");
+        assert_eq!(questions, vec![json!({"header": "pin", "options": []})]);
+        assert_eq!(
+            rt.activity.try_lock().unwrap().question_since,
+            Some("2026-09-21T09:30:00Z".parse::<DateTime<Utc>>().unwrap())
+        );
+        assert_eq!(rt.agent_seq.load(Ordering::SeqCst), 3, "the cursor pass is unchanged");
+
+        // Asked and then answered: nothing is open.
+        std::fs::write(
+            dir.join("events.jsonl"),
+            format!("{question}\n{{\"seq\":4,\"type\":\"question_answered\",\"question_id\":\"q1\",\"answers\":{{}}}}\n"),
+        )
+        .unwrap();
+        let rt = Runtime::load(&dir);
+        assert!(rt.open_question.try_lock().unwrap().is_none());
+        assert!(rt.activity.try_lock().unwrap().question_since.is_none());
+        assert_eq!(rt.agent_seq.load(Ordering::SeqCst), 4);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
