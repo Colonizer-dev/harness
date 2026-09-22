@@ -152,6 +152,11 @@ pub struct Provider {
     /// their tokens but cost, and spend, nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<Pricing>,
+    /// Strip `ttl` from `cache_control` blocks on top of whatever the preset's quirks say. The preset
+    /// is a UI label, not a capability, so a hand-pointed endpoint (preset `custom`) carrying this flag
+    /// normalizes exactly like its catalogue twin; without it, a `custom` preset keeps default behaviour.
+    #[serde(default)]
+    pub normalize_cache_ttl: bool,
 }
 
 impl Provider {
@@ -163,9 +168,14 @@ impl Provider {
         self.queue_timeout_secs.unwrap_or_else(|| self.timeout_secs())
     }
 
-    /// This provider's dialect quirks, from its preset. See [`ProviderQuirks`].
+    /// This provider's dialect quirks: its preset's row, plus the explicit per-provider flag. See
+    /// [`ProviderQuirks`].
     pub fn quirks(&self) -> ProviderQuirks {
-        quirks_for_preset(self.preset.as_str())
+        let mut quirks = quirks_for_preset(self.preset.as_str());
+        if self.normalize_cache_ttl {
+            quirks.strip_cache_ttl = true;
+        }
+        quirks
     }
 
     /// What one routed response costs here: $0 when the provider has no pricing configured, whose tokens
@@ -417,6 +427,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "context_tokens": provider.context_tokens,
         "fallback_model": provider.fallback_model,
         "pricing": provider.pricing,
+        "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
         "queued": queued,
         "usage": usage,
@@ -518,6 +529,10 @@ pub struct PutProvider {
     /// which also is exactly what "no pricing" means, so nothing becomes unreachable.
     #[serde(default)]
     pricing: Option<Pricing>,
+    /// Omitted keeps the saved flag, like pricing: an older save must not quietly re-enable the 400s
+    /// this flag suppresses.
+    #[serde(default)]
+    normalize_cache_ttl: Option<bool>,
 }
 
 fn default_auth() -> String {
@@ -641,6 +656,13 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         context_tokens: req.context_tokens,
         fallback_model,
         pricing,
+        normalize_cache_ttl: req.normalize_cache_ttl.unwrap_or_else(|| {
+            app.providers()
+                .into_iter()
+                .find(|p| p.id == id)
+                .map(|p| p.normalize_cache_ttl)
+                .unwrap_or(false)
+        }),
     };
     let mut providers = app.providers();
     match providers.iter_mut().find(|p| p.id == id) {
@@ -705,7 +727,20 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            normalize_cache_ttl: false,
         }
+    }
+
+    #[test]
+    fn explicit_flag_strips_ttl_even_on_a_custom_preset() {
+        let mut p = provider("meta-handpointed");
+        p.preset = "custom".into();
+        assert!(!p.quirks().strip_cache_ttl, "custom preset alone normalizes nothing");
+        p.normalize_cache_ttl = true;
+        assert!(p.quirks().strip_cache_ttl, "the explicit flag must win over the preset row");
+        p.preset = "meta".into();
+        p.normalize_cache_ttl = false;
+        assert!(p.quirks().strip_cache_ttl, "the preset row still applies on its own");
     }
 
     #[test]
