@@ -120,6 +120,10 @@ while read -r name version plat kind sha url; do
       for leak in hooks skills/using-git-worktrees skills/finishing-a-development-branch; do
         if [ -e "$dest/$leak" ]; then echo "superpowers staging leaked $leak" >&2; exit 1; fi
       done
+      # Canonical layout (docs/skill-packs.md): a root plugin.json beside the
+      # .claude-plugin/ manifest the SDK reads. Upstream lists no skills, so the
+      # list is generated from the staged skill names. No mcp.json: no servers.
+      node -e 'const fs=require("fs"),d=process.argv[1],u=JSON.parse(fs.readFileSync(d+"/.claude-plugin/plugin.json","utf8")),s=fs.readdirSync(d+"/skills").filter((n)=>fs.existsSync(d+"/skills/"+n+"/SKILL.md")).sort();fs.writeFileSync(d+"/plugin.json",JSON.stringify({$schema:"https://colonizer.dev/schemas/skill-pack.json",name:u.name,version:u.version,description:u.description,skills:s},null,2)+"\n");console.log("superpowers root plugin.json: "+s.length+" skills")' "$dest" || exit 1
       rm -rf "$tmp"
       ;;
     rtk)

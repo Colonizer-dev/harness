@@ -368,8 +368,13 @@ land there. It stages three vendored plugins today:
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
 | `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE`. 8.2 MB of the 58 MB source |
-| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.3.0, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (12 of 14), `LICENSE`. 468 KB of the 2.1 MB source |
-| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (142 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 6.5 MB |
+| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.4.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (13 of 15), `LICENSE`. 596 KB of the 2.4 MB source |
+| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (146 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 6.5 MB |
+
+**Canonical layout.** Vendored packs follow the Agent Plugins folder layout in
+[docs/skill-packs.md](skill-packs.md): a root `plugin.json` (and `mcp.json` only when the
+pack ships tool servers) alongside the `.claude-plugin/` manifest the SDK reads. Staging
+synthesizes the root manifest; the skills are untouched and runtime behavior is identical.
 
 **ECC's hooks are not staged.** Its plugin manifest sets `userConfig.hooks_enabled` to `true` by
 default and Claude Code discovers `hooks/hooks.json` by convention, so "skills and agents only" cannot
@@ -391,7 +396,7 @@ text says they are missing on purpose and to stop at those steps. `fetch-vendor.
 `hooks/`, survives staging.
 
 **Google's skills load on demand.** Claude Code discovers exactly one skill in `google-skills`:
-`finding-google-skills`. The other 142 sit in `catalog/`, outside `skills/`, with upstream's directory
+`finding-google-skills`. The other 146 sit in `catalog/`, outside `skills/`, with upstream's directory
 shape, so their relative links still resolve. `index.json` is upstream's catalog with each `entrypoint`
 rewritten from a `raw.githubusercontent.com` URL to a path relative to the plugin root
 (`catalog/cloud/gke-basics/SKILL.md`). The finder is Colonizer's copy of upstream's
