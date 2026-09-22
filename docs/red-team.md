@@ -47,12 +47,14 @@ fix itself, and autopilot runs.
 
 ## Findings and the tally
 
-Each hunter writes `findings.jsonl` in its session directory (protocol §6.6). The run's
-tally reads them: every recorded finding counts as found, entries naming an `issue`
-count as filed. `validated` and `rejected` stay 0 until orchestrator validation of
-findings lands ([#211](https://github.com/Colonizer-dev/harness/issues/211),
-[#216](https://github.com/Colonizer-dev/harness/issues/216)) — today every filed
-finding is unreviewed, so read them before acting.
+Each hunter writes `findings.jsonl` in its session directory (protocol §6.6), one line
+per stage a finding reaches: `validated` or `rejected` by the orchestrator, then `filed`
+or `duplicate` (an open issue already had the title), and with autofix the fix colony,
+its review and merge. The run's tally groups a hunter's lines by the finding's title and
+counts each finding once: every finding counts as found, and as validated, rejected or
+filed (`filed` or `duplicate`) when it reached that stage. Lines written before stages
+existed carry no `state` and are read by what they carry: an `issue` or `duplicate_of`
+counts as filed.
 
 ## States
 

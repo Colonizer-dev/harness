@@ -1631,8 +1631,10 @@ States. `armed` → `running` when the hunters launch — or `waiting` while eve
 still queued for a parallel slot — with `waiting` ⇄ `running` as hunters queue and start. When no
 hunter is live but some are still in flight (publishing, PR open, queued) the run is `draining`,
 and lands `done` once every hunter is `merged`, `closed`, `no_changes`, `stopped` or `failed` — or
-its session is gone (a restart's hunt). `counts.found`/`counts.filed` are read from the hunters'
-on-record findings (§6.6); `validated` and `rejected` arrive with issues #211/#216.
+its session is gone (a restart's hunt). `counts` are read from the hunters' findings ledgers (§6.6)
+and count distinct findings (by title, per hunter) by the stages they reached: `found` every
+finding, `validated`/`rejected` the orchestrator's verdicts, `filed` those filed or matched to an
+open issue.
 `POST /api/redteam/runs/{id}/stop` lands the run `stopped` from any non-terminal state: hunters that
 are live or queued are stopped, while one already publishing or with its pull request open settles on
 its own — the run is still marked `stopped`. Stops are idempotent once the run is terminal. Runs

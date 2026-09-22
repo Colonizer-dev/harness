@@ -7,7 +7,7 @@
 #[cfg(not(test))]
 use crate::sessions::{self, NewSession};
 use crate::{
-    ApiResult, App, Shared, client_error,
+    ApiResult, App, Shared, client_error, findings,
     sessions::{Session, SessionStatus},
     util::{short_id, valid_repo, write_atomic},
 };
@@ -68,8 +68,9 @@ impl RedTeamState {
     }
 }
 
-/// A run's findings tally. Validation wiring lands in issues #211/#216; until then `validated` and
-/// `rejected` stay 0 and `found`/`filed` are read from the hunters' on-record findings.
+/// A run's findings tally, read from the hunters' findings ledgers: each counts distinct findings,
+/// not ledger lines, so a finding that went validated → filed → fix colony is one found, one validated
+/// and one filed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Counts {
@@ -492,27 +493,36 @@ fn advance_state(run: &mut RedTeamRun, sessions: &[Session]) {
     }
 }
 
-/// The run's findings counts from its hunters' on-record findings (`sessions/<id>/findings.jsonl`,
-/// written by §6.6): every recorded finding was found, and the entries naming an `issue` were filed.
-/// Validation wires in issues #211/#216; until then `validated`/`rejected` are 0.
+/// The run's findings counts from its hunters' ledgers (`sessions/<id>/findings.jsonl`, §6.6). The
+/// ledger has one line per stage a finding reached — validated, rejected, filed, duplicate, then the
+/// fix colony, its review and merge — all carrying the finding's title, so lines are grouped by title
+/// within each hunter's ledger and each finding is counted once per state it reached. Filed counts a
+/// finding that matched an open issue too: either way it is on GitHub. Legacy lines with no `state`
+/// are read by what they carry (`findings::records` does that).
 fn counts_for(app: &App, run: &RedTeamRun) -> Counts {
     let mut counts = Counts::default();
     for hunter in &run.hunters {
         let record = app.session_dir(&hunter.session_id).join("findings.jsonl");
-        let Ok(content) = std::fs::read_to_string(&record) else {
-            continue;
-        };
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
+        // Title → the states that finding reached, in first-seen order of titles.
+        let mut reached: Vec<(String, Vec<String>)> = Vec::new();
+        for line in findings::records(&record) {
+            let at = match reached.iter().position(|(title, _)| *title == line.title) {
+                Some(at) => at,
+                None => {
+                    reached.push((line.title.clone(), Vec::new()));
+                    reached.len() - 1
+                }
+            };
+            if let Some(state) = line.state {
+                reached[at].1.push(state);
             }
+        }
+        for (_, states) in &reached {
+            let has = |wanted: &[&str]| states.iter().any(|s| wanted.contains(&s.as_str()));
             counts.found += 1;
-            if serde_json::from_str::<Value>(line)
-                .map(|entry| entry["issue"].is_string())
-                .unwrap_or(false)
-            {
-                counts.filed += 1;
-            }
+            counts.validated += u32::from(has(&["validated"]));
+            counts.rejected += u32::from(has(&["rejected"]));
+            counts.filed += u32::from(has(&["filed", "duplicate"]));
         }
     }
     counts
@@ -1057,18 +1067,37 @@ mod tests {
             .0;
         let hunter = &run.hunters[0].session_id;
         tokio::fs::create_dir_all(app.session_dir(hunter)).await.unwrap();
-        // One filed finding, one matched a duplicate of an open issue.
+        // The ledger as the current build writes it: one line per stage, keyed by title. "a" went all
+        // the way to a merged fix, "b" matched an open issue, "c" was rejected, "d" was validated but
+        // never filed (the cap, or a GitHub error), and "e" failed validation outright. A legacy line
+        // with no state is read by what it carries.
         std::fs::write(
             app.session_dir(hunter).join("findings.jsonl"),
             concat!(
-                "{\"title\":\"a\",\"issue\":\"https://github.com/acme/repo/issues/1\"}\n",
-                "{\"title\":\"b\",\"duplicate_of\":\"https://github.com/acme/repo/issues/2\"}\n",
+                "{\"title\":\"a\",\"state\":\"validated\",\"severity\":\"high\"}\n",
+                "{\"title\":\"a\",\"state\":\"filed\",\"issue\":\"https://github.com/acme/repo/issues/1\"}\n",
+                "{\"title\":\"a\",\"state\":\"fix_colony\",\"fix_session\":\"f1\",\"issue\":\"https://github.com/acme/repo/issues/1\"}\n",
+                "{\"title\":\"a\",\"state\":\"review\",\"review_session\":\"r1\",\"verdict\":\"approve\",\"pr\":\"https://github.com/acme/repo/pull/9\"}\n",
+                "{\"title\":\"a\",\"state\":\"merged\",\"pr\":\"https://github.com/acme/repo/pull/9\"}\n",
+                "{\"title\":\"b\",\"state\":\"validated\",\"severity\":\"low\"}\n",
+                "{\"title\":\"b\",\"state\":\"duplicate\",\"duplicate_of\":\"https://github.com/acme/repo/issues/2\"}\n",
+                "{\"title\":\"c\",\"state\":\"rejected\",\"reason\":\"not a bug\"}\n",
+                "{\"title\":\"d\",\"state\":\"validated\",\"severity\":\"medium\"}\n",
+                "{\"title\":\"e\",\"state\":\"error\",\"reason\":\"model timed out\"}\n",
+                "{\"title\":\"legacy\",\"issue\":\"https://github.com/acme/repo/issues/3\"}\n",
             ),
         )
         .unwrap();
         let counts = counts_for(&app, &run);
-        assert_eq!((counts.found, counts.filed), (2, 1));
-        assert_eq!((counts.validated, counts.rejected), (0, 0), "validation lands in #211/#216");
+        assert_eq!(
+            counts,
+            Counts {
+                found: 6,
+                validated: 3,
+                rejected: 1,
+                filed: 3,
+            }
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
