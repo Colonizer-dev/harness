@@ -40,6 +40,13 @@ test('the orchestrator is refused the work itself, by name', () => {
   }
 });
 
+// Regression guard for issue #188: the superpowers bootstrap tells the orchestrator to load skills
+// with the Skill tool, and a skill only brings instructions in; whatever it says to do still meets
+// the gate tool by tool.
+test('loading a skill is the orchestrator\'s own planning, not work', () => {
+  assert.equal(delegationDecision('Skill', { skill: 'superpowers:brainstorming' }, ORCHESTRATOR), null);
+});
+
 test('a tool nobody has heard of is refused rather than allowed', () => {
   assert.ok(delegationDecision('SomeToolAddedNextYear', {}, ORCHESTRATOR));
 });
@@ -82,7 +89,7 @@ test('the enforced boundary is named in the prompt under enforce, and only there
   assert.ok(appendOf({}).includes(ENFORCE_PROMPT_APPEND), 'the default is enforce');
   assert.ok(!appendOf({ COLONIZER_DELEGATE: 'encourage' }).includes(ENFORCE_PROMPT_APPEND), 'encourage has no gate, so the text would be false');
   assert.ok(!appendOf({ COLONIZER_DELEGATE: 'off' }).includes(ENFORCE_PROMPT_APPEND), 'off has no gate either');
-  for (const tool of ['SendMessage', 'Bash']) {
+  for (const tool of ['SendMessage', 'Skill', 'Bash']) {
     assert.ok(ENFORCE_PROMPT_APPEND.includes(tool), `${tool} is named so the model need not rediscover it`);
   }
 });

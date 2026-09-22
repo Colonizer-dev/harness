@@ -38,7 +38,7 @@ export const DELEGATE_PROMPT_APPEND = [
  * stops the model rediscovering it one refused call at a time.
  */
 export const ENFORCE_PROMPT_APPEND = [
-  '- Delegation is enforced in this colony: the only tools you may call yourself are Task (or Agent) to start a subagent, SendMessage, ListAgents and TaskStop to direct the ones you started, AskUserQuestion, TodoWrite, EnterPlanMode and ExitPlanMode, the colony\'s mcp__colonizer_* tools, and Write to /harness/out/pr.md.',
+  '- Delegation is enforced in this colony: the only tools you may call yourself are Task (or Agent) to start a subagent, SendMessage, ListAgents and TaskStop to direct the ones you started, AskUserQuestion, TodoWrite, EnterPlanMode and ExitPlanMode, Skill to load a skill\'s instructions, the colony\'s mcp__colonizer_* tools, and Write to /harness/out/pr.md.',
   '- Every other tool you can see — Bash and Read included — belongs to your subagents. Calling one yourself is refused and costs a turn, so hand that work to a subagent instead.',
 ].join('\n');
 
@@ -186,6 +186,11 @@ const ORCHESTRATOR_TOOLS = new Set([
   // Planning: ExitPlanMode was allowed without EnterPlanMode, which was an oversight.
   'EnterPlanMode',
   'ExitPlanMode',
+  // Loading a skill: it only brings instructions into the context, which is guidance for planning
+  // rather than the work itself. A skill that says to run or edit something still meets this gate
+  // on every tool it names, and its allowed-tools only pre-approve calls the hook refuses anyway.
+  // The superpowers bootstrap tells the orchestrator to use it (issue #188).
+  'Skill',
 ]);
 
 /** The one thing the orchestrator writes itself; the harness reads it to open the pull request. */
