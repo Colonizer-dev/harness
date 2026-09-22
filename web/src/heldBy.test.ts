@@ -2,7 +2,7 @@
 // check must refuse exactly the statuses the server's 409 refuses, and free the rest for retry.
 import { describe, expect, it } from "vitest";
 
-import { heldByFor, holdsIssue } from "./api";
+import { heldByFor, heldInBatch, holdsIssue } from "./api";
 import type { Session, SessionStatus } from "./types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -69,5 +69,27 @@ describe("heldByFor", () => {
 
   it("returns null for an empty list", () => {
     expect(heldByFor([], "acme/webshop", 7)).toBeNull();
+  });
+});
+
+describe("heldInBatch", () => {
+  const list = [
+    session({ id: "live", issue: 3 }),
+    session({ id: "done", issue: 4, status: "merged" }),
+    session({ id: "pr", issue: 9, status: "pr_opened" }),
+    session({ id: "elsewhere", repo: "acme/other", issue: 5 }),
+  ];
+
+  it("returns the selected issues another colony holds, in the order given", () => {
+    expect(heldInBatch(list, "acme/webshop", [9, 4, 5, 3])).toEqual([9, 3]);
+  });
+
+  it("takes the picker's selection set as it is", () => {
+    expect(heldInBatch(list, "acme/webshop", new Set([3, 4]))).toEqual([3]);
+  });
+
+  it("returns nothing when no selected issue is held", () => {
+    expect(heldInBatch(list, "acme/webshop", [4, 5, 6])).toEqual([]);
+    expect(heldInBatch([], "acme/webshop", [3, 9])).toEqual([]);
   });
 });

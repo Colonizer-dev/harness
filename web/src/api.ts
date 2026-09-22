@@ -75,6 +75,11 @@ export function heldByFor(sessions: Session[], repo: string, issue: number): Ses
   return sessions.find((s) => s.repo === repo && s.issue === issue && holdsIssue(s.status)) ?? null;
 }
 
+/** The issues of a batch launch another colony already holds, in the order given — each one a 409 waiting to happen. */
+export function heldInBatch(sessions: Session[], repo: string, issues: Iterable<number>): number[] {
+  return [...issues].filter((issue) => heldByFor(sessions, repo, issue) !== null);
+}
+
 export interface SaveModuleRequest {
   provider: string;
   enabled: boolean;
