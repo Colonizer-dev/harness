@@ -6,7 +6,17 @@ import { test } from 'node:test';
 
 import { z } from 'zod';
 
-import { createMemoryServer, formatResults, MEMORY_PROMPT_APPEND, MEMORY_SERVER, MEMORY_TOOLS, PROPOSED_REPLY, searchMemory } from '../memory.mjs';
+import {
+  createMemoryServer,
+  formatResults,
+  MEMORY_PROMPT_APPEND,
+  MEMORY_PROPOSE_TOOL,
+  MEMORY_SERVER,
+  MEMORY_TOOLS,
+  memoryDecision,
+  PROPOSED_REPLY,
+  searchMemory,
+} from '../memory.mjs';
 import { buildOptions as buildOptionsWithDefaults, SYSTEM_PROMPT_APPEND } from '../runner.mjs';
 
 // These tests cover other features. Delegation is enforced by default and has its own tests in
@@ -125,4 +135,31 @@ test('buildOptions maps routing and memory settings into Claude Code options', (
 
   // Memory needs both the mounted directory and a server.
   assert.equal(buildOptions({ COLONIZER_MEMORY_DIR: '/colonizer/memory' }).options.mcpServers, undefined);
+});
+
+test('only the orchestrator proposes: a subagent is told to report instead', () => {
+  const [search] = MEMORY_TOOLS;
+  assert.equal(memoryDecision(MEMORY_PROPOSE_TOOL, {}), null, 'the orchestrator may propose');
+  assert.match(memoryDecision(MEMORY_PROPOSE_TOOL, { agent_id: 'agent_01' }), /Only the orchestrator proposes shared memory/);
+  assert.equal(memoryDecision(search, { agent_id: 'agent_01' }), null, 'a subagent still searches');
+  assert.equal(memoryDecision('Bash', { agent_id: 'agent_01' }), null, 'other tools are not this gate’s business');
+});
+
+test('the memory gate is registered only with memory, and refuses a subagent even when delegation is off', async () => {
+  const memoryServer = { type: 'sdk', name: MEMORY_SERVER, instance: {} };
+  assert.equal(buildOptions({}, { memoryServer }).options.hooks, undefined, 'no memory, no gate');
+
+  const { options } = buildOptions({ COLONIZER_MEMORY_DIR: '/colonizer/memory' }, { memoryServer });
+  const hooks = options.hooks.PreToolUse.flatMap((entry) => entry.hooks);
+  const decide = async (input) => {
+    for (const hook of hooks) {
+      const out = await hook({ hook_event_name: 'PreToolUse', tool_input: {}, ...input });
+      if (out.hookSpecificOutput?.permissionDecision === 'deny') return out.hookSpecificOutput;
+    }
+    return null;
+  };
+  assert.equal(await decide({ tool_name: MEMORY_PROPOSE_TOOL }), null);
+  assert.equal(await decide({ tool_name: MEMORY_TOOLS[0], agent_id: 'agent_01' }), null);
+  const denied = await decide({ tool_name: MEMORY_PROPOSE_TOOL, agent_id: 'agent_01' });
+  assert.match(denied.permissionDecisionReason, /Only the orchestrator proposes shared memory/);
 });
