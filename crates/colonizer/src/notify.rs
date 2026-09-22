@@ -715,6 +715,7 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            normalize_cache_ttl: false,
         }
     }
 
