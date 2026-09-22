@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ApiError, heldByFor } from "../api";
+import { ApiError, heldByFor, heldInBatch } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
@@ -762,11 +762,17 @@ export function NewSession({
       return next;
     });
 
+  // Selected issues another colony already holds. They are skipped rather than sent, since the
+  // mothership would refuse each with a 409 — unless Allow duplicate says to start them anyway.
+  const heldSelected = activeRepo ? heldInBatch(sessions, activeRepo, selected) : [];
+  const launchCount = allowDuplicate ? selected.size : selected.size - heldSelected.length;
+
   // One colony per issue, launched in the order they appear. Past the parallel limit the harness
   // queues them, so a batch is a plan rather than a burst.
   const launchSelected = async () => {
     if (!activeRepo) return;
-    const batch = matchingIssues.filter((i) => selected.has(i.number));
+    const held = new Set(allowDuplicate ? [] : heldInBatch(sessions, activeRepo, selected));
+    const batch = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number));
     setLaunching(true);
     setBlockedByDuplicate(false);
     let started = 0;
@@ -796,11 +802,17 @@ export function NewSession({
     }
     setLaunching(false);
     setSelected(new Set());
-    const summary = [started > 0 ? `${started} started` : null, queued > 0 ? `${queued} queued` : null].filter(Boolean).join(", ");
+    const summary = [
+      started > 0 ? `${started} started` : null,
+      queued > 0 ? `${queued} queued` : null,
+      held.size > 0 ? `${held.size} already held, skipped` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
     if (failures.length > 0) {
       toast(`${summary || "Nothing launched"} · ${failures.length} failed — ${failures[0]}`, "error");
     } else {
-      toast(`${batch.length} ${batch.length === 1 ? "colony" : "colonies"}: ${summary}`);
+      toast(`${batch.length} ${batch.length === 1 ? "colony" : "colonies"}: ${summary || "nothing launched"}`);
     }
     // The rest arrive with the sidebar's next poll; this one opens so there is something to watch.
     if (last) onCreated(last);
@@ -873,12 +885,17 @@ export function NewSession({
                 <span className="min-w-0 flex-1 text-[12.5px]">
                   {selected.size} selected
                   <span className="block text-[11.5px] text-faint">one colony each, queued past the limit</span>
+                  {heldSelected.length > 0 && (
+                    <span className="block text-[11.5px] text-warn">
+                      {heldSelected.length} already held — skipped unless Allow duplicate
+                    </span>
+                  )}
                 </span>
                 <Button size="sm" variant="ghost" disabled={launching} onClick={() => setSelected(new Set())}>
                   Clear
                 </Button>
-                <Button size="sm" variant="primary" disabled={launching} onClick={launchSelected}>
-                  {launching ? <Spinner /> : <IconPlus size={14} />} Launch {selected.size}
+                <Button size="sm" variant="primary" disabled={launching || launchCount === 0} onClick={launchSelected}>
+                  {launching ? <Spinner /> : <IconPlus size={14} />} Launch {launchCount}
                 </Button>
               </div>
               <label className="flex cursor-pointer items-center gap-2 px-0.5 text-[12px] text-muted">
