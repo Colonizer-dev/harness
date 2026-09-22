@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { analyze, formatReport, formatTranscript, reasons, redact, summarize } from '../colony-report.mjs';
+import { analyze, formatReport, formatTranscript, reasons, redact, summarize, totalCost } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -212,4 +212,36 @@ test('the summary adds up the finding chain and names it in the report', () => {
   const quietReport = formatReport(quietSummary, [analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })]);
   assert.match(quietReport, /Findings filed: 0\./);
   assert.ok(!quietReport.split('\n').find((l) => l.startsWith('- Settlers')).includes('validated'));
+});
+
+test('routed provider cost is carried beside Claude’s, and the total adds both', () => {
+  const routed = {
+    ...colony,
+    session: { ...colony.session, id: 'routed01', routed_cost_usd: 0.35 },
+  };
+  const r = analyze(routed);
+  assert.equal(r.cost_usd, 0.4, 'Claude’s own estimate, from the last turn_end');
+  assert.equal(r.routed_cost_usd, 0.35);
+  assert.ok(Math.abs(r.total_cost_usd - 0.75) < 1e-9);
+
+  const unmeasured = analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] });
+  assert.equal(unmeasured.routed_cost_usd, null, 'a session without the field, or from before it existed');
+  assert.equal(unmeasured.total_cost_usd, null, 'unmeasured stays unmeasured, not $0');
+  assert.equal(totalCost(null, 0.2), 0.2);
+  assert.equal(totalCost(0.1, undefined), 0.1);
+
+  const s = summarize([r, unmeasured]);
+  assert.ok(Math.abs(s.claude_cost_usd - 0.4) < 1e-9);
+  assert.ok(Math.abs(s.routed_cost_usd - 0.35) < 1e-9);
+  assert.ok(Math.abs(s.total_cost_usd.median - 0.75) < 1e-9);
+
+  const report = formatReport(s, [r, unmeasured]);
+  assert.match(report, /Cost in total: \$0\.75: Claude \$0\.40 .*routed \$0\.35/);
+  assert.doesNotMatch(report, /aren't priced/);
+  assert.match(report, /\| routed01[^|]*\| acme\/webshop \| pr_opened \| \$0\.75 \| \$0\.35 \|/);
+});
+
+test('the top-quarter cost reason counts routed spend', () => {
+  const cheapClaude = { ...analyze({ session: { id: 'r', cost_usd: 0.05, routed_cost_usd: 2 }, events: [] }) };
+  assert.deepEqual(reasons(cheapClaude, 1), ['cost $2.05 (top quarter)']);
 });
