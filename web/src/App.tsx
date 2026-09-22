@@ -25,6 +25,7 @@ import {
   type NotificationPrefs,
   type SessionSnapshot,
 } from "./notifications";
+import { floatingColumnClass } from "./floatingColumn";
 import { pendingOrgPrompt } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
@@ -83,6 +84,8 @@ export function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [launchRequests, setLaunchRequests] = useState(0);
   const [settingsRequests, setSettingsRequests] = useState(0);
+  // Whether the cockpit is showing its inspector; the fixed card column steps left of it.
+  const [inspectorShown, setInspectorShown] = useState(false);
   // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
   // (colonizer.sidebar-tab stays the sidebar's own memory of itself.)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
@@ -589,6 +592,7 @@ export function App() {
                 void loadOrgs();
               }}
               onOpenSettings={openSettings}
+              onInspectorShown={setInspectorShown}
               colony={colonyPane}
               memory={memoryPane}
             />
@@ -620,7 +624,7 @@ export function App() {
       />
       {(storageAlert || liveMapPrompt) && (
         // Both fixed cards live in the same corner; the shared column keeps them stacked and clickable.
-        <div className={cx("fixed z-30 flex flex-col gap-3", narrow ? "inset-x-3 bottom-3" : "bottom-5 right-5 w-[380px]")}>
+        <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(narrow, inspectorShown))}>
           {storageAlert && <StorageAlert storage={storageAlert} onDismiss={() => setDismissedStorageTs(storageAlertKey(storageAlert))} />}
           {liveMapPrompt && (
             <LiveMapPrompt
