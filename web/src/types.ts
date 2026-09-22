@@ -612,6 +612,8 @@ export interface ProviderHealth {
   latency_ms: number | null;
   models: string[];
   error: string | null;
+  /** Set when the probe answered in a way that is still healthy — an anthropic-wire endpoint that serves no /v1/models ("no model list"). */
+  note: string | null;
   checked_at: string;
 }
 

@@ -1361,12 +1361,16 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
                 .as_array()
                 .map(|data| data.iter().filter_map(|m| m["id"].as_str()).map(|id| json!(id)).collect())
                 .unwrap_or_default();
+            // An Anthropic-compatible endpoint need not serve /v1/models (Alibaba's /apps/anthropic
+            // doesn't): a 404 there means reachable with no published list, not a broken provider.
+            let note = (provider.wire == crate::providers::Wire::Anthropic && status == 404).then_some("no model list");
             json!({
                 "reachable": true,
                 "status": status,
                 "latency_ms": started.elapsed().as_millis() as u64,
                 "models": models,
                 "error": null,
+                "note": note,
                 "checked_at": checked_at,
             })
         }
@@ -1378,7 +1382,7 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
             } else {
                 e.without_url().to_string()
             };
-            json!({"reachable": false, "status": null, "latency_ms": null, "models": [], "error": error, "checked_at": checked_at})
+            json!({"reachable": false, "status": null, "latency_ms": null, "models": [], "error": error, "note": null, "checked_at": checked_at})
         }
     }
 }
@@ -1527,6 +1531,48 @@ mod tests {
             "refused locally, so nothing counts as provider usage"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Probes a provider of the given wire whose upstream answers `/v1/models` with `status`.
+    async fn probe_answering(wire: crate::providers::Wire, status: StatusCode) -> Value {
+        let router = Router::new().route("/v1/models", axum::routing::get(move || async move { status }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-probe-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            wire,
+            ..provider("x", None)
+        };
+        let health = probe(&app, &provider).await;
+        let _ = std::fs::remove_dir_all(root);
+        health
+    }
+
+    /// An Anthropic-compatible endpoint that does not serve `/v1/models` still routes, so its 404
+    /// reads as reachable with no published list rather than as a failed probe.
+    #[tokio::test]
+    async fn an_anthropic_provider_without_a_model_list_probes_as_reachable() {
+        let health = probe_answering(crate::providers::Wire::Anthropic, StatusCode::NOT_FOUND).await;
+        assert_eq!(health["reachable"], true);
+        assert_eq!(health["status"], 404, "the real status is kept");
+        assert_eq!(health["error"], Value::Null);
+        assert_eq!(health["models"], json!([]));
+        assert_eq!(health["note"], "no model list");
+    }
+
+    /// Only the anthropic-wire 404 is softened: a refused key, or a 404 from an OpenAI-wire
+    /// endpoint (which must serve `/v1/models`), come back as they are.
+    #[tokio::test]
+    async fn other_probe_failures_carry_no_note() {
+        let refused = probe_answering(crate::providers::Wire::Anthropic, StatusCode::UNAUTHORIZED).await;
+        assert_eq!(refused["status"], 401);
+        assert_eq!(refused.get("note"), Some(&Value::Null), "the key is always present");
+        let openai = probe_answering(crate::providers::Wire::Openai, StatusCode::NOT_FOUND).await;
+        assert_eq!(openai["status"], 404);
+        assert_eq!(openai.get("note"), Some(&Value::Null));
     }
 
     /// A gateway whose usage file lives in a fresh temp directory.

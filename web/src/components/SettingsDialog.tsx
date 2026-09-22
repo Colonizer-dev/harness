@@ -2407,7 +2407,7 @@ function KeyBadge({ provider }: { provider: ModelProvider }) {
 
 type HealthView = { state: "checking" } | { state: "done"; result: ProviderHealth } | { state: "failed"; message: string };
 
-function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boolean }) {
+export function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boolean }) {
   if (health.state === "checking") {
     return (
       <span role="status" className="flex items-center gap-1.5 text-[12px] text-muted">
@@ -2425,18 +2425,23 @@ function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boo
     const r = health.result;
     const latency = r.latency_ms != null ? `${Math.round(r.latency_ms)} ms` : null;
     const models = r.models.length ? `${r.models.length} model${r.models.length === 1 ? "" : "s"}` : null;
+    // A note marks a non-2xx the Mothership judged healthy (an anthropic-wire endpoint with no
+    // /v1/models), so it skips the HTTP warning.
     if (!r.reachable) {
       tone = "err";
       text = `Unreachable${r.error ? `: ${r.error}` : ""}`;
-    } else if (r.status != null && (r.status < 200 || r.status > 299)) {
+    } else if (!r.note && r.status != null && (r.status < 200 || r.status > 299)) {
       tone = "warn";
       text = [`HTTP ${r.status}`, latency, r.error].filter(Boolean).join(" · ");
     } else {
       tone = "ok";
       // A passing probe is one request; say so next to a provider failing a share of its real traffic.
-      text = ["Reachable", latency, models, degraded ? "but failing real traffic" : null].filter(Boolean).join(" · ");
+      text = ["Reachable", latency, models ?? r.note, degraded ? "but failing real traffic" : null].filter(Boolean).join(" · ");
     }
-    title = [r.models.length ? `Models: ${r.models.join(", ")}` : null, r.checked_at ? `Checked ${new Date(r.checked_at).toLocaleTimeString()}` : null]
+    title = [
+      r.models.length ? `Models: ${r.models.join(", ")}` : r.note ? "The endpoint does not list its models; requests route normally." : null,
+      r.checked_at ? `Checked ${new Date(r.checked_at).toLocaleTimeString()}` : null,
+    ]
       .filter(Boolean)
       .join("\n");
   }

@@ -1531,8 +1531,12 @@ state, so slots release and resume works today) and `attention.reason`
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 
 ```json
-{"reachable": true, "status": 200, "latency_ms": 42, "models": ["deepseek-v4-flash"], "error": null, "checked_at": "…"}
+{"reachable": true, "status": 200, "latency_ms": 42, "models": ["deepseek-v4-flash"], "error": null, "note": null, "checked_at": "…"}
 ```
+
+The probe is informational, not a routing gate. An Anthropic-wire endpoint need not serve `/v1/models`,
+so a 404 from one comes back as `reachable: true` with the real `status`, empty `models` and
+`"note": "no model list"`; `note` is `null` in every other case.
 
 At colony start the mothership probes every used provider and logs a warning for each unreachable one
 (the colony still starts; fallback covers it when configured).
