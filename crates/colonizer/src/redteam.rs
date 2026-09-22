@@ -32,6 +32,9 @@ const MAX_SWARM: usize = 8;
 const DEFAULT_SWARM: usize = 3;
 /// The module a hunter runs when the request names none.
 const DEFAULT_MODULE: &str = "general";
+/// The modules a run may name. Only the built-in one exists until module manifests land (#216); an
+/// unknown name is refused rather than run as if it were the default.
+const KNOWN_MODULES: &[&str] = &[DEFAULT_MODULE];
 
 /// The eight focus areas a run's hunters are drawn from, cycled as `i % 8`. Each brief names its own
 /// focus and lists the others, so the swarm keeps out of one another's way.
@@ -638,6 +641,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -
         .modules
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| vec![DEFAULT_MODULE.to_string()]);
+    if let Some(unknown) = modules.iter().find(|m| !KNOWN_MODULES.contains(&m.as_str())) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "unknown red-team module {unknown:?}; known modules: {}",
+                KNOWN_MODULES.join(", ")
+            ),
+        ));
+    }
     let autofix = req.autofix.unwrap_or(false);
     let armed = req.arm.unwrap_or(false);
     let live = live_count(&app).await;
@@ -1053,6 +1065,24 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(run.swarm_size, 3);
+        assert_eq!(run.modules, vec![DEFAULT_MODULE]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_module_is_refused_and_the_known_ones_are_named() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let mut req = new_run("acme/repo", None, true);
+        req.modules = Some(vec![DEFAULT_MODULE.into(), "foo".into()]);
+        let err = create(State(app.clone()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "unknown red-team module \"foo\"; known modules: general");
+        assert!(app.redteam.runs.read().await.is_empty(), "a refused run is not created");
+
+        let mut req = new_run("acme/repo", None, true);
+        req.modules = Some(vec![DEFAULT_MODULE.into()]);
+        let run = create(State(app.clone()), Json(req)).await.unwrap().0;
         assert_eq!(run.modules, vec![DEFAULT_MODULE]);
         let _ = std::fs::remove_dir_all(root);
     }

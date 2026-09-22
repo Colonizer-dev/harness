@@ -1668,6 +1668,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             // The operator's data directory first, then what shipped with the app; the same resolution the
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
+            if let Some(vendored) = crate::plugins::shadowed_vendored(&app.cfg, name) {
+                log.info(format!(
+                    "skillset {name:?}: the local copy at {} shadows the vendored one at {}",
+                    source.display(),
+                    vendored.display()
+                ))
+                .await;
+            }
             let target = format!("/opt/colonizer/plugins/{name}");
             mounts.push(Mount {
                 source,
