@@ -333,13 +333,22 @@ pub async fn version(State(app): State<Shared>) -> Json<&'static Build> {
 /// `GET /api/update` — the installed version, the latest release, whether to act,
 /// and how an update being applied is getting on.
 pub async fn status(State(app): State<Shared>) -> Json<Value> {
+    Json(full_status(&app).await)
+}
+
+/// The one `/api/update` shape, shared by the GET and the PUT: the base view
+/// plus the apply progress and the can-apply verdict. The toggle used to answer
+/// with the bare view, and the Settings pane dereferences `apply.colonies` and
+/// `can_apply.ok` unconditionally — so flipping the switch blanked the screen
+/// until a refresh re-fetched the full shape.
+pub async fn full_status(app: &Shared) -> Value {
     let mut view = app.updates.view().await;
     view["apply"] = serde_json::to_value(app.updater.progress().await).unwrap_or(Value::Null);
     view["can_apply"] = match crate::update::blocker(app.cfg.assets.as_deref()) {
         Some(reason) => json!({ "ok": false, "reason": reason }),
         None => json!({ "ok": true, "reason": Value::Null }),
     };
-    Json(view)
+    view
 }
 
 #[derive(Deserialize)]
@@ -362,7 +371,7 @@ pub async fn put(State(app): State<Shared>, Json(body): Json<SetRequest>) -> cra
     if body.enabled {
         app.updates.check().await;
     }
-    Ok(Json(app.updates.view().await))
+    Ok(Json(full_status(&app).await))
 }
 
 /// Checks shortly after start, then every few hours, and only while switched on.
@@ -498,6 +507,36 @@ mod tests {
         assert_eq!(Choice::load(&path), Choice { enabled: Some(false) });
         assert!(!Choice::load(&path).enabled.unwrap_or(true), "off must survive a restart");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The toggle must answer the same shape as the status read: the Settings
+    /// pane dereferences `apply.colonies` and `can_apply.ok` unconditionally,
+    /// so a PUT that returned the bare view blanked the screen until refresh.
+    #[tokio::test]
+    async fn toggle_returns_the_full_update_shape() {
+        let dir = std::env::temp_dir().join(format!("colonizer-updates-{}", crate::util::short_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let app = crate::tests::test_app(&dir);
+        // Off, so no check call reaches the network.
+        let put = put(State(app.clone()), Json(SetRequest { enabled: false })).await.unwrap().0;
+        let get = status(State(app.clone())).await.0;
+        for key in [
+            "enabled",
+            "blocked_by",
+            "installed",
+            "latest",
+            "available",
+            "last_checked",
+            "error",
+            "apply",
+            "can_apply",
+        ] {
+            assert!(put.get(key).is_some(), "PUT shape is missing {key}");
+            assert!(get.get(key).is_some(), "GET shape is missing {key}");
+        }
+        assert_eq!(put["enabled"], false);
+        assert!(put["can_apply"]["ok"].is_boolean());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
