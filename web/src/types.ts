@@ -856,7 +856,11 @@ export type AgentEventBody =
       /** Colony-cumulative totals as of this turn, not this turn's own usage (docs/protocol.md §4). */
       model_usage?: Record<string, ModelTokens>;
     }
-  | { type: "log"; level: LogLevel; message: string };
+  | { type: "log"; level: LogLevel; message: string }
+  /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
+  | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
+  /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
+  | { type: "finding"; title: string; body: string; evidence: string };
 
 export type AgentEvent = Sequenced & AgentEventBody;
 
