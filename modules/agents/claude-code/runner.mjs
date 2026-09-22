@@ -15,6 +15,7 @@ import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
 import { routeEnv, routingPlan, startRouter } from './router.mjs';
+import { subagentDefinitions } from './subagents.mjs';
 
 export const SYSTEM_PROMPT_APPEND = [
   'You are running inside the Colonizer; the user follows along in a web UI.',
@@ -441,6 +442,11 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (env.COLONIZER_EFFORT) {
     if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
     else warnings.push(`ignoring COLONIZER_EFFORT=${env.COLONIZER_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
+  }
+  // Unset leaves the built-in agents in place, so subagents inherit the orchestrator's effort as before.
+  if (env.COLONIZER_SUBAGENT_EFFORT) {
+    if (EFFORT_LEVELS.has(env.COLONIZER_SUBAGENT_EFFORT)) options.agents = subagentDefinitions(env.COLONIZER_SUBAGENT_EFFORT);
+    else warnings.push(`ignoring COLONIZER_SUBAGENT_EFFORT=${env.COLONIZER_SUBAGENT_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
   }
   return { options, warnings };
 }
