@@ -404,6 +404,37 @@ test('options come from the environment', () => {
   assert.deepEqual(childEnv({ CLAUDE_PID: '1', HOME: '/root' }), { HOME: '/root' });
 });
 
+test('subagent effort redefines the built-in agents the orchestrator delegates to', () => {
+  // Unset: no agents option, so the built-ins stay and inherit the orchestrator's effort.
+  assert.equal(buildOptions({ COLONIZER_EFFORT: 'xhigh' }).options.agents, undefined);
+
+  const { options, warnings } = buildOptions({
+    COLONIZER_EFFORT: 'xhigh',
+    COLONIZER_SUBAGENT_EFFORT: 'medium',
+    COLONIZER_SUBAGENT_MODEL: 'claude-opus-5-5',
+  });
+  assert.deepEqual(warnings, []);
+  assert.equal(options.effort, 'xhigh');
+  assert.deepEqual(Object.keys(options.agents).sort(), ['Explore', 'general-purpose']);
+  for (const agent of Object.values(options.agents)) {
+    assert.equal(agent.effort, 'medium');
+    assert.ok(agent.description && agent.prompt);
+    // No model on the definition, so the subagent model setting still decides it.
+    assert.equal(agent.model, undefined);
+  }
+  assert.equal(options.env.CLAUDE_CODE_SUBAGENT_MODEL, 'claude-opus-5-5');
+  // Explore stays read-only: the prompt says so and the deny list enforces it. The list must never be
+  // narrower than the built-in's, read from the Claude Code 2.1.280 binary vendor/claude-code.lock pins.
+  const builtInExploreDenies = ['Agent', 'Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'ExitPlanMode', 'Edit', 'Write', 'NotebookEdit'];
+  for (const tool of builtInExploreDenies) assert.ok(options.agents.Explore.disallowedTools.includes(tool), tool);
+  assert.equal(options.agents['general-purpose'].disallowedTools, undefined);
+
+  const bad = buildOptions({ COLONIZER_SUBAGENT_EFFORT: 'extreme' });
+  assert.equal(bad.options.agents, undefined);
+  assert.equal(bad.warnings.length, 1);
+  assert.match(bad.warnings[0], /COLONIZER_SUBAGENT_EFFORT=extreme/);
+});
+
 test('tool result text handles strings, parts and short output', () => {
   assert.equal(toolResultText('ok'), 'ok');
   assert.equal(toolResultText([{ type: 'text', text: 'a' }, { type: 'image' }]), 'a\n[image]');

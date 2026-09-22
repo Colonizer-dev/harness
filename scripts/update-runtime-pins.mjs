@@ -129,6 +129,13 @@ async function stableVersion() {
   return version;
 }
 
+/** Orders two `x.y.z` versions numerically: negative when `a` is older than `b`. */
+function compareVersions(a, b) {
+  const [x, y] = [a, b].map((v) => v.split('.').map(Number));
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return 0;
+}
+
 async function releaseManifest(version) {
   const response = await fetch(`${ANTHROPIC}/${version}/manifest.json`, { headers: { 'user-agent': USER_AGENT } });
   if (!response.ok) throw new Error(`the ${version} manifest: HTTP ${response.status}`);
@@ -212,6 +219,12 @@ async function proposeAgent(lines, entries) {
     }
     if (checksum === entry.sha && version === entry.version) {
       console.log(`${entry.name} ${entry.platform}: current (${version})`);
+      continue;
+    }
+    // A pin can be moved ahead of stable by hand when a newer build is needed — Claude Opus 5.5 is
+    // refused by the API below Claude Code 2.1.280 — and following stable back down would break it.
+    if (compareVersions(version, entry.version) < 0) {
+      console.log(`${entry.name} ${entry.platform}: pinned ${entry.version} is ahead of stable ${version}; kept`);
       continue;
     }
     console.log(`${entry.name} ${entry.platform}: ${entry.version}/${entry.sha.slice(0, 12)} -> ${version}/${checksum.slice(0, 12)}`);

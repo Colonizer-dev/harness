@@ -39,7 +39,7 @@
       "model": {
         "type": "string",
         "title": "Orchestrator model",
-        "description": "Model for the main agent: a Claude alias or ID (opus, claude-opus-5) or <provider>/<model> for another provider. Empty uses Claude Code's default.",
+        "description": "Model for the main agent: a Claude alias or ID (opus, claude-opus-5-5) or <provider>/<model> for another provider. Empty uses Claude Code's default.",
         "default": "",
         "env": "COLONIZER_MODEL"
       },
@@ -93,8 +93,8 @@
       },
       "effort": {
         "type": "string",
-        "title": "Effort",
-        "description": "Reasoning effort. Empty uses the model default.",
+        "title": "Orchestrator effort",
+        "description": "Reasoning effort for the main agent. Empty uses the model default.",
         "enum": [
           "",
           "low",
@@ -105,6 +105,14 @@
         ],
         "default": "",
         "env": "COLONIZER_EFFORT"
+      },
+      "subagent_effort": {
+        "type": "string",
+        "title": "Subagent effort",
+        "description": "Reasoning effort for the general-purpose and Explore subagents, e.g. medium under an xhigh orchestrator. Empty keeps Claude Code's rule: a subagent reasons at the orchestrator's effort. Plugin agents keep that rule either way.",
+        "enum": ["", "low", "medium", "high", "xhigh", "max"],
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_EFFORT"
       },
       "enforce_choices": {
         "type": "boolean",
