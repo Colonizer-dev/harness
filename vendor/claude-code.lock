@@ -15,5 +15,5 @@
 # Platform names here are the guest ones Anthropic uses (linux-arm64, linux-x64), not Colonizer's own
 # release platform names (linux-x86_64, darwin-arm64). The guest is always Linux — a colony is a Linux
 # microVM — so there is no darwin row even though a Mac is where this lock is most often read.
-claude-code  2.1.267  linux-arm64  agent  226a4e009574044a18bf5495f127806b2a1bfcbf25b3c01608705fafee95fefb  https://downloads.claude.ai/claude-code-releases/2.1.267/linux-arm64/claude
-claude-code  2.1.267  linux-x64    agent  0399c793ff571d5946ef923d80b4f330d05ac4b6842a6b0775468f5d389403c0  https://downloads.claude.ai/claude-code-releases/2.1.267/linux-x64/claude
+claude-code  2.1.280  linux-arm64  agent  92f2b4fd05d0bdcf7b9a0d4e0ecef4a1e4b368b290cd8fd07cff9a50013f45a2  https://downloads.claude.ai/claude-code-releases/2.1.280/linux-arm64/claude
+claude-code  2.1.280  linux-x64    agent  1e08503dbdf3c2cb0d706d32f3408277388d1c76ef108673e8fe42c1b322925b  https://downloads.claude.ai/claude-code-releases/2.1.280/linux-x64/claude

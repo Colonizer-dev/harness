@@ -181,6 +181,7 @@ const ANTHROPIC_MODELS: &[(&str, &str)] = &[
     ("sonnet", "Claude Sonnet (latest)"),
     ("haiku", "Claude Haiku (latest)"),
     ("fable", "Claude Fable (latest)"),
+    ("claude-opus-5-5", "Claude Opus 5.5"),
     ("claude-opus-5", "Claude Opus 5"),
     ("claude-sonnet-5", "Claude Sonnet 5"),
     ("claude-haiku-4-5", "Claude Haiku 4.5"),
