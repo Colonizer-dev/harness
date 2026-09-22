@@ -133,6 +133,9 @@ pub struct App {
     pub new_orgs: RwLock<BTreeMap<String, Option<String>>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// When the last org refresh failed, so a `gh` that keeps failing is retried once a minute
+    /// rather than on every workspace poll.
+    pub orgs_failed_at: Mutex<Option<std::time::Instant>>,
     /// The last Anthropic profile lookup for the Claude credential, cached so the status poll does not
     /// hammer Anthropic. Keyed on a fingerprint of the token; the token itself is never stored.
     pub claude_account: Mutex<Option<claude_login::AccountStatus>>,
@@ -945,6 +948,7 @@ async fn serve() -> Result<()> {
         repo_owners: RwLock::new(BTreeSet::new()),
         new_orgs: RwLock::new(BTreeMap::new()),
         orgs_refreshed: Mutex::new(None),
+        orgs_failed_at: Mutex::new(None),
         claude_account: Mutex::new(None),
         github_viewer: Mutex::new(None),
         claude_bins: Mutex::new(HashMap::new()),
@@ -1205,6 +1209,7 @@ pub(crate) mod tests {
             repo_owners: RwLock::new(BTreeSet::new()),
             new_orgs: RwLock::new(BTreeMap::new()),
             orgs_refreshed: Mutex::new(None),
+            orgs_failed_at: Mutex::new(None),
             pull: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
