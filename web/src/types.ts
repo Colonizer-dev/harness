@@ -907,7 +907,7 @@ export interface FindingRecord {
   session: string;
   repo?: string;
   title: string;
-  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "error";
+  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
   ts?: string;
   reason?: string;
   severity?: "low" | "medium" | "high" | "critical";
