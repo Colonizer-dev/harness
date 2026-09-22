@@ -45,14 +45,21 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      # Every entry in Cargo.lock must resolve from the registry, into an empty cargo home so the warm
+      # cache above cannot hide an entry the registry no longer has; a phantom lock entry passed CI
+      # once and only failed the release build (#313). Fetch-only, so it costs a download, no compile.
+      - name: Lockfile resolves
+        run: CARGO_HOME="$(mktemp -d)" cargo fetch --locked
+
       # Includes colonizer-agentd's integration and smoke tests, which boot the real agentd binary on
       # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
-      # stock runners have it; no KVM is involved anywhere in this job.
+      # stock runners have it; no KVM is involved anywhere in this job. --locked, like the release
+      # build: a lockfile cargo would have to change fails here instead of being silently re-resolved.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Last, so a formatting nit never hides a failing test or a real lint.
       - name: Format
