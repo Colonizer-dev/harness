@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { analyze, loadColonies } from './colony-report.mjs';
+import { analyze, loadColonies, totalCost } from './colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MOTHERSHIP = process.env.COLONIZER_URL || 'http://127.0.0.1:7878';
@@ -189,6 +189,8 @@ export function scoreBranch({ repo, branch, base = 'main', task, workdir }) {
 export function scoreTask({ task, session, answers, timed_out, branchScore, colony }) {
   const expect = task.expect ?? {};
   const failures = [];
+  const cost = colony?.cost_usd ?? session.cost_usd ?? null;
+  const routed = colony?.routed_cost_usd ?? session.routed_cost_usd ?? null;
   if (timed_out) failures.push('timed out');
   if (expect.pr && !session.pr_url) failures.push(`no pull request (${session.status})`);
   if (session.pr_url) {
@@ -205,7 +207,9 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
     failures,
     pr_url: session.pr_url ?? null,
     status: session.status,
-    cost_usd: colony?.cost_usd ?? session.cost_usd ?? null,
+    cost_usd: cost,
+    routed_cost_usd: routed,
+    total_cost_usd: totalCost(cost, routed),
     working_ms: colony?.working_ms ?? null,
     wall_ms: colony?.wall_ms ?? null,
     turns: colony?.turns ?? null,
@@ -222,6 +226,9 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
   };
 }
 
+/** A result's whole spend; recomputed, so a run saved before routed cost was recorded still compares. */
+const spent = (r) => (r ? totalCost(r.cost_usd, r.routed_cost_usd) : null);
+
 export function summarizeRun(results) {
   const n = results.length || 1;
   const sum = (key) => results.reduce((a, r) => a + (Number(r[key]) || 0), 0);
@@ -229,6 +236,8 @@ export function summarizeRun(results) {
     tasks: results.length,
     passed: results.filter((r) => r.passed).length,
     cost_usd: sum('cost_usd'),
+    routed_cost_usd: sum('routed_cost_usd'),
+    total_cost_usd: results.reduce((a, r) => a + (spent(r) ?? 0), 0),
     working_ms: sum('working_ms'),
     questions: sum('questions'),
     tool_errors: sum('tool_errors'),
@@ -253,7 +262,7 @@ export function formatComparison(before, after) {
     return [
       id,
       `${mark(b)} → ${mark(a)}`,
-      `${b?.cost_usd?.toFixed(2) ?? '–'} → ${a?.cost_usd?.toFixed(2) ?? '–'} (${delta(a?.cost_usd, b?.cost_usd)})`,
+      `${spent(b)?.toFixed(2) ?? '–'} → ${spent(a)?.toFixed(2) ?? '–'} (${delta(spent(a), spent(b))})`,
       `${Math.round((b?.working_ms ?? 0) / 1000)}s → ${Math.round((a?.working_ms ?? 0) / 1000)}s`,
       `${b?.questions ?? '–'} → ${a?.questions ?? '–'}`,
       (a?.failures ?? []).join('; ') || '',
@@ -266,7 +275,7 @@ export function formatComparison(before, after) {
   return [
     `# ${before.label} → ${after.label}`,
     '',
-    `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.cost_usd.toFixed(2)} → $${as.cost_usd.toFixed(2)}. Questions ${bs.questions} → ${as.questions}.`,
+    `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.`,
     '',
     line(head),
     line(head.map(() => '---')),
@@ -348,7 +357,7 @@ async function main() {
   const file = `bench-${args.label}.json`;
   writeFileSync(file, JSON.stringify(run, null, 2));
   const s = summarizeRun(results);
-  console.log(`\n${s.passed}/${s.tasks} passed · $${s.cost_usd.toFixed(2)} · ${s.questions} questions · written to ${file}`);
+  console.log(`\n${s.passed}/${s.tasks} passed · $${s.total_cost_usd.toFixed(2)} (routed $${s.routed_cost_usd.toFixed(2)}) · ${s.questions} questions · written to ${file}`);
   console.log(`Compare with: node scripts/bench.mjs compare bench-<other>.json ${file}`);
 }
 

@@ -59,6 +59,12 @@ const RATE_LIMIT = /\b429\b|rate[ _-]?limit|overloaded|too many requests|quota/i
 const PLAIN_TEXT_REPROMPT = /asked in plain text/i;
 const QUIET_STATES = new Set(['waiting_for_answer', 'idle', 'exited', 'error']);
 
+/** Claude's estimate plus the gateway's routed dollars; null only when neither was measured. */
+export function totalCost(claude, routed) {
+  if (typeof claude !== 'number' && typeof routed !== 'number') return null;
+  return (typeof claude === 'number' ? claude : 0) + (typeof routed === 'number' ? routed : 0);
+}
+
 /** One colony's numbers. Pure: takes what loadColonies read, so it can be tested without a mothership. */
 export function analyze({ mothership = '', session = {}, events = [], logs = [] }) {
   const tools = {};
@@ -81,7 +87,11 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
     working_ms: 0,
     turns: 0,
     failed_turns: 0,
+    // Claude Code's own estimate, over the Claude models only; turn_end events refine it below.
     cost_usd: session.cost_usd ?? null,
+    // What the gateway priced for the providers it routed to. Only the session record carries it.
+    routed_cost_usd: session.routed_cost_usd ?? null,
+    total_cost_usd: null,
     model_usage: null,
     tool_calls: 0,
     tool_errors: 0,
@@ -221,6 +231,7 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
 
   // A turn's duration includes the time it waited for an answer, which is the user's time, not the agent's.
   r.working_ms = Math.max(0, r.working_ms - r.answer_wait_ms);
+  r.total_cost_usd = totalCost(r.cost_usd, r.routed_cost_usd);
   r.subagents = subagents.size;
   for (const type of subagents.values()) r.subagent_types[type] = (r.subagent_types[type] ?? 0) + 1;
   r.repeated_reads = [...reads].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).map(([path, n]) => ({ path, n }));
@@ -247,7 +258,7 @@ export function reasons(r, costThreshold = Infinity) {
   if (r.questions >= 3) out.push(`${r.questions} questions`);
   if (r.repeated_reads.length > 0) out.push(`re-read ${r.repeated_reads[0].path.split('/').pop()} ${r.repeated_reads[0].n}×`);
   if (r.repeated_commands.length > 0) out.push(`ran the same command ${r.repeated_commands[0].n}×`);
-  if (typeof r.cost_usd === 'number' && r.cost_usd >= costThreshold) out.push(`cost $${r.cost_usd.toFixed(2)} (top quarter)`);
+  if (typeof r.total_cost_usd === 'number' && r.total_cost_usd >= costThreshold) out.push(`cost $${r.total_cost_usd.toFixed(2)} (top quarter)`);
   return out;
 }
 
@@ -271,14 +282,16 @@ export function summarize(reports) {
   }
   const sum = (key) => reports.reduce((a, r) => a + (Number(r[key]) || 0), 0);
   const stat = (key) => ({ median: quantile(reports.map((r) => r[key]), 0.5), p90: quantile(reports.map((r) => r[key]), 0.9) });
-  const costThreshold = quantile(reports.map((r) => r.cost_usd), 0.75) ?? Infinity;
+  const costThreshold = quantile(reports.map((r) => r.total_cost_usd), 0.75) ?? Infinity;
   return {
     colonies: reports.length,
     motherships: [...new Set(reports.map((r) => r.mothership))],
     statuses,
     pr_rate: finished.length ? reports.filter((r) => r.pr_url || r.status === 'pr_opened').length / finished.length : null,
     claude_cost_usd: sum('cost_usd'),
+    routed_cost_usd: sum('routed_cost_usd'),
     cost_usd: stat('cost_usd'),
+    total_cost_usd: stat('total_cost_usd'),
     working_ms: stat('working_ms'),
     wall_ms: stat('wall_ms'),
     turns: stat('turns'),
@@ -359,7 +372,7 @@ export function formatReport(summary, reports, worst = 10) {
     table(
       ['', 'median', 'p90'],
       [
-        ['Claude cost (colony total)', usd(summary.cost_usd.median), usd(summary.cost_usd.p90)],
+        ['Cost (colony total, Claude and routed)', usd(summary.total_cost_usd.median), usd(summary.total_cost_usd.p90)],
         ['Time the agent worked (answer waits excluded)', duration(summary.working_ms.median), duration(summary.working_ms.p90)],
         ['Wall-clock time', duration(summary.wall_ms.median), duration(summary.wall_ms.p90)],
         ['Boot', duration(summary.boot_ms.median), duration(summary.boot_ms.p90)],
@@ -371,7 +384,9 @@ export function formatReport(summary, reports, worst = 10) {
   );
   out.push('');
   out.push(`- Outcomes: ${Object.entries(summary.statuses).map(([s, n]) => `${s} ${n}`).join(', ')}. Pull requests from finished colonies: ${pct(summary.pr_rate)}.`);
-  out.push(`- Claude cost in total: ${usd(summary.claude_cost_usd)}. Routed models (with a \`/\`) aren't priced; see the JSON for their tokens.`);
+  out.push(
+    `- Cost in total: ${usd(summary.claude_cost_usd + summary.routed_cost_usd)}: Claude ${usd(summary.claude_cost_usd)} (Claude Code's own estimate), routed ${usd(summary.routed_cost_usd)} (priced by the gateway; a provider without pricing counts tokens only, see the JSON).`,
+  );
   out.push(`- Questions: ${summary.questions.total}, waiting ${duration(summary.answer_wait_ms.total)} in total for answers (longest ${duration(summary.answer_wait_ms.longest)}).`);
   out.push(`- Asked in plain text and re-prompted: ${summary.plain_text_reprompts}. Watchdog nudges: ${summary.watchdog_nudges}. Failed turns: ${summary.failed_turns}. Rate-limit hits: ${summary.rate_limit_hits}.`);
   out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}${findingChain(summary)}. Memory proposals: ${summary.memory_proposals}.`);
@@ -380,14 +395,15 @@ export function formatReport(summary, reports, worst = 10) {
   out.push('', '## Colonies', '');
   out.push(
     table(
-      ['Colony', 'Repo', 'Status', 'Cost', 'Worked', 'Turns', 'Tools (failed)', 'Questions', 'Longest silence'],
+      ['Colony', 'Repo', 'Status', 'Cost', 'Routed', 'Worked', 'Turns', 'Tools (failed)', 'Questions', 'Longest silence'],
       [...reports]
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
         .map((r) => [
           `${r.id}${summary.motherships.length > 1 ? ` (${r.mothership})` : ''}`,
           r.repo,
           r.status,
-          usd(r.cost_usd),
+          usd(r.total_cost_usd),
+          usd(r.routed_cost_usd),
           duration(r.working_ms),
           r.turns,
           `${r.tool_calls} (${r.tool_errors})`,
