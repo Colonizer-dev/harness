@@ -98,12 +98,16 @@ pub struct ClaudeCred {
 }
 
 /// The latest confirmed storage failure, shown by the UI until it is dismissed. Sticky on purpose:
-/// a later successful write does not clear it, because the gap the alert reports did happen.
+/// a later successful write does not clear it, because the gap the alert reports did happen. What
+/// the write does change is `recovered_at`, so the alert can say the mothership is writing again
+/// instead of reporting a healthy disk as broken until the next restart.
 #[derive(Clone, Debug)]
 pub struct StorageAlert {
     pub message: String,
     pub ts: DateTime<Utc>,
     pub failures: u64,
+    /// When a write first succeeded after this failure; `None` while writes are still failing.
+    pub recovered_at: Option<DateTime<Utc>>,
 }
 
 pub struct App {
@@ -264,7 +268,28 @@ impl App {
             message: format!("{what} failed: {err:#}"),
             ts: Utc::now(),
             failures,
+            recovered_at: None,
         });
+    }
+
+    /// Records that a write went through, which is what turns a standing alert into a recovered
+    /// one. Only the first success after a failure stamps it, and the common case — no alert, or
+    /// one already recovered — takes only the read lock, since every session-list save calls this.
+    pub async fn storage_succeeded(&self) {
+        if !self
+            .storage_alert
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|a| a.recovered_at.is_none())
+        {
+            return;
+        }
+        if let Some(alert) = self.storage_alert.write().await.as_mut()
+            && alert.recovered_at.is_none()
+        {
+            alert.recovered_at = Some(Utc::now());
+        }
     }
 
     /// The mesh manager, created on first use from the bundled binaries and mesh module settings.
@@ -429,11 +454,18 @@ impl AppError {
 pub type ApiResult<T> = Result<Json<T>, AppError>;
 
 /// The `storage` key of `/api/status`: `ok` while every write was confirmed, else the sticky alert
-/// (`ts` in the same RFC 3339 form the `harness_log` frames use).
+/// (`ts` and `recovered_at` in the same RFC 3339 form the `harness_log` frames use). A recovered
+/// alert is `ok` again but keeps its message, time and count: the gap it reports still happened.
 fn storage_status(alert: Option<StorageAlert>) -> Value {
     match alert {
         None => json!({"ok": true}),
-        Some(alert) => json!({"ok": false, "message": alert.message, "ts": alert.ts, "failures": alert.failures}),
+        Some(alert) => json!({
+            "ok": alert.recovered_at.is_some(),
+            "message": alert.message,
+            "ts": alert.ts,
+            "failures": alert.failures,
+            "recovered_at": alert.recovered_at,
+        }),
     }
 }
 
@@ -714,6 +746,7 @@ fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> 
             message,
             ts: Utc::now(),
             failures: 1,
+            recovered_at: None,
         }),
     ))
 }
@@ -733,6 +766,7 @@ fn unusable(path: &FsPath, saved: &FsPath, reason: String) -> (Vec<Session>, Opt
             message,
             ts: Utc::now(),
             failures: 1,
+            recovered_at: None,
         }),
     )
 }
@@ -1466,6 +1500,7 @@ pub(crate) mod tests {
             message: "save the session list failed: disk is full".into(),
             ts: Utc::now(),
             failures: 3,
+            recovered_at: None,
         };
         let value = storage_status(Some(alert));
         assert_eq!(value["ok"], false);
@@ -1475,6 +1510,50 @@ pub(crate) mod tests {
             value["ts"].is_string(),
             "the ts is the RFC 3339 string the harness_log frames use: {value}"
         );
+        assert!(value["recovered_at"].is_null(), "still failing: {value}");
+    }
+
+    /// The sequence from #220's disk-full incident: writes fail, space is freed and they succeed,
+    /// then the disk fills again. Each step must read differently, and the count never resets.
+    #[tokio::test]
+    async fn a_storage_alert_reports_recovery_and_a_later_failure_undoes_it() {
+        let root = temp_root();
+        let app = test_app(&root);
+        app.storage_succeeded().await;
+        assert!(
+            app.storage_alert.read().await.is_none(),
+            "a success with no failure behind it raises nothing"
+        );
+
+        app.storage_failed("save the session list", &anyhow!("disk is full")).await;
+        let failing = storage_status(app.storage_alert.read().await.clone());
+        assert_eq!(failing["ok"], false);
+        assert!(failing["recovered_at"].is_null(), "{failing}");
+
+        app.persist_sessions().await.unwrap();
+        let recovered = storage_status(app.storage_alert.read().await.clone());
+        assert_eq!(recovered["ok"], true, "a write went through, so the disk is not broken now");
+        assert!(recovered["recovered_at"].is_string(), "{recovered}");
+        assert_eq!(
+            recovered["ts"], failing["ts"],
+            "the failure it recovered from is still the one shown"
+        );
+        assert_eq!(recovered["failures"], 1);
+        assert!(recovered["message"].as_str().unwrap().contains("disk is full"));
+        app.storage_succeeded().await;
+        let again = storage_status(app.storage_alert.read().await.clone());
+        assert_eq!(
+            again["recovered_at"], recovered["recovered_at"],
+            "recovery is stamped by the first success, not moved by every later one"
+        );
+
+        app.storage_failed("save the session list", &anyhow!("disk is full again"))
+            .await;
+        let failing_again = storage_status(app.storage_alert.read().await.clone());
+        assert_eq!(failing_again["ok"], false, "a new failure makes the alert current again");
+        assert!(failing_again["recovered_at"].is_null(), "{failing_again}");
+        assert_eq!(failing_again["failures"], 2, "failures stay cumulative across a recovery");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A platform whose assets vendor no mesh binaries — every Mac — is a fact to explain, not a

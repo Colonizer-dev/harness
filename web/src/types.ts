@@ -273,13 +273,16 @@ export interface FleetHost {
 
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
 export interface StorageHealth {
+  /** False while writes are failing; true when every write was confirmed, or once one succeeds after a failure (then `recovered_at` is set). */
   ok: boolean;
-  /** The underlying write error, for showing verbatim. */
+  /** The underlying write error, for showing verbatim. Kept after a recovery: the gap it reports still happened. */
   message?: string | null;
-  /** When the failure was recorded; same representation as a harness_log `ts`. */
+  /** When the latest failure was recorded; same representation as a harness_log `ts`. */
   ts?: string | null;
-  /** Failed writes since the mothership started. */
+  /** Failed writes since the mothership started; a recovery does not reset it. */
   failures?: number | null;
+  /** When a write first succeeded after the latest failure; null while writes are still failing. Absent from older motherships, whose alert stays until a restart. */
+  recovered_at?: string | null;
 }
 
 /** GET /api/storage: disk usage and what automatic reclamation can (and pointedly will not) take (issue #223). */
