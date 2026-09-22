@@ -7,14 +7,21 @@ import { join } from 'node:path';
 
 export const MEMORY_SCOPES = ['repo', 'org', 'global'];
 export const MEMORY_SERVER = 'colonizer_memory';
-export const MEMORY_TOOLS = [`mcp__${MEMORY_SERVER}__memory_search`, `mcp__${MEMORY_SERVER}__memory_propose`];
+export const MEMORY_PROPOSE_TOOL = `mcp__${MEMORY_SERVER}__memory_propose`;
+export const MEMORY_TOOLS = [`mcp__${MEMORY_SERVER}__memory_search`, MEMORY_PROPOSE_TOOL];
 export const PROPOSED_REPLY = 'Proposed for review; it becomes shared memory once approved.';
 
 export const MEMORY_PROMPT_APPEND = [
   '- Shared memory from earlier colonies lives in /colonizer/memory/{repo,org,global}: repo is this repository, org its GitHub organisation, global everything. Read the MEMORY.md index of each before starting.',
   '- Use the memory_search tool whenever you are unsure about a convention, command or past decision.',
-  '- Use memory_propose only for durable, reusable learnings (conventions, gotchas, decisions) that would help a future colony. Never propose secrets, credentials or task-specific details. Proposals are reviewed before they become shared memory.',
+  '- Use memory_propose only for durable, reusable learnings (conventions, gotchas, decisions) that would help a future colony. Never propose secrets, credentials or task-specific details. Proposals are reviewed before they become shared memory. Subagents can search memory but cannot propose: ask them to include anything worth remembering in their reports, and decide yourself what to propose.',
 ].join('\n');
+
+/** Why a memory_propose call is refused, or null. Subagents read shared memory; only the orchestrator proposes. */
+export function memoryDecision(toolName, hookInput = {}) {
+  if (toolName !== MEMORY_PROPOSE_TOOL || !hookInput.agent_id) return null;
+  return 'Only the orchestrator proposes shared memory. Put this learning in your report, and the orchestrator will decide whether to propose it.';
+}
 
 const MAX_RESULTS = 10;
 const SNIPPET_RADIUS = 120;
