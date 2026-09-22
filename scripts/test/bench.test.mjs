@@ -89,3 +89,26 @@ test('every task names a check that exists, and the fixture is there', () => {
     assert.equal(typeof t.expect.questions, 'number', `${t.id} needs how many questions it should ask`);
   }
 });
+
+test('routed cost is recorded per task and counted in the run and the comparison', () => {
+  const plain = scoreTask({ task, session, answers: [], timed_out: false, branchScore: clean, colony });
+  assert.equal(plain.routed_cost_usd, null);
+  assert.equal(plain.total_cost_usd, 0.2);
+
+  const routed = scoreTask({ task, session, answers: [], timed_out: false, branchScore: clean, colony: { ...colony, routed_cost_usd: 0.3 } });
+  assert.equal(routed.routed_cost_usd, 0.3);
+  assert.equal(routed.total_cost_usd, 0.5);
+  const fromSession = scoreTask({ task, session: { ...session, routed_cost_usd: 0.1 }, answers: [], timed_out: false, branchScore: clean, colony });
+  assert.equal(fromSession.routed_cost_usd, 0.1, 'the session record when the colony report has none');
+
+  const s = summarizeRun([plain, routed]);
+  assert.equal(Number(s.cost_usd.toFixed(2)), 0.4);
+  assert.equal(Number(s.routed_cost_usd.toFixed(2)), 0.3);
+  assert.equal(Number(s.total_cost_usd.toFixed(2)), 0.7);
+
+  // A run saved before routed cost was recorded has no total_cost_usd; it still compares.
+  const { routed_cost_usd, total_cost_usd, ...old } = plain;
+  const text = formatComparison({ label: 'before', results: [old] }, { label: 'after', results: [routed] });
+  assert.match(text, /0\.20 → 0\.50 \(\+0\.30\)/);
+  assert.match(text, /Cost \$0\.20 → \$0\.50 \(routed \$0\.00 → \$0\.30\)/);
+});
