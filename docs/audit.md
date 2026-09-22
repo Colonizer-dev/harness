@@ -79,9 +79,13 @@ Four gates have to pass before unattended work is on the table.
 ## Where this stands
 
 Nothing is checked off yet, and no gate is cleared. The roadmap is the issue tracker, and this page
-is the audit's view of it. One fact worth stating plainly: the Rust test suites are not run by CI
-today — there is no test workflow, and `.github/workflows/` holds only `headroom-bundle.yml`,
-`release.yml` and `vendored-plugin-updates.yml`. That is part of what G4 asks for.
+is the audit's view of it. Since the audit, `.github/workflows/ci.yml` runs on every pull request and
+push to `main`: `cargo test --workspace` (including agentd's no-KVM smoke test), `cargo clippy` with
+warnings denied and `cargo fmt --check`; the Claude Code runner's tests; the web UI's `tsc`, build and
+tests; and the tests of the telemetry receiver and the scripts. `supply-chain.yml` adds dependency audits
+and SBOMs. Two limits keep this short of what G4 asks for: CI is not a required check on `main`, so a red
+run does not block a merge, and nothing in CI boots a real colony — the `colony-smoke` job needs a
+self-hosted KVM runner and has never run.
 
 ## Authority controls, issue #98 (partial G2)
 

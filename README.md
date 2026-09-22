@@ -360,6 +360,18 @@ built. Process settings come from the environment:
 | `DO_NOT_TRACK`, `COLONIZER_TELEMETRY=off` | – | Keep the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) off whatever Settings says |
 | `CI=true` | – | Also keeps [usage data](docs/usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
+| `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest; see below |
+
+`COLONIZER_MASTER_KEY` encrypts the secrets saved under the config directory (the GitHub and Claude
+tokens, the model provider keys, the mem0 key and the webhook signing secret) with ChaCha20-Poly1305, keyed by
+the SHA-256 of its value, and writes each one as a `.enc` file beside where the plaintext would be, removing
+the plaintext. Unset or blank, secrets are written in plaintext (0600) and any stale `.enc` is removed. A
+`.enc` file with content is read with the key or not at all: without the key, or with the wrong one, the
+secret counts as missing, never falls back to an old plaintext copy. It protects a copied, synced or
+backed-up config directory, not a machine where something runs as you, since that can read the variable
+too. Use a long random value (32 or more random bytes): the single SHA-256 does no key stretching. Another
+machine with a copy of the directory needs the same value. To rotate, set a new value and save each secret
+again; if the key is lost, delete the `.enc` files and enter the secrets again.
 
 Two limits bound one colony, both sandbox module settings (Settings → Modules → sandbox) with an override
 per org. Both default to `0` — unlimited — on purpose: there is no dollar figure or byte count that suits
