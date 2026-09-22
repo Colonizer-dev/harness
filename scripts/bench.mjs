@@ -151,6 +151,38 @@ async function runTask(task, repo, issue, options) {
 
 // ------------------------------------------------------------------------------------------------ score
 
+// A node --test started from inside another one inherits NODE_TEST_CONTEXT, skips its files and exits 0, so
+// every check would pass when this runs under the bench's own tests.
+const childEnv = () => {
+  const { NODE_TEST_CONTEXT, ...env } = process.env;
+  return env;
+};
+
+/** The files a change touched that its task does not allow. */
+export const outsideTask = (task, changed) => changed.filter((file) => !(task.expect.changed_within ?? []).includes(file));
+
+/** Runs the task's hidden check at the root of a checkout, where the colony never saw it. */
+export function runCheck(task, dir) {
+  cpSync(join(ROOT, task.expect.check), join(dir, 'bench-check.test.mjs'));
+  try {
+    return { passed: true, output: execFileSync('node', ['--test', 'bench-check.test.mjs'], { cwd: dir, encoding: 'utf8', env: childEnv() }) };
+  } catch (e) {
+    return { passed: false, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-2000) };
+  } finally {
+    rmSync(join(dir, 'bench-check.test.mjs'), { force: true });
+  }
+}
+
+/** Whether the checkout's own tests still pass. */
+export function runOwnTests(dir) {
+  try {
+    execFileSync('npm', ['test', '--silent'], { cwd: dir, encoding: 'utf8', env: childEnv() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Checks out the colony's branch, runs the task's hidden check and the repo's own tests, and diffs it. */
 export function scoreBranch({ repo, branch, base = 'main', task, workdir }) {
   const result = { check: false, regression: null, changed: [], outside: [], check_output: '' };
@@ -160,25 +192,13 @@ export function scoreBranch({ repo, branch, base = 'main', task, workdir }) {
     git(['fetch', '--quiet', 'origin', branch], dir);
     git(['checkout', '--quiet', 'FETCH_HEAD'], dir);
     result.changed = git(['diff', '--name-only', `origin/${base}...HEAD`], dir).split('\n').filter(Boolean);
-    result.outside = result.changed.filter((file) => !(task.expect.changed_within ?? []).includes(file));
+    result.outside = outsideTask(task, result.changed);
     if (task.expect.check) {
-      cpSync(join(ROOT, task.expect.check), join(dir, 'bench-check.test.mjs'));
-      try {
-        result.check_output = execFileSync('node', ['--test', 'bench-check.test.mjs'], { cwd: dir, encoding: 'utf8' });
-        result.check = true;
-      } catch (e) {
-        result.check_output = `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-2000);
-      }
-      rmSync(join(dir, 'bench-check.test.mjs'), { force: true });
+      const check = runCheck(task, dir);
+      result.check = check.passed;
+      result.check_output = check.output;
     }
-    if (task.expect.regression) {
-      try {
-        execFileSync('npm', ['test', '--silent'], { cwd: dir, encoding: 'utf8' });
-        result.regression = true;
-      } catch {
-        result.regression = false;
-      }
-    }
+    if (task.expect.regression) result.regression = runOwnTests(dir);
   } finally {
     if (!workdir) rmSync(dir, { recursive: true, force: true });
   }
