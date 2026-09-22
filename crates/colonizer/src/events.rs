@@ -345,6 +345,10 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     let errored = is_error;
                     let open_question = rt.open_question.lock().await.is_some();
                     match autopilot_step(errored, interrupted, open_question, pr_written) {
+                        // Issue #84: the kill-switch holds the publish without flagging the colony.
+                        Autopilot::Publish if crate::authority::external_writes_blocked() => {
+                            app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
+                        }
                         Autopilot::Publish => {
                             app.session_log(
                                 id,
@@ -500,6 +504,12 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
     }
 }
 
+/// Issue #84: what the colony's log says when the write kill-switch holds an effect back.
+const AUTOPILOT_BLOCKED: &str = "autopilot: not publishing, external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS); \
+                                 press Create PR when writes are enabled";
+const FINDING_BLOCKED: &str =
+    "ignored a finding: external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS), so no issue is filed";
+
 /// A colony's orchestrator confirmed something outside its task. Nothing is filed directly anymore:
 /// a host-side validation call judges the finding first, every stage is minuted on the findings
 /// ledger and the colony's event stream, and only a validated finding reaches GitHub's cap and
@@ -516,6 +526,10 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             "ignored a finding: filing findings is switched off in Settings".into(),
         )
         .await;
+        return;
+    }
+    if crate::authority::external_writes_blocked() {
+        app.session_log(&id, "info", FINDING_BLOCKED.into()).await;
         return;
     }
     let finding = match findings::parse(&event) {
