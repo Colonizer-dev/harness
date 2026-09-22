@@ -22,7 +22,8 @@ lines on stdout, diagnostics on stderr.
 | `COLONIZER_BACKGROUND_MODEL` | Claude Code default | Background model for small auxiliary calls (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1) |
 | `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
-| `COLONIZER_EFFORT` | model default | `low`, `medium`, `high`, `xhigh` or `max` |
+| `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
+| `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); plugin agents keep the orchestrator's |
 | `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
 
 Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a microsandbox placeholder in
