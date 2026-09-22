@@ -926,6 +926,19 @@ async fn proxy(
             None,
         );
     };
+    // A keyed provider with no saved key would otherwise be sent the request with no credential at all,
+    // and answer with a bare 401 that says nothing about why. Refused here instead, before any upstream
+    // call, naming the provider and where the key goes.
+    if provider.auth != "none" && credential_header(&app, &provider).is_none() {
+        return api_error(
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+            format!(
+                "colonizer gateway: provider \"{id}\" needs an API key and none is saved; add it in Settings → Model providers"
+            ),
+            None,
+        );
+    }
     // Refused before it waits for a slot, and the colony is stopped like the max-duration path stops one.
     // The 403 follows the empty-balance precedent in openai.rs: Claude Code does not retry it in a loop.
     if crate::lifecycle::enforce_budget(&app, &colony).await {
@@ -1466,6 +1479,54 @@ mod tests {
         let mut only_oauth = HeaderMap::new();
         only_oauth.insert("anthropic-beta", HeaderValue::from_static("oauth-2025-04-20"));
         assert!(forward_headers(&only_oauth, None).get("anthropic-beta").is_none());
+    }
+
+    /// A keyed provider with no saved key is refused before any upstream call: the request would
+    /// otherwise go out with no credential and come back as an unexplained 401.
+    #[tokio::test]
+    async fn a_keyed_provider_without_a_saved_key_is_refused_before_any_upstream_call() {
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-nokey-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // Port 9 (discard) is never reached: nothing may be sent upstream.
+        std::fs::write(
+            root.join("config/providers.json"),
+            r#"[{"id":"deepseek","name":"DeepSeek","base_url":"http://127.0.0.1:9","auth":"x-api-key"}]"#,
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(&token).unwrap());
+        let response = proxy(
+            State(app.clone()),
+            Path(("deepseek".into(), "v1/messages".into())),
+            Method::POST,
+            "/providers/deepseek/v1/messages".parse().unwrap(),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("\"deepseek\""), "names the provider: {message}");
+        assert!(
+            message.contains("Settings → Model providers"),
+            "says where to fix it: {message}"
+        );
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            0,
+            "refused locally, so nothing counts as provider usage"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A gateway whose usage file lives in a fresh temp directory.
