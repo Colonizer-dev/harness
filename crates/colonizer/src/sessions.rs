@@ -658,7 +658,11 @@ impl App {
     pub(crate) async fn persist_sessions(&self) -> Result<()> {
         let _guard = self.session_persist.lock().await;
         let data = serde_json::to_vec_pretty(&*self.sessions.read().await).context("could not serialize the session list")?;
-        write_atomic(&self.sessions_file(), &data).await
+        write_atomic(&self.sessions_file(), &data).await?;
+        // The session list is written on nearly every state change, so its saves are the signal
+        // that the disk is taking writes again after a failure.
+        self.storage_succeeded().await;
+        Ok(())
     }
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {

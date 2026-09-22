@@ -423,7 +423,9 @@ export function App() {
   const current = sessions.find((s) => s.id === selectedId) ?? null;
 
   const storage = status?.storage;
-  const storageAlert = storage && storage.ok === false && storageAlertKey(storage) !== dismissedStorageTs ? storage : null;
+  // A recovered alert is `ok` again but still reports the gap, so it keeps its card until dismissed.
+  const storageAlert =
+    storage && (storage.ok === false || storage.recovered_at) && storageAlertKey(storage) !== dismissedStorageTs ? storage : null;
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;
   // a mothership already set up still gets asked, in memory, on its first load of the page.
   const liveMapPrompt = telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && !setupShown;
@@ -696,24 +698,41 @@ function LiveMapPrompt({
 /** Identity of a storage failure for dismissal: its ts, or — for older motherships that omit it — its message, prefixed so neither can be confused with "nothing dismissed yet" (null). */
 const storageAlertKey = (storage: StorageHealth) => storage.ts ?? `no-ts:${storage.message ?? "unknown"}`;
 
-/** A write the mothership could not make (issue #87). Sticky server-side; dismissed here per failure, a newer one reopens it. */
+/** harness_log frames render ts with toLocaleTimeString (SessionView's activity strip); an odd or missing ts shows nothing. */
+const localTime = (ts: string | null | undefined) => {
+  const at = ts ? new Date(ts) : null;
+  return at && !Number.isNaN(at.getTime()) ? at.toLocaleTimeString() : null;
+};
+
+/** A write the mothership could not make (issue #87). Sticky server-side; dismissed here per failure, a newer one reopens it. Once a later write goes through (issue #220) the card stays, in amber, saying so: the gap it reports still happened. */
 function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; onDismiss: () => void }) {
-  // harness_log frames render ts with toLocaleTimeString (SessionView's activity strip); an odd or missing ts shows nothing.
-  const at = storage.ts ? new Date(storage.ts) : null;
-  const when = at && !Number.isNaN(at.getTime()) ? `At ${at.toLocaleTimeString()}` : null;
+  const failedAt = localTime(storage.ts);
+  const recoveredAt = localTime(storage.recovered_at);
+  const recovered = storage.ok;
   const meta = [
-    when,
+    failedAt ? `Failed at ${failedAt}` : null,
     storage.failures != null ? `${storage.failures} failed ${storage.failures === 1 ? "write" : "writes"}` : null,
+    recovered && recoveredAt ? `Writing again since ${recoveredAt}` : null,
   ].filter(Boolean);
+  const tone = recovered ? "text-warn" : "text-err";
   return (
-    <div role="alert" className="rounded-2xl border border-err/30 bg-err-soft p-4 shadow-[var(--shadow)]">
-      <p className="text-[14px] font-semibold text-err">The mothership could not write to disk</p>
-      {storage.message && <p className="mt-1.5 font-mono text-[12px] text-err [overflow-wrap:anywhere]">{storage.message}</p>}
-      <p className="mt-1.5 text-[12.5px] text-muted">
-        What you see here can drift from what is on disk, and colony event logs may have gaps. The alert clears only when the
-        mothership restarts — dismissing just hides this card.
+    <div
+      role={recovered ? "status" : "alert"}
+      className={cx(
+        "rounded-2xl border p-4 shadow-[var(--shadow)]",
+        recovered ? "border-warn/30 bg-warn-soft" : "border-err/30 bg-err-soft",
+      )}
+    >
+      <p className={cx("text-[14px] font-semibold", tone)}>
+        {recovered ? "The mothership is writing to disk again" : "The mothership could not write to disk"}
       </p>
-      {meta.length > 0 && <p className="mt-1.5 text-[12px] text-err">{meta.join(" · ")}</p>}
+      {storage.message && <p className={cx("mt-1.5 font-mono text-[12px] [overflow-wrap:anywhere]", tone)}>{storage.message}</p>}
+      <p className="mt-1.5 text-[12.5px] text-muted">
+        {recovered
+          ? "Writes are going through again, but colony event logs may still have gaps from while they failed. Dismissing hides this card."
+          : "What you see here can drift from what is on disk, and colony event logs may have gaps. The card turns amber once a write goes through again — dismissing just hides it."}
+      </p>
+      {meta.length > 0 && <p className={cx("mt-1.5 text-[12px]", tone)}>{meta.join(" · ")}</p>}
       <div className="mt-3 flex justify-end">
         <Button size="sm" onClick={onDismiss}>
           Dismiss

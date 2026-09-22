@@ -39,7 +39,7 @@ export interface SetupRow {
   command?: string;
   /** Non-blocking lines: advisories and platform facts. Shown plainly, never red. */
   notes: string[];
-  /** Offer "Check again": a re-fetch of /api/status can change this row's outcome. False for an unsupported platform and for sticky storage failures, where it cannot. */
+  /** Offer "Check again": a re-fetch of /api/status can change this row's outcome. False for an unsupported platform, where it cannot. */
   retry: boolean;
 }
 
@@ -255,8 +255,8 @@ function machineRow(status: HarnessStatus): SetupRow {
   if (status.storage && !status.storage.ok) {
     block({
       error: status.storage.message?.trim() || undefined,
-      fix: "Free space or fix the disk the storage alert names, then restart the mothership.",
-      retry: false, // sticky until the mothership restarts
+      fix: "Free space or fix the disk the storage alert names; the next write that goes through clears this.",
+      retry: true, // a later successful write turns `ok` back on (issue #220)
     });
   }
 
