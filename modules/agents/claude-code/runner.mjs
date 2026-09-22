@@ -10,7 +10,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
-import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER } from './memory.mjs';
+import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
 import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
@@ -404,6 +404,22 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
       hooks: [
         async (input) => {
           const reason = findingDecision(input.tool_name, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (memory) {
+    // The same for shared memory: a subagent searches it but never proposes to it, so every proposal
+    // under review is one the orchestrator chose to make.
+    preToolUse.push({
+      hooks: [
+        async (input) => {
+          const reason = memoryDecision(input.tool_name, input);
           if (!reason) return { continue: true };
           return {
             continue: true,
