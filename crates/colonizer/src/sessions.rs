@@ -314,7 +314,9 @@ pub struct Session {
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
-    /// Set when a colony finishes booting, and replaced on resume.
+    /// Cleared when a colony is claimed for a (re)boot, then `{phases}` with the phases done so far
+    /// while it boots; `total_ms` appears only once the boot finishes. A boot that stops part way
+    /// keeps its `{phases}`.
     pub boot_timing: Option<Value>,
     /// How this colony's microVM was sized at boot: vCPUs and memory exactly as `msb run` received
     /// them. microsandbox/agentd expose no guest CPU% or RSS metrics today — agentd serves only
@@ -1306,6 +1308,15 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
     }
 }
 
+/// Closes a boot phase and publishes the breakdown so far, so a colony still `starting` shows which
+/// phases it has got through, and a boot that fails keeps them. Written without `total_ms`, which
+/// only the finished boot carries.
+async fn mark_phase(app: &App, id: &str, timing: &mut crate::timing::Phases, name: &str) {
+    timing.mark(name);
+    let breakdown = timing.progress_json();
+    app.update_session(id, |x| x.boot_timing = Some(breakdown)).await;
+}
+
 /// The repository's default branch, with access failures worded the way boots report them.
 /// Transient blips ride out the boot retry budget first; only a lasting or permanent failure
 /// reaches the caller.
@@ -1323,6 +1334,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
     let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
+    // An empty breakdown up front, so a boot that stops before its first phase still reads as a boot that stopped.
+    app.update_session(id, |x| x.boot_timing = Some(timing.progress_json())).await;
     // The retry clock starts before the first pre-worktree step and is persisted, so a harness
     // restart resumes the same budget instead of starting a new one: `lifecycle::recover`
     // re-queues a boot that died before its worktree existed, carrying this stamp with it.
@@ -1398,7 +1411,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     .await;
     ensure_starting(app, id).await?;
 
-    timing.mark("issue");
+    mark_phase(app, id, &mut timing, "issue").await;
 
     let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
@@ -1442,7 +1455,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let stack = resolve_stack(&modules, &sandbox_schema, &org_settings, &wt, &log).await;
 
-    timing.mark("git");
+    mark_phase(app, id, &mut timing, "git").await;
 
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
@@ -1577,7 +1590,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             .await;
         }
     }
-    timing.mark("providers");
+    mark_phase(app, id, &mut timing, "providers").await;
 
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
@@ -1894,7 +1907,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         x.boot_memory = Some(spec.memory.clone());
     })
     .await;
-    timing.mark("mesh-start");
+    mark_phase(app, id, &mut timing, "mesh-start").await;
 
     // `msb run` pulls an uncached image itself, so this is not what makes the
     // download happen — it is what stops it being an unexplained wait. On a cold
@@ -1920,7 +1933,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             .await;
         }
     }
-    timing.mark("image-pull");
+    mark_phase(app, id, &mut timing, "image-pull").await;
 
     log.info(format!(
         "booting microVM {} ({}, {} vCPU, {})",
@@ -1930,7 +1943,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     sandbox::boot(&app.cfg.msb, &spec).await?;
     // The pull is its own phase above, so this is the VM itself — unless the
     // pre-pull failed, in which case `msb run` pulls and this absorbs it.
-    timing.mark("vm-boot");
+    mark_phase(app, id, &mut timing, "vm-boot").await;
     let s = ensure_starting(app, id).await?;
 
     if mesh_on {
@@ -1947,7 +1960,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     }
 
-    timing.mark("mesh-join");
+    mark_phase(app, id, &mut timing, "mesh-join").await;
 
     let s = ensure_starting(app, id).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);

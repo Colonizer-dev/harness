@@ -129,6 +129,8 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         return Some(Claim::Retire(s.clone(), message));
     }
     s.status = SessionStatus::Starting;
+    // A colony re-queued after a boot that died part way still carries that boot's phases.
+    s.boot_timing = None;
     s.updated_at = Utc::now();
     Some(Claim::Start(s.clone()))
 }
