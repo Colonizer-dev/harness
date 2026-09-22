@@ -658,6 +658,20 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     let req: PutOrg =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("invalid org settings: {e}")))?;
     validate(&req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    let mut all = app.all_org_settings();
+    // A skillset switched on must exist, or boot fails. One switched off must exist only when this save
+    // adds the switch, which catches a misspelt disable; an off override already saved for a skillset
+    // since uninstalled is harmless and the org dialog sends it back on every save.
+    if let Some(skillsets) = req.settings.agent.as_ref().and_then(|agent| agent.skillsets.as_ref()) {
+        let saved_off = |name: &str| {
+            all.get(&org)
+                .and_then(|saved| saved.agent.as_ref()?.skillsets.as_ref()?.get(name))
+                .is_some_and(|on| !on)
+        };
+        let checked = skillsets.iter().filter(|(name, on)| **on || !saved_off(name));
+        crate::plugins::check_skillsets(&app.cfg, checked.map(|(name, _)| name.as_str()))
+            .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    }
     let mut req = req;
     // No skillset overrides is the same as inheriting all of them.
     if let Some(agent) = req.settings.agent.as_mut()
@@ -665,7 +679,6 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     {
         agent.skillsets = None;
     }
-    let mut all = app.all_org_settings();
     keep_unnamed_fields(
         &mut req.settings,
         all.get(&org).unwrap_or(&OrgSettings::default()),
@@ -1526,6 +1539,52 @@ mod tests {
     }
 
     // -- answering the prompt --------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn an_org_override_naming_an_unknown_skillset_is_refused_with_the_available_ones() {
+        let (app, root) = org_app();
+        std::fs::create_dir_all(app.cfg.data_dir.join("plugins/ecc")).unwrap();
+        for on in [true, false] {
+            let err = put(
+                State(app.clone()),
+                Path("acme".into()),
+                Json(json!({"settings": {"agent": {"skillsets": {"ecc": true, "superpower": on}}}})),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(err.message(), "unknown skillset \"superpower\"; available: ecc");
+        }
+        assert!(!app.all_org_settings().contains_key("acme"), "a refused save stores nothing");
+
+        // An off override saved while its skillset was installed outlives the uninstall: the org dialog
+        // sends it back on every save, and that must not block an unrelated change.
+        std::fs::create_dir_all(app.cfg.data_dir.join("plugins/old")).unwrap();
+        let save = |skillsets: Value| {
+            put(
+                State(app.clone()),
+                Path("acme".into()),
+                Json(json!({"settings": {"max_parallel": 2, "agent": {"skillsets": skillsets}}})),
+            )
+        };
+        let _ = save(json!({"ecc": true, "old": false}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        std::fs::remove_dir(app.cfg.data_dir.join("plugins/old")).unwrap();
+        let _ = save(json!({"ecc": true, "old": false}))
+            .await
+            .unwrap_or_else(|e| panic!("a stale off override blocked the save: {:#}", e.1));
+        // A new off switch is still checked, and a stale one switched back on would fail boot.
+        for (skillsets, unknown) in [
+            (json!({"old": false, "ecc": false, "ecx": false}), "ecx"),
+            (json!({"old": true}), "old"),
+        ] {
+            let err = save(skillsets).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(err.message(), format!("unknown skillset {unknown:?}; available: ecc"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn answering_the_prompt_records_the_pending_avatar_with_the_answer() {

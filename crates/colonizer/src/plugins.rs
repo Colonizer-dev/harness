@@ -52,6 +52,32 @@ pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
     }
 }
 
+/// The vendored copy of `name` that a local copy hides, if both exist, so boot can say which one it
+/// mounted instead of letting the local copy win silently.
+pub fn shadowed_vendored(cfg: &Settings, name: &str) -> Option<PathBuf> {
+    if !is_plain_name(name) || !local_root(cfg).join(name).is_dir() {
+        return None;
+    }
+    vendored_root(cfg).map(|root| root.join(name)).filter(|dir| dir.is_dir())
+}
+
+/// Refuses, at save time, any name `resolve` would refuse at boot, listing what could be named instead.
+pub fn check_skillsets<'a>(cfg: &Settings, names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    let Some(unknown) = names.into_iter().find(|name| resolve(cfg, name).is_err()) else {
+        return Ok(());
+    };
+    let mut known: Vec<String> = directories(&local_root(cfg)).into_keys().collect();
+    known.extend(vendored_root(cfg).into_iter().flat_map(|root| directories(&root).into_keys()));
+    known.sort();
+    known.dedup();
+    let available = if known.is_empty() {
+        "none".to_string()
+    } else {
+        known.join(", ")
+    };
+    Err(format!("unknown skillset {unknown:?}; available: {available}"))
+}
+
 /// Entries directly under `dir` that `keep` accepts; 0 when the directory is absent.
 fn count(dir: &Path, keep: impl Fn(&Path) -> bool) -> usize {
     std::fs::read_dir(dir)
@@ -185,6 +211,55 @@ mod tests {
         for bad in ["../ecc", "a/b", ".hidden", ""] {
             assert!(resolve(&cfg, bad).is_err(), "{bad:?} must be refused");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_copy_that_shadows_a_vendored_one_is_reported() {
+        let (root, cfg) = install();
+        let vendored = cfg.assets.clone().unwrap().join("plugins/ecc");
+        plugin(&vendored, "2.2.1", &[], &[]);
+        assert_eq!(
+            shadowed_vendored(&cfg, "ecc"),
+            None,
+            "nothing is shadowed without a local copy"
+        );
+
+        plugin(&cfg.data_dir.join("plugins/ecc"), "9.9.9", &[], &[]);
+        plugin(&cfg.data_dir.join("plugins/team-skills"), "1.0.0", &[], &[]);
+        assert_eq!(shadowed_vendored(&cfg, "ecc"), Some(vendored));
+        assert_eq!(
+            shadowed_vendored(&cfg, "team-skills"),
+            None,
+            "a local-only copy shadows nothing"
+        );
+        assert_eq!(shadowed_vendored(&cfg, "../ecc"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_skillsets_are_refused_with_what_is_available() {
+        let (root, cfg) = install();
+        assert_eq!(
+            check_skillsets(&cfg, ["ecc"]).unwrap_err(),
+            "unknown skillset \"ecc\"; available: none"
+        );
+
+        plugin(&cfg.assets.clone().unwrap().join("plugins/ecc"), "2.2.1", &[], &[]);
+        plugin(&cfg.assets.clone().unwrap().join("plugins/superpowers"), "6.3.0", &[], &[]);
+        plugin(&cfg.data_dir.join("plugins/ecc"), "9.9.9", &[], &[]);
+        plugin(&cfg.data_dir.join("plugins/team-skills"), "1.0.0", &[], &[]);
+        assert_eq!(check_skillsets(&cfg, ["ecc", "superpowers", "team-skills"]), Ok(()));
+        assert_eq!(check_skillsets(&cfg, []), Ok(()));
+        assert_eq!(
+            check_skillsets(&cfg, ["ecc", "ec"]).unwrap_err(),
+            "unknown skillset \"ec\"; available: ecc, superpowers, team-skills"
+        );
+        assert!(
+            check_skillsets(&cfg, ["../ecc"])
+                .unwrap_err()
+                .starts_with("unknown skillset \"../ecc\"")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -114,6 +114,9 @@ pub struct App {
     pub cfg: Settings,
     pub modules: RwLock<ModulesConfig>,
     pub agents: Vec<AgentModule>,
+    /// Agent manifests that are present but unusable, one line each naming the file and the fault;
+    /// logged at boot and reported as the agent kind's `manifest_errors` in GET /api/modules.
+    pub agent_problems: Vec<String>,
     pub sessions: RwLock<Vec<Session>>,
     pub redteam: redteam::RedTeamStore,
     session_persist: Mutex<()>,
@@ -963,11 +966,12 @@ async fn serve() -> Result<()> {
         println!("sessions: cleared a stale attention flag from {stale_attention} finished colonies");
     }
     let modules = ModulesConfig::load(&cfg.config_dir.join("modules.json"));
-    let agents = modules::discover_agents(cfg.assets.as_deref());
+    let (agents, agent_problems) = modules::discover_agents(cfg.assets.as_deref());
 
     let app = Arc::new(App {
         modules: RwLock::new(modules),
         agents,
+        agent_problems,
         sessions: RwLock::new(sessions),
         redteam: redteam::RedTeamStore::new(&cfg.data_dir),
         session_persist: Mutex::new(()),
@@ -1219,6 +1223,7 @@ pub(crate) mod tests {
             cfg,
             modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
             agents,
+            agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
             redteam: redteam::RedTeamStore::new(&root.join("data")),
             session_persist: Mutex::new(()),
