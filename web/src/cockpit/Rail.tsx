@@ -146,6 +146,21 @@ export function Rail(props: {
         </button>
       </RailItem>
 
+      <RailItem label={theme === "dark" ? "switch to light" : "switch to dark"}>
+        <button
+          type="button"
+          aria-label="toggle theme"
+          aria-pressed={theme === "dark"}
+          onClick={onToggleTheme}
+          className={`${SQUARE} text-faint hover:bg-panel-2 hover:text-text`}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+            <circle cx="12" cy="12" r="4.5" />
+            <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" strokeLinecap="round" />
+          </svg>
+        </button>
+      </RailItem>
+
       <RailItem label="settings · modules">
         <button
           type="button"
@@ -158,21 +173,6 @@ export function Rail(props: {
             <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
             <circle cx="16" cy="7" r="2" />
             <circle cx="10" cy="17" r="2" />
-          </svg>
-        </button>
-      </RailItem>
-
-      <RailItem label={theme === "dark" ? "switch to light" : "switch to dark"}>
-        <button
-          type="button"
-          aria-label="toggle theme"
-          aria-pressed={theme === "dark"}
-          onClick={onToggleTheme}
-          className={`${SQUARE} text-faint hover:bg-panel-2 hover:text-text`}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-            <circle cx="12" cy="12" r="4.5" />
-            <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" strokeLinecap="round" />
           </svg>
         </button>
       </RailItem>
