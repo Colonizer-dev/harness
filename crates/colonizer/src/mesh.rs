@@ -4,7 +4,7 @@
 //! This network is completely separate from any tailnet the host is on: its own control server,
 //! its own state directory, its own socket, and `--no-logs-no-support`.
 
-use crate::util::{exec, exec_within, write_private};
+use crate::util::{exec_within, write_private};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
@@ -21,12 +21,18 @@ use tokio::{
 pub const COLONIZER_HOSTNAME: &str = "colonizer";
 const COLONIZER_USER: &str = "harness";
 const VMS_USER: &str = "vms";
-/// Caps the three CLI calls `Mesh::status` makes (`backend_state`, `nodes`, `tailscale ip -4`),
-/// so a wedged CLI cannot park them indefinitely. Deliberately generous: `wait_online` and
+/// Caps every headscale and tailscale CLI call except `tailscale up`, so a wedged CLI cannot park
+/// them indefinitely — `Mesh::status`'s three calls (`backend_state`, `nodes`, `tailscale ip -4`),
+/// and the ones `ensure_started` makes while it holds the `running` lock, where a hang would stall
+/// every colony boot behind it. Deliberately generous: `wait_online` and
 /// `delete_nodes_named` propagate an error from these same calls with `?`, and a cap that tripped
 /// on a slow-but-healthy CLI would fail a boot or a teardown for nothing. `/api/status` gets its
 /// tighter guarantee from `MESH_STATUS_LIMIT` instead.
 const CLI_LIMIT: Duration = Duration::from_secs(10);
+/// `tailscale up` bounds its own wait with `--timeout=60s`, but that covers only the wait for the
+/// node to come up, not a CLI stuck before it gets there; this backstop leaves it room to report
+/// its own timeout first.
+const TAILSCALE_UP_LIMIT: Duration = Duration::from_secs(75);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ports {
@@ -162,7 +168,9 @@ impl Mesh {
             .context("failed to start headscale")?;
         write_pid(&self.runtime_dir.join("headscale.pid"), headscale.id());
         wait_for(Duration::from_secs(30), || async {
-            exec(self.headscale().args(["users", "list", "-o", "json"])).await.is_ok()
+            exec_within(CLI_LIMIT, self.headscale().args(["users", "list", "-o", "json"]))
+                .await
+                .is_ok()
         })
         .await
         .context("headscale did not become ready (see mesh/headscale.log)")?;
@@ -198,7 +206,8 @@ impl Mesh {
             let key = self.create_key(harness_user).await?;
             let key_file = self.runtime_dir.join("harness-authkey");
             write_private(&key_file, key.as_bytes())?;
-            let result = exec(
+            let result = exec_within(
+                TAILSCALE_UP_LIMIT,
                 self.tailscale()
                     .arg("up")
                     .arg(format!("--login-server=http://127.0.0.1:{}", self.ports.control))
@@ -304,12 +313,12 @@ taildrop:
         if let Some(id) = self.find_user(name).await? {
             return Ok(id);
         }
-        exec(self.headscale().args(["users", "create", name])).await?;
+        exec_within(CLI_LIMIT, self.headscale().args(["users", "create", name])).await?;
         self.find_user(name).await?.context("headscale user was not created")
     }
 
     async fn find_user(&self, name: &str) -> Result<Option<u64>> {
-        let out = exec(self.headscale().args(["users", "list", "-o", "json"])).await?;
+        let out = exec_within(CLI_LIMIT, self.headscale().args(["users", "list", "-o", "json"])).await?;
         let users: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
         Ok(users
             .as_array()
@@ -331,7 +340,7 @@ taildrop:
             "-o",
             "json",
         ]);
-        let out = exec(&mut cmd).await?;
+        let out = exec_within(CLI_LIMIT, &mut cmd).await?;
         let key: Value = serde_json::from_str(&out).context("unexpected headscale preauthkeys output")?;
         key["key"].as_str().map(String::from).context("headscale returned no key")
     }
@@ -394,7 +403,8 @@ taildrop:
             if node["given_name"] == hostname
                 && let Some(id) = as_u64(&node["id"])
             {
-                let _ = exec(
+                let _ = exec_within(
+                    CLI_LIMIT,
                     self.headscale()
                         .args(["nodes", "delete", "--identifier", &id.to_string(), "--force"]),
                 )
@@ -418,12 +428,17 @@ taildrop:
         // `ifconfig` in a different shape. Both are tried everywhere rather than split by `cfg`,
         // so the fallback macOS depends on is exercised on Linux, and a box without iproute2
         // still gets rules instead of silently dropping to the DERP relay.
-        let ip_out = exec(Command::new("ip").args(["-4", "-o", "addr", "show", "scope", "global"]))
-            .await
-            .unwrap_or_default();
+        let ip_out = exec_within(
+            CLI_LIMIT,
+            Command::new("ip").args(["-4", "-o", "addr", "show", "scope", "global"]),
+        )
+        .await
+        .unwrap_or_default();
         let listed = parse_ip_addr_show(&ip_out);
         let listed = if listed.is_empty() {
-            let ifconfig_out = exec(&mut Command::new("ifconfig")).await.unwrap_or_default();
+            let ifconfig_out = exec_within(CLI_LIMIT, &mut Command::new("ifconfig"))
+                .await
+                .unwrap_or_default();
             parse_ifconfig(&ifconfig_out)
         } else {
             listed
@@ -618,6 +633,9 @@ fn log_file(path: &Path) -> Result<std::fs::File> {
     Ok(std::fs::OpenOptions::new().create(true).append(true).open(path)?)
 }
 
+/// Polls `check` until it passes or `timeout` runs out. Each check is itself cut off at the
+/// deadline and counted as a failure: the deadline is otherwise only looked at between checks, so a
+/// check that never returned would hold `ensure_started`, and the `running` lock with it, forever.
 async fn wait_for<F, Fut>(timeout: Duration, mut check: F) -> Result<()>
 where
     F: FnMut() -> Fut,
@@ -625,7 +643,7 @@ where
 {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
-        if check().await {
+        if tokio::time::timeout_at(deadline, check()).await.unwrap_or(false) {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -636,6 +654,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A check that never resolves — a wedged `headscale users list` — used to hold `wait_for`
+    /// past its deadline for good; now the deadline cuts it off and the wait fails.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_gives_up_at_its_deadline_even_when_a_check_never_returns() {
+        let started = tokio::time::Instant::now();
+        let result = wait_for(Duration::from_secs(30), std::future::pending::<bool>).await;
+        assert!(result.is_err(), "a check that never answers is not a pass");
+        // The cut-off check is followed by one last poll interval before the loop sees the deadline.
+        assert!(
+            started.elapsed() <= Duration::from_secs(31),
+            "and the wait ends at the deadline, not whenever the check might have returned"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_passes_once_a_check_does() {
+        let mut calls = 0;
+        let result = wait_for(Duration::from_secs(30), || {
+            calls += 1;
+            let pass = calls == 3;
+            async move { pass }
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(calls, 3);
+    }
 
     /// `kill_stale` only kills a pid it can prove is the bundled binary, so both of its answers matter:
     /// which executable a pid is, and whether it is still there. macOS gets the `ps` half.
