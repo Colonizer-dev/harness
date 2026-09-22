@@ -4,7 +4,8 @@
 // means redefining the built-ins the orchestrator actually delegates to, under their own names, so a
 // Task call keeps landing where it did. An `agents` entry replaces the built-in of the same name.
 //
-// The prompts follow the built-ins in Claude Code 2.1 (Agent SDK 0.3.270). They are copies, so an SDK
+// The prompts and the Explore deny list follow the built-ins in Claude Code 2.1.280, the build
+// vendor/claude-code.lock pins. They are copies, so a Claude Code
 // bump that rewrites a built-in leaves these on the older text until someone refreshes them here.
 // Plugin agents and the built-in Plan agent are left alone and keep inheriting the session's effort.
 // `model` is omitted on purpose: CLAUDE_CODE_SUBAGENT_MODEL (COLONIZER_SUBAGENT_MODEL) then applies,
@@ -54,6 +55,19 @@ const EXPLORE_PROMPT = [
   "Complete the user's search request efficiently and report your findings clearly.",
 ].join('\n');
 
+export const EXPLORE_DISALLOWED = [
+  'Agent',
+  'Task',
+  'Artifact',
+  'ArtifactComments',
+  'ArtifactData',
+  'ArtifactCheck',
+  'ExitPlanMode',
+  'Edit',
+  'Write',
+  'NotebookEdit',
+];
+
 /**
  * The built-in agents a colony delegates to, redefined with `effort`. Keyed by agent type, the shape
  * the SDK's `agents` option takes.
@@ -71,8 +85,9 @@ export function subagentDefinitions(effort) {
       description:
         'Fast read-only search agent for locating code. Use it to find files by pattern (eg. "src/components/**/*.tsx"), grep for symbols or keywords (eg. "API endpoints"), or answer "where is X defined / which files reference Y." Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: "quick" for a single targeted lookup, "medium" for moderate exploration, or "very thorough" to search across multiple locations and naming conventions.',
       prompt: EXPLORE_PROMPT,
-      // The prompt forbids writing; this is what enforces it, as the built-in's own deny list does.
-      disallowedTools: ['Agent', 'Task', 'Edit', 'Write', 'NotebookEdit', 'ExitPlanMode'],
+      // The prompt forbids writing; this is what enforces it. At least the built-in's own deny list in
+      // Claude Code 2.1.280 (the Artifact tools publish pages), plus Task, Agent's older name.
+      disallowedTools: EXPLORE_DISALLOWED,
       effort,
     },
   };
