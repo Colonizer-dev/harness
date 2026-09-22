@@ -1356,33 +1356,57 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
     Ok(Json(repos))
 }
 
+/// A successful org refresh serves every workspace poll for five minutes.
+const ORGS_SUCCESS_TTL: Duration = Duration::from_secs(5 * 60);
+/// A failed one holds off the next attempt for a minute. The web polls the workspace list every
+/// 15 s, hidden tabs included, so without this a signed-out or broken `gh` was spawned four times a
+/// minute for as long as the harness ran.
+const ORGS_FAILURE_TTL: Duration = Duration::from_secs(60);
+/// Long enough for a paginated org list on a slow link; a `gh` that outlasts it is wedged, and the
+/// workspace poll waits on it.
+const ORGS_FETCH_LIMIT: Duration = Duration::from_secs(20);
+
+/// Whether an org refresh is due at `now`, given when the last one succeeded and when the last one
+/// failed. Pure so the throttle can be tested without `gh`.
+fn orgs_refresh_due(refreshed: Option<Instant>, failed: Option<Instant>, now: Instant) -> bool {
+    let within = |at: Option<Instant>, ttl: Duration| at.is_some_and(|at| now.duration_since(at) < ttl);
+    !within(refreshed, ORGS_SUCCESS_TTL) && !within(failed, ORGS_FAILURE_TTL)
+}
+
 /// Refreshes the signed-in account's orgs: adopts the ones already on record as workspaces, drops
 /// the ones the account has left or the operator switched off, records avatars, and parks orgs that
 /// are new since the last look in `new_orgs` for the operator to decide on. The first refresh after
 /// an install — no `known-orgs.json` yet — adopts everything at once and says how many workspaces it
 /// added, so an upgrade never asks about orgs the account always had. A successful refresh is
-/// throttled to once every five minutes; a failing `gh` returns silently without recording the
-/// attempt — the list still answers from the record, so a failed refresh must not empty the
-/// workspace list — and is retried on the next call.
+/// throttled to once every five minutes; a failing `gh` leaves the list answering from the record —
+/// a failed refresh must not empty the workspace list — and is retried after a minute. The
+/// `orgs_refreshed` lock is held for the whole refresh, so polls that arrive while one is running
+/// wait for it and then find it fresh instead of starting another.
 pub async fn refresh_orgs(app: &App) {
-    if app
-        .orgs_refreshed
-        .lock()
-        .await
-        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300))
-    {
+    let mut refreshed = app.orgs_refreshed.lock().await;
+    if !orgs_refresh_due(*refreshed, *app.orgs_failed_at.lock().await, Instant::now()) {
         return;
     }
-    let Ok(out) = exec(&mut app.gh([
-        "api",
-        "--paginate",
-        "/user/orgs?per_page=100",
-        "--jq",
-        ".[] | {login, avatar_url}",
-    ]))
+    let out = match exec_within(
+        ORGS_FETCH_LIMIT,
+        &mut app.gh([
+            "api",
+            "--paginate",
+            "/user/orgs?per_page=100",
+            "--jq",
+            ".[] | {login, avatar_url}",
+        ]),
+    )
     .await
-    else {
-        return;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            // Logged once per attempt, and attempts are a minute apart, so a `gh` that stays broken
+            // costs one line a minute rather than silence.
+            eprintln!("orgs: could not list the GitHub account's orgs, retrying in a minute: {e:#}");
+            *app.orgs_failed_at.lock().await = Some(Instant::now());
+            return;
+        }
     };
     let mut fetched: BTreeMap<String, Option<String>> = out.lines().filter_map(orgs::parse_org_line).collect();
     // The signed-in login comes from the cached viewer — its TTL is the point, one `gh api user`
@@ -1392,7 +1416,7 @@ pub async fn refresh_orgs(app: &App) {
         Ok(user) => user["login"]
             .as_str()
             .map(|login| (login.to_string(), user["avatar_url"].as_str().map(String::from))),
-        Err(_) => exec(&mut app.gh(["api", "user", "--jq", ".login"]))
+        Err(_) => exec_within(ORGS_FETCH_LIMIT, &mut app.gh(["api", "user", "--jq", ".login"]))
             .await
             .ok()
             .map(|login| (login.trim().to_string(), None)),
@@ -1446,7 +1470,7 @@ pub async fn refresh_orgs(app: &App) {
             if plan.first_run_adopted == 1 { "" } else { "s" }
         );
     }
-    *app.orgs_refreshed.lock().await = Some(std::time::Instant::now());
+    *refreshed = Some(Instant::now());
 }
 
 pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
@@ -2378,6 +2402,43 @@ mod tests {
             .fresh("k", Instant::now()),
             "a failure is kept within its minute, so a burst of polls shares one miss"
         );
+    }
+
+    #[test]
+    fn a_failed_org_refresh_holds_off_the_next_attempt_for_a_minute() {
+        let now = Instant::now();
+        assert!(orgs_refresh_due(None, None, now), "the first refresh always runs");
+        assert!(
+            !orgs_refresh_due(Some(now - (ORGS_SUCCESS_TTL - Duration::from_secs(1))), None, now),
+            "a success serves the list for five minutes"
+        );
+        assert!(
+            !orgs_refresh_due(None, Some(now - (ORGS_FAILURE_TTL - Duration::from_secs(1))), now),
+            "a failure inside its minute is not retried, whatever the poll rate"
+        );
+        assert!(
+            orgs_refresh_due(None, Some(now - ORGS_FAILURE_TTL), now),
+            "after the minute the refresh tries again"
+        );
+        assert!(
+            !orgs_refresh_due(Some(now - Duration::from_secs(10)), Some(now - ORGS_FAILURE_TTL), now),
+            "an old failure does not cut short a recent success"
+        );
+    }
+
+    /// With a failure inside its minute, a refresh returns before running `gh`: had it run, it
+    /// would have recorded either a fresh success or a newer failure, whichever `gh` gave it.
+    #[tokio::test]
+    async fn an_org_refresh_inside_the_failure_window_does_not_run_gh() {
+        let root = std::env::temp_dir().join(format!("colonizer-orgs-backoff-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let failed = Instant::now() - Duration::from_secs(30);
+        *app.orgs_failed_at.lock().await = Some(failed);
+        refresh_orgs(&app).await;
+        refresh_orgs(&app).await;
+        assert_eq!(*app.orgs_failed_at.lock().await, Some(failed), "no new attempt was recorded");
+        assert!(app.orgs_refreshed.lock().await.is_none(), "and none succeeded either");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A fresh entry answers the poll without running `gh` at all — here `gh` is absent, so a cache
