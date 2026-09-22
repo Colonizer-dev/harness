@@ -215,6 +215,14 @@ describe("setupRows", () => {
       const machine = row(failing, "machine");
       expect(machine.state).toBe("blocked");
       expect(machine.error).toBe("disk quota exceeded");
+      expect(machine.retry).toBe(true);
+    });
+
+    it("stops blocking once a write goes through again, though the alert is kept", () => {
+      const recovered = input({
+        status: status({ storage: { ok: true, message: "disk quota exceeded", failures: 3, recovered_at: "2026-09-20T23:12:00Z" } }),
+      });
+      expect(row(recovered, "machine").state).toBe("done");
     });
 
     it("invents no failures for an older mothership that sends no runtime", () => {
