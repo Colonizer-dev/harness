@@ -96,3 +96,17 @@ fail-closed. `publish.rs` splits the single publish gate into ordered `commit_al
 `push_allowed` → `pr_allowed` checks plus a PR-body binding helper, and `lifecycle.rs`
 `recover` fences restarted colonies behind fresh re-authorization. Wiring only — no gate is
 checked off until real-colony negative tests exercise these paths.
+
+## No-write policy, issue #84 (partial G2)
+
+Wired: an operator kill-switch, `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE` set to
+anything but `0`/`false`/`off`/`no` (`authority::external_writes_blocked`). While it is on, the
+publish endpoint answers 409, the publish task refuses before claiming the colony, and
+`commit_allowed` → `push_allowed` → `pr_allowed` all fail closed; the commit, push and PR steps in
+`github.rs` each re-check before running. Draft PRs are refused like ready ones. Stacked-PR retargets,
+fix-PR merges and review comments, and filed findings are skipped with a log line. Every publish also
+refuses to open or reuse a PR when the local branch head moved after the push step.
+
+Not done: the PR body's SHA-256 is only logged, never checked against an approval — per-effect grants
+stay with #98. Running the repository's tests on the host before a push is still the operator's
+responsibility. As above, F05 is not checked off and G2 is not cleared.
