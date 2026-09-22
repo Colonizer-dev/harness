@@ -659,6 +659,8 @@ export interface OrgSettings {
     skillsets?: Record<string, boolean> | null;
   } | null;
   max_parallel?: number | null;
+  /** Live colonies one repository of this org may run at once; null inherits the global per-repository limit. */
+  repo_max_parallel?: number | null;
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */

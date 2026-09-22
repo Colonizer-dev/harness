@@ -1139,8 +1139,11 @@ and its existing colonies: a colony of a switched-off org is still listed and re
 or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
 global switch. Names are plain directory names, at most 64. An empty map is stored as `null`.
 
-`max_parallel` overrides the sandbox module's parallel limit for the org's colonies. So do the two
-per-colony limits: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
+`max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
+(`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
+layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's
+`max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The two
+per-colony limits override the global ones: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
 host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
 `host_disk`); `0` (or `"0"`) means unlimited, which is how an org opts out of a global limit. The same
 validation applies as at the module setting: a budget is `0` or more dollars, a quota must parse as a size.
@@ -1157,6 +1160,7 @@ something is pinned above it). `null` inherits.
   "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
             "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
+  "repo_max_parallel": 1,
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
