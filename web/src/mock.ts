@@ -1107,7 +1107,19 @@ export function createMockApi(): Api {
     // Booted after issue #205, so the overview row's second line has something to read.
     boot_cpus: 4,
     boot_memory: "8G",
-    boot_timing: { total_ms: 94_320, phases: [{ name: "vm-boot", ms: 86_400 }] },
+    boot_timing: {
+      total_ms: 94_320,
+      phases: [
+        { name: "issue", ms: 240 },
+        { name: "git", ms: 1_180 },
+        { name: "providers", ms: 310 },
+        { name: "mesh-start", ms: 2_050 },
+        { name: "image-pull", ms: 1_900 },
+        { name: "vm-boot", ms: 86_400 },
+        { name: "mesh-join", ms: 1_460 },
+        { name: "agentd", ms: 720 },
+      ],
+    },
     created_at: ago(6),
   });
   const old = new MockSession(

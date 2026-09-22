@@ -17,6 +17,7 @@ import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
 import type { FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
+import { bootView } from "./bootTiming";
 import { chains, type FindingChain } from "./findings";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -306,6 +307,7 @@ export function Inspector({
   const stackedOn = stackParent
     ? `${stackParent.repo}${stackParent.issue != null ? `#${stackParent.issue}` : ""} · ${stackParent.branch}`
     : (session?.parent ?? null);
+  const boot = session ? bootView(session.boot_timing, session.status === "starting") : null;
 
   // The finding ledger is a separate call, keyed by colony: the event stream does not carry it, and
   // a colony that never validated a finding has none, so an error reads as "nothing yet".
@@ -590,6 +592,28 @@ export function Inspector({
                   )}
                 </div>
               </Section>
+
+              {boot && (
+                // Where the launch's time went, phase by phase in boot order. The slowest phase is the
+                // one worth a look, so it reads in full ink while the rest stay muted.
+                <Section title="BOOT">
+                  <div className="flex flex-col gap-1.5">
+                    {boot.rows.map((row, i) => (
+                      <div
+                        key={`${i}:${row.name}`}
+                        className={cx("flex gap-2.5 text-[12px]", row.slowest ? "font-semibold text-text" : "text-muted")}
+                      >
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{row.name}</span>
+                        {row.slowest && <span className="font-mono text-[10px] tracking-[0.1em] text-warn">SLOWEST</span>}
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums">{row.duration}</span>
+                      </div>
+                    ))}
+                    <div className={cx("text-[12px] text-faint", boot.rows.length === 0 && "rounded-[9px] bg-panel-2 px-3 py-2")}>
+                      {boot.summary}
+                    </div>
+                  </div>
+                </Section>
+              )}
 
               <Section title="FINDINGS">
                 <div className="flex flex-col gap-2">
