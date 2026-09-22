@@ -1488,6 +1488,7 @@ mod tests {
             context_tokens: None,
             fallback_model: fallback_model.map(str::to_string),
             pricing: None,
+            normalize_cache_ttl: false,
         }
     }
 
