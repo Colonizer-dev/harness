@@ -72,6 +72,7 @@ export function Cockpit({
   onRedStop,
   onCreated,
   onOpenSettings,
+  onInspectorShown,
   colony,
   memory,
 }: {
@@ -102,6 +103,8 @@ export function Cockpit({
   onRedStop?: (id: string) => Promise<void>;
   onCreated: (session: Session) => void;
   onOpenSettings: (section?: SectionId) => void;
+  /** Told whether the inspector is on screen, so App can keep its fixed cards clear of it. */
+  onInspectorShown?: (shown: boolean) => void;
   /** The open colony's own pane, wired by App (chat, terminal, publish). */
   colony: ReactNode;
   memory: ReactNode;
@@ -116,6 +119,11 @@ export function Cockpit({
   useEffect(() => {
     store(VIEW_KEY, view);
   }, [view]);
+
+  // The inspector renders only on the home view, whatever it is looking at.
+  useEffect(() => {
+    onInspectorShown?.(view === "home");
+  }, [view, onInspectorShown]);
 
   // An explicit choice is written on the root, where index.css's :root[data-theme] blocks pick it
   // up; clearing it hands the page back to prefers-color-scheme.
