@@ -597,6 +597,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A restart must not resume a parked colony into a plan that is still out: the record the last
+    /// run wrote is what the fresh gateway reads.
+    #[tokio::test]
+    async fn quota_resume_after_a_restart_keeps_a_colony_parked_while_the_saved_record_holds() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-restart-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        crate::gateway::Gateway::new(&root.join("data"))
+            .unwrap()
+            .mark_quota_exhausted("bailian", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
+        let app = crate::tests::test_app(&root);
+        *app.sessions.write().await = vec![quota_parked(
+            "parked",
+            "provider quota exhausted (bailian, resets 09-23 07:54 UTC)",
+        )];
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
+        assert_eq!(parked.status, SessionStatus::Stopped, "the saved record still holds");
+        assert!(parked.attention.is_some(), "the attention stays until recovery");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn the_queue_holds_a_waiting_child_and_retires_one_whose_parent_is_gone() {
         let root = std::env::temp_dir().join(format!("colonizer-queue-{}", crate::util::short_id()));
