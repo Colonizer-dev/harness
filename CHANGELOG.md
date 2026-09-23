@@ -33,6 +33,11 @@ setting) is called out under **Take care** rather than left for you to find.
 - **Switch a running colony's model.** A `set_model` command changes the model
   for the colony's next turns in the same session, conversation and microVM,
   until it is stopped. ([#240])
+- **Security-hunter modules (Strix).** On-demand, checksum-verified install of
+  the pinned Strix binary, Strix `vulnerabilities.json` + SARIF findings
+  parsers, a capability probe (runtime + Docker), and
+  [docs/security-hunters.md](docs/security-hunters.md). Shannon ships as a
+  manifest-only stub for now.
 
 ### Fixed
 
