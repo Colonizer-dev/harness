@@ -52,6 +52,11 @@ const CRUMB: Record<CockpitView, string> = {
   memory: "memory",
 };
 
+/** The toast for a failed inspector action: what failed, on which colony, and why. */
+export function actionError(action: "stop" | "resume", colony: string, error: unknown): string {
+  return `Couldn't ${action} ${colony}: ${errorMessage(error)}`;
+}
+
 export function Cockpit({
   sessions,
   orgs,
@@ -62,6 +67,7 @@ export function Cockpit({
   onSelectSession,
   onOpenColony,
   status,
+  statusError = false,
   fleet,
   update,
   autopilotDefault,
@@ -92,6 +98,8 @@ export function Cockpit({
   /** Selecting a colony that the org filter would hide, which App resolves before selecting. */
   onOpenColony: (session: Session) => void;
   status: HarnessStatus | null;
+  /** The status poll is failing; the header says so, the counts beside it are stale. */
+  statusError?: boolean;
   /** Self plus every configured peer (issue #231); older mothership builds send an empty list. */
   fleet?: FleetHost[];
   update: UpdateStatus | null;
@@ -275,14 +283,16 @@ export function Cockpit({
   );
 
   const act = useCallback(
-    async (id: string, run: (id: string) => Promise<Session>) => {
+    async (id: string, action: "stop" | "resume", run: (id: string) => Promise<Session>) => {
       try {
         onSessionChanged(await run(id));
-      } catch {
-        /* the 4s poll is the backstop; a failed stop or resume shows up there */
+      } catch (error) {
+        // The 4s poll confirms a success; a failure needs saying aloud, or the button looks dead.
+        const target = sessions.find((s) => s.id === id);
+        toast(actionError(action, target ? `${target.repo}#${target.issue}` : id, error), "error");
       }
     },
-    [onSessionChanged],
+    [onSessionChanged, sessions, toast],
   );
 
   // The global quota banner's keyed dismissal: dismissing hides this pause, and a new reset (or a
@@ -361,6 +371,7 @@ export function Cockpit({
         return (
           <NestView
             sessions={inOrg}
+            capacity={status?.sandbox.max_parallel ?? null}
             // The inspector wins while it is open; otherwise the chamber for the colony App has
             // selected stays lit, so coming back from the colony view lands somewhere familiar.
             selectedId={inspector?.kind === "colony" ? inspector.session.id : selectedId}
@@ -415,6 +426,7 @@ export function Cockpit({
           cost={spend != null && spend > 0 ? spend : null}
           update={update}
           onOpenUpdates={() => onOpenSettings("updates")}
+          statusError={statusError}
         />
         <div className="flex min-h-0 min-w-0">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -446,8 +458,8 @@ export function Cockpit({
               update={update}
               onClose={() => setInspector(null)}
               onOpenColony={openColonyById}
-              onStop={(id) => void act(id, (x) => api.stopSession(x))}
-              onResume={(id) => void act(id, (x) => api.resumeSession(x))}
+              onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
+              onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
               onLaunch={() => setView("launch")}
               onOpenSettings={(section) => onOpenSettings(section)}
             />

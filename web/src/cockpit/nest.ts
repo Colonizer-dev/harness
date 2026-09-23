@@ -63,9 +63,36 @@ export const SLOT_FRACTIONS: readonly (readonly [number, number, number])[] = [
 
 export const MAX_CHAMBERS = SLOT_FRACTIONS.length;
 
-export function slotAt(index: number, box: NestBox): Slot {
-  const frac = SLOT_FRACTIONS[index];
-  if (!frac) throw new RangeError(`no slot ${index}, the nest holds ${SLOT_FRACTIONS.length} chambers`);
+/**
+ * A machine only digs `sandbox.max_parallel` colonies at once (5 by default), so the nest draws
+ * only that many chambers. Unknown capacity (null/undefined/NaN) reads as the default 5;
+ * anything else is floored, then clamped to what the nest can hold.
+ */
+export const DEFAULT_CHAMBERS = 5;
+
+export function chamberCount(capacity: number | null | undefined): number {
+  if (capacity == null || Number.isNaN(capacity)) return DEFAULT_CHAMBERS;
+  const floored = Math.floor(capacity);
+  if (!Number.isFinite(floored)) return DEFAULT_CHAMBERS;
+  return Math.min(MAX_CHAMBERS, Math.max(1, floored));
+}
+
+/**
+ * The roomier layout, used when the machine runs 5 or fewer colonies at once: the same
+ * [fx, fy, baseRadius] shape as SLOT_FRACTIONS, with bigger chambers spread further apart.
+ */
+export const FIVE_SLOT_FRACTIONS: readonly (readonly [number, number, number])[] = [
+  [0.5, 0.4, 84],
+  [0.2, 0.32, 80],
+  [0.8, 0.32, 80],
+  [0.32, 0.8, 80],
+  [0.68, 0.8, 80],
+];
+
+export function slotAt(index: number, box: NestBox, count: number = MAX_CHAMBERS): Slot {
+  const fractions = count <= FIVE_SLOT_FRACTIONS.length ? FIVE_SLOT_FRACTIONS : SLOT_FRACTIONS;
+  const frac = fractions[index];
+  if (!frac) throw new RangeError(`no slot ${index}, the nest holds ${fractions.length} chambers`);
   const [fx, fy, baseRadius] = frac;
   return {
     x: Math.round(fx * box.width),
