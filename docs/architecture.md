@@ -124,7 +124,7 @@ stateDiagram-v2
 5. **Publish** – "Create PR", or autopilot (the `publish` module's `autopilot` setting, on by default)
    when a turn ends without an error or open question and the agent wrote or updated `pr.md` during
    it: agentd shuts the runner down, the VM is removed, and the host publishes with the hardened
-   publish step: committing (co-authored by Colonizer) only what is uncommitted, pushing the colony's
+   publish step: committing (co-authored by Colonizer Settlers) only what is uncommitted, pushing the colony's
    own `colonizer/…` branch only when origin is behind it, and reusing a pull request that is already
    open for the branch instead of opening a second one. It refuses to push anything else, checked
    before the VM is removed. A publish that fails part-way leaves the colony `failed`, and it can be
