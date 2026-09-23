@@ -186,6 +186,8 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 - Git objects and worktree metadata are mounted read-only; publish treats VM output as untrusted.
 - agentd requires a per-session bearer token even inside the private mesh.
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
+- Network: what a colony's microsandbox profiles allow and deny is in
+  [sandbox-network.md](sandbox-network.md).
 
 The external audit of v0.1.3 checked these boundaries against the code; its findings and the
 release checkpoints are in [audit.md](audit.md).
