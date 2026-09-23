@@ -332,6 +332,7 @@ export function Cockpit({
             onStart={onRedStart}
             onStop={onRedStop}
             onOpenColony={openColonyById}
+            onOpenSettings={(section) => onOpenSettings(section)}
           />
         );
       case "launch":

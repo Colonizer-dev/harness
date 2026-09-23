@@ -188,11 +188,11 @@ export function deltaTone(delta: number | null, goodWhen: "up" | "down" = "up"):
 
 // ---------------------------------------------------------------------------
 // Overview derivations (issue #398): everything the OVERVIEW screen reads off the
-// session list. The mothership records NO merge timestamp, NO CI data and NO failure
-// history — so merged PRs are bucketed by created_at (said out loud wherever they
-// render), lead time / PR cycle time / CI pass rate have no helper here at all, and the
-// change-failure rate is a snapshot reading (failed ÷ decided among sessions created in
-// the window), never a history.
+// session list. Merged PRs bucket by merged_at (falling back to created_at when the
+// mothership omits it); failed sessions bucket by created_at. Lead time / PR cycle
+// time / CI pass rate have no helper here at all, and the change-failure rate is a
+// snapshot reading (failed ÷ decided in the window, merged read by merge time and
+// failed by created_at), never a history.
 // ---------------------------------------------------------------------------
 
 function windowMs(ts: string, fromMs: number, toMs: number): boolean {
@@ -200,10 +200,15 @@ function windowMs(ts: string, fromMs: number, toMs: number): boolean {
   return !Number.isNaN(t) && t >= fromMs && t < toMs;
 }
 
-/** Sessions with status merged created in [fromMs, toMs): a real count, bucketed by
- *  created_at because the merge date itself is not recorded. */
+/** A merged session's merge time: merged_at when the mothership serves one, else created_at. */
+export function mergedAtOf(s: Session): string {
+  return s.merged_at ?? s.created_at;
+}
+
+/** Sessions with status merged in [fromMs, toMs), bucketed by merge time (merged_at,
+ *  falling back to created_at when absent). */
 export function mergedInWindow(sessions: Session[], fromMs: number, toMs: number): Session[] {
-  return sessions.filter((s) => s.status === "merged" && windowMs(s.created_at, fromMs, toMs));
+  return sessions.filter((s) => s.status === "merged" && windowMs(mergedAtOf(s), fromMs, toMs));
 }
 
 /** The local-calendar "YYYY-MM-DD" of a Date — the same day key the mock's spend
@@ -227,32 +232,41 @@ export function shortDayLabel(day: string): string {
   return `${MONTHS[Number(m[2]) - 1] ?? ""} ${Number(m[3])}`;
 }
 
-/** Merged sessions per day over `days` (ascending "YYYY-MM-DD"), bucketed by created_at,
- *  optionally scoped to one org. */
+/** Merged sessions per day over `days` (ascending "YYYY-MM-DD"), bucketed by merge
+ *  time (merged_at, falling back to created_at), optionally scoped to one org. */
 export function dailyMerged(sessions: Session[], days: string[], org?: string): number[] {
-  return days.map((day) => sessions.filter((s) => s.status === "merged" && dayKeyOf(s.created_at) === day && (!org || sameOrg(orgOf(s), org))).length);
+  return days.map((day) => sessions.filter((s) => s.status === "merged" && dayKeyOf(mergedAtOf(s)) === day && (!org || sameOrg(orgOf(s), org))).length);
 }
 
 export interface FailRate {
-  /** failed ÷ (merged + failed) among sessions created in the window; null when nothing was decided. */
+  /** failed ÷ (merged + failed) in the window — merged read by merge time, failed by
+   *  created_at; null when nothing was decided. */
   rate: number | null;
   failed: number;
   /** merged + failed: the snapshot basis, named in the sub-line wherever it renders. */
   decided: number;
 }
 
-/** The honest change-failure reading: failed ÷ decided among sessions created in the window. */
+/** The honest change-failure reading: failed ÷ decided in the window, with merged
+ *  sessions bucketed by merge time and failed ones by created_at. */
 export function changeFailRate(sessions: Session[], fromMs: number, toMs: number, org?: string): FailRate {
-  const inScope = sessions.filter((s) => windowMs(s.created_at, fromMs, toMs) && (!org || sameOrg(orgOf(s), org)));
-  const failed = inScope.filter((s) => s.status === "failed").length;
-  const decided = inScope.filter((s) => s.status === "merged" || s.status === "failed").length;
+  const inScope = (status: Session["status"]) =>
+    sessions.filter(
+      (s) =>
+        s.status === status &&
+        windowMs(status === "merged" ? mergedAtOf(s) : s.created_at, fromMs, toMs) &&
+        (!org || sameOrg(orgOf(s), org)),
+    );
+  const failed = inScope("failed").length;
+  const decided = failed + inScope("merged").length;
   return { rate: decided > 0 ? failed / decided : null, failed, decided };
 }
 
-/** Per-day failure rate over `days` (null = nothing decided that day, a gap — never a zero). */
+/** Per-day failure rate over `days` (null = nothing decided that day, a gap — never a zero).
+ *  Merged sessions bucket by merge day, failed ones by created day. */
 export function dailyFailRate(sessions: Session[], days: string[], org?: string): (number | null)[] {
   return days.map((day) => {
-    const list = sessions.filter((s) => dayKeyOf(s.created_at) === day && (!org || sameOrg(orgOf(s), org)));
+    const list = sessions.filter((s) => dayKeyOf(s.status === "merged" ? mergedAtOf(s) : s.created_at) === day && (!org || sameOrg(orgOf(s), org)));
     const decided = list.filter((s) => s.status === "merged" || s.status === "failed").length;
     if (decided === 0) return null;
     return list.filter((s) => s.status === "failed").length / decided;

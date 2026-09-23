@@ -699,6 +699,7 @@ mod tests {
             automerge: None,
             fix_for: None,
             pr_url: Some("https://github.com/acme-corp/secret-project/pull/7".into()),
+            merged_at: None,
             error: None,
             cost_usd: Some(0.42),
             routed_cost_usd: None,

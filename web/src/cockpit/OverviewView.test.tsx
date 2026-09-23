@@ -97,7 +97,7 @@ describe("overview dash helpers", () => {
   const merged = (id: string, created_at: string, status: Session["status"] = "merged") =>
     session({ id, created_at, updated_at: created_at, status });
 
-  it("mergedInWindow buckets by created_at: only merged sessions created in the window count", () => {
+  it("mergedInWindow falls back to created_at when merged_at is absent: only merged sessions in the window count", () => {
     const list = [
       merged("in", "2026-09-10T09:00:00Z"),
       merged("too-old", "2026-08-10T09:00:00Z"),
@@ -166,7 +166,7 @@ describe("OverviewView KPIs", () => {
 
   it("counts merged PRs from sessions and says the bucket out loud", () => {
     const html = renderOverview(list, [ACME]);
-    expect(html).toContain("by created_at, no merge date");
+    expect(html).toContain("by merge date");
     expect(html).toContain("MERGED PRS PER DAY · BY WORKSPACE");
   });
 

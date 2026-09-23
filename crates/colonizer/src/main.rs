@@ -1336,6 +1336,10 @@ async fn serve() -> Result<()> {
     tokio::spawn(reclaim::run(app.clone()));
     let pr_watch = app.clone();
     tokio::spawn(async move { publish::watch_pull_requests(pr_watch).await });
+    // Merged colonies from before `merged_at` existed gain GitHub's time where it still reports
+    // one; best effort, off the serving path.
+    let merged_at_backfill = app.clone();
+    tokio::spawn(async move { publish::backfill_merged_at(merged_at_backfill).await });
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(autonomy::run(app.clone()));
     tokio::spawn(burn_down::run(app.clone()));

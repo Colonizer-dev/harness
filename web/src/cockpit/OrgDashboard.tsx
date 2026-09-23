@@ -24,6 +24,7 @@ import {
   formatDelta,
   formatPts,
   funnelFor,
+  mergedAtOf,
   modelColorFor,
   orgColorFor,
   relDelta,
@@ -126,9 +127,10 @@ export function OrgDashboard({
   const prevSpend = sumHistoryCost(previous, org.org);
   const cpp = costPerMerged(rollup ?? periodSpend, merged);
   // In-range windowed figures for the sparkline + previous-period delta: merged per day via
-  // dailyMerged (bucketed by created_at, like the overview), the failure snapshot over the
-  // history-day window, and cost per merged PR off the period spend. The tile values stay the
-  // dashboard's own readings (see the sub-lines); only spark/delta read the window.
+  // dailyMerged (bucketed by merge date, falling back to created_at), the failure snapshot over the
+  // history-day window (merged by merge date, failed by created date), and cost per merged PR off
+  // the period spend. The tile values stay the dashboard's own readings (see the sub-lines); only
+  // spark/delta read the window.
   const mergedDaily = dailyMerged(scoped, days);
   const mergedPrevDaily = previous.length > 0 ? dailyMerged(scoped, previous.map((d) => d.day)) : [];
   const mergedTotal = (ns: number[]) => ns.reduce((t, n) => t + n, 0);
@@ -157,10 +159,10 @@ export function OrgDashboard({
       deltaDir: (mergedDelta ?? 0) < 0 ? "down" : "up",
       spark: mergedDaily.length > 0 ? sparkPoints(mergedDaily) : undefined,
       sub: scoped.length > 0 ? `${Math.round((merged / scoped.length) * 100)}% of ${scoped.length} ${scoped.length === 1 ? "colony" : "colonies"}` : "no colonies in scope",
-      hint: "sessions with status merged, GET /api/sessions — the delta reads merged created in range vs the previous period (bucketed by created_at, no merge date)",
+      hint: "sessions with status merged, GET /api/sessions — the delta reads merged in range vs the previous period (bucketed by merge date, falling back to created_at)",
     },
     { label: "LEAD TIME", value: "—", emptyNote: "no data source yet", hint: "needs issue-picked-up → PR-opened timestamps; the API serves none" },
-    { label: "PR CYCLE TIME", value: "—", emptyNote: "no data source yet", hint: "needs PR-opened → merged timestamps; the API serves none" },
+    { label: "PR CYCLE TIME", value: "—", emptyNote: "no data source yet", hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
     {
       label: "CHANGE FAILURE RATE",
       ...(scoped.length > 0
@@ -173,7 +175,7 @@ export function OrgDashboard({
             sub: `${failed} failed of ${scoped.length}`,
           }
         : { value: "—", emptyNote: "no colonies in scope" }),
-      hint: "failed sessions ÷ colonies in scope, GET /api/sessions — the spark and delta read the in-range window (failed ÷ decided among sessions created per day)",
+      hint: "failed sessions ÷ colonies in scope, GET /api/sessions — the spark and delta read the in-range window (merged by merge day, failed by created day)",
     },
     { label: "TIME TO RECOVER", value: "—", emptyNote: "no data source yet", hint: "needs failure → recovery timestamps; the API serves none" },
     { label: "CI PASS RATE", value: "—", emptyNote: "no data source yet", hint: "the API serves no CI results" },
@@ -189,7 +191,7 @@ export function OrgDashboard({
             sub: `${merged} merged`,
           }
         : { value: "—", emptyNote: "nothing merged yet" }),
-      hint: "org spend rollup ÷ merged sessions, GET /api/orgs + GET /api/sessions — the delta reads period spend ÷ merged created in range vs the previous period",
+      hint: "org spend rollup ÷ merged sessions, GET /api/orgs + GET /api/sessions — the delta reads period spend ÷ merged in range vs the previous period",
     },
     {
       label: "API ERROR RATE",
@@ -200,13 +202,14 @@ export function OrgDashboard({
     },
   ];
 
-  // --- Colony outcomes per day: sessions bucketed by launch day, carrying their current status. ---
+  // --- Colony outcomes per day: sessions bucketed by merge day when merged, by launch
+  //     day otherwise, carrying their current status. ---
   const perDay = new Map<string, Record<Outcome, number>>();
   for (const s of scoped) {
-    const day = dayKeyOf(s.created_at);
-    if (!inRange.has(day)) continue;
     const outcome = outcomeOf(s);
     if (outcome === null) continue;
+    const day = dayKeyOf(outcome === "merged" ? mergedAtOf(s) : s.created_at);
+    if (!inRange.has(day)) continue;
     let row = perDay.get(day);
     if (!row) perDay.set(day, (row = { merged: 0, pr: 0, nochg: 0, failed: 0, stopped: 0 }));
     row[outcome] += 1;
@@ -216,7 +219,7 @@ export function OrgDashboard({
   // Zero-launch days are gaps, not baseline anchors: joining through them would sawtooth the ghost.
   const ghost = compare && !repo && previous.length > 0 ? days.map((_, i) => prevLaunched[i] || null) : undefined;
   const outcomeSub =
-    `${launched} launched in range, ${merged} merged overall · by launch day · current status` +
+    `${launched} launched in range, ${merged} merged overall · merged by merge day, the rest by launch day · current status` +
     (inProgress > 0 ? ` · ${inProgress} in progress excluded` : "") +
     (compare && !repo && previous.length > 0 ? ` · dashed line is launches in the previous ${range}d` : "");
 
@@ -413,7 +416,7 @@ export function OrgDashboard({
               </div>
             ))}
           </div>
-          <div className="py-8 text-center font-mono text-[11px] text-faint">no data source yet · no PR timestamps in the API</div>
+          <div className="py-8 text-center font-mono text-[11px] text-faint">no data source yet · no pickup or PR-opened timestamps in the API</div>
         </DashPanel>
         <DashPanel
           title="TOKEN USAGE · MODEL MIX"

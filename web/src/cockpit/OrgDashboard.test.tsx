@@ -75,10 +75,10 @@ describe("OrgDashboard", () => {
     expect(filtered).toContain("org-wide: spend history is per org");
   });
 
-  it("buckets outcomes by launch day and keeps the CI-green funnel step empty", () => {
+  it("buckets outcomes by merge day for merged, launch day otherwise, and keeps the CI-green funnel step empty", () => {
     const html = render();
     expect(html).toContain("COLONY OUTCOMES PER DAY");
-    expect(html).toContain("by launch day · current status");
+    expect(html).toContain("merged by merge day, the rest by launch day · current status");
     for (const legend of ["Merged", "PR open", "No changes", "Failed", "Stopped"]) expect(html).toContain(legend);
     expect(html).toContain("DELIVERY FUNNEL");
     expect(html).toContain("Colonies launched");
