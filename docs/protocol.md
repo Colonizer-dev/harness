@@ -211,7 +211,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, autofix?, automerge?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
-| `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
+| `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
@@ -335,6 +335,28 @@ comes. Both are estimates. A colony's budget answers to `cost_usd + routed_cost_
 host-disk quota to `host_disk_bytes`; past either, the mothership stops the colony: `status` `stopped`,
 the reason in `error`, and the worktree kept, so raising the limit (or, for the quota, cleaning up) and
 pressing Resume continues it.
+
+`GET /api/sessions/{id}` — only that route, never the list or the WS session frame — adds two fields,
+each omitted when absent. `recent_events` is the last ≤ 20 events from the tail of `events.jsonl`
+(at most the last 64 KiB are read, never the whole file), oldest first, as
+`[{seq, ts, type, summary}]`: `seq`/`ts` are whatever the line carried (`ts` is `null` when the line
+has none); `summary` is a one-line digest — the text for `assistant_text`/`user_message`, the pending
+question for `question`, the `state` for `status`, the tool name for `tool_call`, the output for
+`tool_result`, the result (or `"ok"`) for `turn_end` — newlines collapsed and cut to 200 chars plus `…`. `assistant_text_delta`
+and `thinking` lines are skipped as noise. `diagnosis` is the best guess for a non-terminal colony
+(`queued`, `starting`, `running`, `waiting_for_answer`, `idle`), exactly one of `queued`, `booting`,
+`working`, `waiting_on_human`, `waiting_on_provider` or `stuck`, first match wins: `queued` reads
+"queued, waiting for a free slot"; `starting` reads "booting: \<last boot phase\> for \<dur\>"
+(`"starting"` when no phase finished yet, clocked from the boot attempt, else the colony's birth);
+a quota attention flag, or the tail's most recent `assistant_text` with no `user_message` after it
+classifying as provider exhaustion, reads "waiting on provider: quota exhausted[, resets \<X\>]" with
+`resets_at` carrying the provider's reset words verbatim when it named a reset; a colony waiting for
+an answer, held by autopilot, or `idle` otherwise reads "waiting for an answer[: \<question\>]" /
+"autopilot held, waiting for the next message" / "idle, waiting for the next message", naming the
+tail's pending question when it has one; a `running` colony active within the last
+15 minutes (the watchdog's stall default) reads "working (last activity \<dur\> ago)"; anything else
+reads "no activity for \<dur\>; last event: \<type\>: \<summary>" (or "no events yet"). Durations are
+compact (`45s`, `12m`, `3h 5m`).
 
 #### Automatic reclamation
 
@@ -605,6 +627,15 @@ Two more top-level keys round the payload out: `"version"` — this build's `CAR
 microVM slot (disjoint from `host.microvms_live`, which counts colonies that already hold one). A
 peer polling this endpoint for the fleet view (`GET /api/hosts`, below) reads everything it needs
 straight off this one response; nothing extra is asked of it.
+
+`"stall"` is `null` normally, or
+`{"idle_secs", "last_event_at", "live", "queued"}` when at least one colony is live, the queue is
+non-empty, and no live colony has produced an event for ≥ 10 minutes: `idle_secs` is how long every
+live colony has been event-quiet, `last_event_at` (RFC 3339) is the
+newest event any live colony produced, and `live`/`queued` are the counts behind the decision. The
+"last event" time comes from the runtimes' in-memory activity stamps, falling back to `events.jsonl`
+mtimes for live colonies without one — metadata only, never file contents — so the poll stays cheap
+under the endpoint's 10 s cache.
 
 ### `GET /api/hosts`
 
