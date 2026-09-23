@@ -169,6 +169,8 @@ class MockSession {
   private cost = 0;
   /** Colony-cumulative per-model usage, as the runner reports it in every `turn_end` (docs/protocol.md §4). */
   private modelUsage: Record<string, ModelTokens> = {};
+  /** The model the next turn uses; `set_model` switches it and `model_changed` reports it. */
+  private model = "claude-opus-5";
   private pendingQuestion: string | null = null;
   private userMessages = 0;
 
@@ -258,7 +260,7 @@ class MockSession {
 
   command(data: unknown): void {
     if (typeof data !== "string") return;
-    let command: { type?: string; text?: string; question_id?: string; answers?: Answers; response?: string | null };
+    let command: { type?: string; text?: string; question_id?: string; answers?: Answers; response?: string | null; model?: string };
     try {
       command = JSON.parse(data);
     } catch {
@@ -272,7 +274,17 @@ class MockSession {
       this.generation += 1;
       this.emit({ type: "log", level: "info", message: "Interrupted by user" });
       this.emit({ type: "status", state: this.pendingQuestion ? "waiting_for_answer" : "idle" });
+    } else if (command.type === "set_model" && command.model) {
+      void this.onSetModel(command.model);
     }
+  }
+
+  /** The runner confirms a switch a moment later; the next turn uses the new model. */
+  private async onSetModel(model: string): Promise<void> {
+    await sleep(300);
+    const previous = this.model;
+    this.model = model;
+    this.emit({ type: "model_changed", model, previous });
   }
 
   halt(): void {
@@ -352,6 +364,7 @@ class MockSession {
     this.started = true;
     const s = this.session;
     this.log("Worktree created, microVM booted, joined mesh");
+    this.emit({ type: "model_changed", model: this.model, previous: null }, ago(27));
     this.emit({ type: "status", state: "working" }, ago(27));
     this.emit(
       {
@@ -415,6 +428,7 @@ class MockSession {
         await sleep(1200);
         this.patch({ status: "running" });
       }
+      this.emit({ type: "model_changed", model: this.model, previous: null });
       if (this.instructions) this.emit({ type: "user_message", id: "initial", text: `Colony on ${s.repo}.\n\n${this.instructions}` });
       this.emit({ type: "status", state: "working" });
       await sleep(500);
@@ -442,6 +456,7 @@ class MockSession {
       this.log(`microVM ${s.sandbox} booted (node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0, 4 vCPU, 8G)`);
       this.log(`Joined the private mesh as ${s.mesh?.name} (${s.mesh?.ip}) — direct connection`);
     }
+    this.emit({ type: "model_changed", model: this.model, previous: null });
     this.emit({ type: "status", state: "working" });
     this.emit({
       type: "user_message",
@@ -641,7 +656,7 @@ class MockSession {
     this.cost += 0.42;
     // First result of the run: it covers the delegation turn, the settlers' routed-model work and this turn, so
     // the colony-cumulative total is all new and both models belong to this footer. A later turn that only the
-    // orchestrator served (see onUserMessage) must then diff down to Claude alone.
+    // orchestrator served (see onUserMessage) must then diff down to its model alone.
     this.emit({
       type: "turn_end",
       is_error: false,
@@ -689,7 +704,7 @@ class MockSession {
       result: reply,
       cost_usd: Math.round(this.cost * 100) / 100,
       duration_ms: 4_210,
-      model_usage: this.turnUsage({ "claude-opus-5": { input_tokens: 5_800, output_tokens: 940, cache_read_tokens: 48_000, cache_write_tokens: 3_600, thinking_tokens: 0 } }),
+      model_usage: this.turnUsage({ [this.model]: { input_tokens: 5_800, output_tokens: 940, cache_read_tokens: 48_000, cache_write_tokens: 3_600, thinking_tokens: 0 } }),
     });
     this.emit({ type: "status", state: this.pendingQuestion ? "waiting_for_answer" : "idle" });
   }
