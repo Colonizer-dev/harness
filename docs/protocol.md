@@ -1552,10 +1552,11 @@ a refused model — is quota exhaustion, and the gateway treats it apart from tr
 other status is not exhaustion, whatever it says. The anthropic wire forwards the error body
 verbatim; the OpenAI wire forwards the translated body (the classifier reads the raw error code
 there, since translation drops `insufficient_quota`). Either way the provider is recorded as
-exhausted (in memory; a restart forgets it) with the reset the message named — or, when the message
-names none, a 15-minute TTL after which the record lapses and the queue re-probes — and the answer
-carries `x-colonizer-quota-exhausted` (the reset words, or `exhausted`). An upstream 2xx clears the
-record at once. When the
+exhausted (in `provider-quota.json` in the mothership's data directory, written on every change, so a
+restart keeps it; a record whose reset has passed or whose TTL has run out is dropped on load) with
+the reset the message named — or, when the message names none, a 15-minute TTL after which the record
+lapses and the queue re-probes — and the answer carries `x-colonizer-quota-exhausted` (the reset
+words, or `exhausted`). An upstream 2xx clears the record at once. When the
 provider has a `fallback_model` the answer also carries `x-colonizer-fallback:
 provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504 —
 failover happens at request level, so an operator opts a role out by unsetting that role's
