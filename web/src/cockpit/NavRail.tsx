@@ -541,7 +541,7 @@ function ScopeSwitcher({
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="Find a workspace…"
                   aria-label="find a workspace"
-                  className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-text outline-none placeholder:text-faint focus-visible:outline-none"
+                  className="bare-field min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-text outline-none placeholder:text-faint focus-visible:outline-none"
                 />
               </div>
             )}

@@ -16,6 +16,7 @@ import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
+import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
@@ -443,7 +444,7 @@ export function Cockpit({
         latest={liveEvents.latest}
       />
       <div className="relative z-[1] flex min-h-0 min-w-0">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           {/* The session-limit banner sits above every view, outside each view's own scroll. */}
           {quotaBanner ? (
             <QuotaBanner
@@ -454,6 +455,20 @@ export function Cockpit({
             />
           ) : null}
           {body()}
+          {/* The composer floats over every overview-style view; the launch form, an open colony and
+              settings have their own inputs. */}
+          {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory") && (
+            <Composer
+              org={selectedOrg}
+              repos={repos}
+              githubConnected={status?.github.connected ?? false}
+              autopilotDefault={autopilotDefault}
+              onCreated={(session) => {
+                onCreated(session);
+                setView("home");
+              }}
+            />
+          )}
         </div>
         {view === "home" && (
           <Inspector

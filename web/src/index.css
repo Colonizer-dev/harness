@@ -1468,3 +1468,56 @@ body {
     display: none;
   }
 }
+
+/* Composer (cockpit/Composer.tsx): the listening waveform and the open mic's pulse. */
+.composer-wave span {
+  width: 3px;
+  height: 6px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--chart-2, var(--accent)), var(--accent));
+  animation: composer-wave 0.9s ease-in-out infinite;
+}
+@keyframes composer-wave {
+  0%,
+  100% {
+    height: 4px;
+    opacity: 0.5;
+  }
+  50% {
+    height: 22px;
+    opacity: 1;
+  }
+}
+.composer[data-listening="true"] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 18px 60px -12px rgb(0 0 0 / 0.55),
+    0 0 48px -8px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.composer-mic[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  animation: composer-ping 1.4s ease-out infinite;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+}
+@keyframes composer-ping {
+  to {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-wave span,
+  .composer-mic[aria-pressed="true"]::after {
+    animation: none;
+  }
+  .composer-wave span {
+    height: 10px;
+  }
+}
+/* Bare text fields inside a styled shell (the composer, the switcher's filter): the shell shows
+   focus, so the global focus ring would draw a second box inside it. */
+.bare-field:focus-visible {
+  outline: none;
+}

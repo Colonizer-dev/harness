@@ -811,7 +811,7 @@ export function NestView({
       </div>
 
       {waiting.length > 0 && (
-        <section aria-label="needs you" className="relative z-[5] px-6 pb-4">
+        <section aria-label="needs you" className="relative z-[5] px-6 pb-24">
           <div className="mb-2 flex items-baseline gap-2.5">
             <h2 className="m-0 text-[14px] font-medium text-text">Needs you</h2>
             <span className="text-[13px] text-faint">{waiting.length} waiting</span>
