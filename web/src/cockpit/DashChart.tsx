@@ -162,9 +162,9 @@ export function Sparkline({ points, color, height = 24 }: { points: string; colo
         strokeLinejoin="round"
         strokeLinecap="round"
         vectorEffect="non-scaling-stroke"
-        pathLength={1}
-        strokeDasharray={1}
-        className="dash-draw"
+        // Revealed left to right by a clip, not a dash offset: a dashed draw-in on a
+        // non-scaling stroke renders as broken segments in Chrome.
+        className="spark-reveal"
         style={{ filter: `drop-shadow(0 0 2px ${color})` }}
       />
     </svg>

@@ -93,9 +93,18 @@ export function formatDelta(d: number | null): string {
 }
 
 /** Sparkline points in a 100×28 box; unmeasured days sit on the baseline, never as zeroes. */
-export function sparkPoints(values: (number | null)[], w = 100, h = 28): string {
+export function sparkPoints(values: (number | null)[], w = 100, h = 28, window = 7): string {
   if (values.length === 0) return "";
-  const nums = values.map((v) => v ?? 0);
+  // A trailing rolling mean (the design's 7-day roll): per-day counts are mostly 0s and 1s, and
+  // drawn raw they read as a comb of spikes rather than a trend.
+  const raw = values.map((v) => (v != null && Number.isFinite(v) ? v : 0));
+  const span = Math.max(1, Math.min(window, raw.length));
+  const nums = raw.map((_, i) => {
+    const from = Math.max(0, i - span + 1);
+    // Divided by the full window even at the start, so the first days are not inflated by a
+    // short denominator.
+    return raw.slice(from, i + 1).reduce((a, b) => a + b, 0) / span;
+  });
   const max = Math.max(...nums);
   if (max <= 0) return values.map((_, i) => `${((i / Math.max(1, values.length - 1)) * w).toFixed(1)},${h}`).join(" ");
   return nums.map((v, i) => `${((i / Math.max(1, values.length - 1)) * w).toFixed(1)},${(h - 2 - (v / max) * (h - 4)).toFixed(1)}`).join(" ");

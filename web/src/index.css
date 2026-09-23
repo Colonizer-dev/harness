@@ -1209,6 +1209,22 @@ body {
     stroke-dashoffset: 0;
   }
 }
+.spark-reveal {
+  animation: spark-reveal 0.9s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes spark-reveal {
+  from {
+    clip-path: inset(-8px 100% -8px -8px);
+  }
+  to {
+    clip-path: inset(-8px -8px -8px -8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark-reveal {
+    animation: none;
+  }
+}
 .dash-grow-y {
   transform-origin: bottom;
   animation: dash-grow-y 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;

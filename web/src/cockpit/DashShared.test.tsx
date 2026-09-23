@@ -231,7 +231,9 @@ describe("StatusChip / SegTabs / RangePicker", () => {
 describe("Sparkline", () => {
   it("draws one glowing smoothed line", () => {
     const html = renderToStaticMarkup(<Sparkline points="0,20 50,10 100,4" color="red" />);
-    expect(html).toContain("dash-draw");
+    // Revealed by a clip: a dash-offset draw-in breaks a non-scaling stroke into segments.
+    expect(html).toContain("spark-reveal");
+    expect(html).not.toContain("stroke-dasharray");
     expect(html).toContain("drop-shadow(0 0 2px red)");
   });
   it("keeps its height but draws nothing for fewer than two points", () => {
