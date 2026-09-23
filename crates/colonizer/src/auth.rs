@@ -172,23 +172,14 @@ pub fn open_browser(url: &str) {
 /// with the same path minus the `token` query. A plain redirect would arrive without the
 /// `SameSite=Strict` cookie when the link was followed cross-site (e.g. clicked in a chat app).
 pub fn login_page() -> String {
-    "<!doctype html><title>Colonizer</title>\
-    <body style=\"font:15px system-ui;margin:3rem\"><h1>Signed in</h1>\
-    <p>Opening the cockpit&hellip;</p>\
-    <script>var u=new URL(location.href);u.searchParams.delete('token');location.replace(u.toString());</script></body>"
-        .to_string()
+    include_str!("pages/signed_in.html").to_string()
 }
 
 /// What an unauthenticated page load answers. The script reloads once — session storage plus a
 /// timestamp, so it cannot loop — because a `SameSite=Strict` cookie is not sent on a cross-site
 /// navigation: the page-initiated reload is same-site, so a cookie set earlier rides along.
 pub fn locked_page() -> String {
-    "<!doctype html><title>Colonizer</title>\
-    <body style=\"font:15px system-ui;margin:3rem\"><h1>Sign-in needed</h1>\
-    <p>Open the access link printed when colonizer started, or run <code>colonizer open</code> on the host.</p>\
-    <script>try{var k='colonizer_auth_retry';var t=sessionStorage.getItem(k);var now=Date.now();\
-    if(!t||now-Number(t)>60000){sessionStorage.setItem(k,String(now));location.reload();}}catch(e){}</script></body>"
-        .to_string()
+    include_str!("pages/locked.html").to_string()
 }
 
 #[cfg(test)]
@@ -224,6 +215,31 @@ mod tests {
         assert!(!tokens_match("abc", "abd"));
         assert!(!tokens_match("abc", "abcd"), "length matters too");
         assert!(!tokens_match("", "abc"));
+    }
+
+    #[test]
+    fn the_sign_in_pages_keep_their_safety_scripts() {
+        let locked = locked_page();
+        assert!(locked.contains("colonizer open"), "the locked page names the command");
+        assert!(
+            locked.contains("colonizer_auth_retry"),
+            "the one-shot reload that picks up a SameSite cookie"
+        );
+        let signed_in = login_page();
+        assert!(
+            signed_in.contains("searchParams.delete('token')"),
+            "the token leaves the address"
+        );
+        assert!(
+            signed_in.contains("history.replaceState"),
+            "the address is cleaned before the delay"
+        );
+        // Served before sign-in, so it must load nothing from anywhere else.
+        for page in [&locked, &signed_in] {
+            for external in ["<link rel=\"stylesheet\"", "<script src", "@import", "url(http"] {
+                assert!(!page.contains(external), "external asset {external:?} in a sign-in page");
+            }
+        }
     }
 
     #[test]
