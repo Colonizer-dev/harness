@@ -539,7 +539,9 @@ mod tests {
             schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
+        // A skillset needs a manifest to pass validation (plugins::validate).
         std::fs::create_dir_all(app.cfg.data_dir.join("plugins/ecc")).unwrap();
+        std::fs::write(app.cfg.data_dir.join("plugins/ecc/plugin.json"), r#"{"name": "ecc"}"#).unwrap();
         let save = |plugins: &str| {
             let mut settings = Map::new();
             settings.insert("plugins".into(), json!(plugins));
