@@ -97,7 +97,7 @@ describe("Header running workspaces", () => {
 
 describe("NavRail views", () => {
   it("lists the views in order; launch and settings have their own buttons", () => {
-    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "inbox", "history", "memory"]);
+    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "inbox", "history", "memory", "host"]);
     const html = rail();
     expect(html).toContain('aria-label="launch a colony"');
     expect(html).toContain('aria-label="settings"');

@@ -18,6 +18,8 @@ import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, Star
 import type { LiveConnection } from "../liveStream";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
+import { HostView } from "./HostView";
+import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
@@ -33,7 +35,7 @@ const VIEW_KEY = "colonizer.cockpitView";
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -150,6 +152,9 @@ export function Cockpit({
     else root.removeAttribute("data-theme");
     store(THEME_KEY, theme);
   }, [theme]);
+
+  // Every host probe becomes a sample for the Host view's trend lines, whichever view is showing.
+  useEffect(() => recordHost(status?.host), [status?.host]);
 
   useEffect(() => {
     if (launchRequests > 0) setView("launch");
@@ -356,6 +361,17 @@ export function Cockpit({
             onOpenSettings={() => onOpenSettings("setup")}
           />
         );
+      case "host":
+        return (
+          <HostView
+            status={status}
+            fleet={fleet}
+            sessions={sessions}
+            liveStorage={liveStorage}
+            onOpenColony={openColonyById}
+            onOpenSettings={(section) => onOpenSettings(section)}
+          />
+        );
       case "inbox":
         return (
           <InboxView
@@ -441,7 +457,7 @@ export function Cockpit({
           {body()}
           {/* The composer floats over every overview-style view; the launch form, an open colony and
               settings have their own inputs. */}
-          {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory") && (
+          {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory" || view === "host") && (
             <Composer
               org={selectedOrg}
               repos={repos}

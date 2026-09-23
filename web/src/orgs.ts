@@ -152,5 +152,5 @@ export function memoryBadge(selected: string | null, workspaces: OrgEntry[], tot
  * to the nest.
  */
 export function viewAfterOrgSwitch(view: CockpitView): CockpitView {
-  return view === "overview" || view === "home" || view === "history" || view === "launch" || view === "memory" ? view : "home";
+  return view === "overview" || view === "home" || view === "history" || view === "launch" || view === "memory" || view === "host" ? view : "home";
 }
