@@ -707,11 +707,20 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
     if !allowed {
         return (StatusCode::FORBIDDEN, "Host not allowed (set COLONIZER_ALLOWED_HOSTS)").into_response();
     }
-    if (req.method() != Method::GET || req.headers().contains_key(header::UPGRADE))
-        && let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok())
-        && origin.split("://").nth(1) != Some(host.as_str())
-    {
-        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    // Cross-origin writes and WebSocket upgrades are rejected, and a *missing* `Origin` on such a
+    // request is rejected by default rather than trusted. A browser always attaches `Origin` to a
+    // cross-origin write or upgrade, so only a non-browser client — which must not be allowed to
+    // drive this unauthenticated API — omits it. Same-origin requests, whose `Origin` matches the
+    // `Host`, still pass, so the served web UI is unaffected. See #375.
+    if req.method() != Method::GET || req.headers().contains_key(header::UPGRADE) {
+        let same_origin = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|o| o.to_str().ok())
+            .is_some_and(|origin| origin.split("://").nth(1) == Some(host.as_str()));
+        if !same_origin {
+            return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+        }
     }
     next.run(req).await
 }
