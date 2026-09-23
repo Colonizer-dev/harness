@@ -1,0 +1,37 @@
+{
+  "description": "OpenCode agent (opencode-ai), speaking the runner protocol. Models come from Settings → Providers through the mothership gateway; the module holds no credential.",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "id": "opencode",
+  "kind": "agent",
+  "name": "OpenCode",
+  "protocol": "colonizer-runner/1",
+  "requires": {
+    "binaries": [
+      "opencode"
+    ],
+    "image": "glibc + node >= 20"
+  },
+  "secrets": [],
+  "settings": {
+    "properties": {
+      "model": {
+        "default": "",
+        "description": "Model for the agent as <provider>/<model> from Settings → Providers, e.g. local/deepseek-v4-flash. Required: OpenCode colonies reach models only through the gateway.",
+        "env": "COLONIZER_MODEL",
+        "title": "Model",
+        "type": "string"
+      },
+      "small_model": {
+        "default": "",
+        "description": "Model for titles and summaries as <provider>/<model>. Empty uses the main model.",
+        "env": "COLONIZER_SMALL_MODEL",
+        "title": "Small model",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

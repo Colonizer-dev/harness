@@ -1,0 +1,11 @@
+# The OpenCode builds colonies run, pinned so every install of the same Colonizer release
+# gets the same agent. Same six columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
+#
+# Like vendor/claude-code.lock this file is read where the agent is fetched (here the runner itself,
+# at colony boot) rather than bundled: a release carries no OpenCode code. The runner downloads the
+# row for its architecture from registry.npmjs.org into a scratch dir, checks the sha256, and only
+# then extracts `package/bin/opencode`. `linux-x64-baseline` is the same build for x64 CPUs without
+# AVX2 (the plain x64 build requires it); colonies on Apple Silicon take `linux-arm64`.
+opencode  1.18.32  linux-x64           agent  da0803c85eb86709c4f084adcbfb0b5329936670bfe43d2367f0ca034be0c1de  https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.32.tgz
+opencode  1.18.32  linux-x64-baseline  agent  e1ed254bacd7a43ebac74af226d6a6f7a76bba279f6ceb597a8b41125ad8f4c6  https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.18.32.tgz
+opencode  1.18.32  linux-arm64         agent  29ab2d61a70e99d1224d289115c3b8194ff254968e2609531186227be39b2001  https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.32.tgz
