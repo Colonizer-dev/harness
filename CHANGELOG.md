@@ -31,6 +31,13 @@ setting) is called out under **Take care** rather than left for you to find.
 - A publish refuses to open or reuse a pull request if the branch head moved
   after the push, and logs the SHA-256 of the PR body it sends. ([#84])
 
+### Fixed
+
+- A mothership restart no longer forgets which providers are out of quota: the
+  record and its reset time are kept in `provider-quota.json` beside
+  `provider-usage.json`, so colonies parked on an exhausted quota stay parked
+  until the reset instead of all resuming at once and parking again. ([#358])
+
 ### Take care
 
 - `repo_max_parallel` defaults to 3. An install that raised `max_parallel` and
@@ -312,6 +319,7 @@ Macs. ([#74])
 [#215]: https://github.com/Colonizer-dev/harness/issues/215
 [#276]: https://github.com/Colonizer-dev/harness/pull/276
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
+[#358]: https://github.com/Colonizer-dev/harness/issues/358
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
