@@ -5,7 +5,8 @@
 #
 # The update lands on the vendor/plugin-updates branch. The workflow then opens a pull request, or,
 # while the repository doesn't allow GitHub Actions to create pull requests (Settings → Actions →
-# General), keeps an issue open with the same description and a link to open the pull request.
+# General), keeps an issue open with the same description and a link to open the pull request, and
+# closes the issue once a run finds nothing to change.
 name: Vendored plugin updates
 
 on:
@@ -40,6 +41,13 @@ jobs:
       - name: Check upstreams
         id: check
         run: node scripts/update-vendored-plugins.mjs --write --summary "$RUNNER_TEMP/summary.md"
+
+      # A run with nothing to propose closes the stand-in issue, if one is open. That covers two
+      # cases: upstream hasn't moved, or someone merged the update branch ($BRANCH) by hand, after
+      # which the next run finds the lock matching upstream and has nothing to change either.
+      - name: Close the stale issue
+        if: steps.check.outputs.changed != 'true'
+        run: sh scripts/tracking-issue.sh close "$TITLE" "Vendored plugins are current as of $(date -u +%Y-%m-%d)."
 
       # Staging runs every check a real install does: sha256, no hooks, no MCP servers, the Google
       # finder still reading its local catalog. An update that fails them never becomes a proposal.
@@ -76,10 +84,4 @@ jobs:
             echo
             cat "$RUNNER_TEMP/summary.md"
           } > "$RUNNER_TEMP/issue.md"
-          issue=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -1)
-          if [ -n "$issue" ]; then
-            gh issue edit "$issue" --body-file "$RUNNER_TEMP/issue.md"
-            echo "Updated issue #$issue"
-          else
-            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md"
-          fi
+          sh scripts/tracking-issue.sh update "$TITLE" "$RUNNER_TEMP/issue.md"
