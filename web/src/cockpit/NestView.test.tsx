@@ -7,36 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { Session } from "../types";
 import { NestView, planBalloons, type BalloonAnchor } from "./NestView";
-
-function session(overrides: Partial<Session> = {}): Session {
-  return {
-    id: "s1",
-    repo: "acme/webshop",
-    org: "acme",
-    issue: 42,
-    issue_title: "Checkout fails for guest users",
-    status: "running",
-    branch: "colonizer/issue-42-s1",
-    base: "main",
-    parent: null,
-    worktree: "/wt/s1",
-    git_admin_dir: "/git/s1",
-    sandbox: "colony-s1",
-    mesh: null,
-    agent: "claude-code",
-    autopilot: false,
-    pr_url: null,
-    error: null,
-    cost_usd: null,
-    cleaned_up: false, keep_worktree: false,
-    created_at: "2026-09-18T09:00:00Z",
-    updated_at: "2026-09-18T09:10:00Z",
-    attention: null,
-    ...overrides,
-  };
-}
+import { session, settlerView } from "./testFixtures";
 
 const noop = () => {};
 
@@ -191,6 +163,36 @@ describe("NestView", () => {
     expect(markup).toContain(`title="${long}"`);
     expect(markup).toContain("truncate");
     expect(markup).toContain("max-width");
+  });
+
+  it("gives each of the selected colony's carriers a speech bubble, and no one else", () => {
+    const markup = renderToStaticMarkup(
+      <NestView
+        sessions={[session({ id: "s1" }), session({ id: "s2", updated_at: "2026-09-18T09:11:00Z" })]}
+        selectedId="s1"
+        mothershipSelected={false}
+        settlers={[
+          settlerView(),
+          settlerView({
+            agent: { id: "a2", name: "builder" },
+            name: "Builder 1",
+            role: "builder",
+            current: { name: "Read", input: { file_path: "src/cockpit/feed.ts" } },
+          }),
+        ]}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+      />,
+    );
+    // Each working settler's carrier speaks its tool, in describeTool's words.
+    expect(markup).toContain('title="Reading nest.ts"');
+    expect(markup).toContain('title="Reading feed.ts"');
+    // The other colony's solo carrier stays silent: its feed line shows only on its balloon.
+    expect(markup.match(/title="webshop#42 is working"/g)?.length ?? 0).toBe(2);
   });
 });
 
