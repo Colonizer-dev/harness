@@ -148,6 +148,24 @@ while read -r name version plat kind sha url; do
       grep -q '^name: caveman$' "$dest/SKILL.md" || { echo "caveman $version: SKILL.md is not the caveman skill" >&2; exit 1; }
       rm -rf "$tmp"
       ;;
+    fast-jev-compaction)
+      # Staged at dist/vendor/fast-jev-compaction: only what the function hook runs — the plugin
+      # manifest, hooks/ with its src/ imports, plus LICENSE and package.json. Left out: tests,
+      # examples, types (compile-time only), docs and the demo. Kind `hook`, never `plugin`: a
+      # dist/plugins/ copy would list it as a pickable skillset and bypass the compaction switch.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/fast-jev-compaction-*)
+      dest="$out/fast-jev-compaction"
+      rm -rf "$dest"
+      mkdir -p "$dest"
+      for keep in .claude-plugin hooks src LICENSE package.json; do
+        [ -e "$src/$keep" ] || { echo "fast-jev-compaction $version has no $keep" >&2; exit 1; }
+        cp -R "$src/$keep" "$dest/$keep"
+      done
+      grep -q '"name": "fast-jev-compaction"' "$dest/.claude-plugin/plugin.json" || { echo "fast-jev-compaction $version: plugin.json is not the fast-jev-compaction plugin" >&2; exit 1; }
+      rm -rf "$tmp"
+      ;;
     google-skills)
       # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
       # of google/skills would put ~17k tokens of skill descriptions into every
