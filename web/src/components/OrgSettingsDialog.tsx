@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { orgEnabled } from "../orgs";
+import { HIDE_EMPTY_ORGS_KEY, orgEnabled, parseHideEmptyOrgs, serializeHideEmptyOrgs } from "../orgs";
 import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
 import { Avatar } from "./Avatar";
 import { IconX } from "./icons";
 import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
-import { Button, ModelInput, Spinner, Switch, cx, inputClass } from "./ui";
+import { Button, ModelInput, Spinner, Switch, cx, inputClass, stored, store } from "./ui";
 
 type FieldKey =
   | "model"
@@ -300,6 +300,13 @@ function OrgSettingsForm({
   const [skillsets, setSkillsets] = useState(() => sortedSkillsets(info?.settings?.agent?.skillsets));
   // Absent and null mean on; only an explicit false opens with the switch off.
   const [enabled, setEnabled] = useState(() => orgEnabled(info?.settings));
+  // The workspace-wide "hide orgs with no colonies" toggle also lives here, persisted
+  // client-side; the Overview reads it via parseHideEmptyOrgs + hideEmptyOrgEntries (orgs.ts).
+  const [hideEmpty, setHideEmpty] = useState(() => parseHideEmptyOrgs(stored(HIDE_EMPTY_ORGS_KEY)));
+  const setHideEmptyOrgs = (hide: boolean) => {
+    setHideEmpty(hide);
+    store(HIDE_EMPTY_ORGS_KEY, serializeHideEmptyOrgs(hide));
+  };
   const [initial, setInitial] = useState(() =>
     JSON.stringify(
       withEnabled(
@@ -401,6 +408,18 @@ function OrgSettingsForm({
         <section className="border-b border-border py-3">
           <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Workspace</h3>
           <div className="divide-y divide-border">
+            <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
+              <div className="min-w-0 flex-1 basis-44">
+                <div className="text-[13.5px] font-medium">Hide orgs with no colonies</div>
+                <div className="text-[12px] text-muted">
+                  Orgs with nothing in the colony list stay out of the overview, the rail and the totals.
+                </div>
+              </div>
+              <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-[270px]">
+                <Switch checked={hideEmpty} onChange={setHideEmptyOrgs} label="Hide orgs with no colonies" />
+                <span className="text-[13px]">{hideEmpty ? "On" : "Off"}</span>
+              </div>
+            </div>
             <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
               <div className="min-w-0 flex-1 basis-44">
                 <div className="text-[13.5px] font-medium">Include in the workspace list</div>

@@ -207,7 +207,8 @@ describe("OverviewView spend", () => {  it("derives the header from the org rows
   });
 
   it("falls back to the sessions-derived cost when no org carries server spend", () => {
-    const html = render([entry("acme", undefined)], 4.5);
+    // total: 1 so the card itself renders under the default hide-empty toggle; the pin is the header.
+    const html = render([{ ...entry("acme", undefined), total: 1 }], 4.5);
     expect(html).toContain("$4.50 spent");
     expect(html).toContain("acme");
   });

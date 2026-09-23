@@ -7,21 +7,40 @@ import { useId, useMemo, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { IconAlert, IconChevron, IconCpu, IconMemory, IconServer } from "../components/icons";
-import { SESSION_STATUS, type Tone, attentionText, cx, formatDuration, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, attentionText, cx, formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
 import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
+import { HIDE_EMPTY_ORGS_KEY, hideEmptyOrgEntries, parseHideEmptyOrgs } from "../orgs";
 import { isActive, isRaiding } from "../redTeam";
 import { sortSessions } from "../sessionOrder";
-import { formatCost, orgCost, sumCosts } from "../spend";
+import { formatCost, formatTokens, orgCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
+import { DashBars, KpiTile, type KpiDef } from "./DashChart";
 import { FleetPanel } from "./FleetPanel";
+import { OrgDashboard, RangePicker } from "./OrgDashboard";
+import {
+  DASH_COLORS,
+  dailyCosts,
+  dailyLaunched,
+  dailyReturned,
+  dayCost,
+  formatDelta,
+  relDelta,
+  slicePeriods,
+  sparkPoints,
+  sumHistoryCost,
+  sumLaunched,
+  sumReturned,
+  sumTokens,
+  type RangeDays,
+} from "./dash";
 import { headlineFor, OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, overviewSessions, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
 import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
 import { RedTeamCard } from "./RedTeamCard";
-import type { FleetHost, HostInfo, RedTeamRun, Session, SpendOrgDay, StartRedTeamRunRequest, StatusQuota } from "../types";
+import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -198,6 +217,13 @@ export function OverviewView({
   // stays expanded across a filter switch and is still open when its bucket comes back.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (id: string) => setExpanded((rows) => flipExpanded(rows, id));
+  // Dashboard toolbar state (issue #398): the range scopes the history-backed KPIs and charts;
+  // the compare toggle adds previous-period deltas and the ghost line. Client state, per visit.
+  const [range, setRange] = useState<RangeDays>(30);
+  const [compare, setCompare] = useState(true);
+  // The org whose dashboard replaces the overview body in place; null is the overview itself.
+  // Local state, so Cockpit.tsx stays untouched.
+  const [dashOrg, setDashOrg] = useState<string | null>(null);
   // The page renders one card per entry of `orgs` (the visible workspaces), so the counters cover
   // exactly that set — never the whole list. Counting switched-off orgs in the chips while their
   // colonies have no card is the divergence behind issue #246: bare global numbers over a list
@@ -206,6 +232,10 @@ export function OverviewView({
   const visibleSessions = overviewVisibleSessions(sessions, orgs);
   const counts = overviewCounts(visibleSessions);
   const shown = overviewSessions(visibleSessions, filter);
+  // The Workspace-settings "hide orgs with no colonies" toggle is client-side state: read it on
+  // render so flipping it in the dialog shows on the next poll. Only the workspace list narrows —
+  // the counters above still cover every visible workspace's sessions.
+  const workspaces = hideEmptyOrgEntries(orgs, parseHideEmptyOrgs(stored(HIDE_EMPTY_ORGS_KEY)));
   // Held slots (issue #217): idle colonies whose PR autopilot holds occupy parallel slots without
   // doing work. When every slot-occupying colony is held and something queues, nothing can drain
   // until a hold times out — the queued chip must read as stalled, never as a healthy busy queue.
@@ -237,24 +267,15 @@ export function OverviewView({
 
   // The daily spend history for the sparklines, loaded once (see useSpendHistory). Per org it is
   // aligned to the full day span: a day the org has no entry becomes an empty (zero-height) slot.
-  const spendHistory = useSpendHistory();
+  // Twice the range is fetched so the compare toggle has a previous period to stand on.
+  const spendHistory = useSpendHistory(range * 2);
+  const { current, previous } = useMemo(() => slicePeriods(spendHistory, range), [spendHistory, range]);
   const daysByOrg = useMemo(() => {
     const span = spendHistory?.days ?? [];
-    const byOrg = new Map<string, { day: string; org: SpendOrgDay | undefined }[]>();
-    for (const day of span) {
-      for (const orgDay of day.orgs) {
-        const list = byOrg.get(orgDay.org) ?? [];
-        list.push({ day: day.day, org: orgDay });
-        byOrg.set(orgDay.org, list);
-      }
-    }
-    // Align each org to the full day span: a day the response lists with no entry for this org
-    // becomes an empty (zero-height) slot on its sparkline.
-    for (const [org, days] of byOrg) {
-      const orgByDay = new Map(days.map((d) => [d.day, d.org]));
-      byOrg.set(org, span.map((day) => ({ day: day.day, org: orgByDay.get(day.day) })));
-    }
-    return byOrg;
+    const names = new Set(span.flatMap((day) => day.orgs.map((o) => o.org)));
+    return new Map(
+      [...names].map((name) => [name, span.map((day) => ({ day: day.day, org: day.orgs.find((o) => sameOrg(o.org, name)) }))]),
+    );
   }, [spendHistory]);
 
   // Prefer the server's per-org rollups when it reports them, so the header can never disagree with
@@ -264,6 +285,48 @@ export function OverviewView({
     orgs.length > 0 && orgs.every((o) => o.spend !== undefined)
       ? sumCosts(orgs.map((o) => orgCost(o.spend)))
       : cost;
+
+  // Dashboard figures (issue #398), every one with a source. History-backed KPIs read the current
+  // vs previous period; session-backed ones (merged, needs you) are snapshots with no previous.
+  const launched = sumLaunched(current);
+  const returned = sumReturned(current);
+  const periodSpend = sumHistoryCost(current);
+  const needN = visibleSessions.filter(needsYou).length;
+  const mergedN = visibleSessions.filter((s) => s.status === "merged").length;
+  const kpis: KpiDef[] = [
+    { label: "LAUNCHED", value: String(launched), delta: compare ? formatDelta(relDelta(launched, sumLaunched(previous))) : undefined, spark: sparkPoints(dailyLaunched(current)), hint: "colonies launched per day, GET /api/spend/history" },
+    { label: "RETURNED", value: String(returned), delta: compare ? formatDelta(relDelta(returned, sumReturned(previous))) : undefined, spark: sparkPoints(dailyReturned(current)), hint: "colonies returned per day, GET /api/spend/history" },
+    { label: "MERGED", value: String(mergedN), hint: "visible sessions with status merged, GET /api/sessions" },
+    { label: "SPEND", value: formatCost(periodSpend), delta: compare ? formatDelta(relDelta(periodSpend, sumHistoryCost(previous))) : undefined, spark: sparkPoints(dailyCosts(current)), sub: `${formatTokens(sumTokens(current))} tokens`, hint: "measured spend in range, GET /api/spend/history" },
+    { label: "NEEDS YOU", value: String(needN), hint: "sessions needing an answer, GET /api/sessions" },
+  ];
+  // Spend/day stacked by workspace; the ghost is the previous period's daily total when it covers it.
+  const spendSeries = workspaces
+    .map((o, i) => ({ label: o.org, color: DASH_COLORS[i % DASH_COLORS.length], values: dailyCosts(current, o.org).map((v) => v ?? 0) }))
+    .filter((s) => s.values.some((v) => v > 0));
+  const prevTotals = previous.map((d) => dayCost(d));
+  const ghost = compare && previous.length > 0 ? current.map((_, i) => prevTotals[i] ?? null) : undefined;
+  const dayLabels = current.map((d) => d.day);
+
+  // An org dashboard replaces the overview body in place; the header above stays put.
+  const dashEntry = dashOrg ? workspaces.find((o) => sameOrg(o.org, dashOrg)) : undefined;
+  if (dashEntry) {
+    return (
+      <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
+        <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-5">
+          <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} />
+          <OrgDashboard
+            org={dashEntry}
+            sessions={visibleSessions.filter((s) => sameOrg(orgOf(s), dashEntry.org))}
+            history={spendHistory}
+            range={range}
+            compare={compare}
+            onBack={() => setDashOrg(null)}
+          />
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
@@ -344,6 +407,54 @@ export function OverviewView({
           </div>
         )}
 
+        <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} />
+
+        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
+          {kpis.map((k) => (
+            <KpiTile key={k.label} label={k.label} value={k.value} delta={k.delta} spark={k.spark} sub={k.sub} hint={k.hint} />
+          ))}
+        </div>
+
+        <div className="flex flex-wrap gap-3.5">
+          <section className="min-w-0 flex-[2_1_320px] rounded-2xl border border-border bg-panel p-4">
+            <div className="mb-1 font-mono text-[10.5px] tracking-[0.12em] text-faint">SPEND PER DAY · BY WORKSPACE</div>
+            <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1">
+              {spendSeries.map((s) => (
+                <span key={s.label} className="inline-flex items-center gap-1.5 text-[11.5px] text-muted">
+                  <span className="h-2 w-2 rounded-[2px]" style={{ background: s.color }} />
+                  {s.label}
+                </span>
+              ))}
+            </div>
+            <DashBars series={spendSeries} labels={dayLabels} ghost={ghost} format={(v) => formatCost(v)} />
+          </section>
+          <section className="min-w-0 flex-[1_1_260px] overflow-hidden rounded-2xl border border-border bg-panel">
+            <div className="px-4 pb-1 pt-4 font-mono text-[10.5px] tracking-[0.12em] text-faint">WORKSPACES COMPARED</div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[280px] border-collapse tabular-nums">
+                <tbody>
+                  {workspaces.map((o) => {
+                    const mine = visibleSessions.filter((s) => sameOrg(orgOf(s), o.org));
+                    const m = mine.filter((s) => s.status === "merged").length;
+                    return (
+                      <tr key={o.org} className="border-b border-border last:border-b-0">
+                        <td className="min-w-0 px-4 py-2.5">
+                          <div className="truncate text-[13px] font-semibold">{o.org}</div>
+                          <div className="mt-1 h-1 overflow-hidden rounded-full bg-panel-3">
+                            <div className="h-full rounded-full bg-ok" style={{ width: `${(m / (mergedN || 1)) * 100}%` }} title={`share of merged: ${m} of ${mergedN}`} />
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-2.5 text-right font-mono text-xs">{m} merged</td>
+                        <td className="whitespace-nowrap px-4 py-2.5 text-right font-mono text-xs">{formatCost(orgCost(o.spend))}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
         {host && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border bg-panel px-3.5 py-2">
             <span
@@ -400,7 +511,7 @@ export function OverviewView({
           </div>
         ) : (
           <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
-            {orgs.map((org) => {
+            {workspaces.map((org) => {
               const mine = sortSessions(shown.filter((s) => sameOrg(orgOf(s), org.org)));
               const raid = runForOrg(org.org);
               // Under a filter, an org with no matching colonies drops out entirely.
@@ -447,6 +558,13 @@ export function OverviewView({
                   </div>
                   {/* The raid's ants march over this org's card; the layer never takes clicks. */}
                   {raid && <RedAnts mode={isRaiding(raid) ? "raiding" : "waiting"} count={raid.swarm_size} />}
+                  <button
+                    type="button"
+                    onClick={() => setDashOrg(org.org)}
+                    className="cursor-pointer border-t border-border px-3.5 py-2 text-left font-mono text-[11px] text-accent hover:bg-panel-2"
+                  >
+                    dashboard →
+                  </button>
                 </section>
               );
             })}
