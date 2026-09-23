@@ -1136,6 +1136,23 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     {
         return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
     }
+    // A second mothership shares no memory with this one, so the local guard above cannot see its
+    // colonies: the issue itself carries the claim (see claims.rs). A failed lookup degrades to the
+    // local guard rather than refusing the launch.
+    if crate::claims::should_check_remote(req.issue, req.allow_duplicate)
+        && let Some(issue) = req.issue
+    {
+        let checked = crate::claims::check_remote_claim(&app, &repo, issue).await;
+        if let Err(e) = &checked {
+            eprintln!("claims: remote duplicate check for #{issue} in {repo} failed ({e:#}); falling back to the local guard");
+        }
+        if let Some(info) = crate::claims::remote_result_or_fallback(checked) {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                &crate::claims::remote_conflict_message(&info, issue),
+            ));
+        }
+    }
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
@@ -1271,6 +1288,13 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // Heard about by the append-only spend journal now, before the colony does anything else: the
     // `launched` edge has to survive the cleanup or delete that will forget this record.
     spend::record_launched(&app, owner).await;
+    // The launch claims the issue on GitHub itself, so a second mothership sees it: best effort in
+    // the background, never failing the launch.
+    if crate::claims::should_check_remote(session.issue, req.allow_duplicate)
+        && let Some(issue) = session.issue
+    {
+        crate::claims::spawn_publish(app.clone(), repo.clone(), issue, id.clone());
+    }
     if queued {
         if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
             app.session_log(
@@ -1336,6 +1360,10 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
         })
         .await;
         app.note_cleared_attention(&id, attention).await;
+        // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
+        if let Some(s) = app.session(&id).await {
+            crate::claims::spawn_release_if_needed(app.clone(), &s);
+        }
     }
 }
 
@@ -3371,6 +3399,34 @@ pub(crate) mod tests {
             let claimed = try_claim_session(&mut sessions, true, retry, "acme/repo", Some(7), false, false);
             assert!(claimed.is_ok(), "a retry after {} is admitted, not refused", status.as_str());
         }
+    }
+
+    #[test]
+    fn allow_duplicate_bypasses_the_hold_that_blocks_a_second_claim() {
+        // The holder here is still live, unlike the finished colonies above: without
+        // `allow_duplicate` the claim is refused with the holder handed back; passing
+        // `allow_duplicate: true` for the same issue is admitted anyway.
+        let mut sessions = vec![on_issue("first", 7, SessionStatus::Running)];
+
+        let mut blocked = colony("acme", SessionStatus::Starting);
+        blocked.id = "blocked".into();
+        blocked.issue = Some(7);
+        let refused = try_claim_session(&mut sessions, true, blocked, "acme/repo", Some(7), false, false);
+        assert!(
+            matches!(&refused, Err(held) if held.id == "first"),
+            "a live holder refuses a second claim without allow_duplicate"
+        );
+        assert_eq!(sessions.len(), 1, "the refused claim inserted nothing");
+
+        let mut second = colony("acme", SessionStatus::Starting);
+        second.id = "second".into();
+        second.issue = Some(7);
+        let admitted = try_claim_session(&mut sessions, true, second, "acme/repo", Some(7), true, false);
+        assert!(
+            admitted.is_ok(),
+            "allow_duplicate lets a second colony start on an issue another still holds"
+        );
+        assert_eq!(sessions.len(), 2, "the admitted duplicate is inserted alongside the holder");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

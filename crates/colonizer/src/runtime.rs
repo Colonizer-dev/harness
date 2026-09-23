@@ -377,8 +377,9 @@ pub async fn probe_host(app: &App) -> Host {
 }
 
 /// The host's name: `/proc/sys/kernel/hostname` on Linux, which needs no subprocess; a bounded
-/// `hostname` exec elsewhere. Trimmed to the name; a failure is `None`.
-async fn probe_hostname() -> Option<String> {
+/// `hostname` exec elsewhere. Trimmed to the name; a failure is `None`. Shared with the
+/// cross-mothership issue claims, which name the host in their comment.
+pub(crate) async fn probe_hostname() -> Option<String> {
     if std::env::consts::OS == "linux" {
         return read_proc("/proc/sys/kernel/hostname").map(|s| s.trim().to_string());
     }

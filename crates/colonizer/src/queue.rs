@@ -293,6 +293,9 @@ pub(crate) async fn start_queued(app: &Shared) {
                 spend::record_returned(app, &retired.org).await;
                 app.persist_and_broadcast(&retired).await;
                 app.session_log(&retired.id, "warn", message).await;
+                // Retired without ever booting: it frees the issue for a retry, on GitHub as well
+                // as locally, the same as a boot that fails after starting.
+                crate::claims::spawn_release_if_needed(app.clone(), &retired);
                 continue;
             }
             Some(Claim::Start(starting)) => {

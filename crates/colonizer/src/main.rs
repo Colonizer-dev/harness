@@ -11,6 +11,7 @@ mod auth;
 mod authority;
 mod autonomy;
 mod burn_down;
+mod claims;
 mod claude_accounts;
 mod claude_login;
 mod config;

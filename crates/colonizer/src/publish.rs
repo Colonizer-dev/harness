@@ -105,6 +105,11 @@ pub async fn publish_session(app: Shared, id: String) {
             })
             .await;
             app.note_cleared_attention(&id, attention).await;
+            // Failed without ever opening a pull request: it frees the issue for a retry, on
+            // GitHub as well as locally.
+            if let Some(fresh) = app.session(&id).await {
+                crate::claims::spawn_release_if_needed(app.clone(), &fresh);
+            }
         }
     }
 }
@@ -323,6 +328,13 @@ pub async fn watch_pull_requests(app: Shared) {
                             _ => "the pull request was reopened",
                         };
                         app.session_log(&s.id, "info", message.into()).await;
+                        // A pull request closed unmerged frees the issue for a retry, on GitHub as
+                        // well as locally.
+                        if target == SessionStatus::Closed
+                            && let Some(fresh) = app.session(&s.id).await
+                        {
+                            crate::claims::spawn_release_if_needed(app.clone(), &fresh);
+                        }
                         // A merge completes a stack, but GitHub only retargets a dependent pull
                         // request when its base branch is *deleted*, and nothing here ever deletes
                         // a branch — without this explicit call the children would point at a
