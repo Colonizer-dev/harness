@@ -33,6 +33,14 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Fixed
 
+- The cockpit's org list works as a switcher. The rail and the header menu both
+  have an **All workspaces** choice, and clicking the selected org again clears
+  the filter. The header menu opens settings for the selected org and lists
+  switched-off orgs, so you can turn them back on. A new **memory** rail item
+  shows how many proposals are waiting for review. Switching org keeps you on
+  history, launch or memory instead of jumping to the nest. A saved org that is
+  gone or switched off no longer filters the nest to nothing. The org list
+  scrolls on its own, and the header menu works from the keyboard. ([#411])
 - A mothership restart no longer forgets which providers are out of quota: the
   record and its reset time are kept in `provider-quota.json` beside
   `provider-usage.json`, so colonies parked on an exhausted quota stay parked
@@ -320,6 +328,7 @@ Macs. ([#74])
 [#276]: https://github.com/Colonizer-dev/harness/pull/276
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
 [#358]: https://github.com/Colonizer-dev/harness/issues/358
+[#411]: https://github.com/Colonizer-dev/harness/issues/411
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

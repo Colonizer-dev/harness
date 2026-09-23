@@ -14,6 +14,7 @@ import {
   matchesFilter,
   matchesOverviewFilter,
   needCountByOrg,
+  needFor,
   overviewCounts,
   overviewSessions,
 } from "./feed";
@@ -191,6 +192,16 @@ describe("needCountByOrg", () => {
   it("falls back to the repository owner when the mothership omits the org", () => {
     const counts = needCountByOrg([session({ id: "a", org: undefined, status: "waiting_for_answer" })]);
     expect(counts).toEqual({ acme: 1 });
+  });
+
+  it("keys by the lowercased org, so the /api/orgs spelling finds it (needFor)", () => {
+    const counts = needCountByOrg([
+      session({ id: "a", org: "Acme", status: "waiting_for_answer" }),
+      session({ id: "b", org: "acme", status: "waiting_for_answer" }),
+    ]);
+    expect(counts).toEqual({ acme: 2 });
+    expect(needFor(counts, "ACME")).toBe(2);
+    expect(needFor(counts, "other")).toBe(0);
   });
 
   it("is empty when nothing waits", () => {
