@@ -10,7 +10,9 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, 
 
 import { AntAvatar, type AntState } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
-import { SESSION_STATUS, type Tone, orgOf, sameOrg } from "../components/ui";
+import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg } from "../components/ui";
+import type { LiveConnection } from "../liveStream";
+import { formatCost, sessionCost } from "../spend";
 import { needsYou } from "../notifications";
 import { isActive, isRaiding } from "../redTeam";
 import type { SubagentView } from "../sessionStream";
@@ -20,6 +22,8 @@ import { AntBubble } from "./AntBubble";
 import { BUBBLE_TONE, colonySays, planAntBubbles, settlerSays } from "./bubbles";
 import { ChamberZoom, zoomReducer } from "./ChamberZoom";
 import { feedEntry } from "./feed";
+import { LiveCost } from "./Live";
+import { BUMP_MS, isBumped, isFlashed, useLiveEvents, type LiveEvent, type LiveEventKind, type LiveEvents } from "./liveEvents";
 import { RedAnts } from "./RedAnts";
 import {
   chamberCount,
@@ -127,6 +131,127 @@ export function planBalloons(anchors: BalloonAnchor[]): BalloonAnchor[] {
   return shown;
 }
 
+/** The dot beside each event in the live strip: needs-you in warn, outcomes in their own tone. */
+const EVENT_DOT: Record<LiveEventKind, string> = {
+  asked: "var(--warn)",
+  merged: "var(--ok)",
+  failed: "var(--err)",
+  pr: "var(--accent)",
+  started: "var(--accent)",
+  resumed: "var(--accent)",
+  stopped: "var(--faint)",
+  ended: "var(--faint)",
+  spent: "var(--muted)",
+};
+
+/** How many events the strip keeps on screen, newest first. */
+export const STRIP_LIMIT = 6;
+
+/**
+ * The nest's live strip (Cockpit Dashboards v3): what moved in this workspace while you watched,
+ * newest first. Every entry is a change actually observed between two session lists (liveEvents.ts);
+ * a click selects that colony's chamber. Empty until something moves — a page load is not news.
+ */
+export function NestLiveStrip({
+  events,
+  known,
+  onSelect,
+}: {
+  events: readonly LiveEvent[];
+  /** Ids still in the nest; an event whose colony has left it is shown but not clickable. */
+  known: ReadonlySet<string>;
+  onSelect: (id: string) => void;
+}): ReactElement {
+  const shown = events.slice(0, STRIP_LIMIT);
+  return (
+    <div
+      role="log"
+      aria-label="live events"
+      aria-live="polite"
+      className="nest-strip relative z-[5] flex min-h-[37px] items-center gap-x-5 overflow-hidden border-b border-border px-6 py-2 text-[12.5px] text-faint"
+    >
+      {shown.length === 0 ? (
+        <span>No changes yet — moves land here as they happen.</span>
+      ) : (
+        shown.map((event, i) => {
+          const body = (
+            <>
+              <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: EVENT_DOT[event.kind] }} />
+              <span className="truncate">{event.text}</span>
+            </>
+          );
+          const style = { opacity: Math.max(0.35, 1 - i * 0.15) };
+          return known.has(event.id) ? (
+            <button
+              key={`${event.id}-${event.at}-${event.kind}`}
+              type="button"
+              onClick={() => onSelect(event.id)}
+              title={event.text}
+              className={`nest-ev flex max-w-[260px] shrink-0 cursor-pointer items-center gap-2 whitespace-nowrap bg-transparent p-0 transition-colors hover:text-text ${i === 0 ? "text-text" : ""}`}
+              style={style}
+            >
+              {body}
+            </button>
+          ) : (
+            <span
+              key={`${event.id}-${event.at}-${event.kind}`}
+              title={event.text}
+              className={`nest-ev flex max-w-[260px] shrink-0 items-center gap-2 whitespace-nowrap ${i === 0 ? "text-text" : ""}`}
+              style={style}
+            >
+              {body}
+            </span>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+/** Pulsing green dot + "Live" while the stream is open, a still dot + "Reconnecting…" otherwise. */
+export function NestLiveDot({ connection = "connecting" }: { connection?: LiveConnection }): ReactElement {
+  const live = connection === "open";
+  return (
+    <span
+      role="status"
+      title={live ? "realtime updates from /api/stream" : "the stream dropped — polls cover until it reconnects"}
+      className="inline-flex items-center gap-2 whitespace-nowrap text-[13px] text-muted"
+    >
+      <span aria-hidden="true" className={live ? "nest-live-dot" : "h-[7px] w-[7px] rounded-full bg-faint"} />
+      {live ? "Live" : "Reconnecting…"}
+    </span>
+  );
+}
+
+/**
+ * How much each colony's measured cost rose on its last move, and when — the "+$0.04" that floats
+ * off a chamber. Only a rise actually observed between two lists counts; the first list is silent.
+ */
+function useCostRises(sessions: readonly Session[]): Readonly<Record<string, { delta: number; at: number }>> {
+  const last = useRef<Map<string, number> | null>(null);
+  const [rises, setRises] = useState<Record<string, { delta: number; at: number }>>({});
+  useEffect(() => {
+    const previous = last.current;
+    const next = new Map<string, number>();
+    const found: Record<string, { delta: number; at: number }> = {};
+    const at = Date.now();
+    for (const s of sessions) {
+      const cost = sessionCost(s);
+      if (cost == null) continue;
+      next.set(s.id, cost);
+      const was = previous?.get(s.id);
+      if (previous && cost > (was ?? 0) + 1e-9) found[s.id] = { delta: cost - (was ?? 0), at };
+    }
+    last.current = next;
+    if (Object.keys(found).length === 0) return;
+    setRises((current) => ({ ...current, ...found }));
+    // One more render once the float has run, so it leaves without waiting for the next push.
+    const timer = setTimeout(() => setRises((current) => ({ ...current })), BUMP_MS + 50);
+    return () => clearTimeout(timer);
+  }, [sessions]);
+  return rises;
+}
+
 export function NestView({
   sessions,
   capacity = null,
@@ -141,6 +266,8 @@ export function NestView({
   onOpen,
   onSelectMothership,
   onLaunch,
+  connection,
+  liveEvents,
 }: {
   /** Already filtered to the chosen org and sorted; the view takes the first chambers. */
   sessions: Session[];
@@ -166,6 +293,11 @@ export function NestView({
   onOpen: (id: string) => void;
   onSelectMothership: () => void;
   onLaunch: () => void;
+  /** The realtime feed's connection (issue #446); absent reads as reconnecting. */
+  connection?: LiveConnection;
+  /** What moved, for the strip and the flashes. Derived from `sessions` in production; the tests
+   *  pin it here because static markup never runs the effect that derives it. */
+  liveEvents?: LiveEvents;
 }): ReactElement {
   const plotRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<NestBox>(() => normalizeBox(0, 0));
@@ -186,6 +318,11 @@ export function NestView({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  const derived = useLiveEvents(sessions);
+  const events = liveEvents ?? derived;
+  const costRises = useCostRises(sessions);
+  const now = Date.now();
 
   const count = chamberCount(capacity);
   const chambers = sessions.slice(0, count);
@@ -219,6 +356,17 @@ export function NestView({
   const queued = sessions.filter((s) => s.status === "queued").slice(0, 2);
   const waiting = sessions.filter(needsYou);
   const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
+  const liveCount = sessions.filter((s) => isLive(s.status)).length;
+  const queuedCount = sessions.filter((s) => s.status === "queued").length;
+  const known = new Set(sessions.map((s) => s.id));
+  const meta = [
+    `${waiting.length} need you`,
+    `${liveCount} live`,
+    `${queuedCount} queued`,
+    capacity != null ? `capacity ${liveCount}/${capacity}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const placed = chambers.map((session, index) => {
     const slot = slotAt(index, box, count);
@@ -267,7 +415,24 @@ export function NestView({
   const zoomPlaced = zoomSession ? placed.find((p) => p.session.id === zoomSession.id) : null;
 
   return (
-    <div className="cockpit nest relative grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
+    <div className="cockpit nest nest-v3 relative grid min-h-0 flex-1 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden">
+      <div className="relative z-[5] flex flex-wrap items-end justify-between gap-x-6 gap-y-3 px-6 pb-5 pt-7">
+        <div className="min-w-0">
+          <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em] text-text">Nest</h1>
+          <div className="mt-2 text-[14px] text-muted tabular-nums">{meta}</div>
+        </div>
+        <div className="flex items-center gap-4">
+          <NestLiveDot connection={connection} />
+          <button
+            type="button"
+            onClick={onLaunch}
+            className="cursor-pointer rounded-md bg-text px-3 py-1.5 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+          >
+            Launch a colony
+          </button>
+        </div>
+      </div>
+      <NestLiveStrip events={events.recent} known={known} onSelect={onSelect} />
       {/* The dotted ground, fading out before it reaches the strip. */}
       <div
         aria-hidden="true"
@@ -277,7 +442,7 @@ export function NestView({
       <div
         aria-hidden="true"
         className="pointer-events-none absolute left-1/2 top-[8%] h-[620px] w-[620px] -translate-x-1/2 -translate-y-1/2 blur-[30px]"
-        style={{ background: "radial-gradient(circle, var(--accent-soft), transparent 62%)" }}
+        style={{ background: "radial-gradient(circle, var(--halo, var(--accent-soft)), transparent 62%)" }}
       />
 
       <div ref={plotRef} className="relative min-h-0 overflow-hidden">
@@ -364,7 +529,10 @@ export function NestView({
                     strokeLinecap="round"
                     strokeDasharray={busy ? "3 6" : "2 7"}
                     opacity={hot ? 0.7 : 0.35}
-                    style={{ animation: busy && !digging ? "ck-flow 1.6s linear infinite" : undefined }}
+                    style={{
+                      animation: busy && !digging ? "ck-flow 1.6s linear infinite" : undefined,
+                      transition: "stroke 600ms ease, opacity 600ms ease",
+                    }}
                   />
                   {/* A fat transparent copy so the tunnel itself is a target, not just the chamber. */}
                   <path
@@ -511,6 +679,9 @@ export function NestView({
             const status = SESSION_STATUS[session.status];
             // Only the open colony has real settlers; every other chamber shows the colony itself.
             const ants = selected && settlers.length > 0 ? settlers.slice(0, 3) : null;
+            const flashed = isFlashed(events, session.id, now);
+            const bumped = isBumped(events, session.id, now) || now - (costRises[session.id]?.at ?? 0) < BUMP_MS;
+            const cost = sessionCost(session);
             return (
               <button
                 key={session.id}
@@ -519,7 +690,8 @@ export function NestView({
                 onDoubleClick={() => openColony(session.id)}
                 title={`${session.repo}#${session.issue ?? ""} · ${session.issue_title || status?.label}`}
                 aria-label={`${session.repo} ${session.issue != null ? `#${session.issue}` : ""}, ${status?.label ?? ""}`}
-                className="absolute flex cursor-pointer flex-col items-center justify-center gap-[3px] overflow-hidden border-[1.5px] p-1.5 text-center transition-[transform,box-shadow] duration-300"
+                data-flash={flashed || undefined}
+                className={`absolute flex cursor-pointer flex-col items-center justify-center gap-[3px] overflow-hidden border p-1.5 text-center transition-[transform,box-shadow,border-color] duration-500 ${flashed ? "nest-flash" : ""}`}
                 style={{
                   left: slot.x - slot.r,
                   top: slot.y - slot.r,
@@ -529,14 +701,20 @@ export function NestView({
                   borderColor: edge,
                   background: "radial-gradient(120% 120% at 30% 20%, var(--panel-2), var(--plot))",
                   transform: selected ? "scale(1.06)" : undefined,
+                  // Flatter than before (v3): a hairline edge, a soft glow only while the colony is hot.
                   boxShadow: selected
-                    ? `0 0 0 2px ${edge}, 0 0 46px color-mix(in oklab, ${edge} 40%, transparent)`
+                    ? `0 0 0 1.5px ${edge}, 0 0 36px color-mix(in oklab, ${edge} 32%, transparent)`
                     : hot
-                      ? `0 0 34px color-mix(in oklab, ${edge} 28%, transparent), inset 0 -14px 26px rgb(0 0 0 / 0.18)`
-                      : "inset 0 -14px 26px rgb(0 0 0 / 0.14)",
+                      ? `0 0 26px color-mix(in oklab, ${edge} 20%, transparent)`
+                      : "none",
+                  ["--flash" as string]: edge,
                   // No fill mode: an animation that held its last frame would keep owning `transform`
                   // and the selection scale would never get to transition.
-                  animation: "ck-grow 0.7s cubic-bezier(.2,.9,.3,1.15)",
+                  // The flash joins the list rather than replacing it: ck-grow keeps its finished
+                  // state, and the reduced-motion rule on .nest-flash still wins (it is !important).
+                  animation: flashed
+                    ? "ck-grow 0.7s cubic-bezier(.2,.9,.3,1.15), nest-flash 1.8s ease-out"
+                    : "ck-grow 0.7s cubic-bezier(.2,.9,.3,1.15)",
                 }}
               >
                 {/* Below ~112px the chamber only has room for the label, the status and the ants. */}
@@ -546,9 +724,16 @@ export function NestView({
                 <span className="max-w-full truncate font-mono text-[11px] font-medium text-text">
                   {chamberLabel(session, diameter)}
                 </span>
-                <span className="font-mono text-[10px] tracking-[0.08em]" style={{ color: edge }}>
+                <span className="text-[11px] transition-colors duration-500" style={{ color: edge }}>
                   {status?.label ?? ""}
                 </span>
+                {diameter >= 112 && cost != null && (
+                  <span
+                    className={`font-mono text-[10.5px] tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-faint"}`}
+                  >
+                    <LiveCost value={cost} />
+                  </span>
+                )}
                 <span className="flex h-[22px] items-end gap-px">
                   {ants
                     ? ants.map((settler, k) => (
@@ -579,7 +764,7 @@ export function NestView({
               <span
                 key={`balloon-${session.id}`}
                 title={text}
-                className="absolute -translate-x-1/2 -translate-y-full truncate rounded-full border bg-panel px-2 py-0.5 font-mono text-[10px] text-muted"
+                className="nest-glass absolute -translate-x-1/2 -translate-y-full truncate rounded-full border px-2 py-0.5 font-mono text-[10.5px] text-muted"
                 style={{ left: slot.x, top: slot.y - slot.r - 6, maxWidth: diameter, borderColor: edge }}
               >
                 <span
@@ -590,6 +775,20 @@ export function NestView({
                 {text}
               </span>
             ))}
+            {/* A risen cost floats off its chamber for a moment — only a rise actually observed. */}
+            {placed.map(({ session, slot }) => {
+              const rise = costRises[session.id];
+              if (!rise || now - rise.at >= BUMP_MS) return null;
+              return (
+                <span
+                  key={`rise-${session.id}-${rise.at}`}
+                  className="nest-float absolute -translate-x-1/2 font-mono text-[11px] font-medium text-accent tabular-nums"
+                  style={{ left: slot.x + slot.r * 0.55, top: slot.y - slot.r * 0.55 }}
+                >
+                  +{formatCost(rise.delta)}
+                </span>
+              );
+            })}
           </div>
 
           {freeSlot && (
@@ -641,26 +840,34 @@ export function NestView({
       </div>
 
       {waiting.length > 0 && (
-        <div className="relative flex flex-wrap gap-2.5 px-5 pb-4.5">
-          {waiting.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              // Selecting fills the inspector with the question; the pane then offers the way in.
-              onClick={() => onSelect(session.id)}
-              className="flex max-w-[520px] cursor-pointer items-center gap-3 rounded-xl border border-border bg-panel py-2.5 pl-3.5 pr-3 text-left transition-colors hover:border-warn"
-            >
-              <span
-                aria-hidden="true"
-                className="h-2 w-2 shrink-0 rounded-full bg-warn"
-                style={{ animation: "ck-beacon 1.8s ease-out infinite" }}
-              />
-              <span className="shrink-0 font-mono text-[11.5px] text-muted">{chamberLabel(session, 112)}</span>
-              <span className="min-w-0 truncate">{session.issue_title || "waiting on your answer"}</span>
-              <span className="shrink-0 text-[12.5px] font-semibold text-accent">answer →</span>
-            </button>
-          ))}
-        </div>
+        <section aria-label="needs you" className="relative z-[5] px-6 pb-4">
+          <div className="mb-2 flex items-baseline gap-2.5">
+            <h2 className="m-0 text-[14px] font-medium text-text">Needs you</h2>
+            <span className="text-[13px] text-faint">{waiting.length} waiting</span>
+          </div>
+          <div className="max-h-[168px] overflow-y-auto border-y border-border scroll-thin">
+            {waiting.map((session) => (
+              <button
+                key={session.id}
+                type="button"
+                // Selecting fills the inspector with the question; the pane then offers the way in.
+                onClick={() => onSelect(session.id)}
+                className={`-mt-px grid w-full cursor-pointer grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3.5 border-t border-border bg-transparent py-2.5 text-left transition-colors hover:bg-panel-2 ${isFlashed(events, session.id, now) ? "nest-row-flash" : ""}`}
+              >
+                <span
+                  aria-hidden="true"
+                  className="h-[7px] w-[7px] shrink-0 rounded-full bg-warn"
+                  style={{ animation: "ck-beacon 1.8s ease-out infinite" }}
+                />
+                <span className="min-w-0 truncate text-[14px]">
+                  {session.issue_title || "waiting on your answer"}{" "}
+                  <span className="font-mono text-[12px] text-faint">{chamberLabel(session, 112)}</span>
+                </span>
+                <span className="shrink-0 rounded-md bg-text px-3 py-1 text-[13px] font-medium text-bg">answer →</span>
+              </button>
+            ))}
+          </div>
+        </section>
       )}
     </div>
   );

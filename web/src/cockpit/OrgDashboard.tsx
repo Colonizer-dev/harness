@@ -1,19 +1,20 @@
-// Per-org dashboard (issue #398): the Claude Design "Cockpit Dashboards" org render, backed
-// only by real data — Session (statuses, created_at, cost, repo), /api/spend/history (per-org
-// per-day launched/returned/cost/models) and optional cumulative provider tallies. Anything
-// without a source (lead time, PR cycle time, CI pass/CI-green, coverage, time to recover, per-day
-// latency, lead-time histogram) renders an honest empty state in the same shape, never a guess.
-import { useState, type ReactElement } from "react";
+// Per-org dashboard (issue #398), in the Cockpit Dashboards v3 layout: back link, title and meta,
+// repository pill tabs, the KPI strip, colony outcomes beside the delivery funnel, spend by model
+// beside the token mix, the repositories table and the org's colonies. Backed only by real data —
+// Session (statuses, created_at, cost, repo), /api/spend/history (per-org per-day
+// launched/returned/cost/models) and optional cumulative provider tallies. Anything without a
+// source (lead time, PR cycle time, CI pass/CI-green, coverage, time to recover, per-day latency,
+// lead-time histogram) is named as unmeasured once, never guessed.
+import { useState, type ReactElement, type ReactNode } from "react";
 
-import { Avatar, initialOf } from "../components/Avatar";
-import { SESSION_STATUS, sameOrg, timeAgo, type Tone } from "../components/ui";
+import { sameOrg, timeAgo } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
-import { formatCost, formatTokens, modelMix, orgCost, sessionCost } from "../spend";
+import { formatCost, formatTokens, modelMix, orgCost } from "../spend";
 import type { Session, SpendHistory } from "../types";
 import type { LiveConnection } from "../liveStream";
-import { DashBars, DashLegend, DashLine, DashPanel, FilterChip, KpiTile, ShareBar, type KpiDef } from "./DashChart";
-import { LiveCost, LiveIndicator } from "./Live";
+import { AreaChart, ChartSection, ColonyRow, DashLegend, KpiStrip, OrgTile, PillTab, Rules, Section, type KpiDef } from "./DashChart";
+import { isBumped, isFlashed, type LiveEvents } from "./liveEvents";
 import {
   changeFailRate,
   costPerMerged,
@@ -28,7 +29,6 @@ import {
   funnelFor,
   mergedAtOf,
   modelColorFor,
-  orgColorFor,
   relDelta,
   repoRows,
   shortDayLabel,
@@ -36,7 +36,6 @@ import {
   sparkPoints,
   sumHistoryCost,
   sumTokens,
-  TONE_VAR,
   type ProviderErrorSnapshot,
   type RangeDays,
 } from "./dash";
@@ -91,7 +90,9 @@ export function OrgDashboard({
   onBack,
   providers = [],
   initialRepo = null,
-  connection,
+  toolbar,
+  events,
+  onOpenColony,
 }: {
   org: OrgEntry;
   /** This org's visible sessions (already filtered by the caller). */
@@ -106,8 +107,13 @@ export function OrgDashboard({
   /** The repo filter to start on. Null in production — the tests pin the filtered state through
    *  it because static markup cannot click. */
   initialRepo?: string | null;
-  /** The realtime feed's connection (issue #446); absent renders the indicator as reconnecting. */
+  /** The realtime feed's connection (issue #446); the header shows it now, so this is unread. */
   connection?: LiveConnection;
+  /** The range/compare toolbar, which the caller owns; drawn at the title row's right. */
+  toolbar?: ReactNode;
+  /** What moved since the last push, for the colonies' row flash and cost highlight. */
+  events?: LiveEvents;
+  onOpenColony?: (id: string) => void;
 }): ReactElement {
   // The repository filter scopes the whole dashboard below the header: every session-backed
   // figure reads `scoped`. Spend history is per org per day, so it — and the ghost line drawn
@@ -155,43 +161,46 @@ export function OrgDashboard({
   const totalFail = providers.reduce((n, p) => n + p.failures, 0);
   const errRate = totalReq > 0 ? totalFail / totalReq : null;
   const since = providers.map((p) => p.since).find((s) => s != null)?.slice(0, 10) ?? null;
+  // The API error rate is cumulative, not range-bound, so it rides in the strip's footnote as a
+  // snapshot rather than sitting among the ranged tiles (the v3 placement).
+  const errNote =
+    errRate != null
+      ? `API error rate ${(errRate * 100).toFixed(2)}% of ${formatTokens(totalReq)} calls${since ? ` since ${since}` : ""} (cumulative)`
+      : "API error rate: no data source yet";
   const kpis: KpiDef[] = [
     {
-      label: "MERGED PRS",
+      label: "Merged PRs",
       value: String(merged),
       delta: mergedDelta != null ? formatDelta(mergedDelta) : undefined,
       deltaTone: deltaTone(mergedDelta),
-      deltaDir: (mergedDelta ?? 0) < 0 ? "down" : "up",
       spark: mergedDaily.length > 0 ? sparkPoints(mergedDaily) : undefined,
       sub: scoped.length > 0 ? `${Math.round((merged / scoped.length) * 100)}% of ${scoped.length} ${scoped.length === 1 ? "colony" : "colonies"}` : "no colonies in scope",
       hint: "sessions with status merged, GET /api/sessions — the delta reads merged in range vs the previous period (bucketed by merge date, falling back to created_at)",
     },
-    { label: "LEAD TIME", value: "—", emptyNote: "no data source yet", hint: "needs issue-picked-up → PR-opened timestamps; the API serves none" },
-    { label: "PR CYCLE TIME", value: "—", emptyNote: "no data source yet", hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
+    { label: "Lead time", value: "—", unmeasured: true, hint: "needs issue-picked-up → PR-opened timestamps; the API serves none" },
+    { label: "PR cycle time", value: "—", unmeasured: true, hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
     {
-      label: "CHANGE FAILURE RATE",
+      label: "Change failure rate",
       ...(scoped.length > 0
         ? {
             value: `${((failed / scoped.length) * 100).toFixed(1)}%`,
             delta: failDelta != null ? formatPts(failDelta) : undefined,
             deltaTone: deltaTone(failDelta, "down"),
-            deltaDir: (failDelta ?? 0) < 0 ? "down" : "up",
             spark: days.length > 0 ? sparkPoints(dailyFailRate(scoped, days)) : undefined,
             sub: `${failed} failed of ${scoped.length}`,
           }
         : { value: "—", emptyNote: "no colonies in scope" }),
       hint: "failed sessions ÷ colonies in scope, GET /api/sessions — the spark and delta read the in-range window (merged by merge day, failed by created day)",
     },
-    { label: "TIME TO RECOVER", value: "—", emptyNote: "no data source yet", hint: "needs failure → recovery timestamps; the API serves none" },
-    { label: "CI PASS RATE", value: "—", emptyNote: "no data source yet", hint: "the API serves no CI results" },
+    { label: "Time to recover", value: "—", unmeasured: true, hint: "needs failure → recovery timestamps; the API serves none" },
+    { label: "CI pass rate", value: "—", unmeasured: true, hint: "the API serves no CI results" },
     {
-      label: "COST PER MERGED PR",
+      label: "Cost per merged PR",
       ...(merged > 0
         ? {
             value: formatCost(cpp),
             delta: cppDelta != null ? formatDelta(cppDelta) : undefined,
             deltaTone: deltaTone(cppDelta, "down"),
-            deltaDir: (cppDelta ?? 0) < 0 ? "down" : "up",
             spark: days.length > 0 ? sparkPoints(cppDaily) : undefined,
             sub: `${merged} merged`,
           }
@@ -199,12 +208,17 @@ export function OrgDashboard({
       hint: "org spend rollup ÷ merged sessions, GET /api/orgs + GET /api/sessions — the delta reads period spend ÷ merged in range vs the previous period",
     },
     {
-      label: "API ERROR RATE",
-      ...(errRate != null
-        ? { value: `${(errRate * 100).toFixed(2)}%`, sub: `${formatTokens(totalReq)} calls${since ? ` · since ${since}` : ""}` }
-        : { value: "—", emptyNote: "no data source yet" }),
-      hint: "cumulative provider failures ÷ requests, GET /api/status model_providers (not range-bound)",
+      label: "Spend",
+      value: formatCost(periodSpend),
+      valueNum: periodSpend ?? undefined,
+      formatNum: (n) => formatCost(n),
+      delta: compare && previous.length > 0 && relDelta(periodSpend, prevSpend) != null ? formatDelta(relDelta(periodSpend, prevSpend)) : undefined,
+      deltaTone: deltaTone(compare ? relDelta(periodSpend, prevSpend) : null, "down"),
+      spark: days.length > 0 ? sparkPoints(current.map((d) => dayCost(d, org.org))) : undefined,
+      sub: `${formatTokens(sumTokens(current, org.org))} tokens`,
+      hint: "measured spend in range, GET /api/spend/history",
     },
+    { label: "Coverage", value: "—", unmeasured: true, hint: "the API serves no coverage" },
   ];
 
   // --- Colony outcomes per day: sessions bucketed by merge day when merged, by launch
@@ -270,302 +284,168 @@ export function OrgDashboard({
   const mixTotal = mix.shown.reduce((n, m) => n + m.tokens, 0);
 
   const colonies = sortSessions(scoped);
+  const nowMs = Date.now();
+  const labels = days.map(shortDayLabel);
+  const pctOf = (v: number) => (funnel.launched > 0 ? `${Math.round((v / funnel.launched) * 100)}%` : "");
+  const shareOf = (v: number) => (funnel.launched > 0 ? (v / funnel.launched) * 100 : 0);
+  const pickRepo = (r: string) => setRepo((cur) => (cur !== null && sameOrg(cur, r) ? null : r));
 
   return (
-    <div className="flex flex-col gap-5">
-      <div>
-        <button type="button" onClick={onBack} className="cursor-pointer font-mono text-[11.5px] text-accent hover:underline">
-          ← overview
-        </button>
-        <div className="mt-2 flex items-center gap-3">
-          {org.avatar ? (
-            <Avatar name={org.org} src={org.avatar} size={44} rounded="xl" />
-          ) : (
-            <span
-              aria-hidden="true"
-              className="grid h-[44px] w-[44px] shrink-0 select-none place-items-center rounded-xl text-[18px] font-bold leading-none"
-              style={{ background: orgColorFor(org.org), color: "var(--term-bg)" }}
-            >
-              {initialOf(org.org)}
-            </span>
-          )}
-          <div className="min-w-0">
-            <div className="mb-1 flex items-center gap-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">
-              <span>ORG DASHBOARD</span>
-              <LiveIndicator connection={connection} />
-            </div>
-            <div className="truncate text-[22px] font-semibold tracking-tight">{org.org}</div>
-            <div className="font-mono text-[11.5px] text-muted">
-              {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
-            </div>
+    <div className="flex flex-col gap-10">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="min-w-0">
+          <button type="button" onClick={onBack} className="mb-3 cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
+            ← All workspaces
+          </button>
+          <h1 className="m-0 flex items-center gap-3 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
+            <OrgTile org={org.org} avatar={org.avatar} size={28} />
+            <span className="truncate">{org.org}</span>
+          </h1>
+          <div className="mt-2 text-[14px] text-muted">
+            {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
+            {repo ? ` · filtered to ${shortRepo(repo)}` : ""}
           </div>
         </div>
+        {toolbar}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-1.5 font-mono text-[10.5px] tracking-[0.12em] text-faint">REPOSITORY</span>
-        <FilterChip active={repo === null} count={sessions.length} label="All" title="Show every repository" onClick={() => setRepo(null)} />
+      <div role="group" aria-label="Repository" className="-mt-4 flex flex-wrap gap-1.5">
+        <PillTab active={repo === null} label="all" count={sessions.length} title="Show every repository" onClick={() => setRepo(null)} />
         {repos.map((r) => (
-          <FilterChip
-            key={r.repo}
-            active={repo !== null && sameOrg(repo, r.repo)}
-            count={r.colonies}
-            label={shortRepo(r.repo)}
-            title={r.repo}
-            onClick={() => setRepo((cur) => (cur !== null && sameOrg(cur, r.repo) ? null : r.repo))}
-          />
+          <PillTab key={r.repo} active={repo !== null && sameOrg(repo, r.repo)} label={shortRepo(r.repo)} count={r.colonies} title={r.repo} onClick={() => pickRepo(r.repo)} />
         ))}
       </div>
 
-      <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(200px,1fr))]">
-        {kpis.map((k) => (
-          <KpiTile key={k.label} {...k} />
-        ))}
-      </div>
+      <KpiStrip items={kpis} note={errNote} />
 
-      <div className="flex flex-wrap gap-3.5">
-        <DashPanel title="COLONY OUTCOMES PER DAY" sub={outcomeSub} legend={<DashLegend items={[...OUTCOMES]} />} className="flex-[2_1_480px]">
-          <DashBars
-            series={outcomeSeries}
-            labels={days}
-            ghost={ghost}
-            format={(v) => String(Math.round(v))}
-            formatY={(v) => String(Math.round(v))}
-            xLabels={days.map(shortDayLabel)}
+      <ChartSection
+        title="Colony outcomes"
+        legend={<DashLegend items={[...OUTCOMES, ...(ghost ? [{ label: `launches, prev ${range}d`, color: "transparent", dashed: true }] : [])]} />}
+        chart={<AreaChart series={outcomeSeries} labels={labels} ghost={ghost} format={(v) => String(Math.round(v))} readTitle={`Last ${range} days`} />}
+        foot={outcomeSub}
+        sideTitle="Delivery funnel"
+        side={[
+          { label: "Colonies launched", value: funnel.launched, note: pctOf(funnel.launched), share: shareOf(funnel.launched), color: "var(--out-stopped)" },
+          { label: "PR opened", value: funnel.prOpened, note: pctOf(funnel.prOpened), share: shareOf(funnel.prOpened), color: "var(--out-pr)" },
+          { label: "CI green", value: "—", note: "no data source yet", share: 0, color: "var(--panel-3)", title: "the API serves no CI results" },
+          { label: "Merged", value: funnel.merged, note: pctOf(funnel.merged), share: shareOf(funnel.merged), color: "var(--out-merged)" },
+        ]}
+        sideFoot={funnelNote}
+      />
+
+      <ChartSection
+        title="Spend by model"
+        legend={topModels.length > 0 ? <DashLegend items={topModels.map((m) => ({ label: m.split("/").pop() ?? m, color: modelColorFor(m) }))} /> : undefined}
+        chart={
+          <AreaChart
+            series={topModels.map((model) => ({ label: model.split("/").pop() ?? model, color: modelColorFor(model), values: days.map((d) => costByDay.get(d)?.get(model) ?? 0) }))}
+            labels={labels}
+            ghost={spendGhost}
+            format={(v) => formatCost(v)}
+            formatY={(v) => (v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${Math.round(v)}`)}
+            readTitle={`Last ${range} days`}
+            emptyNote="no model spend in range"
           />
-        </DashPanel>
-        <DashPanel title="DELIVERY FUNNEL" sub="From issue picked up to PR merged" className="flex flex-[1_1_300px] flex-col gap-3.5">
-          {(
-            [
-              { label: "Colonies launched", value: funnel.launched, color: "var(--out-stopped)" },
-              { label: "PR opened", value: funnel.prOpened, color: "var(--out-pr)" },
-            ] as const
-          ).map((step) => (
-            <div key={step.label} className="flex flex-col gap-1.5">
-              <div className="flex items-baseline justify-between gap-2 text-[13px]">
-                <span>{step.label}</span>
-                <span className="font-mono text-xs tabular-nums">
-                  {step.value} <span className="text-faint">{funnel.launched > 0 ? `${Math.round((step.value / funnel.launched) * 100)}%` : ""}</span>
-                </span>
-              </div>
-              <div className="h-2.5 overflow-hidden rounded-full bg-panel-3">
-                <div className="h-full rounded-full" style={{ width: `${funnel.launched > 0 ? (step.value / funnel.launched) * 100 : 0}%`, background: step.color }} />
-              </div>
-            </div>
-          ))}
-          <div className="flex flex-col gap-1.5" title="the API serves no CI results">
-            <div className="flex items-baseline justify-between gap-2 text-[13px]">
-              <span>CI green</span>
-              <span className="font-mono text-xs tabular-nums">—</span>
-            </div>
-            <div className="h-2.5 overflow-hidden rounded-full bg-panel-3" />
-            <div className="font-mono text-[11px] text-faint">no data source yet</div>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-baseline justify-between gap-2 text-[13px]">
-              <span>Merged</span>
-              <span className="font-mono text-xs tabular-nums">
-                {funnel.merged} <span className="text-faint">{funnel.launched > 0 ? `${Math.round((funnel.merged / funnel.launched) * 100)}%` : ""}</span>
-              </span>
-            </div>
-            <div className="h-2.5 overflow-hidden rounded-full bg-panel-3">
-              <div className="h-full rounded-full" style={{ width: `${funnel.launched > 0 ? (funnel.merged / funnel.launched) * 100 : 0}%`, background: "var(--out-merged)" }} />
-            </div>
-          </div>
-          <div className="mt-auto border-t border-border pt-3 font-mono text-[11px] text-faint">{funnelNote}</div>
-        </DashPanel>
-      </div>
+        }
+        foot={`${spendSub} · ${latCaption}`}
+        sideTitle="Token mix"
+        side={mix.shown.map((m) => ({
+          label: m.model,
+          value: formatTokens(m.tokens),
+          note: mixTotal > 0 ? `${Math.round((m.tokens / mixTotal) * 100)}%` : "—",
+          share: mixTotal > 0 ? (m.tokens / mixTotal) * 100 : 0,
+          color: modelColorFor(m.model),
+          title: `${m.model} · ${formatCost(costByModel.get(m.model) ?? null)}`,
+        }))}
+        sideFoot={
+          mix.shown.length > 0
+            ? `${spendTokens != null ? `${formatTokens(spendTokens)} tokens · ` : ""}${formatCost(rollup ?? periodSpend)} · org total${mix.more > 0 ? ` · +${mix.more} more` : ""}`
+            : "no measured usage"
+        }
+      />
 
-      <div className="flex flex-wrap gap-3.5">
-        <DashPanel
-          title="SPEND PER DAY · BY MODEL"
-          sub={spendSub}
-          legend={topModels.length > 0 ? <DashLegend items={topModels.map((m) => ({ label: m.split("/").pop() ?? m, color: modelColorFor(m) }))} /> : undefined}
-          className="flex-[2_1_480px]"
-        >
-          {topModels.length > 0 ? (
-            <DashBars
-              series={topModels.map((model) => ({ label: model.split("/").pop() ?? model, color: modelColorFor(model), values: days.map((d) => costByDay.get(d)?.get(model) ?? 0) }))}
-              labels={days}
-              ghost={spendGhost}
-              format={(v) => formatCost(v)}
-              formatY={(v) => `$${Math.round(v)}`}
-              xLabels={days.map(shortDayLabel)}
-            />
+      <Section title="Repositories" meta={`${range}d · Click a row to filter the dashboard`}>
+        <Rules>
+          {repos.length === 0 ? (
+            <div className="py-3.5 text-[13px] text-faint">No colonies right now.</div>
           ) : (
-            <div className="py-6 text-center font-mono text-[11px] text-faint">no model spend in range</div>
-          )}
-        </DashPanel>
-        <DashPanel
-          title="MODEL API LATENCY"
-          sub={latCaption}
-          legend={<DashLegend items={[{ label: "p50", color: "var(--lat-p50)" }, { label: "p95", color: "var(--lat-p95)" }]} />}
-          className="flex-[1_1_300px]"
-        >
-          <DashLine
-            series={[
-              { label: "p50", color: "var(--lat-p50)", values: days.map(() => null), fill: true },
-              { label: "p95", color: "var(--lat-p95)", values: days.map(() => null), fill: true },
-            ]}
-            labels={days}
-            format={(v) => formatLatency(v)}
-            formatY={(v) => formatLatency(v)}
-            xLabels={days.map(shortDayLabel)}
-          />
-        </DashPanel>
-      </div>
-
-      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))]">
-        <DashPanel title="LEAD TIME DISTRIBUTION" sub="Issue picked up → PR opened">
-          <div className="grid grid-cols-6 gap-2" aria-hidden="true">
-            {["<15m", "15–30m", "30–60m", "1–2h", "2–4h", "4h+"].map((label) => (
-              <div key={label} className="text-center font-mono text-[10.5px] text-faint">
-                {label}
-              </div>
-            ))}
-          </div>
-          <div className="py-8 text-center font-mono text-[11px] text-faint">no data source yet · no pickup or PR-opened timestamps in the API</div>
-        </DashPanel>
-        <DashPanel
-          title="TOKEN USAGE · MODEL MIX"
-          sub={
-            spendTokens != null
-              ? `${formatTokens(spendTokens)} tokens · ${formatCost(rollup ?? periodSpend)} · org total`
-              : "no measured usage"
-          }
-        >
-          {mix.shown.length > 0 ? (
-            <div className="flex flex-col gap-2.5">
-              <ShareBar
-                segments={mix.shown.map((m) => ({ label: m.model, color: modelColorFor(m.model), value: m.tokens }))}
-                format={(v) => `${formatTokens(v)} tokens`}
-                label="token usage by model"
-              />
-              {mix.shown.map((m) => (
-                <div key={m.model} className="grid grid-cols-[minmax(0,1fr)_64px_64px_44px] items-center gap-2.5 text-[12.5px]">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: modelColorFor(m.model) }} />
-                    <span title={m.model} className="truncate font-mono text-[11.5px]">
-                      {m.model}
-                    </span>
-                  </span>
-                  <span className="text-right font-mono text-[11.5px] text-muted">{formatTokens(m.tokens)}</span>
-                  <span className="text-right font-mono text-[11.5px]">{formatCost(costByModel.get(m.model) ?? null)}</span>
-                  <span className="text-right font-mono text-[11.5px] text-faint">{mixTotal > 0 ? `${Math.round((m.tokens / mixTotal) * 100)}%` : "—"}</span>
+            <div className="overflow-x-auto">
+              <div className="min-w-[640px]">
+                <div className={`${REPO_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
+                  <span>Repository</span>
+                  <span className="text-right">Colonies</span>
+                  <span>Merge rate</span>
+                  <span className="text-right">Fail</span>
+                  <span className="text-right">Spend</span>
+                  <span className="text-right">$ / PR</span>
                 </div>
-              ))}
-              {mix.more > 0 && <div className="font-mono text-[11px] text-faint">+{mix.more} more</div>}
-            </div>
-          ) : (
-            <div className="py-8 text-center font-mono text-[11px] text-faint">no data source yet</div>
-          )}
-        </DashPanel>
-      </div>
-
-      <section className="overflow-hidden rounded-2xl border border-border bg-panel">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-4 py-3.5">
-          <span className="font-mono text-[10.5px] tracking-[0.12em] text-faint">REPOSITORIES · {range}d</span>
-          <span className="text-xs text-faint">Click a row to filter the dashboard</span>
-        </div>
-        {repos.length === 0 ? (
-          <div className="px-4 py-3.5 text-[13px] text-faint">No colonies right now.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[860px] border-collapse text-[13px] tabular-nums">
-              <thead>
-                <tr className="border-b border-border font-mono text-[10px] tracking-[0.08em] text-faint">
-                  <th className="px-4 py-2 text-left font-medium">REPO</th>
-                  <th className="px-4 py-2 text-right font-medium">COLONIES</th>
-                  <th className="px-4 py-2 text-left font-medium">MERGE RATE</th>
-                  <th className="px-4 py-2 text-right font-medium">LEAD TIME</th>
-                  <th className="px-4 py-2 text-right font-medium">PR CYCLE</th>
-                  <th className="px-4 py-2 text-right font-medium">CI PASS</th>
-                  <th className="px-4 py-2 text-right font-medium">COVERAGE</th>
-                  <th className="px-4 py-2 text-right font-medium">SPEND</th>
-                  <th className="px-4 py-2 text-right font-medium">$/PR</th>
-                </tr>
-              </thead>
-              <tbody>
                 {repos.map((r) => {
                   const active = repo !== null && sameOrg(repo, r.repo);
+                  const mine = sessions.filter((s) => sameOrg(s.repo, r.repo));
+                  const failedHere = mine.filter((s) => s.status === "failed").length;
+                  const decided = failedHere + r.merged;
+                  const fr = decided > 0 ? failedHere / decided : null;
                   return (
-                    <tr
+                    <button
                       key={r.repo}
-                      onClick={() => setRepo((cur) => (cur !== null && sameOrg(cur, r.repo) ? null : r.repo))}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => pickRepo(r.repo)}
                       title={`Filter the dashboard to ${r.repo}`}
-                      className={`cursor-pointer border-b border-border last:border-b-0 hover:bg-panel-2 ${active ? "bg-accent-soft" : ""}`}
+                      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 ${active ? "bg-panel-2" : "bg-transparent"}`}
                     >
-                      <td className="max-w-[220px] truncate px-4 py-2.5 font-semibold" title={r.repo}>
-                        {shortRepo(r.repo)}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs">{r.colonies}</td>
-                      <td className="px-4 py-2.5">
-                        <span className="flex items-center gap-2">
-                          <span className="h-[5px] min-w-[60px] flex-1 overflow-hidden rounded-full bg-panel-3">
-                            <span className="block h-full rounded-full bg-ok" style={{ width: `${Math.round(r.rate * 100)}%` }} />
-                          </span>
-                          <span className="w-9 text-right font-mono text-xs">{`${Math.round(r.rate * 100)}%`}</span>
+                      <span className="min-w-0 truncate font-mono text-[13px]">{shortRepo(r.repo)}</span>
+                      <span className="text-right text-muted">{r.colonies}</span>
+                      <span className="flex items-center gap-2.5">
+                        <span className="h-1 flex-1 overflow-hidden rounded-sm bg-panel-3">
+                          <span className="block h-full transition-[width] duration-700" style={{ width: `${Math.round(r.rate * 100)}%`, background: "var(--chart-1)" }} />
                         </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-faint" title="no data source yet">
-                        —
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-faint" title="no data source yet">
-                        —
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-faint" title="the API serves no CI results">
-                        —
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-faint" title="the API serves no coverage">
-                        —
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs">{formatCost(r.spend)}</td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-muted">{formatCost(costPerMerged(r.spend, r.merged))}</td>
-                    </tr>
+                        <span className="w-10 text-right">{`${Math.round(r.rate * 100)}%`}</span>
+                      </span>
+                      <span className={`text-right ${fr != null && fr > 0.08 ? "text-err" : "text-muted"}`} title={fr != null ? `${failedHere} failed of ${decided} decided (merged+failed)` : "nothing decided"}>
+                        {fr != null ? `${(fr * 100).toFixed(1)}%` : "—"}
+                      </span>
+                      <span className="text-right">{formatCost(r.spend)}</span>
+                      <span className="text-right text-muted">{formatCost(costPerMerged(r.spend, r.merged))}</span>
+                    </button>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section className="overflow-hidden rounded-2xl border border-border bg-panel">
-        <div className="border-b border-border px-4 py-3.5 font-mono text-[10.5px] tracking-[0.12em] text-faint">COLONIES · {colonies.length}</div>
-        {colonies.length === 0 ? (
-          <div className="px-4 py-3.5 text-[13px] text-faint">No colonies right now.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <div className="min-w-[640px]">
-              {colonies.map((s) => {
-                const meta = SESSION_STATUS[s.status] ?? { label: s.status, tone: "neutral" as Tone };
-                const dot = TONE_VAR[meta.tone];
-                const short = `${shortRepo(s.repo)}${s.issue != null ? `#${s.issue}` : ""}`;
-                return (
-                  <div key={s.id} className="grid grid-cols-[10px_minmax(0,3fr)_150px_80px_72px] items-center gap-3 border-b border-border px-4 py-2.5 text-[13px] last:border-b-0">
-                    <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: dot }} />
-                    <span className="min-w-0 truncate">
-                      {short} <span className="text-faint">{s.issue_title}</span>
-                    </span>
-                    <span className="truncate font-mono text-[11px]" style={{ color: dot }}>
-                      {meta.label}
-                    </span>
-                    <span className="text-right font-mono text-[11px] text-faint">{timeAgo(s.last_activity_at ?? s.updated_at)}</span>
-                    <span className="text-right font-mono text-[11px] tabular-nums">
-                      <LiveCost value={sessionCost(s)} />
-                    </span>
-                  </div>
-                );
-              })}
+              </div>
             </div>
-          </div>
-        )}
-      </section>
+          )}
+        </Rules>
+      </Section>
 
-      <div className="font-mono text-[11px] text-faint">
-        {sumTokens(current, org.org)} tokens in range · figures without a source stay "—": lead time, PR cycle time, CI pass rate, time to recover,
-        per-day latency, lead-time distribution and coverage have no API to read from.
+      <Section title="Colonies" meta={String(colonies.length)}>
+        <Rules>
+          {colonies.length === 0 ? (
+            <div className="py-3.5 text-[13px] text-faint">No colonies right now.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <div className="min-w-[640px]">
+                {colonies.map((s) => (
+                  <ColonyRow
+                    key={s.id}
+                    session={s}
+                    showOrg={false}
+                    age={timeAgo(s.last_activity_at ?? s.updated_at)}
+                    flashed={events ? isFlashed(events, s.id, nowMs) : false}
+                    bumped={events ? isBumped(events, s.id, nowMs) : false}
+                    onOpen={onOpenColony}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </Rules>
+      </Section>
+
+      <div className="-mt-6 text-[12.5px] text-faint">
+        {formatTokens(sumTokens(current, org.org))} tokens in range · per-day latency, the lead-time distribution, CI pass rate and coverage have no API to read from (the API serves no CI results; the API serves no coverage).
       </div>
     </div>
   );
 }
+
+/** The repositories table's grid, shared by its header and rows. */
+const REPO_GRID = "grid grid-cols-[minmax(0,1.4fr)_72px_minmax(0,1.4fr)_64px_84px_72px] items-center gap-4";

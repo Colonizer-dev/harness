@@ -16,16 +16,17 @@ import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
-import { Header } from "./Header";
+import { Header, type CockpitView } from "./Header";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
-import { OverviewView } from "./OverviewView";import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
-import { Rail, type CockpitView } from "./Rail";
+import { OverviewView } from "./OverviewView";
+import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
+import { useLiveEvents } from "./liveEvents";
 
 const VIEW_KEY = "colonizer.cockpitView";
 const THEME_KEY = "colonizer.theme";
@@ -41,17 +42,6 @@ function storedTheme(): "light" | "dark" | null {
   const saved = stored(THEME_KEY);
   return saved === "light" || saved === "dark" ? saved : null;
 }
-
-const CRUMB: Record<CockpitView, string> = {
-  overview: "overview",
-  home: "nest",
-  colony: "colony",
-  launch: "launch",
-  inbox: "inbox",
-  history: "history",
-  settings: "settings",
-  memory: "memory",
-};
 
 /** The toast for a failed inspector action: what failed, on which colony, and why. */
 export function actionError(action: "stop" | "resume", colony: string, error: unknown): string {
@@ -206,6 +196,8 @@ export function Cockpit({
   );
 
   const needByOrg = useMemo(() => needCountByOrg(sessions), [sessions]);
+  // What moved since the last push, across every colony: the header's ticker line.
+  const liveEvents = useLiveEvents(sessions);
   // Two different counts, and mixing them up is what makes a header say "1 need you" over a
   // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
   // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
@@ -396,78 +388,74 @@ export function Cockpit({
             onOpen={openColonyById}
             onSelectMothership={() => setInspector({ kind: "mothership" })}
             onLaunch={() => setView("launch")}
+            connection={liveConnection}
           />
         );
     }
   };
 
   return (
-    <div className="cockpit grid h-full min-h-0 grid-cols-[56px_minmax(0,1fr)] bg-bg text-text">
-      <Rail
+    <div className="cockpit relative isolate grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-bg text-text">
+      {/* The v3 halo: a faint radial glow behind the top of the page, under the glass header. */}
+      <div aria-hidden="true" className="v3-halo" />
+      <Header
         orgs={workspaces}
+        hiddenOrgs={entries.hidden}
         selectedOrg={selectedOrg}
         onSelectOrg={switchOrg}
+        onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
+        needByOrg={needByOrg}
         view={view}
         onNavigate={navigate}
-        needCount={needAnywhere}
-        needByOrg={needByOrg}
+        inboxCount={needAnywhere}
         pendingMemory={memoryBadge(selectedOrg, workspaces, pendingMemory)}
+        liveCount={liveCount}
+        needCount={needHere}
+        cost={spend != null && spend > 0 ? spend : null}
+        update={update}
+        onOpenUpdates={() => onOpenSettings("updates")}
+        statusError={statusError}
+        connection={liveConnection}
+        latest={liveEvents.latest}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
-      <div className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
-        <Header
-          orgs={workspaces}
-          hiddenOrgs={entries.hidden}
-          selectedOrg={selectedOrg}
-          onSelectOrg={switchOrg}
-          onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
-          needByOrg={needByOrg}
-          crumb={CRUMB[view]}
-          liveCount={liveCount}
-          needCount={needHere}
-          cost={spend != null && spend > 0 ? spend : null}
-          update={update}
-          onOpenUpdates={() => onOpenSettings("updates")}
-          statusError={statusError}
-        />
-        <div className="flex min-h-0 min-w-0">
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* The session-limit banner sits above every view, outside each view's own scroll. */}
-            {quotaBanner ? (
-              <QuotaBanner
-                quota={quotaBanner}
-                sessions={sessions}
-                onResumeAll={() => void resumeAllQuotaParked()}
-                onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
-              />
-            ) : null}
-            {body()}
-          </div>
-          {view === "home" && (
-            <Inspector
-              target={inspector}
-              avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
-              settlers={inspector?.kind === "colony" ? settlers : []}
-              pendingQuestions={pendingQuestions}
-              questionActions={questionActions}
+      <div className="relative z-[1] flex min-h-0 min-w-0">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* The session-limit banner sits above every view, outside each view's own scroll. */}
+          {quotaBanner ? (
+            <QuotaBanner
+              quota={quotaBanner}
               sessions={sessions}
-              status={status}
-              liveCount={liveCount}
-              queuedCount={queuedCount}
-              needCount={needHere}
-              spend={spend != null && spend > 0 ? spend : null}
-              maxParallel={status?.sandbox.max_parallel ?? null}
-              update={update}
-              onClose={() => setInspector(null)}
-              onOpenColony={openColonyById}
-              onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
-              onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
-              onLaunch={() => setView("launch")}
-              onOpenSettings={(section) => onOpenSettings(section)}
+              onResumeAll={() => void resumeAllQuotaParked()}
+              onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
             />
-          )}
+          ) : null}
+          {body()}
         </div>
+        {view === "home" && (
+          <Inspector
+            target={inspector}
+            avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
+            settlers={inspector?.kind === "colony" ? settlers : []}
+            pendingQuestions={pendingQuestions}
+            questionActions={questionActions}
+            sessions={sessions}
+            status={status}
+            liveCount={liveCount}
+            queuedCount={queuedCount}
+            needCount={needHere}
+            spend={spend != null && spend > 0 ? spend : null}
+            maxParallel={status?.sandbox.max_parallel ?? null}
+            update={update}
+            onClose={() => setInspector(null)}
+            onOpenColony={openColonyById}
+            onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
+            onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
+            onLaunch={() => setView("launch")}
+            onOpenSettings={(section) => onOpenSettings(section)}
+          />
+        )}
       </div>
     </div>
   );

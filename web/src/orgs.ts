@@ -1,7 +1,7 @@
 // The org workspace list's pure half (issue #176): which orgs are workspaces, which are switched
 // off, and which newly-appeared one the UI should be asking about. The components render; this
 // module decides what is in the list and in what order. Nothing here touches the browser.
-import type { CockpitView } from "./cockpit/Rail";
+import type { CockpitView } from "./cockpit/Header";
 import { orgOf, occupiesSlot, sameOrg } from "./components/ui";
 import type { OrgInfo, OrgSettings, OrgSpend, Session } from "./types";
 

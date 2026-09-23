@@ -166,27 +166,27 @@ export function ChamberZoom({
       <div
         className="absolute inset-0 cursor-zoom-out"
         onClick={onClose}
-        style={{ background: "linear-gradient(rgb(0 0 0 / 0.6), rgb(0 0 0 / 0.72))" }}
+        style={{ background: "linear-gradient(rgb(0 0 0 / 0.5), rgb(0 0 0 / 0.66))" }}
       />
       <header
-        className="absolute inset-x-0 top-0 z-[2] flex items-center gap-2.5 border-b border-border bg-panel/95 px-3.5 py-2"
+        className="absolute inset-x-0 top-0 z-[2] flex items-center gap-2.5 nest-glass border-b border-border px-3.5 py-2"
       >
         <button
           ref={backRef}
           type="button"
           onClick={onClose}
           aria-label="back to the nest"
-          className="shrink-0 cursor-pointer rounded-lg px-2 py-1 font-mono text-[12px] text-accent transition-colors hover:bg-panel-2"
+          className="shrink-0 cursor-pointer rounded-md px-2 py-1 text-[13px] text-muted transition-colors hover:bg-panel-2 hover:text-text"
         >
           ← nest
         </button>
-        <span className="shrink-0 font-mono text-[12px] font-semibold text-text">
+        <span className="shrink-0 font-mono text-[12px] text-text">
           {session.repo}{issue}
         </span>
         <span className="shrink-0 font-mono text-[11px]" style={{ color: edge }}>
           {status?.label ?? ""}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted">
+        <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
           {session.issue_title || status?.label}
         </span>
         <span className="shrink-0 font-mono text-[11px] text-faint tabular-nums">
@@ -195,7 +195,7 @@ export function ChamberZoom({
         <button
           type="button"
           onClick={() => onOpen(session.id)}
-          className="shrink-0 cursor-pointer rounded-lg px-2 py-1 text-[12.5px] font-semibold text-accent transition-colors hover:bg-panel-2"
+          className="shrink-0 cursor-pointer rounded-md bg-text px-3 py-1 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
         >
           open colony →
         </button>

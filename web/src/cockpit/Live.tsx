@@ -6,18 +6,16 @@ import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { LiveConnection } from "../liveStream";
 import { formatCost } from "../spend";
 
-/** Pulsing dot + "Live" while the stream is open, "reconnecting…" otherwise. */
+/** Pulsing dot + "Live" while the stream is open, "reconnecting…" otherwise (v3: no pill, just the dot and the word). */
 export function LiveIndicator({ connection = "connecting" }: { connection?: LiveConnection }): ReactElement {
   const live = connection === "open";
   return (
     <span
       role="status"
       title={live ? "realtime updates from /api/stream" : "the stream dropped — polls cover until it reconnects"}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px] ${
-        live ? "border-ok/40 bg-ok-soft text-ok" : "border-border text-faint"
-      }`}
+      className={`inline-flex items-center gap-2 whitespace-nowrap text-[13px] ${live ? "text-muted" : "text-faint"}`}
     >
-      <span aria-hidden="true" className={live ? "live-dot" : "h-[7px] w-[7px] rounded-full bg-faint"} />
+      <span aria-hidden="true" className={live ? "v3-live-dot" : "inline-block h-[7px] w-[7px] rounded-full bg-faint"} />
       {live ? "Live" : "reconnecting…"}
     </span>
   );

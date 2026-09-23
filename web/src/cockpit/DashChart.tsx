@@ -1,37 +1,67 @@
-// Shared dashboard primitives for the cockpit (issue #398, next-gen pass issue #445): card shapes,
-// KPI tiles, stacked bars, line charts, share bars, chips and the range picker, all following the
-// Claude Design "Cockpit Dashboards" reference (docs/design/cockpit-dashboards/). Single-series
-// charts draw in accent-orange shades, multi-series in the --chart-1..5 ramp (index.css); the
-// caller picks the colour, so semantic series (failed outcomes, status strips) keep theirs.
-// Rendering is a hybrid that never distorts: the SVG (viewBox 0 0 100 100,
-// preserveAspectRatio="none") carries only lines, areas and gridlines — strokes hold their width
-// via vector-effect — while dots, bars, crosshair and tooltips are HTML overlays positioned in %,
-// so circles stay circular at any width. No measuring, no ResizeObserver: static markup renders
-// the full geometry, which is also what the renderToStaticMarkup tests assert on.
-import { useId, type ReactElement, type ReactNode } from "react";
+// Shared dashboard primitives for the cockpit, in the Cockpit Dashboards v3 idiom (Claude Design
+// import): no cards — sections are a quiet 14px heading over content held between two hairlines.
+// The pieces here are the KPI strip, the stacked smoothed-area chart with its side column, the
+// segmented tabs, the range toolbar, the share strip and the colony row, shared by the overview
+// and the org dashboard so the two cannot drift apart.
+//
+// Rendering never distorts: the chart SVG (viewBox 0 0 100 100, preserveAspectRatio="none")
+// carries only areas and lines — strokes hold their width via vector-effect — while dots, the
+// crosshair and the tooltip are HTML overlays positioned in %, so circles stay circular at any
+// width. No measuring: static markup renders the full geometry, which the tests assert on.
+import { useId, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
 
-import { chartRuns, chartY, joinedPoints, monotoneArea, monotonePath, RANGES, type ChartPoint, type RangeDays } from "./dash";
-import { TweenedValue } from "./Live";
+import { Avatar, initialOf } from "../components/Avatar";
+import { SESSION_STATUS, isLive, orgOf, type Tone } from "../components/ui";
+import { sessionCost } from "../spend";
+import type { Session } from "../types";
+import { monotonePath, orgColorFor, RANGES, type ChartPoint, type RangeDays } from "./dash";
+import { LiveCost, TweenedValue } from "./Live";
 
-export interface BarSeries {
-  label: string;
-  color: string;
-  values: number[];
-}
-
-/** The design's mono eyebrow: 10.5px, tracked out, uppercase by convention — pass ALREADY-UPPER text. */
-export function Eyebrow({ children }: { children: ReactNode }): ReactElement {
-  return <div className="font-mono text-[10.5px] tracking-[0.12em] text-faint">{children}</div>;
-}
-
-/** Right-side legend for a panel header: one colour dot per entry, or the caller's icon —
- *  the overview passes each org's avatar tile so hue is never the only identity. */
-export function DashLegend({ items }: { items: Array<{ label: string; color: string; icon?: ReactNode }> }): ReactElement {
+/** A section: the 14px heading with its faint meta, an optional right slot, and the body. */
+export function Section({
+  title,
+  meta,
+  right,
+  children,
+  id,
+}: {
+  title: string;
+  meta?: ReactNode;
+  right?: ReactNode;
+  children: ReactNode;
+  id?: string;
+}): ReactElement {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+    <section id={id} className="min-w-0">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-5 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2.5">
+          <h2 className="m-0 text-[14px] font-medium text-text">{title}</h2>
+          {meta != null && meta !== "" && <span className="text-[13px] text-faint">{meta}</span>}
+        </div>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** The two hairlines every section body sits between. */
+export function Rules({ children, className }: { children: ReactNode; className?: string }): ReactElement {
+  return <div className={`overflow-hidden border-y border-border ${className ?? ""}`}>{children}</div>;
+}
+
+/** Legend entries for a section heading: a small square per series. */
+export function DashLegend({ items }: { items: Array<{ label: string; color: string; icon?: ReactNode; dashed?: boolean }> }): ReactElement {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[12.5px] text-muted">
       {items.map((item) => (
-        <span key={item.label} className="inline-flex items-center gap-1.5 text-[11.5px] text-muted">
-          {item.icon ?? <span aria-hidden="true" className="h-2 w-2 rounded-[2px]" style={{ background: item.color }} />}
+        <span key={item.label} className="inline-flex items-center gap-1.5">
+          {item.icon ??
+            (item.dashed ? (
+              <span aria-hidden="true" className="h-0 w-3 border-t border-dashed border-muted" />
+            ) : (
+              <span aria-hidden="true" className="h-2 w-2 rounded-[2px]" style={{ background: item.color }} />
+            ))}
           {item.label}
         </span>
       ))}
@@ -39,41 +69,13 @@ export function DashLegend({ items }: { items: Array<{ label: string; color: str
   );
 }
 
-/** One dashboard card: eyebrow title, an optional sans subtitle, an optional right-side legend. */
-export function DashPanel({
-  title,
-  sub,
-  legend,
-  children,
-  className,
-}: {
-  title: string;
-  sub?: string;
-  legend?: ReactNode;
-  children: ReactNode;
-  className?: string;
-}): ReactElement {
-  return (
-    <section className={`min-w-0 rounded-2xl border border-border bg-panel p-4 ${className ?? ""}`}>
-      <div className="mb-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-        <div className="min-w-0">
-          <Eyebrow>{title}</Eyebrow>
-          {sub && <div className="mt-1 text-[13px] text-muted">{sub}</div>}
-        </div>
-        {legend}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-/** One KPI tile: value, previous-period delta and a sparkline area. Shared by the overview
- *  strip and the org dashboard so the two cannot drift apart. */
+/** One KPI: value, previous-period delta, sparkline, sub-line. KPIs with no data source are not
+ *  tiles at all in v3 — the strip lists them once in its footnote (see KpiStrip). */
 export interface KpiDef {
   label: string;
   value: string;
-  /** Numeric twin of `value`: when present the tile tweens between pushes (issue #446) instead
-   *  of snapping. Static markup shows `value`, so keep the two in agreement. */
+  /** Numeric twin of `value`: when present the value tweens between pushes instead of snapping.
+   *  Static markup shows the target, so keep the two in agreement. */
   valueNum?: number;
   /** Formats the tweened number; defaults to rounding. */
   formatNum?: (n: number) => string;
@@ -81,49 +83,59 @@ export interface KpiDef {
   delta?: string;
   /** Colours the delta (good → ok, bad → err, flat/absent → faint); pair with deltaTone(). */
   deltaTone?: "good" | "bad" | "flat";
-  /** Renders a ▲/▼ glyph before the delta; the sign itself stays in the delta string. */
-  deltaDir?: "up" | "down";
   spark?: string;
-  /** Sparkline stroke: accent when the tone is good, err when bad, faint with no tone. */
-  sparkColor?: string;
   sub?: string;
-  /** Honest empty state: renders "—" plus this mono line (e.g. "no data source yet") in the same
-   *  card shape, instead of value/spark/delta. */
+  /** No data source: the strip names it in the footnote instead of drawing an empty tile. */
+  unmeasured?: boolean;
+  /** A measured KPI with nothing to read yet ("nothing merged yet"): "—" plus this line. */
   emptyNote?: string;
   hint: string;
 }
 
 const DELTA_CLASS = { good: "text-ok", bad: "text-err", flat: "text-faint" } as const;
 
-export function KpiTile({ label, value, valueNum, formatNum, delta, deltaTone, deltaDir, spark, sparkColor, sub, emptyNote, hint }: KpiDef): ReactElement {
-  if (emptyNote != null) {
-    return (
-      <div title={hint} className="flex min-w-0 flex-col gap-1.5 rounded-[14px] border border-border bg-panel px-3.5 py-3">
-        <div className="truncate font-mono text-[10.5px] tracking-[0.12em] text-faint">{label}</div>
-        <div className="text-2xl font-semibold tabular-nums">—</div>
-        <div className="font-mono text-[11px] text-faint">{emptyNote}</div>
-      </div>
-    );
-  }
-  const stroke = sparkColor ?? (deltaTone === "bad" ? "var(--err)" : deltaTone === "good" ? "var(--accent)" : "var(--faint)");
+export function KpiTile({ label, value, valueNum, formatNum, delta, deltaTone, spark, sub, emptyNote, hint }: KpiDef): ReactElement {
+  const stroke = deltaTone === "bad" ? "var(--err)" : "var(--chart-1)";
   return (
-    <div title={hint} className="flex min-w-0 flex-col gap-1.5 rounded-[14px] border border-border bg-panel px-3.5 py-3">
-      <div className="truncate font-mono text-[10.5px] tracking-[0.12em] text-faint">{label}</div>
-      <div className="flex flex-wrap items-baseline gap-2">
-        <span className="text-2xl font-semibold tabular-nums tracking-tight">
-          {valueNum != null ? <TweenedValue value={valueNum} format={formatNum} /> : value}
+    <div title={hint} className="flex min-w-0 flex-col gap-1.5 px-5 pb-4 pt-5 shadow-[-1px_0_0_var(--border),0_-1px_0_var(--border)]">
+      <div className="truncate text-[13px] text-muted">{label}</div>
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span className="whitespace-nowrap text-[28px] font-semibold tabular-nums tracking-[-0.03em]">
+          {emptyNote != null ? "—" : valueNum != null ? <TweenedValue value={valueNum} format={formatNum} /> : value}
         </span>
-        {delta && (
-          <span className={`font-mono text-[11px] ${DELTA_CLASS[deltaTone ?? "flat"]}`}>
-            {deltaDir === "up" ? "▲ " : deltaDir === "down" ? "▼ " : ""}
-            {delta}
-          </span>
-        )}
+        {delta && emptyNote == null && <span className={`whitespace-nowrap text-[12.5px] ${DELTA_CLASS[deltaTone ?? "flat"]}`}>{delta}</span>}
       </div>
-      {spark ? <Sparkline points={spark} color={stroke} /> : null}
-      {sub && <div className="font-mono text-[11px] text-faint">{sub}</div>}
+      {spark && emptyNote == null ? <Sparkline points={spark} color={stroke} /> : <div aria-hidden="true" className="mt-1 h-6" />}
+      <div className="truncate text-[12.5px] text-faint">{emptyNote ?? sub ?? ""}</div>
     </div>
   );
+}
+
+/** The KPI strip: measured tiles between hairlines, and one line naming what is not measured. */
+export function KpiStrip({ items, note }: { items: KpiDef[]; note?: string }): ReactElement {
+  const shown = items.filter((k) => !k.unmeasured);
+  const missing = items.filter((k) => k.unmeasured).map((k) => k.label);
+  const footnote = [note, missing.length > 0 ? `${joinList(missing)} ${missing.length === 1 ? "is" : "are"} not measured yet — no data source.` : null]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div>
+      <Rules>
+        <div className="grid [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
+          {shown.map((k) => (
+            <KpiTile key={k.label} {...k} />
+          ))}
+        </div>
+      </Rules>
+      {footnote && <div className="mt-2.5 text-[12.5px] text-faint [text-wrap:pretty]">{footnote}</div>}
+    </div>
+  );
+}
+
+function joinList(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  const [first, ...rest] = items;
+  return `${[first, ...rest.slice(0, -1)].join(", ")} and ${rest[rest.length - 1]}`;
 }
 
 /** Back from the "x,y x,y …" spark string (the 100×28 box sparkPoints emits) to points. */
@@ -135,445 +147,335 @@ function parseSpark(points: string): ChartPoint[] {
     .map(([x, y]) => ({ x, y }));
 }
 
-/** One compact sparkline with the full next-gen look: gradient area, smoothed glowing line and
- *  a pulsing last dot. The SVG keeps the historic 100×28 box and carries only the line and
- *  area; the dot is an HTML overlay so it stays circular. Shared by KpiTile and the overview's
- *  per-workspace card so the two cannot drift apart. */
-export function Sparkline({ points, color }: { points: string; color: string }): ReactElement | null {
-  const gid = `spark-${useId().replace(/:/g, "")}`;
+/** The v3 sparkline: one smoothed line with a soft glow, no fill. Keeps the 100×28 box sparkPoints emits. */
+export function Sparkline({ points, color, height = 24 }: { points: string; color: string; height?: number }): ReactElement | null {
   const pts = parseSpark(points);
-  if (pts.length === 0) return null;
-  const last = pts[pts.length - 1];
+  if (pts.length < 2) return <div aria-hidden="true" className="mt-1" style={{ height }} />;
   return (
-    <div className="relative block h-7 w-full">
-      <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="absolute inset-0 block h-full w-full">
-        <defs>
-          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.35} />
-            <stop offset="100%" stopColor={color} stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        {pts.length > 1 && <path d={monotoneArea(pts, 28)} fill={`url(#${gid})`} />}
-        {pts.length > 1 ? (
-          <path
-            key={points}
-            d={monotonePath(pts)}
-            fill="none"
-            stroke={color}
-            strokeWidth={1.5}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            vectorEffect="non-scaling-stroke"
-            pathLength={1}
-            strokeDasharray={1}
-            className="dash-draw"
-            style={{ filter: `drop-shadow(0 1px 3px color-mix(in srgb, ${color} 60%, transparent))` }}
-          />
-        ) : null}
-      </svg>
-      <span
-        aria-hidden="true"
-        className="dash-pulse absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full"
-        style={{ left: `${last.x}%`, top: `${(last.y / 28) * 100}%`, background: color, border: "1.5px solid var(--panel)" }}
+    <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="mt-1 block w-full overflow-visible" style={{ height }}>
+      <path
+        key={points}
+        d={monotonePath(pts)}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+        pathLength={1}
+        strokeDasharray={1}
+        className="dash-draw"
+        style={{ filter: `drop-shadow(0 0 2px ${color})` }}
       />
-    </div>
+    </svg>
   );
 }
 
-/** Dashed gridlines shared by the bar and line charts (the design draws dashed rules). */
-function Gridlines(): ReactElement {
+/** A small plain trend line for table rows (the workspaces table's spend trend). */
+export function TrendLine({ values }: { values: (number | null)[] }): ReactElement {
+  const v = values.map((x) => (x == null || !Number.isFinite(x) ? 0 : x));
+  const mn = Math.min(...v, 0);
+  const mx = Math.max(...v, 0);
+  const span = mx - mn || 1;
+  const pts = v.map((x, i) => `${((i / Math.max(1, v.length - 1)) * 100).toFixed(1)},${(19 - ((x - mn) / span) * 18).toFixed(1)}`).join(" ");
   return (
-    <g>
-      {[75, 50, 25, 0].map((y) => (
-        <line key={y} x1={0} x2={100} y1={y} y2={y} stroke="var(--border)" strokeWidth={0.35} strokeDasharray="1.2 1.6" vectorEffect="non-scaling-stroke" />
-      ))}
-    </g>
+    <svg viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true" className="block h-5 w-full">
+      <polyline points={pts} fill="none" stroke="var(--muted)" strokeWidth={1.25} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 }
 
-/** Chart frame: an optional mono y-axis gutter beside a responsive plot. The plot is a fixed
- *  height — 170px on narrow screens, 240px at desktop widths — with an SVG underlay (gridlines,
- *  areas, lines) and an HTML overlay (bars, dots, crosshair, tooltips) as siblings, so nothing
- *  drawn in screen space ever stretches. Sparse x labels pin to their column centres below. */
-function ChartFrame({
-  max,
-  formatY,
+// --- The stacked smoothed-area chart -------------------------------------------------------
+
+export interface AreaSeries {
+  label: string;
+  color: string;
+  values: number[];
+}
+
+/** The largest "nice" step (1, 2, 2.5, 5 × 10ⁿ) at or above x — four of them make the y axis. */
+export function niceStep(x: number): number {
+  if (!(x > 0)) return 1;
+  const p = 10 ** Math.floor(Math.log10(x));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= x) return m * p;
+  return 10 * p;
+}
+
+/** Stacked area geometry, in viewBox units: per series its top line and closed band, plus the
+ *  column tops the hover dots sit on. Exported for the tests. */
+export function stackAreas(series: AreaSeries[], n: number, max: number): Array<{ line: string; area: string; tops: ChartPoint[] }> {
+  const X = (i: number) => ((i + 0.5) / n) * 100;
+  const Y = (v: number) => Math.max(0, Math.min(100, 100 - (v / max) * 100));
+  const acc = Array<number>(n).fill(0);
+  return series.map((s) => {
+    const bottom = acc.map((v, i) => ({ x: X(i), y: Y(v) }));
+    for (let i = 0; i < n; i++) acc[i] += s.values[i] ?? 0;
+    const tops = acc.map((v, i) => ({ x: X(i), y: Y(v) }));
+    const line = monotonePath(tops);
+    const back = monotonePath([...bottom].reverse()).replace(/^M/, "L");
+    return { line, area: `${line} ${back} Z`, tops };
+  });
+}
+
+/** Glides a path between data pushes where the browser can (Chromium/Firefox interpolate the
+ *  CSS `d` property); elsewhere the attribute simply swaps. */
+const glide = (d: string): CSSProperties => ({ d: `path("${d}")`, transition: "d 700ms cubic-bezier(.2,.8,.2,1)" }) as CSSProperties;
+
+export function AreaChart({
+  series,
+  labels,
   xLabels,
-  n,
-  labelledBy,
-  overlay,
-  children,
+  ghost,
+  format,
+  formatY,
+  readTitle,
+  emptyNote = "no data in range",
 }: {
-  max: number;
-  formatY?: (value: number) => string;
+  series: AreaSeries[];
+  /** One label per column for the tooltip and read-out (e.g. "Sep 3"). */
+  labels: string[];
+  /** Axis labels, one per column; drawn sparsely (~6). Defaults to `labels`. */
   xLabels?: string[];
-  n: number;
-  labelledBy: string;
-  /** HTML layer: bars, dots, hover zones — positioned in %, immune to SVG stretching. */
-  overlay?: ReactNode;
-  /** SVG layer: gridlines, gradient areas, smoothed lines. */
-  children: ReactNode;
+  /** Previous-period daily totals, aligned by index: the dashed ghost line. */
+  ghost?: (number | null)[];
+  format: (v: number) => string;
+  formatY?: (v: number) => string;
+  /** The read-out's title while nothing is hovered ("Last 30 days"). */
+  readTitle: string;
+  emptyNote?: string;
 }): ReactElement {
-  const step = Math.max(1, Math.ceil(n / 7));
+  const uid = useId().replace(/:/g, "");
+  const [hover, setHover] = useState<number | null>(null);
+  const n = Math.max(0, ...series.map((s) => s.values.length));
+  const totals = Array.from({ length: n }, (_, i) => series.reduce((t, s) => t + (s.values[i] ?? 0), 0));
+  const top = Math.max(0, ...totals, ...(ghost ?? []).map((v) => v ?? 0));
+  if (n === 0 || top <= 0) {
+    return <div className="py-10 text-center text-[12.5px] text-faint">{emptyNote}</div>;
+  }
+  const step = niceStep(top / 4);
+  const max = step * 4;
+  const geo = stackAreas(series, n, max);
+  const X = (i: number) => ((i + 0.5) / n) * 100;
+  const hv = hover != null && hover < n ? hover : null;
+  const fmtY = formatY ?? ((v: number) => String(Math.round(v)));
+  const every = Math.ceil(n / 6);
+  const axis = xLabels ?? labels;
+  const nowTop = geo.length > 0 ? geo[geo.length - 1].tops[n - 1] : null;
+  const nowColor = series.length > 0 ? series[series.length - 1].color : "var(--chart-1)";
+  const read =
+    hv != null
+      ? series.map((s) => ({ label: s.label, color: s.color, value: format(s.values[hv] ?? 0) }))
+      : series.map((s) => ({ label: s.label, color: s.color, value: format(s.values.reduce((t, v) => t + (v ?? 0), 0)) }));
+  if (hv != null && ghost) read.push({ label: "prev", color: "var(--muted)", value: ghost[hv] != null ? format(ghost[hv] as number) : "—" });
+  const ghostPts = ghost
+    ? ghost
+        .map((v, i) => (v == null ? null : `${X(i).toFixed(1)},${(100 - (v / max) * 100).toFixed(1)}`))
+        .filter((p): p is string => p !== null)
+        .join(" ")
+    : "";
+
   return (
     <div>
-      <div className="flex gap-1.5">
-        {formatY && (
-          <div aria-hidden="true" className="flex w-9 shrink-0 flex-col justify-between py-0.5 text-right font-mono text-[10px] leading-none text-faint">
-            {[1, 0.75, 0.5, 0.25, 0].map((f) => (
-              <span key={f}>{formatY(max * f)}</span>
-            ))}
-          </div>
-        )}
+      <div className="flex min-h-5 flex-wrap items-baseline gap-x-4 gap-y-1 text-[13px] tabular-nums text-muted">
+        <span className="font-medium text-text">{hv != null ? labels[hv] : readTitle}</span>
+        {read.map((r) => (
+          <span key={r.label} className="inline-flex items-center gap-1.5">
+            <span aria-hidden="true" className="h-[7px] w-[7px] rounded-[2px]" style={{ background: r.color }} />
+            {r.label} <span className="text-text">{r.value}</span>
+          </span>
+        ))}
+      </div>
+      <div className="mt-4 flex gap-2.5">
+        <div aria-hidden="true" className="flex h-[200px] w-[34px] shrink-0 flex-col justify-between text-right font-mono text-[11px] leading-none text-faint">
+          {[4, 3, 2, 1, 0].map((k) => (
+            <span key={k}>{fmtY(step * k)}</span>
+          ))}
+        </div>
         <div className="min-w-0 flex-1">
-          <div role="img" aria-label={labelledBy} className="dash-chart relative h-[170px] w-full md:h-[240px]">
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" className="absolute inset-0 block h-full w-full">
-              {children}
+          <div role="img" aria-label={`${series.map((s) => s.label).join(", ")} per day`} onMouseLeave={() => setHover(null)} className="dash-overlay relative h-[200px]">
+            <div aria-hidden="true" className="absolute inset-x-0 top-0 border-t border-dashed border-border" />
+            <div aria-hidden="true" className="absolute inset-x-0 top-1/2 border-t border-dashed border-border" />
+            <div aria-hidden="true" className="absolute inset-x-0 bottom-0 border-t border-border" />
+            {/* Re-keyed on the column count, so a range change replays the grow-in. */}
+            <svg key={n} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" className="v3-reveal absolute inset-0 h-full w-full overflow-visible">
+              <defs>
+                {series.map((s, si) => (
+                  <linearGradient key={s.label} id={`${uid}-a${si}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0" stopColor={s.color} stopOpacity={0.42} />
+                    <stop offset="1" stopColor={s.color} stopOpacity={0.03} />
+                  </linearGradient>
+                ))}
+              </defs>
+              {geo.map((g, si) => (
+                <path key={`a${si}`} d={g.area} fill={`url(#${uid}-a${si})`} style={glide(g.area)} />
+              ))}
+              {geo.map((g, si) => (
+                <path
+                  key={`l${si}`}
+                  d={g.line}
+                  fill="none"
+                  stroke={series[si].color}
+                  strokeWidth={1.75}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  vectorEffect="non-scaling-stroke"
+                  style={glide(g.line)}
+                />
+              ))}
             </svg>
-            {overlay}
-          </div>
-          {xLabels && (
-            <div aria-hidden="true" className="relative mt-1 h-3.5 font-mono text-[10px] text-faint">
-              {xLabels.map((label, i) =>
-                i % step === 0 ? (
-                  <span key={i} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${((i + 0.5) / n) * 100}%` }}>
-                    {label}
-                  </span>
-                ) : null,
-              )}
+            {ghostPts && (
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" className="v3-fade-late pointer-events-none absolute inset-0 h-full w-full overflow-visible">
+                <polyline points={ghostPts} fill="none" stroke="var(--faint)" strokeWidth={1.25} strokeDasharray="3 3" vectorEffect="non-scaling-stroke">
+                  <title>previous period daily total</title>
+                </polyline>
+              </svg>
+            )}
+            <div className="absolute inset-0 flex">
+              {Array.from({ length: n }, (_, i) => (
+                <div
+                  key={i}
+                  tabIndex={0}
+                  aria-label={`${labels[i] ?? ""}: ${series.map((s) => `${s.label} ${format(s.values[i] ?? 0)}`).join(", ")}`}
+                  onMouseEnter={() => setHover(i)}
+                  onFocus={() => setHover(i)}
+                  onBlur={() => setHover(null)}
+                  className="h-full flex-1 focus-visible:outline-none"
+                />
+              ))}
             </div>
-          )}
+            {nowTop && hv == null && (
+              <span
+                aria-hidden="true"
+                className="v3-now-dot pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full transition-[top] duration-700"
+                style={{ left: `${nowTop.x}%`, top: `${nowTop.y}%`, background: nowColor }}
+              />
+            )}
+            {hv != null && (
+              <>
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 w-px bg-[linear-gradient(to_bottom,transparent,var(--border-strong)_20%,var(--border-strong))]"
+                  style={{ left: `${X(hv)}%` }}
+                />
+                {geo.map((g, si) => (
+                  <span
+                    key={si}
+                    aria-hidden="true"
+                    className="pointer-events-none absolute box-border h-[9px] w-[9px] -translate-x-1/2 -translate-y-1/2 rounded-full border-2 bg-bg"
+                    style={{ left: `${X(hv)}%`, top: `${g.tops[hv].y}%`, borderColor: series[si].color }}
+                  />
+                ))}
+                <div
+                  className="v3-pop pointer-events-none absolute top-0 z-[5] min-w-[160px] rounded-[10px] border border-border-strong px-[11px] py-[9px] text-[12.5px] shadow-[0_10px_30px_rgb(0_0_0/0.3)]"
+                  style={{ left: `${X(hv)}%`, transform: X(hv) > 62 ? "translateX(calc(-100% - 14px))" : "translateX(14px)" }}
+                >
+                  <div className="mb-1.5 font-medium">{labels[hv]}</div>
+                  {[...series.map((s) => ({ label: s.label, color: s.color, value: format(s.values[hv] ?? 0) })), ...(ghost ? [{ label: "previous", color: "var(--faint)", value: ghost[hv] != null ? format(ghost[hv] as number) : "—" }] : [])]
+                    .reverse()
+                    .map((r) => (
+                      <div key={r.label} className="flex items-center gap-2 py-0.5">
+                        <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: r.color }} />
+                        <span className="flex-1 whitespace-nowrap text-muted">{r.label}</span>
+                        <span className="tabular-nums">{r.value}</span>
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
+          </div>
+          <div aria-hidden="true" className="relative mt-2 h-[18px] font-mono text-[11px] text-faint">
+            {axis.map((label, i) =>
+              i % every === 0 ? (
+                <span key={i} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${X(i)}%` }}>
+                  {label}
+                </span>
+              ) : null,
+            )}
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-/** Ghost overlay: the previous period's daily totals as a dashed faint line, joining across
- *  unmeasured days (the old polyline semantics) and smoothed like the real series. A lone
- *  point draws as a bare moveto, so callers dot it in the HTML overlay via GhostLoneDot. */
-function Ghost({ ghost, max }: { ghost?: (number | null)[]; max: number }): ReactElement | null {
-  if (!ghost || !ghost.some((v) => v != null && v > 0)) return null;
-  const pts = joinedPoints(ghost, max);
-  if (pts.length === 0) return null;
-  return (
-    <path
-      d={monotonePath(pts)}
-      fill="none"
-      stroke="var(--faint)"
-      strokeWidth={1.5}
-      strokeDasharray="2.2 1.8"
-      strokeLinecap="round"
-      vectorEffect="non-scaling-stroke"
-      opacity={0.8}
-    >
-      <title>previous period daily total</title>
-    </path>
-  );
-}
-
-/** The HTML dot for a one-point ghost: an SVG circle would stretch into an ellipse, and a bare
- *  moveto draws nothing — so the overlay dots it. Multi-point ghosts need nothing. */
-function GhostLoneDot({ ghost, max }: { ghost?: (number | null)[]; max: number }): ReactElement | null {
-  if (!ghost) return null;
-  const pts = joinedPoints(ghost, max);
-  if (pts.length !== 1) return null;
-  return (
-    <span
-      aria-hidden="true"
-      className="absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-      style={{ left: `${pts[0].x}%`, top: `${pts[0].y}%`, background: "var(--faint)" }}
-    />
-  );
-}
-
-export function DashBars({
-  series,
-  labels,
-  ghost,
-  format,
-  formatY,
-  xLabels,
-}: {
-  series: BarSeries[];
-  /** One x label per day (the "YYYY-MM-DD"), used in the hover titles. */
-  labels: string[];
-  /** Previous-period daily totals, aligned by index; null = gap. */
-  ghost?: (number | null)[];
-  format: (value: number) => string;
-  /** Renders the mono y-axis gutter (5 ticks, max..0); absent leaves just the gridlines. */
-  formatY?: (value: number) => string;
-  /** One date label per column, drawn sparsely (~7) under the chart. */
-  xLabels?: string[];
-}): ReactElement {
-  const n = Math.max(0, ...series.map((s) => s.values.length));
-  // One pass: each column's total plus its topmost segment (the last series with a value there),
-  // which takes the rounded cap.
-  const totals: number[] = Array(n).fill(0);
-  const topOf: number[] = Array(n).fill(-1);
-  series.forEach((s, si) => {
-    s.values.forEach((v, i) => {
-      if ((v ?? 0) > 0) {
-        totals[i] += v as number;
-        topOf[i] = si;
-      }
-    });
-  });
-  const max = Math.max(...totals, ...(ghost ?? []).map((v) => v ?? 0), 0);
-  if (n === 0 || max <= 0) {
-    return <div className="py-6 text-center font-mono text-[11px] text-faint">no data in range</div>;
-  }
-  // The grow-in replays on mount; later data changes glide through the height transition instead
-  // of a whole-stack remount.
-  return (
-    <ChartFrame
-      max={max}
-      formatY={formatY}
-      xLabels={xLabels}
-      n={n}
-      labelledBy="stacked bars per day"
-      overlay={
-        <div className="dash-grow-y dash-overlay absolute inset-0">
-          <GhostLoneDot ghost={ghost} max={max} />
-          <div className="flex h-full w-full items-stretch">
-            {totals.map((total, i) => {
-              const parts = series
-                .map((s) => ({ s, v: s.values[i] ?? 0 }))
-                .filter(({ v }) => v > 0)
-                .map(({ s, v }) => `${s.label}: ${format(v)}`);
-              return (
-              <div
-                key={i}
-                tabIndex={0}
-                title={[labels[i] ?? "", ...parts].filter((p) => p !== "").join(" · ")}
-                className="group relative h-full min-w-0 flex-1"
-              >
-                <div className="absolute bottom-0 flex flex-col justify-end" style={{ left: "20%", right: "20%", minWidth: 2, height: `${(total / max) * 100}%` }}>
-                  {series.map((s, si) => {
-                    const v = s.values[i] ?? 0;
-                    if (!(v > 0)) return null;
-                    return (
-                      <div
-                        key={s.label}
-                        className={`w-full transition-[height] duration-500 ${si === topOf[i] ? "rounded-t-[4px]" : ""}`}
-                        style={{
-                          height: `${(v / total) * 100}%`,
-                          minHeight: 2,
-                          background: `linear-gradient(to top, ${s.color}, color-mix(in srgb, ${s.color} 45%, white))`,
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-                <div
-                  className={`pointer-events-none absolute bottom-full z-10 mb-1.5 whitespace-nowrap rounded-lg border border-border bg-panel px-2 py-1 font-mono text-[10.5px] opacity-0 shadow transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${
-                    i / n > 0.7 ? "right-0" : i / n < 0.3 ? "left-0" : "left-1/2 -translate-x-1/2"
-                  }`}
-                >
-                  <div className="font-semibold text-text">{labels[i] ?? ""}</div>
-                  {series.map((s) => {
-                    const v = s.values[i] ?? 0;
-                    if (!(v > 0)) return null;
-                    return (
-                      <div key={s.label} className="flex items-center gap-1.5 text-muted">
-                        <span aria-hidden="true" className="h-1.5 w-1.5 rounded-[2px]" style={{ background: s.color }} />
-                        {s.label}: <span className="text-text">{format(v)}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              );
-            })}
-          </div>
-        </div>
-      }
-    >
-      <Gridlines />
-      <Ghost ghost={ghost} max={max} />
-    </ChartFrame>
-  );
-}
-
-export interface LineSeries {
+/** One row of a chart's side column: label, value + note, and a 4px share bar. */
+export interface SideRow {
   label: string;
+  value: ReactNode;
+  note?: string;
+  /** Bar width, 0..100. */
+  share: number;
   color: string;
-  /** null = unmeasured gap; the line breaks rather than zeroing through it. */
-  values: (number | null)[];
-  /** Previous-period or reference series: dashed, no area fill. */
-  dashed?: boolean;
-  /** Fills the area under the line at 0.12 opacity, like the design's latency bands. */
-  fill?: boolean;
+  title?: string;
+  onClick?: () => void;
 }
 
-/** One multi-series line chart for p50/p95-style series: gradient bands, smoothed glowing
- *  lines, dashed reference series, a pulsing dot on each series' last point, and a hover
- *  crosshair with a tooltip naming the day and every measured value. Null days split the line
- *  into runs, exactly like the ghost. */
-export function DashLine({
-  series,
-  labels,
-  format,
-  formatY,
-  xLabels,
+/** A chart section: the area chart on the left, its side column (share, funnel, mix) on the
+ *  right, divided by a hairline, all between the section's two rules. */
+export function ChartSection({
+  title,
+  legend,
+  chart,
+  foot,
+  sideTitle,
+  side,
+  sideFoot,
 }: {
-  series: LineSeries[];
-  /** One x label per point (the "YYYY-MM-DD"), used in the hover titles. */
-  labels: string[];
-  format: (value: number) => string;
-  /** Renders the mono y-axis gutter (5 ticks, max..0); absent leaves just the gridlines. */
-  formatY?: (value: number) => string;
-  /** One date label per point, drawn sparsely (~7) under the chart. */
-  xLabels?: string[];
+  title: string;
+  legend?: ReactNode;
+  chart: ReactNode;
+  foot?: ReactNode;
+  sideTitle: string;
+  side: SideRow[];
+  sideFoot?: ReactNode;
 }): ReactElement {
-  const uid = useId().replace(/:/g, "");
-  const n = Math.max(0, ...series.map((s) => s.values.length));
-  const max = Math.max(0, ...series.flatMap((s) => s.values.map((v) => v ?? 0)));
-  if (n === 0 || max <= 0) {
-    return <div className="py-6 text-center font-mono text-[11px] text-faint">no data in range</div>;
-  }
-  // Re-keying the lines on the data replays the draw-in; identical data keeps its key and stays put.
-  const sig = series.map((s) => s.values.map((v) => (v == null ? "" : String(v))).join(",")).join("|");
-  const runsBy = series.map((s) => chartRuns(s.values, max));
   return (
-    <ChartFrame
-      max={max}
-      formatY={formatY}
-      xLabels={xLabels}
-      n={n}
-      labelledBy="lines per day"
-      overlay={
-        <div className="dash-overlay absolute inset-0">
-          {series.map((s, si) => {
-            const runs = runsBy[si];
-            if (runs.length === 0 || s.dashed) return null;
-            const end = runs[runs.length - 1][runs[runs.length - 1].length - 1];
-            return (
-              <span
-                key={s.label}
-                aria-hidden="true"
-                className="dash-pulse absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                style={{ left: `${end.x}%`, top: `${end.y}%`, background: s.color, border: "2px solid var(--panel)" }}
-              />
+    <Section title={title} right={legend}>
+      <Rules className="flex flex-wrap">
+        <div className="min-w-0 flex-[2_1_460px] py-5 pr-6">
+          {chart}
+          {foot && <div className="mt-3 text-[12.5px] text-faint">{foot}</div>}
+        </div>
+        <div className="flex min-w-0 flex-[1_1_240px] flex-col gap-0.5 py-5 pl-6 shadow-[-1px_0_0_var(--border)]">
+          <div className="mb-2 text-[13px] text-muted">{sideTitle}</div>
+          {side.map((row) => {
+            const body = (
+              <>
+                <span className="flex w-full items-baseline justify-between gap-3">
+                  <span className="min-w-0 truncate text-[13.5px]">{row.label}</span>
+                  <span className="whitespace-nowrap text-[13px] tabular-nums">
+                    {row.value} {row.note && <span className="text-faint">{row.note}</span>}
+                  </span>
+                </span>
+                <span className="block h-1 w-full overflow-hidden rounded-sm bg-panel-3">
+                  <span className="block h-full rounded-sm transition-[width] duration-700" style={{ width: `${Math.max(0, Math.min(100, row.share))}%`, background: row.color }} />
+                </span>
+              </>
             );
-          })}
-          {series.map((s, si) =>
-            runsBy[si].flatMap((run, ri) => {
-              // A one-point run draws as a bare moveto — invisible — so it gets a small dot. The
-              // last point of a solid series already has the pulsing end dot, so it is skipped.
-              if (run.length !== 1 || (!s.dashed && ri === runsBy[si].length - 1)) return [];
-              const p = run[0];
-              return (
-                <span
-                  key={`${s.label}-lone-${ri}`}
-                  aria-hidden="true"
-                  className="absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                  style={{ left: `${p.x}%`, top: `${p.y}%`, background: s.color }}
-                />
-              );
-            }),
-          )}
-          {Array.from({ length: n }, (_, i) => {
-            const measured = series.filter((s) => {
-              const v = s.values[i];
-              return v != null && Number.isFinite(v);
-            });
-            if (measured.length === 0) return null;
-            return (
-              <div
-                key={i}
-                tabIndex={0}
-                className="group absolute bottom-0 top-0"
-                style={{ left: `${(i / n) * 100}%`, width: `${100 / n}%` }}
-                title={`${labels[i] ?? ""} · ${measured.map((s) => `${s.label}: ${format(s.values[i] as number)}`).join(" · ")}`}
+            return row.onClick ? (
+              <button
+                key={row.label}
+                type="button"
+                title={row.title}
+                onClick={row.onClick}
+                className="flex cursor-pointer flex-col gap-2 border-0 bg-transparent px-0 py-2.5 text-left hover:opacity-80"
               >
-                <div aria-hidden="true" className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border-strong opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100" />
-                {measured.map((s) => (
-                  <span
-                    key={s.label}
-                    aria-hidden="true"
-                    className="absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                    style={{ left: "50%", top: `${chartY(s.values[i] as number, max)}%`, background: s.color, border: "1.5px solid var(--panel)" }}
-                  />
-                ))}
-                <div
-                  className={`pointer-events-none absolute top-2 z-10 whitespace-nowrap rounded-lg border border-border bg-panel px-2 py-1 font-mono text-[10.5px] opacity-0 shadow transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${
-                    i / n > 0.6 ? "right-1" : "left-1"
-                  }`}
-                >
-                  <div className="font-semibold text-text">{labels[i] ?? ""}</div>
-                  {measured.map((s) => (
-                    <div key={s.label} className="flex items-center gap-1.5 text-muted">
-                      <span aria-hidden="true" className="h-1.5 w-1.5 rounded-[2px]" style={{ background: s.color }} />
-                      {s.label}: <span className="text-text">{format(s.values[i] as number)}</span>
-                    </div>
-                  ))}
-                </div>
+                {body}
+              </button>
+            ) : (
+              <div key={row.label} title={row.title} className="flex flex-col gap-2 py-2.5">
+                {body}
               </div>
             );
           })}
+          {sideFoot && <div className="mt-auto pt-3 text-[12.5px] text-faint">{sideFoot}</div>}
         </div>
-      }
-    >
-      <Gridlines />
-      <defs>
-        {series.map((s, si) =>
-          s.fill && !s.dashed ? (
-            <linearGradient key={s.label} id={`${uid}-area-${si}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={s.color} stopOpacity={0.35} />
-              <stop offset="100%" stopColor={s.color} stopOpacity={0} />
-            </linearGradient>
-          ) : null,
-        )}
-      </defs>
-      {series.map((s, si) => {
-        const runs = runsBy[si];
-        if (runs.length === 0) return null;
-        return (
-          <g key={s.label}>
-            {s.fill &&
-              !s.dashed &&
-              runs.map((run, ri) => <path key={ri} d={monotoneArea(run)} fill={`url(#${uid}-area-${si})`} />)}
-            {runs.map((run, ri) =>
-              s.dashed ? (
-                <path
-                  key={ri}
-                  d={monotonePath(run)}
-                  fill="none"
-                  stroke={s.color}
-                  strokeWidth={1.5}
-                  strokeDasharray="2.2 1.8"
-                  strokeLinecap="round"
-                  vectorEffect="non-scaling-stroke"
-                  opacity={0.8}
-                />
-              ) : (
-                <path
-                  key={`${sig}-${ri}`}
-                  d={monotonePath(run)}
-                  fill="none"
-                  stroke={s.color}
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  vectorEffect="non-scaling-stroke"
-                  pathLength={1}
-                  strokeDasharray={1}
-                  className="dash-draw"
-                  style={{ filter: `drop-shadow(0 1px 5px color-mix(in srgb, ${s.color} 60%, transparent))` }}
-                />
-              ),
-            )}
-          </g>
-        );
-      })}
-    </ChartFrame>
+      </Rules>
+    </Section>
   );
 }
 
-/** One horizontal stacked strip (the org cards' live/returned strip, the model-mix strip):
- *  segments share the bar by value, each with a native hover title, a top-light gradient and a
- *  grow-in keyed on the data. */
+/** One horizontal stacked strip (a model mix): segments share the bar by value, each with a hover title. */
 export function ShareBar({
   segments,
   format,
@@ -585,18 +487,14 @@ export function ShareBar({
 }): ReactElement {
   const total = segments.reduce((t, s) => t + s.value, 0);
   if (!(total > 0)) {
-    return <div className="py-2 text-center font-mono text-[11px] text-faint">no data in range</div>;
+    return <div className="py-2 text-center text-[12.5px] text-faint">no data in range</div>;
   }
   return (
-    <div className="flex h-2.5 overflow-hidden rounded-full bg-panel-3" role="img" aria-label={label}>
+    <div className="flex h-1 overflow-hidden rounded-sm bg-panel-3" role="img" aria-label={label}>
       <div key={segments.map((s) => s.value).join(",")} className="dash-grow-x flex h-full w-full">
         {segments.map((s) =>
           s.value > 0 ? (
-            <div
-              key={s.label}
-              className="h-full"
-              style={{ width: `${(s.value / total) * 100}%`, background: `linear-gradient(180deg, color-mix(in srgb, ${s.color} 72%, white), ${s.color})` }}
-            >
+            <div key={s.label} className="h-full" style={{ width: `${(s.value / total) * 100}%`, background: s.color }}>
               <title>{`${s.label}: ${format(s.value)}`}</title>
             </div>
           ) : null,
@@ -606,63 +504,73 @@ export function ShareBar({
   );
 }
 
-/** A small status pill ("1 need you", "Queued · stalled"): tone-coloured text on a tone-tinted edge. */
-export function StatusChip({ tone = "neutral", children }: { tone?: "neutral" | "info" | "ok" | "warn" | "err" | "accent"; children: ReactNode }): ReactElement {
-  const color =
-    tone === "neutral"
-      ? "var(--muted)"
-      : tone === "info"
-        ? "var(--info)"
-        : tone === "ok"
-          ? "var(--ok)"
-          : tone === "warn"
-            ? "var(--warn)"
-            : tone === "err"
-              ? "var(--err)"
-              : "var(--accent)";
+/** A small status note ("queued · stalled"): tone-coloured text, no pill. */
+export function StatusChip({ tone = "neutral", children }: { tone?: Tone; children: ReactNode }): ReactElement {
   return (
-    <span
-      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border bg-panel px-2.5 py-0.5 font-mono text-[11px]"
-      style={{ color, borderColor: `color-mix(in srgb, ${color} 45%, transparent)` }}
-    >
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[12.5px]" style={{ color: TONE_COLOR[tone] }}>
       {children}
     </span>
   );
 }
 
-/** One toggleable filter pill with a count ("4 need you"): the overview counters and the colonies
- *  table's org filter share this shape. Static markup only — the caller owns the state. */
-export function FilterChip({
-  active,
-  count,
-  label,
-  title,
-  onClick,
-}: {
-  active: boolean;
-  count: number;
+const TONE_COLOR: Record<Tone, string> = {
+  neutral: "var(--muted)",
+  info: "var(--info)",
+  ok: "var(--ok)",
+  warn: "var(--warn)",
+  err: "var(--err)",
+  accent: "var(--accent)",
+};
+
+/** One segment of a SegTabs control. */
+export interface SegTab {
+  key: string;
   label: string;
-  title?: string;
+  count?: number;
+  active: boolean;
   onClick: () => void;
-}): ReactElement {
+  /** The count speaks up in warn (needs you, a stalled queue). */
+  urgent?: boolean;
+  title?: string;
+}
+
+/** The v3 segmented control: a hairline box with the active segment filled. */
+export function SegTabs({ items, label }: { items: SegTab[]; label: string }): ReactElement {
+  return (
+    <div role="group" aria-label={label} className="flex flex-wrap gap-0.5 rounded-lg border border-border p-0.5">
+      {items.map((t) => (
+        <button
+          key={t.key}
+          type="button"
+          aria-pressed={t.active}
+          title={t.title}
+          onClick={t.onClick}
+          className={`cursor-pointer whitespace-nowrap rounded-md border-0 px-2.5 py-1 text-[12.5px] ${t.active ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+        >
+          {t.label}
+          {t.count != null && <span className={t.urgent && t.count > 0 ? "text-warn" : "text-faint"}> {t.count}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A rounded pill tab (the org dashboard's repository filter). */
+export function PillTab({ active, label, count, title, onClick }: { active: boolean; label: string; count: number; title?: string; onClick: () => void }): ReactElement {
   return (
     <button
       type="button"
       aria-pressed={active}
-      onClick={onClick}
       title={title}
-      className={`cursor-pointer whitespace-nowrap rounded-full border px-2.5 py-1 text-[11.5px] font-medium ${
-        active ? "border-accent bg-accent-soft text-text" : "border-border text-muted hover:border-accent hover:text-text"
-      }`}
+      onClick={onClick}
+      className={`cursor-pointer whitespace-nowrap rounded-full border px-3 py-[5px] text-[13px] ${active ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text"}`}
     >
-      <span className={active ? "text-accent" : "text-muted"}>{count}</span> {label}
+      {label} <span className="text-faint">{count}</span>
     </button>
   );
 }
 
-/** The shared dashboard toolbar: the 7d/30d/90d segmented range plus the "compare to previous"
- *  toggle (moved here from OrgDashboard so both screens share one). Client state lives with the
- *  caller; this only renders. */
+/** The dashboard toolbar: the 7d/30d/90d segmented range plus the Compare switch. The caller owns the state. */
 export function RangePicker({
   range,
   onRange,
@@ -675,15 +583,15 @@ export function RangePicker({
   onCompare: () => void;
 }): ReactElement {
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="flex rounded-[10px] border border-border bg-panel p-[3px]" role="group" aria-label="Range">
+    <div className="flex items-center gap-2">
+      <div className="flex rounded-lg border border-border p-0.5" role="group" aria-label="Range">
         {RANGES.map((v) => (
           <button
             key={v}
             type="button"
             aria-pressed={range === v}
             onClick={() => onRange(v)}
-            className={`cursor-pointer rounded-[7px] px-3 py-[5px] font-mono text-[11.5px] ${range === v ? "bg-accent-soft text-accent" : "text-muted hover:text-text"}`}
+            className={`cursor-pointer rounded-md border-0 px-3 py-[5px] text-[13px] ${range === v ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
           >
             {v}d
           </button>
@@ -691,15 +599,112 @@ export function RangePicker({
       </div>
       <button
         type="button"
-        aria-pressed={compare}
+        role="switch"
+        aria-checked={compare}
+        title={`compare to the previous ${range}d`}
         onClick={onCompare}
-        className={`flex cursor-pointer items-center gap-2 rounded-[10px] border px-3 py-[7px] text-xs ${
-          compare ? "border-accent bg-accent-soft text-text" : "border-border bg-panel text-muted hover:text-text"
-        }`}
+        className={`flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-transparent px-3 py-[7px] text-[13px] hover:border-border-strong ${compare ? "text-text" : "text-muted"}`}
       >
-        <span aria-hidden="true" className="h-2 w-2 rounded-[2px]" style={{ background: "var(--accent)" }} />
-        Compare to previous {range}d
+        <Switch on={compare} />
+        Compare
       </button>
     </div>
+  );
+}
+
+/** The v3 switch: a small track with the knob at the end it points to. */
+export function Switch({ on }: { on: boolean }): ReactElement {
+  return (
+    <span
+      aria-hidden="true"
+      className={`box-border flex h-4 w-[26px] rounded-lg p-0.5 transition-colors duration-200 ${on ? "justify-end bg-text" : "justify-start bg-border-strong"}`}
+    >
+      <span className="h-3 w-3 rounded-full bg-bg" />
+    </span>
+  );
+}
+
+/** The live dot a colony row leads with: status-toned, breathing while the colony's microVM is up. */
+export function StatusDot({ session }: { session: Session }): ReactElement {
+  const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
+  const live = session.status === "running" || session.status === "starting";
+  return (
+    <span
+      aria-hidden="true"
+      className={`h-[7px] w-[7px] rounded-full transition-colors duration-500 ${live ? "v3-live-dot" : ""}`}
+      style={{ background: TONE_COLOR[tone] }}
+    />
+  );
+}
+
+/** The colonies table's grid, shared by the header row and every row. */
+export const COLONY_GRID = "grid grid-cols-[10px_minmax(0,1fr)_minmax(0,120px)_130px_72px_64px] items-center gap-3.5";
+
+/** One colony row: dot, title + repo#issue, org, status, age, spend. Flashes when its status just
+ *  moved and lights its cost when it just rose (liveEvents). */
+export function ColonyRow({
+  session,
+  age,
+  flashed,
+  bumped,
+  onOpen,
+  showOrg = true,
+}: {
+  session: Session;
+  age: string;
+  flashed: boolean;
+  bumped: boolean;
+  onOpen?: (id: string) => void;
+  showOrg?: boolean;
+}): ReactElement {
+  const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone };
+  const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
+  return (
+    <div
+      className={`${COLONY_GRID} -mt-px border-t border-border py-3 transition-colors duration-[1200ms] ${flashed ? "v3-flash" : ""}`}
+      data-live={isLive(session.status) || undefined}
+    >
+      <StatusDot session={session} />
+      <button
+        type="button"
+        onClick={() => onOpen?.(session.id)}
+        title={session.issue_title || short}
+        className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-[13.5px] text-text hover:opacity-80"
+      >
+        {session.issue_title || short} <span className="font-mono text-[12px] text-faint">{short}</span>
+      </button>
+      <span className="min-w-0 truncate text-[13px] text-faint">{showOrg ? orgOf(session) : ""}</span>
+      <span className="truncate text-[13px]" style={{ color: TONE_COLOR[meta.tone] }}>
+        {meta.label}
+      </span>
+      <span className="text-right text-[12.5px] text-faint">{age}</span>
+      <span className={`text-right text-[13px] tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-text"}`}>
+        <LiveCost value={sessionCost(session)} />
+      </span>
+    </div>
+  );
+}
+
+/** An org's avatar when /api/orgs knows one, else its initial on its deterministic colour —
+ *  the same tile everywhere (cards, queue, table, legends, chips), so the hue fallback reads as
+ *  one identity. A broken image falls back to the lettermark too, via Avatar's fallback. */
+export function OrgTile({ org, avatar, size = 22 }: { org: string; avatar?: string | null; size?: number }): ReactElement {
+  const radius = "50%";
+  return (
+    <Avatar
+      name={org}
+      src={avatar ?? undefined}
+      size={size}
+      rounded="full"
+      fallback={
+        <span
+          aria-hidden="true"
+          className="grid shrink-0 select-none place-items-center font-mono font-medium"
+          style={{ width: size, height: size, borderRadius: radius, fontSize: Math.max(9, Math.round(size * 0.4)), background: orgColorFor(org), color: "var(--term-bg)" }}
+        >
+          {initialOf(org)}
+        </span>
+      }
+    />
   );
 }

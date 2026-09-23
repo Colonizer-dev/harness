@@ -41,12 +41,13 @@ describe("OrgDashboard", () => {
   const render = (h: SpendHistory | null = history, extra: { providers?: ProviderErrorSnapshot[]; initialRepo?: string | null } = {}) =>
     renderToStaticMarkup(<OrgDashboard org={ACME} sessions={orgSessions()} history={h} range={30} compare onBack={noop} {...extra} />);
 
-  it("renders the render's eight KPI tiles with honest empty states", () => {
+  it("renders the measured KPIs and names the unmeasured ones once", () => {
     const html = render();
-    for (const kpi of ["MERGED PRS", "LEAD TIME", "PR CYCLE TIME", "CHANGE FAILURE RATE", "TIME TO RECOVER", "CI PASS RATE", "COST PER MERGED PR", "API ERROR RATE"]) {
+    for (const kpi of ["Merged PRs", "Change failure rate", "Cost per merged PR", "Spend"]) {
       expect(html).toContain(kpi);
     }
-    expect(html).toContain("no data source yet");
+    expect(html).toContain("Lead time, PR cycle time, Time to recover, CI pass rate and Coverage are not measured yet");
+    expect(html).toContain("API error rate: no data source yet");
     // Real figures: 1 merged of 4 colonies, 1 failed of 4, $6 rollup ÷ 1 merged.
     expect(html).toContain("25% of 4 colonies");
     expect(html).toContain("25.0%");
@@ -65,8 +66,8 @@ describe("OrgDashboard", () => {
 
   it("renders the repository chip row, and a repo filter narrows the whole dashboard", () => {
     const html = render();
-    expect(html).toContain("REPOSITORY");
-    for (const chip of ["All", "webshop", "api"]) expect(html).toContain(chip);
+    expect(html).toContain('aria-label="Repository"');
+    for (const chip of [">all <", "webshop", "api"]) expect(html).toContain(chip);
     const filtered = render(history, { initialRepo: "acme/api" });
     // Only the api colonies remain; the webshop rows are gone from table and list.
     expect(filtered).not.toContain("webshop#9");
@@ -77,10 +78,10 @@ describe("OrgDashboard", () => {
 
   it("buckets outcomes by merge day for merged, launch day otherwise, and keeps the CI-green funnel step empty", () => {
     const html = render();
-    expect(html).toContain("COLONY OUTCOMES PER DAY");
+    expect(html).toContain("Colony outcomes");
     expect(html).toContain("merged by merge day, the rest by launch day · current status");
     for (const legend of ["Merged", "PR open", "No changes", "Failed", "Stopped"]) expect(html).toContain(legend);
-    expect(html).toContain("DELIVERY FUNNEL");
+    expect(html).toContain("Delivery funnel");
     expect(html).toContain("Colonies launched");
     expect(html).toContain("PR opened");
     expect(html).toContain("CI green");
@@ -90,17 +91,17 @@ describe("OrgDashboard", () => {
 
   it("keeps the repositories table and colonies list honest", () => {
     const html = render();
-    for (const col of ["COLONIES", "MERGE RATE", "LEAD TIME", "PR CYCLE", "CI PASS", "COVERAGE", "SPEND", "$/PR"]) {
+    for (const col of [">Repository<", ">Colonies<", ">Merge rate<", ">Fail<", ">Spend<", ">$ / PR<"]) {
       expect(html).toContain(col);
     }
     expect(html).toContain("Click a row to filter the dashboard");
-    expect(html).toContain("COLONIES · 4");
+    expect(html).toMatch(/>Colonies<\/h2><span[^>]*>4</);
     // No CI/coverage API: those cells stay dashes with the reason in the title.
     expect(html).toContain("the API serves no CI results");
     expect(html).toContain("the API serves no coverage");
   });
 
-  it("adds previous-period deltas and sparklines to the measured KPI tiles", () => {
+  it("adds previous-period deltas and sparklines to the measured KPIs", () => {
     const days = ["2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"];
     const h: SpendHistory = { days: days.map((d) => histDay(d, 1, 0, 1)) };
     const list = [
@@ -111,14 +112,14 @@ describe("OrgDashboard", () => {
     // 1 merged in range vs 1 before: a flat zero delta, plus the sparkline area.
     expect(html).toContain("0.0%");
     expect(html).toContain('viewBox="0 0 100 28"');
-    // The empty-state tiles stay empty, with no sparkline or delta.
-    expect(html).toContain("no data source yet");
+    // The unmeasured KPIs are named, not drawn.
+    expect(html).toContain("not measured yet");
   });
 
   it("renders gracefully with no history: dashes, not crashes", () => {
     const html = render(null);
-    expect(html).toContain("← overview");
-    expect(html).toContain("MERGED PRS");
+    expect(html).toContain("← All workspaces");
+    expect(html).toContain("Merged PRs");
     expect(html).toContain("no model spend in range");
     expect(html).toContain("no data in range");
     expect(html).toContain("webshop");

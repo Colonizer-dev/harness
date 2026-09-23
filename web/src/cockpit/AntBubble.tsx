@@ -10,7 +10,7 @@ export function AntBubble({ text, title, tone }: { text: string; title: string; 
       <span
         key={text}
         title={title}
-        className="inline-flex items-center whitespace-nowrap rounded-md border bg-panel px-1.5 py-0.5 font-mono text-[10px] leading-[14px] text-muted"
+        className="inline-flex items-center whitespace-nowrap nest-glass rounded-md border px-1.5 py-0.5 font-mono text-[10.5px] leading-[14px] text-muted"
         style={{ borderColor: tone, animation: "ck-in 0.4s ease-out" }}
       >
         <span aria-hidden="true" className="mr-1 inline-block h-[7px] w-[7px] shrink-0 rounded-full" style={{ background: tone }} />
@@ -18,7 +18,7 @@ export function AntBubble({ text, title, tone }: { text: string; title: string; 
       </span>
       <span
         aria-hidden="true"
-        className="-mt-[5px] block h-[7px] w-[7px] rotate-45 border-b border-r bg-panel"
+        className="-mt-[5px] block h-[7px] w-[7px] nest-glass-tail rotate-45 border-b border-r"
         style={{ borderColor: tone }}
       />
     </span>

@@ -2,99 +2,109 @@
 
 /* Colonizer: deep-space neutrals with one beacon-orange accent. Light values first; dark overrides below. */
 :root {
-  --bg: #f3f5f8;
+  --bg: #f7f7f8;
   --panel: #ffffff;
-  --panel-2: #eef1f5;
-  --panel-3: #e3e8ef;
-  --border: #dde2ea;
-  --border-strong: #c3cbd7;
-  --text: #121722;
-  --muted: #5b6577;
-  --faint: #8a93a3;
-  --accent: #c8440f;
-  --accent-hover: #ad3a0c;
+  --panel-2: #efeff1;
+  --panel-3: #e6e6e9;
+  --border: rgb(0 0 0 / 0.08);
+  --border-strong: rgb(0 0 0 / 0.16);
+  --text: #171717;
+  --muted: #666666;
+  --faint: #8f8f8f;
+  --accent: #e0551f;
+  --accent-hover: #c8440f;
   --accent-soft: #fdece4;
-  --accent-ring: rgb(200 68 15 / 0.35);
+  --accent-ring: rgb(224 85 31 / 0.35);
   --on-accent: #ffffff;
-  --ok: #15803d;
+  --ok: #16a34a;
   --ok-soft: #e3f4e8;
-  --warn: #a15c07;
+  --warn: #c77700;
   --warn-soft: #fdf2dc;
-  --err: #b91c1c;
+  --err: #dc2626;
   --err-soft: #fce8e7;
-  --info: #1d4ed8;
-  --info-soft: #e5ecfd;
+  --info: #666666;
+  --info-soft: rgb(0 0 0 / 0.05);
   --term-bg: #0b0e14;
   --term-fg: #dfe5ee;
-  --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 4px 16px rgb(18 23 34 / 0.07);
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.05), 0 12px 40px rgb(0 0 0 / 0.08);
   /* Dashboard series (issue #398, from the Cockpit Dashboards design): outcome stacks, model
      stacks and p50/p95 lines. The oklch fills are theme-independent on purpose — the design pins
      the same hues in both renders — while --out-stopped tracks the border, which adapts. */
-  --out-merged: oklch(0.76 0.17 158);
-  --out-pr: oklch(0.7 0.16 258);
-  --out-nochg: oklch(0.82 0.15 85);
-  --out-failed: oklch(0.66 0.21 20);
-  --out-stopped: #c3cbd7;
-  --model-deepseek: oklch(0.74 0.14 205);
-  --model-opus: oklch(0.72 0.17 48);
-  --model-spark: oklch(0.68 0.18 295);
+  --out-merged: #e0551f;
+  --out-pr: #f59e3c;
+  --out-nochg: #f3dcc0;
+  --out-failed: #dc2626;
+  --out-stopped: #e5e5e5;
+  --model-deepseek: #f59e3c;
+  --model-opus: #e0551f;
+  --model-spark: #f7c98a;
   --lat-p50: oklch(0.74 0.14 210);
   --lat-p95: oklch(0.7 0.19 340);
   /* Multi-series chart ramp (issue #445): alternating deep/bright orange-amber steps, each
      clearly lighter or darker than its neighbours and every step dark enough to read as a
      line on the white panel. The dark theme carries brighter counterparts below. */
-  --chart-1: #9a3412;
-  --chart-2: #c2410c;
-  --chart-3: #92400e;
-  --chart-4: #b45309;
-  --chart-5: #7c2d12;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --chart-1: #e0551f;
+  --chart-2: #f59e3c;
+  --chart-3: #f7c98a;
+  --chart-4: #8a2e0a;
+  --chart-5: #c2410c;
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --pop: rgb(255 255 255 / 0.8);
+  --hdr: rgb(247 247 248 / 0.7);
+  --halo: rgb(120 140 255 / 0.12);
+  --halo2: rgb(255 255 255 / 0.9);
+  --glass: rgb(255 255 255 / 0.65);
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #07090e;
-    --panel: #0e121a;
-    --panel-2: #151a24;
-    --panel-3: #1c2330;
-    --border: #212938;
-    --border-strong: #323c4f;
-    --text: #e6ebf3;
-    --muted: #97a1b3;
-    --faint: #677185;
+    --bg: #08080a;
+    --panel: #0e0e11;
+    --panel-2: #141417;
+    --panel-3: #1c1c20;
+    --border: rgb(255 255 255 / 0.08);
+    --border-strong: rgb(255 255 255 / 0.16);
+    --text: #ededed;
+    --muted: #a1a1a1;
+    --faint: #707070;
     --accent: #ff6b35;
     --accent-hover: #ff8455;
-    --accent-soft: #2e1a12;
+    --accent-soft: #2a160e;
     --accent-ring: rgb(255 107 53 / 0.4);
     --on-accent: #1a0903;
-    --ok: #4ade80;
-    --ok-soft: #10251a;
-    --warn: #fbbf24;
-    --warn-soft: #2a2110;
-    --err: #f87171;
-    --err-soft: #2e1618;
-    --info: #93c5fd;
-    --info-soft: #132036;
-    --term-bg: #05070b;
+    --ok: #50c878;
+    --ok-soft: #0f2418;
+    --warn: #f5a524;
+    --warn-soft: #2a1f0c;
+    --err: #f2555a;
+    --err-soft: #2c1415;
+    --info: #a1a1a1;
+    --info-soft: rgb(255 255 255 / 0.06);
+    --term-bg: #050506;
     --term-fg: #dfe5ee;
-    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.35);
-    --out-merged: oklch(0.76 0.17 158);
-    --out-pr: oklch(0.7 0.16 258);
-    --out-nochg: oklch(0.82 0.15 85);
-    --out-failed: oklch(0.66 0.21 20);
-    --out-stopped: #323c4f;
-    --model-deepseek: oklch(0.74 0.14 205);
-    --model-opus: oklch(0.72 0.17 48);
-    --model-spark: oklch(0.68 0.18 295);
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 12px 40px rgb(0 0 0 / 0.35);
+    --out-merged: #ff6b35;
+    --out-pr: #ffa63d;
+    --out-nochg: #6b4a2e;
+    --out-failed: #f2555a;
+    --out-stopped: #3a3a3a;
+    --model-deepseek: #ffa63d;
+    --model-opus: #ff6b35;
+    --model-spark: #ffd08a;
     --lat-p50: oklch(0.74 0.14 210);
     --lat-p95: oklch(0.7 0.19 340);
     --chart-1: #ff6b35;
     --chart-2: #ffa63d;
-    --chart-3: #ff7a1a;
-    --chart-4: #ffd08a;
+    --chart-3: #ffd08a;
+    --chart-4: #a8401c;
     --chart-5: #f76707;
+    --pop: rgb(18 18 22 / 0.78);
+    --hdr: rgb(8 8 10 / 0.6);
+    --halo: rgb(120 140 255 / 0.1);
+    --halo2: rgb(255 255 255 / 0.05);
+    --glass: rgb(255 255 255 / 0.028);
     color-scheme: dark;
   }
 }
@@ -131,6 +141,8 @@
   --color-model-spark: var(--model-spark);
   --color-lat-p50: var(--lat-p50);
   --color-lat-p95: var(--lat-p95);
+  --color-pop: var(--pop);
+  --color-hdr: var(--hdr);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -1034,105 +1046,115 @@ body {
 
 /* An explicit choice beats the OS setting; unset follows it. */
 :root[data-theme="light"] {
-  --bg: #f3f5f8;
+  --bg: #f7f7f8;
   --panel: #ffffff;
-  --panel-2: #eef1f5;
-  --panel-3: #e3e8ef;
-  --border: #dde2ea;
-  --border-strong: #c3cbd7;
-  --text: #121722;
-  --muted: #5b6577;
-  --faint: #8a93a3;
-  --accent: #c8440f;
-  --accent-hover: #ad3a0c;
+  --panel-2: #efeff1;
+  --panel-3: #e6e6e9;
+  --border: rgb(0 0 0 / 0.08);
+  --border-strong: rgb(0 0 0 / 0.16);
+  --text: #171717;
+  --muted: #666666;
+  --faint: #8f8f8f;
+  --accent: #e0551f;
+  --accent-hover: #c8440f;
   --accent-soft: #fdece4;
-  --accent-ring: rgb(200 68 15 / 0.35);
+  --accent-ring: rgb(224 85 31 / 0.35);
   --on-accent: #ffffff;
-  --ok: #15803d;
+  --ok: #16a34a;
   --ok-soft: #e3f4e8;
-  --warn: #a15c07;
+  --warn: #c77700;
   --warn-soft: #fdf2dc;
-  --err: #b91c1c;
+  --err: #dc2626;
   --err-soft: #fce8e7;
-  --info: #1d4ed8;
-  --info-soft: #e5ecfd;
+  --info: #666666;
+  --info-soft: rgb(0 0 0 / 0.05);
   --term-bg: #0b0e14;
   --term-fg: #dfe5ee;
-  --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 4px 16px rgb(18 23 34 / 0.07);
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.05), 0 12px 40px rgb(0 0 0 / 0.08);
   --ground: #e8ecf2;
   --plot: #ffffff;
   --plot-edge: #c3cbd7;
   --dots: rgb(18 23 34 / 0.08);
   --tunnel-wall: #b89a78;
   --tunnel-floor: #dcc3a2;
-  --out-merged: oklch(0.76 0.17 158);
-  --out-pr: oklch(0.7 0.16 258);
-  --out-nochg: oklch(0.82 0.15 85);
-  --out-failed: oklch(0.66 0.21 20);
-  --out-stopped: #c3cbd7;
-  --model-deepseek: oklch(0.74 0.14 205);
-  --model-opus: oklch(0.72 0.17 48);
-  --model-spark: oklch(0.68 0.18 295);
+  --out-merged: #e0551f;
+  --out-pr: #f59e3c;
+  --out-nochg: #f3dcc0;
+  --out-failed: #dc2626;
+  --out-stopped: #e5e5e5;
+  --model-deepseek: #f59e3c;
+  --model-opus: #e0551f;
+  --model-spark: #f7c98a;
   --lat-p50: oklch(0.74 0.14 210);
   --lat-p95: oklch(0.7 0.19 340);
   /* Multi-series chart ramp (issue #445): alternating deep/bright orange-amber steps, each
      clearly lighter or darker than its neighbours and every step dark enough to read as a
      line on the white panel. The dark theme carries brighter counterparts below. */
-  --chart-1: #9a3412;
-  --chart-2: #c2410c;
-  --chart-3: #92400e;
-  --chart-4: #b45309;
-  --chart-5: #7c2d12;
+  --chart-1: #e0551f;
+  --chart-2: #f59e3c;
+  --chart-3: #f7c98a;
+  --chart-4: #8a2e0a;
+  --chart-5: #c2410c;
+  --pop: rgb(255 255 255 / 0.8);
+  --hdr: rgb(247 247 248 / 0.7);
+  --halo: rgb(120 140 255 / 0.12);
+  --halo2: rgb(255 255 255 / 0.9);
+  --glass: rgb(255 255 255 / 0.65);
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --bg: #07090e;
-  --panel: #0e121a;
-  --panel-2: #151a24;
-  --panel-3: #1c2330;
-  --border: #212938;
-  --border-strong: #323c4f;
-  --text: #e6ebf3;
-  --muted: #97a1b3;
-  --faint: #677185;
+  --bg: #08080a;
+  --panel: #0e0e11;
+  --panel-2: #141417;
+  --panel-3: #1c1c20;
+  --border: rgb(255 255 255 / 0.08);
+  --border-strong: rgb(255 255 255 / 0.16);
+  --text: #ededed;
+  --muted: #a1a1a1;
+  --faint: #707070;
   --accent: #ff6b35;
   --accent-hover: #ff8455;
-  --accent-soft: #2e1a12;
+  --accent-soft: #2a160e;
   --accent-ring: rgb(255 107 53 / 0.4);
   --on-accent: #1a0903;
-  --ok: #4ade80;
-  --ok-soft: #10251a;
-  --warn: #fbbf24;
-  --warn-soft: #2a2110;
-  --err: #f87171;
-  --err-soft: #2e1618;
-  --info: #93c5fd;
-  --info-soft: #132036;
-  --term-bg: #05070b;
+  --ok: #50c878;
+  --ok-soft: #0f2418;
+  --warn: #f5a524;
+  --warn-soft: #2a1f0c;
+  --err: #f2555a;
+  --err-soft: #2c1415;
+  --info: #a1a1a1;
+  --info-soft: rgb(255 255 255 / 0.06);
+  --term-bg: #050506;
   --term-fg: #dfe5ee;
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.35);
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 12px 40px rgb(0 0 0 / 0.35);
   --ground: #0c0f15;
   --plot: #12151d;
   --plot-edge: rgb(255 255 255 / 0.12);
   --dots: rgb(255 255 255 / 0.07);
   --tunnel-wall: #241a12;
   --tunnel-floor: #3a2b1c;
-  --out-merged: oklch(0.76 0.17 158);
-  --out-pr: oklch(0.7 0.16 258);
-  --out-nochg: oklch(0.82 0.15 85);
-  --out-failed: oklch(0.66 0.21 20);
-  --out-stopped: #323c4f;
-  --model-deepseek: oklch(0.74 0.14 205);
-  --model-opus: oklch(0.72 0.17 48);
-  --model-spark: oklch(0.68 0.18 295);
+  --out-merged: #ff6b35;
+  --out-pr: #ffa63d;
+  --out-nochg: #6b4a2e;
+  --out-failed: #f2555a;
+  --out-stopped: #3a3a3a;
+  --model-deepseek: #ffa63d;
+  --model-opus: #ff6b35;
+  --model-spark: #ffd08a;
   --lat-p50: oklch(0.74 0.14 210);
   --lat-p95: oklch(0.7 0.19 340);
   --chart-1: #ff6b35;
   --chart-2: #ffa63d;
-  --chart-3: #ff7a1a;
-  --chart-4: #ffd08a;
+  --chart-3: #ffd08a;
+  --chart-4: #a8401c;
   --chart-5: #f76707;
+  --pop: rgb(18 18 22 / 0.78);
+  --hdr: rgb(8 8 10 / 0.6);
+  --halo: rgb(120 140 255 / 0.1);
+  --halo2: rgb(255 255 255 / 0.05);
+  --glass: rgb(255 255 255 / 0.028);
   color-scheme: dark;
 }
 
@@ -1256,5 +1278,158 @@ body {
   .rt-twitch,
   .rt-pulse {
     animation: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Cockpit Dashboards v3 (Claude Design import): the glass header, the halo behind the page top,
+   and the realtime motion — a breathing live dot, a pulsing "now" point on charts, and the ticker
+   line easing in. All of it freezes under reduced motion via the .cockpit guard above and the
+   rule below.
+   --------------------------------------------------------------------------- */
+@keyframes lvpulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+@keyframes nowpulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+@keyframes evin { 0% { opacity: 0; transform: translateY(4px); } 15% { opacity: 1; transform: none; } 80% { opacity: 1; } 100% { opacity: 0.6; } }
+.v3-halo {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 720px;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(60% 420px at 50% -80px, var(--halo), transparent 70%), radial-gradient(30% 260px at 18% 0, var(--halo2), transparent 70%);
+}
+.v3-glass {
+  background: var(--hdr);
+  backdrop-filter: saturate(160%) blur(18px);
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
+}
+.v3-pop {
+  background: var(--pop);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+}
+.v3-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: lvpulse 1.6s ease-out infinite;
+}
+.v3-now-dot {
+  animation: nowpulse 1.8s ease-out infinite;
+}
+.v3-evin {
+  display: inline-block;
+  animation: evin 2.2s ease-out forwards;
+}
+.v3-flash {
+  background: var(--accent-soft);
+}
+/* A chart grows in left to right on mount (re-keyed on range, so a range change replays it);
+   the previous-period ghost fades in once the areas have drawn. */
+@keyframes v3-reveal { from { clip-path: inset(-12px 100% -12px -2px); } to { clip-path: inset(-12px 0 -12px -2px); } }
+@keyframes v3-fade { from { opacity: 0; } to { opacity: 1; } }
+.v3-reveal {
+  animation: v3-reveal 1200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.v3-fade-late {
+  animation: v3-fade 600ms ease-out 500ms both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .v3-live-dot,
+  .v3-now-dot,
+  .v3-evin,
+  .v3-reveal,
+  .v3-fade-late {
+    animation: none !important;
+  }
+}
+
+/* Nest v3 (live) ---------------------------------------------------------------
+   The ants view in the Cockpit Dashboards v3 idiom: glass popovers, a breathing Live dot, a
+   live strip whose newest event fades in, chambers that flash when their colony's status moves,
+   and a "+$x" that floats off a chamber whose cost just rose. Owned by NestView/AntBubble/
+   ChamberZoom/Inspector; everything stops under prefers-reduced-motion. */
+.nest-glass {
+  background: var(--pop, var(--panel));
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+}
+.nest-glass-tail {
+  background: var(--pop, var(--panel));
+}
+.nest-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: nest-lvpulse 1.6s ease-out infinite;
+}
+@keyframes nest-lvpulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 6px color-mix(in oklab, var(--ok) 0%, transparent);
+  }
+}
+.nest-strip .nest-ev:first-child {
+  animation: nest-evin 2.2s ease-out both;
+}
+@keyframes nest-evin {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  15% {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* A chamber whose status just moved: a ring in its new tone that swells and fades once. */
+.nest-flash {
+  animation: nest-flash 1.8s ease-out 1;
+}
+@keyframes nest-flash {
+  0% {
+    outline: 2px solid var(--flash, var(--accent));
+    outline-offset: 0;
+  }
+  100% {
+    outline: 2px solid transparent;
+    outline-offset: 14px;
+  }
+}
+.nest-row-flash {
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+  transition: background 1200ms;
+}
+.nest-float {
+  animation: nest-float 1.5s ease-out both;
+}
+@keyframes nest-float {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -18px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nest-live-dot,
+  .nest-strip .nest-ev:first-child,
+  .nest-flash,
+  .nest-float {
+    animation: none !important;
+  }
+  .nest-float {
+    display: none;
   }
 }
