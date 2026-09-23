@@ -226,12 +226,28 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped). Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
+| `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
 | `POST /api/redteam/runs` | `{repo, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise). **409** when another run for the same repository is still active |
 | `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
 | `GET /api/burn-down` · `POST /api/burn-down/stop` | Burn-down mode (§6.2c): the measured window and launch plan, and a stop that persistently switches the module off and halts every colony it launched |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
+
+### `GET /api/stream`
+
+One authenticated WebSocket per open Cockpit tab, so the dashboard updates in realtime instead of
+polling. Auth is the same `host_guard` as every other `/api/` route; client messages are ignored.
+On connect the server sends the full snapshots first — `{"type":"sessions","sessions":[…]}` (exactly
+the `GET /api/sessions` body), then `orgs` (the `GET /api/orgs` body), then the cached `hosts` and `storage` frames when the hub holds
+them (otherwise with the next hub broadcast) — then only deltas:
+`{"type":"session","session":{…}}` per created/changed colony, `{"type":"session_removed","id":"…"}`,
+and a fresh full `orgs`/`hosts`/`storage` frame whenever that source changes. One shared hub task
+serves all tabs: it re-diffs sessions every 1 s, orgs every 2 s, hosts every 5 s and storage every
+20 s (the slow sources fetch off the sessions path, so a wedged peer or disk walk only delays its own
+rows), broadcasts only on change, idles with no subscribers, and pings every 20 s. A client that falls
+behind the broadcast buffer gets the full `sessions` and `orgs` lists plus the cached
+`hosts`/`storage` frames again instead of the missed deltas.
 
 ### Duplicate-colony prevention
 

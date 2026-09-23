@@ -133,13 +133,27 @@ export function StoragePanelView({
   );
 }
 
-export function StoragePanel({ onOpenColony, onOpenSettings }: { onOpenColony: (id: string) => void; onOpenSettings?: (section: SectionId) => void }): ReactElement | null {
+export function StoragePanel({
+  onOpenColony,
+  onOpenSettings,
+  liveStorage = null,
+}: {
+  onOpenColony: (id: string) => void;
+  onOpenSettings?: (section: SectionId) => void;
+  liveStorage?: StorageSummary | null;
+}): ReactElement | null {
   const api = useApi();
   const toast = useToast();
   const [summary, setSummary] = useState<StorageSummary | null>(null);
   const [cleaningId, setCleaningId] = useState<string | null>(null);
 
   useEffect(() => {
+    // A pushed /api/stream frame overrides the fetch (issue #446); when the stream drops its
+    // override clears and this refetches, so the panel never freezes on a stale push.
+    if (liveStorage) {
+      setSummary(liveStorage);
+      return;
+    }
     let cancelled = false;
     // One fetch and no poll: each GET /api/storage walks the worktrees and the microsandbox
     // home, and a cleanup refetches below. (No status prop reaches this panel to refetch on.)
@@ -155,7 +169,7 @@ export function StoragePanel({ onOpenColony, onOpenSettings }: { onOpenColony: (
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, liveStorage]);
 
   if (!summary) return null;
 

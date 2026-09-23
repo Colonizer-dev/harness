@@ -14,15 +14,15 @@ import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
-import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, UpdateStatus } from "../types";
+import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
+import type { LiveConnection } from "../liveStream";
 import { Header } from "./Header";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
-import { OverviewView } from "./OverviewView";
-import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
+import { OverviewView } from "./OverviewView";import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { Rail, type CockpitView } from "./Rail";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
@@ -70,6 +70,8 @@ export function Cockpit({
   status,
   statusError = false,
   fleet,
+  liveConnection,
+  liveStorage = null,
   update,
   autopilotDefault,
   launchRequests,
@@ -103,6 +105,10 @@ export function Cockpit({
   statusError?: boolean;
   /** Self plus every configured peer (issue #231); older mothership builds send an empty list. */
   fleet?: FleetHost[];
+  /** The realtime feed's connection (issue #446); absent renders the indicator as reconnecting. */
+  liveConnection?: LiveConnection;
+  /** A storage frame the stream pushed; the overview's storage panel shows it (issue #446). */
+  liveStorage?: StorageSummary | null;
   update: UpdateStatus | null;
   autopilotDefault: boolean;
   /** Bumped by Setup's launch row, which lives in the settings body App owns. */
@@ -324,6 +330,8 @@ export function Cockpit({
             host={status?.host ?? null}
             fleet={fleet}
             runs={redRuns}
+            connection={liveConnection}
+            liveStorage={liveStorage}
             quota={status?.quota ?? null}
             quotaBannerVisible={quotaBanner !== null}
             // The org dashboard's API-error tile reads the status poll's cumulative provider

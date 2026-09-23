@@ -48,6 +48,7 @@ mod sessions;
 mod spend;
 mod stack;
 mod stale;
+mod stream;
 mod telemetry;
 mod timing;
 mod update;
@@ -205,6 +206,8 @@ pub struct App {
     pub updater: update::Updater,
     /// Anonymous usage reporting, local half only: the batch that would be sent and the switch for it.
     pub usage: usage::Usage,
+    /// The `GET /api/stream` push hub: one shared broadcast diff task for all open tabs.
+    pub stream: stream::Hub,
 }
 
 pub type Shared = Arc<App>;
@@ -1192,6 +1195,7 @@ async fn serve() -> Result<()> {
         updates: version::Updates::new(&cfg.config_dir)?,
         updater: update::Updater::new(),
         usage: usage::Usage::new(&cfg.config_dir),
+        stream: stream::Hub::new(),
         api_token,
         cfg,
     });
@@ -1256,6 +1260,7 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/stop", post(lifecycle::stop))
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/storage", get(reclaim::storage))
+        .route("/api/stream", get(stream::handler))
         .route("/api/sessions/{id}/retain", post(reclaim::retain))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
@@ -1468,6 +1473,7 @@ pub(crate) mod tests {
             pull: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
+            stream: stream::Hub::new(),
         })
     }
 
@@ -1522,6 +1528,7 @@ pub(crate) mod tests {
         Router::new()
             .route("/api/status", get(status))
             .route("/api/sessions", post(|| async { "created" }))
+            .route("/api/stream", get(stream::handler))
             .fallback(|| async { Html("test page") })
             .layer(middleware::from_fn_with_state(app.clone(), host_guard))
             .with_state(app.clone())
@@ -1649,6 +1656,54 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert_eq!(res.status(), expected, "origin {value} upgrade={is_upgrade}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stream_upgrade_without_a_token_is_rejected() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let res = auth_router(&app)
+            .oneshot(guarded(Method::GET, "/api/stream", upgrade()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stream_cookie_upgrade_from_elsewhere_is_forbidden() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let mut headers = vec![cookie(&app), origin("http://evil.example")];
+        headers.extend(upgrade());
+        let res = auth_router(&app)
+            .oneshot(guarded(Method::GET, "/api/stream", headers))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stream_upgrade_with_a_token_reaches_the_handler() {
+        let root = temp_root();
+        let app = test_app(&root);
+        // Bearer needs no Origin; cookie auth needs the same-origin one. Either way the guard
+        // passes and routing reaches the real WebSocket extractor — which answers 426 here only
+        // because `oneshot` carries no hyper upgrade state (production answers 101). A guard
+        // failure would be 401/403 instead, and a missing route the fallback page.
+        let mut cookie_headers = vec![cookie(&app), origin("http://127.0.0.1:7878")];
+        cookie_headers.extend(upgrade());
+        let mut bearer_headers = vec![bearer(&app)];
+        bearer_headers.extend(upgrade());
+        for headers in [bearer_headers, cookie_headers] {
+            let res = auth_router(&app)
+                .oneshot(guarded(Method::GET, "/api/stream", headers))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
         }
         let _ = std::fs::remove_dir_all(root);
     }

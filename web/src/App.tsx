@@ -26,6 +26,13 @@ import {
   type SessionSnapshot,
 } from "./notifications";
 import { floatingColumnClass } from "./floatingColumn";
+import {
+  LiveStream,
+  removeSessionById,
+  shouldPollWhileLive,
+  upsertSession as upsertSessionList,
+  type LiveConnection,
+} from "./liveStream";
 import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
@@ -40,6 +47,7 @@ import type {
   Session,
   StartRedTeamRunRequest,
   StorageHealth,
+  StorageSummary,
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
@@ -95,6 +103,10 @@ export function App() {
   // (colonizer.sidebar-tab stays the sidebar's own memory of itself.)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
   const [modules, setModules] = useState<ModuleInfo[]>([]);
+  // The realtime feed (issue #446): while its connection is open the sessions/orgs/fleet poll
+  // ticks skip their fetch; a pushed storage frame feeds the storage panel through liveStorage.
+  const [liveConnection, setLiveConnection] = useState<LiveConnection>("connecting");
+  const [liveStorage, setLiveStorage] = useState<StorageSummary | null>(null);
   // One image-pull poller for the whole app; Setup, Settings and the sidebar all read it.
   const pull = useImagePull(true);
 
@@ -205,17 +217,89 @@ export function App() {
   // minute, which used to delay notifications for colonies the open chat is not showing
   // (issue #159). Error semantics are unchanged: every loader swallows its own failure and keeps
   // the last data, exactly as the old setIntervals did.
+  // While the realtime stream is open it owns the sessions/orgs/fleet ticks, so those polls skip
+  // (shouldPollWhileLive); every other tick keeps running, and a dropped stream falls back to the
+  // full schedule until it reconnects. A guarded poll also drops its own result when the stream
+  // reopened mid-flight, so a stale fetch can never rewind fresher pushed frames.
+  const liveConnectionRef = useRef(liveConnection);
+  liveConnectionRef.current = liveConnection;
+
+  const pollSessions = useCallback(async () => {
+    if (!shouldPollWhileLive("sessions", liveConnectionRef.current)) return;
+    try {
+      const list = await api.sessions();
+      if (!shouldPollWhileLive("sessions", liveConnectionRef.current)) return;
+      setSessions(list);
+      setSessionsLoaded(true);
+    } catch {
+      /* keep the last list */
+    }
+  }, [api]);
+
+  const pollOrgs = useCallback(async () => {
+    if (!shouldPollWhileLive("orgs", liveConnectionRef.current)) return;
+    try {
+      const list = await api.orgs();
+      if (!shouldPollWhileLive("orgs", liveConnectionRef.current)) return;
+      setOrgs(list);
+      setOrgsLoaded(true);
+    } catch {
+      /* keep the last list */
+    }
+  }, [api]);
+
+  const pollFleet = useCallback(async () => {
+    if (!shouldPollWhileLive("fleet", liveConnectionRef.current)) return;
+    try {
+      const fleet = (await api.hosts()).hosts;
+      if (!shouldPollWhileLive("fleet", liveConnectionRef.current)) return;
+      setFleet(fleet);
+    } catch {
+      /* keep the last list */
+    }
+  }, [api]);
+
   usePollTick({
-    sessions: loadSessions,
+    sessions: () => void pollSessions(),
     redRuns: loadRedRuns,
     status: loadStatus,
     // Fleet stats change about as slowly as the host's own, so it shares that cadence.
-    fleet: loadFleet,
-    orgs: loadOrgs,
+    fleet: () => void pollFleet(),
+    orgs: () => void pollOrgs(),
     pendingMemory: loadPendingMemory,
     // A release check is a request to github.com, so it runs far more slowly than the rest.
     update: loadUpdate,
   });
+
+  // The realtime feed: created once per api, closed on unmount. Full-list frames replace the
+  // same state the polls feed; single-session frames upsert like GET /api/sessions (newest
+  // created first). On a drop the stream asks for one immediate guarded refresh and clears the
+  // storage override, so nothing goes stale before the polls catch up.
+  useEffect(() => {
+    const stream = new LiveStream(() => api.openStream(), {
+      onSessions: (list) => {
+        setSessions(list);
+        setSessionsLoaded(true);
+      },
+      onSession: (session) => setSessions((list) => upsertSessionList(list, session)),
+      onSessionRemoved: (id) => setSessions((list) => removeSessionById(list, id)),
+      onOrgs: (list) => {
+        setOrgs(list);
+        setOrgsLoaded(true);
+      },
+      onHosts: (hosts) => setFleet(hosts),
+      onStorage: (storage) => setLiveStorage(storage),
+      onConnection: (connection) => setLiveConnection(connection),
+      onDrop: () => {
+        setLiveStorage(null);
+        void pollSessions();
+        void pollOrgs();
+        void pollFleet();
+      },
+    });
+    stream.start();
+    return () => stream.stop();
+  }, [api, pollSessions, pollOrgs, pollFleet]);
 
   // A returning tab refreshes at once instead of waiting for the next tick: the worker already
   // kept polling while hidden, so this only closes the gap since its last tick.
@@ -331,17 +415,12 @@ export function App() {
   }, []);
 
   const removeSession = useCallback((id: string) => {
-    setSessions((list) => list.filter((s) => s.id !== id));
+    setSessions((list) => removeSessionById(list, id));
   }, []);
 
   const upsertSession = useCallback((session: Session) => {
-    setSessions((list) => {
-      const index = list.findIndex((s) => s.id === session.id);
-      if (index < 0) return [session, ...list];
-      const next = list.slice();
-      next[index] = session;
-      return next;
-    });
+    // Newest-created first like GET /api/sessions, shared with the stream's single-session frames.
+    setSessions((list) => upsertSessionList(list, session));
   }, []);
 
   // Red-team start/stop fold the returned run into the list immediately; the 5 s poll confirms.
@@ -599,6 +678,8 @@ export function App() {
               statusError={statusError}
               fleet={fleet}
               update={updateStatus}
+              liveConnection={liveConnection}
+              liveStorage={liveStorage}
               autopilotDefault={autopilotDefault}
               launchRequests={launchRequests}
               settingsRequests={settingsRequests}

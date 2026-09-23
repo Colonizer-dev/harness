@@ -27,6 +27,7 @@ import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { DashBars, DashLegend, DashPanel, Eyebrow, FilterChip, KpiTile, RangePicker, ShareBar, StatusChip, type KpiDef } from "./DashChart";
 import { FleetPanel } from "./FleetPanel";
+import { LiveCost, LiveIndicator } from "./Live";
 import { OrgDashboard } from "./OrgDashboard";
 import {
   changeFailRate,
@@ -57,7 +58,8 @@ import { headlineFor, OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overvi
 import { hostFacts } from "./host";
 import { RedTeamCard } from "./RedTeamCard";
 import { StoragePanel } from "./StoragePanel";
-import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota } from "../types";
+import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
+import type { LiveConnection } from "../liveStream";
 
 /** The last `range` local-calendar days, ascending — the x axis of every per-day series.
  *  Walks the calendar (not fixed 24h steps) so a DST transition cannot duplicate or skip a day. */
@@ -115,6 +117,8 @@ export function OverviewView({
   quota = null,
   quotaBannerVisible = false,
   providers = [],
+  connection,
+  liveStorage = null,
   onStart,
   onStop,
   onOpenColony,
@@ -141,6 +145,10 @@ export function OverviewView({
   /** Cumulative provider tallies, mapped from GET /api/status `model_providers` by the caller;
    *  passed through to the in-place org dashboard. Empty stays empty, never zero. */
   providers?: ProviderErrorSnapshot[];
+  /** The realtime feed's connection (issue #446); absent renders the indicator as reconnecting. */
+  connection?: LiveConnection;
+  /** A storage frame the stream pushed; the storage panel shows it instead of its own fetch. */
+  liveStorage?: StorageSummary | null;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
@@ -225,6 +233,7 @@ export function OverviewView({
     {
       label: "MERGED PRS",
       value: String(mergedCur.length),
+      valueNum: mergedCur.length,
       delta: mergedDelta != null ? formatDelta(mergedDelta) : undefined,
       deltaTone: deltaTone(mergedDelta),
       deltaDir: (mergedDelta ?? 0) < 0 ? "down" : "up",
@@ -250,6 +259,8 @@ export function OverviewView({
     {
       label: "SPEND",
       value: formatCost(periodSpend),
+      valueNum: periodSpend ?? undefined,
+      formatNum: (n) => formatCost(n),
       delta: spendDelta != null ? formatDelta(spendDelta) : undefined,
       deltaTone: deltaTone(spendDelta, "down"),
       deltaDir: (spendDelta ?? 0) < 0 ? "down" : "up",
@@ -295,6 +306,7 @@ export function OverviewView({
             range={range}
             compare={compare}
             providers={providers}
+            connection={connection}
             onBack={() => setDashOrg(null)}
           />
         </div>
@@ -315,7 +327,10 @@ export function OverviewView({
         ) : null}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <div className="mb-1.5 font-mono text-[10.5px] tracking-[0.12em] text-faint">OVERVIEW · {workspaces.length} WORKSPACES</div>
+            <div className="mb-1.5 flex items-center gap-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">
+              <span>OVERVIEW · {workspaces.length} WORKSPACES</span>
+              <LiveIndicator connection={connection} />
+            </div>
             <div className="text-[22px] font-semibold tracking-tight">{headlineFor(needList.length, working)}</div>
           </div>
           <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} />
@@ -641,7 +656,9 @@ export function OverviewView({
                       <span className="text-right font-mono text-[11px] text-faint">
                         {session.status === "queued" ? `queued ${formatWait(nowMs - Date.parse(session.created_at))}` : timeAgo(session.last_activity_at ?? session.updated_at)}
                       </span>
-                      <span className="text-right font-mono text-[11px] tabular-nums">{formatCost(sessionCost(session))}</span>
+                      <span className="text-right font-mono text-[11px] tabular-nums">
+                        <LiveCost value={sessionCost(session)} />
+                      </span>
                     </div>
                   );
                 })}
@@ -689,7 +706,7 @@ export function OverviewView({
 
         <FleetPanel hosts={fleetHosts} />
 
-        <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} />
+        <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
 
         <RedTeamCard runs={runs} sessions={sessions} onStart={onStart} onStop={onStop} onOpenColony={onOpenColony} />
       </div>
