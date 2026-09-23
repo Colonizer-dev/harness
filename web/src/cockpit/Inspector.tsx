@@ -312,6 +312,13 @@ export function Inspector({
     ? `${stackParent.repo}${stackParent.issue != null ? `#${stackParent.issue}` : ""} · ${stackParent.branch}`
     : (session?.parent ?? null);
   const boot = session ? bootView(session.boot_timing, session.status === "starting") : null;
+  // A queued colony waiting on another colony names it instead of reading as a generic queue
+  // entry; a queued colony with no link still reads as plain "Queued".
+  const queuedBehind = session?.queued_behind ?? null;
+  const statusLabel =
+    session?.status === "queued" && queuedBehind
+      ? `Queued behind ${queuedBehind}`
+      : (session ? (SESSION_STATUS[session.status]?.label ?? session.status) : "");
   // Cross-colony boot medians for the mothership pane; the colony branch never reads it.
   const medianBoot = mothership ? bootMedians(sessions) : null;
 
@@ -475,7 +482,7 @@ export function Inspector({
             <>
               <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.1em]" style={{ color: edge }}>
                 <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: edge }} />
-                {SESSION_STATUS[session.status]?.label ?? session.status}
+                {statusLabel}
                 <span className="tracking-normal text-faint">· {timeAgo(session.created_at)}</span>
               </div>
 
@@ -569,6 +576,21 @@ export function Inspector({
                     label="STACKED ON"
                     value={stackedOn}
                     title={stackParent?.issue_title}
+                  />
+                )}
+                {queuedBehind && (
+                  <Fact
+                    className="col-span-2"
+                    label="QUEUED BEHIND"
+                    value={queuedBehind}
+                    title={sessions.find((s) => s.id === queuedBehind)?.issue_title}
+                  />
+                )}
+                {session.needs_rebase && (
+                  <Fact
+                    label="REBASE"
+                    value="needs rebase"
+                    title="this colony's branch has diverged from its base"
                   />
                 )}
               </div>

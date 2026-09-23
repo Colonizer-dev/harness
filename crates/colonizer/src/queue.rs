@@ -130,8 +130,9 @@ enum Claim {
 enum Gate {
     /// Nothing holds it back; the slot rules decide, as for any colony.
     Admit,
-    /// Its parent has not pushed a branch yet. Look past it this tick — a child waiting on a slow
-    /// parent must not stall the colonies behind it — and look again next tick.
+    /// What it waits on is not ready yet: its stacked-on parent's branch, or the live colony it
+    /// queued behind for overlap. Look past it this tick — a colony waiting on a slow holder must
+    /// not stall the colonies behind it — and look again next tick.
     Hold,
     /// Its parent can never provide a branch; the message names the parent and says why.
     Retire(String),
@@ -146,6 +147,14 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     // decide that the boot it spawns is a resume.
     if s.git_admin_dir.is_some() {
         return Gate::Admit;
+    }
+    // Issue #453: a colony queued behind a live same-repo colony for overlap waits until that
+    // colony is no longer live — finished, or gone entirely, which releases it at once. Looked
+    // past this tick like a parent-wait, so it never stalls the colonies behind it.
+    if let Some(holder) = s.queued_behind.as_deref()
+        && sessions.iter().any(|p| p.id == holder && p.status.is_live())
+    {
+        return Gate::Hold;
     }
     let Some(parent_id) = s.parent.as_deref() else {
         return Gate::Admit;
@@ -186,8 +195,10 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         return Some(Claim::Retire(s.clone(), message));
     }
     s.status = SessionStatus::Starting;
-    // A colony re-queued after a boot that died part way still carries that boot's phases.
+    // A colony re-queued after a boot that died part way still carries that boot's phases, and one
+    // released from overlap queueing still names its holder: both belong to the wait, not the run.
     s.boot_timing = None;
+    s.queued_behind = None;
     s.updated_at = Utc::now();
     Some(Claim::Start(s.clone()))
 }

@@ -61,6 +61,10 @@ export interface Session {
   base: string | null;
   /** The colony this one is stacked on: it branched from that colony's branch instead of the default one, which is what `base` then holds. null for an unstacked colony — absent in live data, since the backend omits the field when there is no parent. */
   parent?: string | null;
+  /** The colony this queued one waits for; null when it waits for a parallelism slot instead. Absent in older payloads, which read as a generic queued entry. */
+  queued_behind?: string | null;
+  /** True when the colony branch has diverged from origin/{base} and needs a rebase. Absent in older payloads. */
+  needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
   origin?: string | null;
   worktree: string;

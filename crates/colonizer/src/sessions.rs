@@ -291,6 +291,23 @@ pub struct Session {
     /// the old every-publish-holds rule — so those default to holding, the conservative reading.
     #[serde(default = "publishing_holds_slot_legacy")]
     pub publishing_holds_slot: bool,
+    /// Whether the colony's pull request fell behind its base or conflicts with it, and the
+    /// watcher's auto-rebase could not finish on its own: set when a rebase is aborted, fails, or
+    /// has no colony left to run in, cleared when a rebase lands or the PR reads clean again. The
+    /// cockpit reads it as "needs rebase".
+    #[serde(default)]
+    pub needs_rebase: bool,
+    /// Whether `needs_rebase` was set because the colony behind the pull request is gone (finished
+    /// and reclaimed, mid-teardown, or otherwise not live) rather than woken to fix it itself —
+    /// issue #453's case for a notification, since nothing is left running that will ever clear
+    /// `needs_rebase` on its own. Cleared wherever `needs_rebase` is cleared.
+    #[serde(default)]
+    pub rebase_orphaned: bool,
+    /// The live same-repo colony a fresh colony queued behind for overlap (issue #453): it starts
+    /// once that colony is no longer live. `None` once started; stacked colonies never carry one —
+    /// they already wait on their parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_behind: Option<String>,
     pub error: Option<String>,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
     /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
@@ -384,6 +401,9 @@ impl Default for Session {
             merged_at: None,
             publish_stage: None,
             publishing_holds_slot: false,
+            needs_rebase: false,
+            rebase_orphaned: false,
+            queued_behind: None,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -887,6 +907,40 @@ fn duplicate_message(held: &Session, issue: u64) -> String {
 
 /// The authoritative duplicate-colony claim, run while the admission write lock is held: the
 /// pre-check in `create` reads under a read lock, so two launches can both pass it before either
+/// Issue #453: the colony a fresh same-repo colony queues behind for overlap, if any — the oldest
+/// live same-repo colony that already has a worktree, and so may be touching files. Pure, so the
+/// rule is testable apart from the file scan that [`overlap_queue_target`] wraps around it.
+pub(crate) fn overlap_holder(sessions: &[Session], repo: &str) -> Option<String> {
+    sessions
+        .iter()
+        .filter(|s| s.repo == repo && s.status.is_live() && s.git_admin_dir.is_some())
+        .min_by_key(|s| s.created_at)
+        .map(|s| s.id.clone())
+}
+
+/// Issue #453: who a fresh colony queues behind, if anyone — the [`overlap_holder`], and only while
+/// some live sibling still has touched files. This is not a real overlap check: the newcomer's own
+/// file set is unknown until it boots, so any live touched files queue it
+/// (`rebase::should_queue_behind_live_colony`, the conservative reading). Best effort with a short
+/// overall budget: an unreadable worktree reads as untouched, never as a reason to queue.
+async fn overlap_queue_target(sessions: &[Session], repo: &str) -> Option<String> {
+    let holder = overlap_holder(sessions, repo)?;
+    let siblings: Vec<(String, String)> = sessions
+        .iter()
+        .filter(|s| s.repo == repo && s.status.is_live() && s.git_admin_dir.is_some())
+        .map(|s| (s.worktree.clone(), s.base.clone().unwrap_or_else(|| "main".to_string())))
+        .collect();
+    let mut live_files = Vec::new();
+    let scan = async {
+        for (worktree, base) in &siblings {
+            live_files.extend(crate::rebase::touched_files(std::path::Path::new(worktree), &format!("origin/{base}")).await);
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), scan).await;
+    live_files.sort();
+    crate::rebase::should_queue_behind_live_colony(&live_files).then_some(holder)
+}
+
 /// inserts — this re-check closes that window, and the loser gets its holder back for a 409.
 /// `Ok` carries the admitted colony, whether it queued, and how many were already waiting;
 /// `Err` carries the colony already holding the issue, and nothing is inserted.
@@ -908,7 +962,19 @@ fn try_claim_session(
     // A colony still waiting for its parent's branch queues even when a slot is free: booting now
     // would branch from the default branch, which is exactly what stacking exists to avoid. A
     // queued colony holds no slot, so nothing is wasted by the wait.
-    session.status = if room && !wait_for_parent {
+    // Issue #453: a newcomer queued behind a live same-repo colony for overlap stays queued even
+    // with a free slot, and never carries a parent — it still branches fresh from the default
+    // branch when the queue starts it. A holder that finished between the scan and this lock
+    // releases it at once, clearing the stale pointer.
+    let overlap_held = session.parent.is_none()
+        && session
+            .queued_behind
+            .as_deref()
+            .is_some_and(|holder| sessions.iter().any(|s| s.id == holder && s.status.is_live()));
+    if !overlap_held {
+        session.queued_behind = None;
+    }
+    session.status = if room && !wait_for_parent && !overlap_held {
         SessionStatus::Starting
     } else {
         SessionStatus::Queued
@@ -1144,6 +1210,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     let org_limit = orgs::org_max_parallel(&org_settings);
     let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
 
+    // Issue #453: overlap-aware queueing — while a live same-repo colony still has touched files,
+    // a newcomer queues behind it instead of developing against the same paths at once. Stacked
+    // colonies already wait on their parent, so the scan is skipped for them.
+    let queued_behind = if parent.is_none() {
+        overlap_queue_target(&app.sessions.read().await, &repo).await
+    } else {
+        None
+    };
+
     let id = short_id();
     let slug = match req.issue {
         Some(number) => format!("issue-{number}-{id}"),
@@ -1189,6 +1264,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         publish_stage: None,
         // A fresh colony is starting or queued, never publishing: the flag is inert.
         publishing_holds_slot: false,
+        needs_rebase: false,
+        rebase_orphaned: false,
+        queued_behind,
         error: None,
         cost_usd: None,
         model_usage: None,
@@ -1272,7 +1350,16 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // `launched` edge has to survive the cleanup or delete that will forget this record.
     spend::record_launched(&app, owner).await;
     if queued {
-        if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
+        if let Some(holder) = session.queued_behind.as_deref() {
+            app.session_log(
+                &id,
+                "info",
+                format!(
+                    "queued behind colony {holder}: it is working in the same repository, so this colony starts once it finishes"
+                ),
+            )
+            .await;
+        } else if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
             app.session_log(
                 &id,
                 "info",
@@ -2867,6 +2954,9 @@ pub(crate) mod tests {
             // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
             // a stopped-origin publish flip this off.
             publishing_holds_slot: status == SessionStatus::Publishing,
+            needs_rebase: false,
+            rebase_orphaned: false,
+            queued_behind: None,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -2887,6 +2977,73 @@ pub(crate) mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn overlap_queueing_holds_the_oldest_live_same_repo_colony_with_a_worktree() {
+        fn holder(id: &str, repo: &str, status: SessionStatus, ago_secs: i64) -> Session {
+            let mut s = colony("acme", status);
+            s.id = id.into();
+            s.repo = repo.into();
+            s.git_admin_dir = Some("git".into());
+            s.created_at = Utc::now() - chrono::Duration::seconds(ago_secs);
+            s
+        }
+        let sessions = vec![
+            holder("new", "acme/repo", SessionStatus::Running, 10),
+            holder("old", "acme/repo", SessionStatus::Running, 100),
+            holder("other-repo", "acme/other", SessionStatus::Running, 200),
+            holder("published", "acme/repo", SessionStatus::PrOpened, 300),
+            holder("queued", "acme/repo", SessionStatus::Queued, 400),
+        ];
+        assert_eq!(
+            overlap_holder(&sessions, "acme/repo").as_deref(),
+            Some("old"),
+            "the oldest live holder wins"
+        );
+        assert_eq!(overlap_holder(&sessions, "acme/other").as_deref(), Some("other-repo"));
+        assert_eq!(overlap_holder(&sessions, "acme/empty"), None, "no live worktree, no holder");
+        // A live colony that never booted a worktree holds nothing back.
+        let mut no_worktree = holder("wt-less", "acme/repo", SessionStatus::Running, 500);
+        no_worktree.git_admin_dir = None;
+        let mut only_quiet = vec![no_worktree];
+        only_quiet.extend(sessions.into_iter().filter(|s| s.repo != "acme/repo" || !s.status.is_live()));
+        assert_eq!(overlap_holder(&only_quiet, "acme/repo"), None);
+    }
+
+    #[test]
+    fn an_overlap_queued_colony_stays_queued_until_its_holder_finishes() {
+        fn queued_behind(holder: &str) -> Session {
+            let mut s = colony("acme", SessionStatus::Starting);
+            s.id = "new".into();
+            s.repo = "acme/repo".into();
+            s.queued_behind = Some(holder.into());
+            s
+        }
+        let mut live_holder = colony("acme", SessionStatus::Running);
+        live_holder.id = "holder".into();
+        live_holder.repo = "acme/repo".into();
+        // Room and no parent, yet queued: the live holder keeps it waiting, and the pointer stays.
+        let mut sessions = vec![live_holder.clone()];
+        let (admitted, queued, _) =
+            try_claim_session(&mut sessions, true, queued_behind("holder"), "acme/repo", None, false, false)
+                .expect("no issue race");
+        assert!(
+            queued && admitted.status == SessionStatus::Queued,
+            "held behind the live colony"
+        );
+        assert_eq!(admitted.queued_behind.as_deref(), Some("holder"));
+        // The holder published: the same pointer releases at once, pointing nowhere stale.
+        live_holder.status = SessionStatus::PrOpened;
+        let mut sessions = vec![live_holder];
+        let (admitted, queued, _) =
+            try_claim_session(&mut sessions, true, queued_behind("holder"), "acme/repo", None, false, false)
+                .expect("no issue race");
+        assert!(
+            !queued && admitted.status == SessionStatus::Starting,
+            "released once the holder finished"
+        );
+        assert_eq!(admitted.queued_behind, None);
     }
 
     /// The shape of `create`'s admission, shared by the concurrency tests below: check for room and push a
