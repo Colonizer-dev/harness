@@ -344,7 +344,7 @@ pub async fn status(State(app): State<Shared>) -> Json<Value> {
 pub async fn full_status(app: &Shared) -> Value {
     let mut view = app.updates.view().await;
     view["apply"] = serde_json::to_value(app.updater.progress().await).unwrap_or(Value::Null);
-    view["can_apply"] = match crate::update::apply_blocker(build(), app.cfg.assets.as_deref()) {
+    view["can_apply"] = match crate::update::blocker(app.cfg.assets.as_deref()).or_else(|| crate::update::dev_refusal(build())) {
         Some(reason) => json!({ "ok": false, "reason": reason }),
         None => json!({ "ok": true, "reason": Value::Null }),
     };

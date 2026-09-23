@@ -1,6 +1,7 @@
 // In-browser mock of the harness API and event streams, enabled with `?mock=1`.
 import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
+import { isTerminal } from "./notifications";
 import type {
   AgentEvent,
   AgentEventBody,
@@ -1107,7 +1108,19 @@ export function createMockApi(): Api {
     // Booted after issue #205, so the overview row's second line has something to read.
     boot_cpus: 4,
     boot_memory: "8G",
-    boot_timing: { total_ms: 94_320, phases: [{ name: "vm-boot", ms: 86_400 }] },
+    boot_timing: {
+      total_ms: 94_320,
+      phases: [
+        { name: "issue", ms: 240 },
+        { name: "git", ms: 1_180 },
+        { name: "providers", ms: 310 },
+        { name: "mesh-start", ms: 2_050 },
+        { name: "image-pull", ms: 1_900 },
+        { name: "vm-boot", ms: 86_400 },
+        { name: "mesh-join", ms: 1_460 },
+        { name: "agentd", ms: 720 },
+      ],
+    },
     created_at: ago(6),
   });
   const old = new MockSession(
@@ -1485,6 +1498,7 @@ export function createMockApi(): Api {
           cpus: { type: "integer", title: "vCPUs", minimum: 1, maximum: 64, default: 4 },
           memory: { type: "string", title: "Memory", default: "8G" },
           max_parallel: { type: "integer", title: "Parallel colonies", minimum: 1, maximum: 16, default: 3 },
+          repo_max_parallel: { type: "integer", title: "Parallel sessions per repository", minimum: 1, maximum: 32, default: 3 },
           budget_usd: { type: "number", title: "Budget per colony (USD)", minimum: 0, default: 0, description: "Dollars one colony may spend on models in total. 0, the default, means unlimited." },
           host_disk: { type: "string", title: "Host disk per colony", default: "0", format: "disk-size", description: "How much disk one colony may leave on the host, like 512M or 16G. 0, the default, means unlimited." },
         },
@@ -1922,11 +1936,19 @@ export function createMockApi(): Api {
     },
     stopSession: async (id) => {
       const s = find(id);
-      if (!isLive(s.session.status)) throw new ApiError("the colony is not running", 409);
+      // Like the server: a colony already over answers `already_stopped` untouched, a queued one
+      // leaves the queue, and only a publishing one is refused.
+      if (isTerminal(s.session.status)) return { ...clone(s.session), result: "already_stopped" };
+      if (s.session.status === "queued") {
+        s.patch({ status: "stopped" });
+        s.log("Left the queue before it started");
+        return { ...clone(s.session), result: "stopped" };
+      }
+      if (!isLive(s.session.status)) throw new ApiError("session is not running", 409);
       s.halt();
       s.patch({ status: "stopped", mesh: null });
       s.log("microVM stopped and removed; the worktree was kept");
-      return clone(s.session);
+      return { ...clone(s.session), result: "stopped" };
     },
     deleteSession: async (id) => {
       const s = find(id);
@@ -2140,16 +2162,19 @@ export function createMockApi(): Api {
     providerHealth: async (id) => {
       const provider = providers.find((p) => p.id === id);
       if (!provider) throw new ApiError("no such provider", 404);
-      // strix is a local server that is switched off; custom endpoints answer but have no /v1/models.
+      // strix is a local server that is switched off; custom endpoints answer but have no /v1/models,
+      // which the Mothership reports as a note (still healthy) for anthropic wire and an error for openai.
       await sleep(provider.id === "strix" ? 2200 : 700);
       const checked_at = now();
       if (provider.id === "strix") {
-        return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", checked_at };
+        return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", note: null, checked_at };
       }
       if (provider.preset === "custom") {
-        return { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", checked_at };
+        return provider.wire === "anthropic"
+          ? { reachable: true, status: 404, latency_ms: 38, models: [], error: null, note: "no model list", checked_at }
+          : { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", note: null, checked_at };
       }
-      return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, checked_at };
+      return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, note: null, checked_at };
     },
     models: () =>
       later((): ModelOption[] => [

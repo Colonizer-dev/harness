@@ -22,6 +22,12 @@ The repository's own files are in `scripts/bench/fixture`. The checks that decid
 in `scripts/bench/checks`, and are **not** in the scratch repository: they are copied into the colony's
 branch after the fact, so an agent cannot write code that satisfies a test it can read.
 
+Every task also has a reference solution in `scripts/bench/reference/<task-id>/`: only the files its fix
+changes or adds, laid out as in the fixture. `scripts/test/bench.test.mjs` holds each check to it: the
+check must fail on the bare fixture and pass, along with `npm test`, once the reference is laid over it, and
+the reference must stay inside the task's `changed_within`. A check that passes on untouched code, or fails
+on a correct fix, would score every colony the same whatever it did.
+
 A task passes when all of this holds:
 
 - a pull request was opened;

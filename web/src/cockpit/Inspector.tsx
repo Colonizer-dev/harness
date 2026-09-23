@@ -17,6 +17,7 @@ import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
 import type { FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
+import { bootView } from "./bootTiming";
 import { chains, type FindingChain } from "./findings";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -108,6 +109,7 @@ const STAGE_ORDER: FindingRecord["state"][] = [
   "fix_colony",
   "review",
   "merged",
+  "blocked",
   "duplicate",
   "rejected",
   "error",
@@ -120,6 +122,7 @@ const STAGE_LABEL: Record<FindingRecord["state"], string> = {
   fix_colony: "fix",
   review: "review",
   merged: "merged",
+  blocked: "merge blocked",
   duplicate: "duplicate",
   rejected: "rejected",
   error: "error",
@@ -139,7 +142,7 @@ function trail(chain: FindingChain): FindingStage[] {
       tone = chain.verdict === "fail" ? "err" : "neutral";
     }
     if (state === "merged") tone = "ok";
-    if (state === "duplicate" || state === "rejected") tone = "warn";
+    if (state === "blocked" || state === "duplicate" || state === "rejected") tone = "warn";
     if (state === "error") tone = "err";
     stages.push({ label, tone });
   }
@@ -148,10 +151,11 @@ function trail(chain: FindingChain): FindingStage[] {
 
 const isUrl = (value: string) => /^https?:\/\//.test(value);
 
-/** The one line under the trail that explains a terminal: why it was rejected, the error, or the finding it duplicated. */
+/** The one line under the trail that explains a terminal: why it was rejected or its merge blocked, the error, or the finding it duplicated. */
 function noteFor(chain: FindingChain): { text: string; tone: Tone; href: string | null } | null {
   const states = new Set(chain.records.map((r) => r.state));
   if (states.has("rejected") && chain.reason) return { text: chain.reason, tone: "warn", href: null };
+  if (states.has("blocked") && chain.reason) return { text: chain.reason, tone: "warn", href: null };
   if (states.has("error") && chain.reason) return { text: chain.reason, tone: "err", href: null };
   if (states.has("duplicate") && chain.duplicate_of)
     return { text: chain.duplicate_of, tone: "warn", href: isUrl(chain.duplicate_of) ? chain.duplicate_of : null };
@@ -306,6 +310,7 @@ export function Inspector({
   const stackedOn = stackParent
     ? `${stackParent.repo}${stackParent.issue != null ? `#${stackParent.issue}` : ""} · ${stackParent.branch}`
     : (session?.parent ?? null);
+  const boot = session ? bootView(session.boot_timing, session.status === "starting") : null;
 
   // The finding ledger is a separate call, keyed by colony: the event stream does not carry it, and
   // a colony that never validated a finding has none, so an error reads as "nothing yet".
@@ -590,6 +595,28 @@ export function Inspector({
                   )}
                 </div>
               </Section>
+
+              {boot && (
+                // Where the launch's time went, phase by phase in boot order. The slowest phase is the
+                // one worth a look, so it reads in full ink while the rest stay muted.
+                <Section title="BOOT">
+                  <div className="flex flex-col gap-1.5">
+                    {boot.rows.map((row, i) => (
+                      <div
+                        key={`${i}:${row.name}`}
+                        className={cx("flex gap-2.5 text-[12px]", row.slowest ? "font-semibold text-text" : "text-muted")}
+                      >
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{row.name}</span>
+                        {row.slowest && <span className="font-mono text-[10px] tracking-[0.1em] text-warn">SLOWEST</span>}
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums">{row.duration}</span>
+                      </div>
+                    ))}
+                    <div className={cx("text-[12px] text-faint", boot.rows.length === 0 && "rounded-[9px] bg-panel-2 px-3 py-2")}>
+                      {boot.summary}
+                    </div>
+                  </div>
+                </Section>
+              )}
 
               <Section title="FINDINGS">
                 <div className="flex flex-col gap-2">

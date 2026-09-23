@@ -205,7 +205,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed, else `{ok, message, ts, failures, recovered_at}` from the latest failed write: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. All cached for 10 s, `?fresh=1` to re-probe |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. All cached for 10 s, `?fresh=1` to re-probe |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry, polled on request |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
@@ -214,8 +214,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
-| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
-| `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree |
+| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
+| `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped). Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
@@ -292,9 +292,12 @@ commits something, kept in place when a publish fails part-way, and cleared when
 changes; the publish re-derives the truth from git and origin, so the field is the record, not the
 authority.
 
-`boot_timing` is where the last launch's time went, filled in when the colony finishes booting and
-replaced on resume. The phases are consecutive spans in boot order and partition the launch, so they
-sum to at most `total_ms`:
+`boot_timing` is where the last launch's time went. It is cleared when a colony is claimed for a
+boot or a resume. While the colony is `starting` it is `{"phases": [...]}` with the phases done so
+far, one added as each completes. `total_ms` appears only once the boot finishes, so its absence
+marks a boot still under way or, on a colony that is no longer starting, one that stopped part way;
+such a boot keeps the phases it got through. The phases are consecutive spans in boot order and
+partition the launch, so they sum to at most `total_ms`:
 
 | Phase | Covers |
 | :--- | :--- |
@@ -368,8 +371,15 @@ land there. It stages three vendored plugins today:
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
 | `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE`. 8.2 MB of the 58 MB source |
-| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.3.0, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (12 of 14), `LICENSE`. 468 KB of the 2.1 MB source |
-| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (142 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 6.5 MB |
+| `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.4.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (13 of 15), `LICENSE`. 596 KB of the 2.4 MB source |
+| `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (146 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 6.5 MB |
+
+**Canonical layout.** `superpowers` is staged in the Agent Plugins folder layout in
+[docs/skill-packs.md](skill-packs.md): a root `plugin.json` (and `mcp.json` only when a
+pack ships tool servers) alongside the `.claude-plugin/` manifest the SDK reads. Staging
+synthesizes the root manifest; the skills are untouched and runtime behavior is identical.
+`ecc` and `google-skills` still carry only `.claude-plugin/plugin.json`, which boot
+validation accepts as the manifest.
 
 **ECC's hooks are not staged.** Its plugin manifest sets `userConfig.hooks_enabled` to `true` by
 default and Claude Code discovers `hooks/hooks.json` by convention, so "skills and agents only" cannot
@@ -391,7 +401,7 @@ text says they are missing on purpose and to stop at those steps. `fetch-vendor.
 `hooks/`, survives staging.
 
 **Google's skills load on demand.** Claude Code discovers exactly one skill in `google-skills`:
-`finding-google-skills`. The other 142 sit in `catalog/`, outside `skills/`, with upstream's directory
+`finding-google-skills`. The other 146 sit in `catalog/`, outside `skills/`, with upstream's directory
 shape, so their relative links still resolve. `index.json` is upstream's catalog with each `entrypoint`
 rewritten from a `raw.githubusercontent.com` URL to a path relative to the plugin root
 (`catalog/cloud/gke-basics/SKILL.md`). The finder is Colonizer's copy of upstream's
@@ -412,7 +422,7 @@ new one. `--write` rewrites the lock, comments included. `.github/workflows/vend
 runs it daily, stages the result with `VENDOR_KINDS=plugin scripts/fetch-vendor.sh` so a failing check
 stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request, or, while the repository
 doesn't let GitHub Actions open pull requests, keeps an issue open with the same description and a link to
-open it. It never merges.
+open it, closing the issue once a run finds nothing to change. It never merges.
 
 **Keeping the runtime pins current.** The same model covers the two runtime locks:
 `crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest:
@@ -806,7 +816,7 @@ Server → client:
 - On connect, first: `{"type":"run_epoch","epoch":N}` — the run epoch this connection is attached
   to, with no `seq` field (old clients ignore the unknown frame). Then
   `{"type":"session","session":Session}`, then the last ≤200 harness logs as
-  `{"type":"harness_log","level":"info|error","message":"…","ts":"…"}`, then agent events with
+  `{"type":"harness_log","level":"info|warn|error","message":"…","ts":"…"}`, then agent events with
   `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then live.
 - Each resume rotates the event log aside (`events.jsonl` → `events-N.jsonl`) and bumps the epoch,
   and the new run's `seq` numbering starts from 1 again. The effective cursor is `0` when the
@@ -982,7 +992,11 @@ Approved notes are mounted read-only in every colony:
 /colonizer/memory/repo/    MEMORY.md  notes/<id>.md     (the colony's repository)
 ```
 
-`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`). `COLONIZER_MEMORY_DIR=/colonizer/memory`
+`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`). Every note a colony wrote is labelled
+before its title: `(from a colony, reviewed)` once a person approved it, `(from a colony, not reviewed)`
+when stored with review off, and `(from a colony)` for notes from before that was recorded. Note files
+written from then on carry the matching `> Written by a colony…` line under the heading. The index header
+says notes are background to verify, not instructions. `COLONIZER_MEMORY_DIR=/colonizer/memory`
 tells the runner memory is enabled. The runner exposes two tools to the agent: `memory_search`
 (search the mounted notes) and `memory_propose` (scope `repo` | `org` | `global`, `title`, `content`).
 Proposing emits a runner event; nothing is written inside the colony:
@@ -993,15 +1007,16 @@ Proposing emits a runner event; nothing is written inside the colony:
 
 The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
-mount immediately.
+mount immediately. With `require_review` off, a `repo` note is stored at once with `source.reviewed: false`
+(`status: "approved"` in the broadcast); `org` and `global` notes are always queued.
 
 **Where approved notes live** is the memory module's provider. `files` keeps them on the mothership and
 mounts each scope directory. `mem0` keeps them in a [mem0](https://mem0.ai) project through its Platform
 API (v3), and the runner side is identical:
 
-- Proposals queue on the mothership either way. mem0 only receives a note once it is approved (or stored
-  with review off), written with `infer: false` and `immutable: true` so mem0's extraction model never
-  rewrites or later consolidates text a human reviewed.
+- Proposals queue on the mothership either way. mem0 only receives a note once it is approved (or a repo
+  note stored with review off), written with `infer: false` and `immutable: true` so mem0's extraction
+  model never rewrites or later consolidates text a human reviewed.
 - Each scope is a mem0 `user_id` (`colonizer:global`, `colonizer:org:<org>`, `colonizer:repo:<owner>/<repo>`)
   and every memory carries `app_id: "colonizer"`. Colonizer's own fields (`colonizer_id`, `scope`, `key`,
   `title`, `tags`, `source`, `created_at`) ride in `metadata`. Listing and deleting are filtered on both, so a
@@ -1012,7 +1027,7 @@ API (v3), and the runner side is identical:
   task (the issue title, the instructions, then the issue body, not the full prompt).
 - If mem0 cannot be reached at boot, the colony still starts, with an empty layout and a `warn` in its log.
   An approval that cannot reach mem0 fails with `502` and the proposal stays in the queue; with review off, a
-  note that cannot be stored is queued for review instead of dropped.
+  repo note that cannot be stored is queued for review instead of dropped.
 
 ### 6.2b Autonomous mode (Mothership)
 
@@ -1144,8 +1159,11 @@ and its existing colonies: a colony of a switched-off org is still listed and re
 or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
 global switch. Names are plain directory names, at most 64. An empty map is stored as `null`.
 
-`max_parallel` overrides the sandbox module's parallel limit for the org's colonies. So do the two
-per-colony limits: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
+`max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
+(`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
+layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's
+`max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The two
+per-colony limits override the global ones: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
 host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
 `host_disk`); `0` (or `"0"`) means unlimited, which is how an org opts out of a global limit. The same
 validation applies as at the module setting: a budget is `0` or more dollars, a quota must parse as a size.
@@ -1162,6 +1180,7 @@ something is pinned above it). `null` inherits.
   "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
             "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
+  "repo_max_parallel": 1,
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
@@ -1212,12 +1231,13 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
 
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
-(`pending`). `source` = `{session_id, repo}` or `{user: true}`.
+(`pending`). `source` = `{session_id, repo}` or `{user: true}`; a colony's note gains `reviewed: true`
+when approved, or `reviewed: false` when stored with review off.
 
 **Watchdog.** New module kind `watchdog` (provider `default`; settings `enabled` = true,
 `stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30) and kind `memory` (provider `files`;
-settings `enabled` = true, `require_review` = true). `Session` gains `last_activity_at` and
-`attention`:
+settings `enabled` = true, `require_review` = true; off lets only `repo` notes skip review). `Session`
+gains `last_activity_at` and `attention`:
 
 ```json
 {"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted", "since": "…", "nudges": 2}}
@@ -1297,7 +1317,30 @@ retried.
 **Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
 error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn
 ended. An unchanged `pr.md` from an earlier turn doesn't publish a colony the maintainer is still
-talking to.
+talking to. While external writes are blocked (below), a turn that would publish does not: the colony
+log gets a `warn` line (`autopilot: not publishing, external writes are blocked
+(COLONIZER_NO_EXTERNAL_EFFECTS); press Create PR when writes are enabled`) and the colony's
+`attention` is left as it was. Opening pull requests as drafts (`publish.settings.draft`) does not
+change this: a draft PR is still an external write, refused the same way as a ready one.
+
+**No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
+in the mothership's environment to any non-empty value other than `0`, `false`, `off` or `no`
+(trimmed, case-insensitive) blocks the writes the mothership makes on a colony's behalf, each failing
+closed:
+
+- Publish: `POST /api/sessions/{id}/publish` answers **409**, and the publish task (autopilot's
+  included) refuses before it claims the colony, so the colony keeps its status and its `error`
+  carries the reason. The commit, push and pull-request steps each check again before they run.
+- Retargeting a stacked child's pull request: GitHub is not asked, the child keeps its old base and
+  its log says so. Nothing retries it; retarget it by hand once writes are allowed.
+- Reviewing a fix PR (§6.6): whatever the verdict, nothing is merged or commented on GitHub; a
+  `warn` line in the fix colony's log says so.
+- Findings (§6.6): ignored, no issue is filed.
+
+Independently of the kill-switch, a publish refuses to open (or reuse) a pull request when the
+branch's local head moved after the push step, and logs the SHA-256 of the exact PR body it sends
+(`opening the pull request; body sha256 <hex>`). The hash is only logged; nothing yet checks it
+against an approval (issue #98).
 
 ### 6.4 UI additions
 
@@ -1514,10 +1557,11 @@ a refused model — is quota exhaustion, and the gateway treats it apart from tr
 other status is not exhaustion, whatever it says. The anthropic wire forwards the error body
 verbatim; the OpenAI wire forwards the translated body (the classifier reads the raw error code
 there, since translation drops `insufficient_quota`). Either way the provider is recorded as
-exhausted (in memory; a restart forgets it) with the reset the message named — or, when the message
-names none, a 15-minute TTL after which the record lapses and the queue re-probes — and the answer
-carries `x-colonizer-quota-exhausted` (the reset words, or `exhausted`). An upstream 2xx clears the
-record at once. When the
+exhausted (in `provider-quota.json` in the mothership's data directory, written on every change, so a
+restart keeps it; a record whose reset has passed or whose TTL has run out is dropped on load) with
+the reset the message named — or, when the message names none, a 15-minute TTL after which the record
+lapses and the queue re-probes — and the answer carries `x-colonizer-quota-exhausted` (the reset
+words, or `exhausted`). An upstream 2xx clears the record at once. When the
 provider has a `fallback_model` the answer also carries `x-colonizer-fallback:
 provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504 —
 failover happens at request level, so an operator opts a role out by unsetting that role's
@@ -1536,8 +1580,12 @@ state, so slots release and resume works today) and `attention.reason`
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 
 ```json
-{"reachable": true, "status": 200, "latency_ms": 42, "models": ["deepseek-v4-flash"], "error": null, "checked_at": "…"}
+{"reachable": true, "status": 200, "latency_ms": 42, "models": ["deepseek-v4-flash"], "error": null, "note": null, "checked_at": "…"}
 ```
+
+The probe is informational, not a routing gate. An Anthropic-wire endpoint need not serve `/v1/models`,
+so a 404 from one comes back as `reachable: true` with the real `status`, empty `models` and
+`"note": "no model list"`; `note` is `null` in every other case.
 
 At colony start the mothership probes every used provider and logs a warning for each unreachable one
 (the colony still starts; fallback covers it when configured).
@@ -1562,6 +1610,11 @@ Mothership side. The GitHub token never enters a colony, so filing happens on th
 
 - Setting: `publish.settings.file_findings`, default `true`. When it is off the variable is not set, and
   a `finding` event that arrives anyway is ignored.
+- Kill-switch: while external writes are blocked (§6.3), a `finding` event is ignored with an `info`
+  line in the colony log (`ignored a finding: external writes are blocked
+  (COLONIZER_NO_EXTERNAL_EFFECTS), so no issue is filed`). This is checked after the setting above and
+  before the finding is parsed or validated, so no validation call is made and nothing is written to
+  the ledger.
 - Validation: `title` (one line, ≤ 200 chars), `body` (≤ 20 000) and `evidence` (≤ 5 000) are all
   required. A finding without evidence is not filed.
 - Cap: at most 5 per colony, counted from `sessions/<id>/findings.jsonl`. A GitHub error does not use
@@ -1598,7 +1651,7 @@ runner never emits them, and the runner-event schema in `docs/agent-events.schem
 the runner events stay the §2 set plus `finding`. Every transition is also one line of the ledger,
 `sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records
 `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?,
-verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|error`. A
+verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|blocked|error`. A
 good run is `validated → filed → fix_colony → review → merged`; rejections and failures stay too —
 append-only, one line per stage transition, folded by title in the UI.
 
@@ -1729,3 +1782,206 @@ cumulative; the journal gets the deltas). A one-model turn files its cost on tha
 multi-model turn files per-model token rows and its cost on an un-modeled row, mirroring the
 attribution rule. A failed append is reported through the app's sticky storage alert and leaves
 the run unchanged: a lost row is a lost measurement, not a failed run.
+
+---
+
+## 7. Standard names (UHP)
+
+Colonizer's wire names came before the open protocols. This section maps them
+to the [Unified Harness Protocol](https://unifiedharnessprotocol.org/) (UHP,
+version `2026-09-12`, draft), which extends the OpenAI Responses API, so that
+Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
+
+**Status: proposed.** These tables are the contract to review before any code;
+each one is implemented in its own change afterwards. Until then nothing on the
+wire changes, and the *Colonizer today* column is what works. The runner
+contract (§2), the event definitions in `docs/agent-events.schema.json`, the
+sandbox, the mesh and the publish path stay as they are: the standard names live
+on the mothership's API, not inside the microVM. The one exception is §7.5's
+input files, which a colony reads next to `session.json`.
+
+### 7.1 Rules for every rename
+
+- **Both names for one release.** A renamed field or route is accepted under the
+  old and the new name for one release after the alias ships: alias in
+  `v0.1.N`, old name removed in `v0.1.N+1`. A request that sends both with
+  different values gets **400** `invalid_input`.
+- **Replies use the new name.** Replies and stream frames carry the new name. In
+  the deprecation release they carry the old one too, with the same value, so
+  the web UI and scripts keep working; it goes when the alias goes.
+- **Deprecation notice.** A request that uses an old request name makes the
+  mothership append a `harness_log` entry at `warn` to that colony's
+  `harness.jsonl`, once per name per colony.
+  `scripts/colony-report.mjs --transcript <id>` prints `warn` entries, so the
+  notice shows there. The request names that trigger it are `instructions`
+  (§7.3). A name that only appears in replies, such as `agent` (§7.2), cannot be
+  detected on the wire; its removal is announced in the CHANGELOG instead.
+
+  ```json
+  {"type": "harness_log", "level": "warn", "ts": "…",
+   "message": "deprecated: \"instructions\" is now \"input\"; the old name goes in v0.1.N+1"}
+  ```
+
+- **Unknown input is still ignored**, as the rule at the top of this file says.
+  UHP routes also list the ignored request fields in the reply's
+  `metadata.ignored_fields`, comma-separated, because UHP metadata values are
+  strings.
+- **Colonizer extras keep their names.** Error codes UHP lacks take its vendor
+  form, `colonizer_<code>`. Extra stream events are `colonizer.<type>` with the
+  §2 `type`. UHP lets servers add event types; clients must skip unknown ones
+  and read an unknown error `code` as its `type`.
+- **Two surfaces, one handler.** UHP paths are served as route aliases under
+  `/uhp` (`/uhp/v1/responses`, …), a prefix of their own beside `/api/…` and
+  the web UI on the API listener; the model gateway (§6.5) is a separate
+  listener that serves only `/providers/{id}/…`. An SDK takes
+  `<mothership>/uhp/v1` as its base URL. `/uhp/v1/…` routes always answer in
+  UHP shapes and send `UHP-Version: 2026-09-12`. `/api/…` routes keep
+  Colonizer's reply shapes and use the UHP error envelope (§7.7) only when the
+  request carries a `UHP-Version` header.
+
+### 7.2 Harness selection
+
+| Colonizer today | Standard (UHP) | Wire location | Compat notes |
+| --- | --- | --- | --- |
+| One agent module for the install: `agent.provider` in `modules.json` (`"claude-code"`), set with `PUT /api/modules/agent` | `metadata.harness_id` on the create request | new optional `metadata.harness_id` in the `POST /api/sessions` body | Absent: the install's active agent module, as today. The value is a module id (`modules/agents/<id>/module.json`); UHP treats it as opaque. Unknown or disabled: **404** `harness_not_found`. Per-org `agent` overrides still set model, Claude account and skillsets and never pick the module. Further runners plug in here. |
+| `Session.agent` (`"claude-code"`), fixed at create | `harness_id` on a session; `metadata.harness_id` on a response | `Session` in REST replies and in the `session` WS frame | Sent beside `agent` in the deprecation release. UHP requires a server to report the harness it defaulted to but names no key; Colonizer uses `metadata.harness_id` on every response. |
+| — | `harness_mismatch` | continuation (§7.3) | A continuation that names another `harness_id` than the colony's: **409** `harness_mismatch`. A colony keeps one runner for life. |
+| `agent.module` in `/colonizer/session.json` | unchanged | inside the microVM | Not a wire name; the runner contract does not change. |
+
+### 7.3 Continuation
+
+A turn becomes a UHP response. Its id is
+`resp_<session id>.<run epoch>.<turn>`, where `<turn>` counts the turns of that
+run epoch from 1, so the id is known when the turn starts. Clients treat it as
+opaque. It is derived from the event log rather than stored, so §2 and §3 do not
+change. It resolves through `sessions.json` and the colony's event logs; both
+survive a mothership restart, and colonies run detached and are reattached after
+one, so the id keeps working across restarts.
+
+| Colonizer today | Standard (UHP) | Wire location | Compat notes |
+| --- | --- | --- | --- |
+| No turn id: a turn is the stored events up to its `turn_end` | response `id` | new `Session.last_response_id`; the `id` of every SSE response (§7.4) | Additive. |
+| Session id, the `{id}` in `/api/sessions/{id}/…` | `metadata.session_id` on every response; `GET /v1/sessions/{session_id}` | unchanged | UHP requires `metadata.session_id`. |
+| `POST /api/sessions/{id}/resume`, no body: same worktree, fresh microVM, new run epoch | `previous_response_id` on create | `POST /api/sessions` with `previous_response_id` continues that colony instead of creating one | Resolved as below. The resume route stays and runs underneath. |
+| WS `{"type": "user_message", "text": …}`, live colonies only | `input` on a continuation | the same `POST /api/sessions` | The WS command does not change. |
+| `instructions` in the create body: the task text | `input` | `POST /api/sessions` | Not an in-place alias: UHP's `instructions` means system-level instructions. `input` becomes the task text; `instructions` keeps today's meaning through the deprecation release, and reusing the name is a later decision. |
+| duplicate-issue check, `allow_duplicate` | `Idempotency-Key` header | `POST /api/sessions` | A repeat with the same key within 24 hours returns the first colony and starts nothing, even while that one is still booting. The duplicate check stays. |
+
+`previous_response_id` resolves by the colony's state:
+
+| Colony | Result |
+| --- | --- |
+| `idle` | Delivered as a follow-up; the reply is the new response, `in_progress`. |
+| `queued`, `starting`, `running`, `waiting_for_answer`, `publishing` | **409** `session_busy`: retry once that work ends. UHP has no input path into a running task; the WS command keeps working as today. |
+| `stopped` or `failed`, worktree kept | Resumed as by `POST …/resume`, with `input` added to the resume brief; the reply is that brief's response, turn 1 of the new run epoch, `in_progress`. |
+| `pr_opened`, `merged`, `closed`, `no_changes`, or the worktree is gone | **404** `session_expired`. |
+| names an older turn than the colony's latest | **409** `colonizer_not_latest`, with `detail.latest_response_id`: a colony cannot fork. |
+| unknown or malformed | **404** `response_not_found`. |
+
+### 7.4 Streaming
+
+The browser keeps its WebSocket, and `web/src/sessionStream.ts` does not change.
+The SSE stream is a projection of the same stored log, one response (turn) per
+stream, so the §2 events keep their names inside the microVM and on the WS.
+
+| Colonizer today | Standard (UHP) | Wire location | Compat notes |
+| --- | --- | --- | --- |
+| `GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>`, WebSocket, the whole colony | SSE (`text/event-stream`) of one response: `POST /v1/responses` with `stream: true` | the same `GET` without an upgrade and with `Accept: text/event-stream`: the current turn, or the one named by `response_id=` | The WS frame types and the §2 events do not change; the `Session` in the `session` frame follows §7.1. |
+| `seq`, from 1 in each run epoch; the `run_epoch`, `session`, `harness_log` and `memory_proposed` frames have none | `sequence_number`, from 0 and +1 per event within a stream | every SSE event | Counted per stream, so it never equals `seq`. The SSE `id:` line carries `<epoch>.<seq>` of the last stored event sent; `Last-Event-ID` with that value resumes like `since` and `epoch` (UHP leaves the format open). |
+| `turn_end`: `result`, `is_error`, `cost_usd`, `duration_ms`, `model_usage` | one terminal event carrying the whole response: `response.completed`, `response.failed` or `response.incomplete` | the last SSE event | `usage` (from `model_usage`) and `cost_usd` are this turn's: the `turn_end` values minus the previous turn's, since §2 makes them cumulative. `cost_usd` and `duration_ms` go in `metadata` as strings, since UHP metadata values are strings. |
+
+| §2 event | SSE event(s) |
+| --- | --- |
+| the first event of a turn | `response.created`, then `response.in_progress` |
+| `user_message` | none: it is the response's input |
+| `assistant_text_delta` | `response.output_text.delta` |
+| `assistant_text` | `response.output_text.done`, then `response.output_item.done` for the `message` item |
+| `thinking` | `response.reasoning_summary_part.added`, one `response.reasoning_summary_text.delta` with the whole block, `response.reasoning_summary_part.done` |
+| `tool_call` | `response.output_item.added` and `.done`, item `type: "function_call"` with `call_id`, `name`, and `arguments` as a JSON string. UHP uses `function_call` for tools the harness runs itself; a client never answers it. |
+| `tool_result` | `response.output_item.done`, item `type: "function_call_output"` with the same `call_id`; UHP puts it in `output` |
+| `question`, `question_answered` | `colonizer.question`, `colonizer.question_answered`, with the §2 body. UHP has no way to ask the user mid-task; answers still go through the WS `answer` command. |
+| `memory_proposal`, `finding`, `log` at `warn` or `error` | `colonizer.memory_proposal`, `colonizer.finding`, `colonizer.log` |
+| `status` | nothing, except `exited` with no `turn_end`, which ends the response by how the colony stopped (§7.7): `response.failed` with `response.status: "cancelled"` after Stop, `response.incomplete` after a budget stop, otherwise an `error` event (`harness_error`) and then `response.failed` |
+| `turn_end` | `is_error: false`: `response.completed`. `is_error: true`: `response.failed` with `error.code` from §7.7. After an interrupt: `response.failed` with `response.status: "cancelled"`, which UHP makes authoritative. |
+
+A subagent event keeps its `agent` ref as an extra field on its item or event.
+The projection gets its own schema when it is built;
+`docs/agent-events.schema.json` describes §2 and does not change.
+
+### 7.5 Files
+
+| Colonizer today | Standard (UHP) | Wire location | Compat notes |
+| --- | --- | --- | --- |
+| None: the task is text (issue plus `instructions`) and follow-ups are plain text | `input_file` content part, with `file_data` (a data URL) and `filename`, or with a `file_id` from `POST /v1/files` | `input` items on `POST /api/sessions`, creating or continuing; uploads on `POST /api/files` | The mothership keeps the files under `<session dir>/in/` and copies them into `vm/` at each boot, so the agent reads them at `/colonizer/in/<filename>`, next to `session.json` (§1), in the mount the host already makes read-only: no new mount and no change to isolation. §1 gains that row when this is built. The prompt lists them. Over the documented size limit: **413** `file_too_large` with `detail.max_bytes`. |
+| `/harness/out/pr.md`: a regular file (no symlink) of at most 256,000 bytes, read by the mothership after the microVM is gone | artifacts: `GET /v1/sessions/{session_id}/files` → `{"files": [File]}`, `GET /v1/containers/{container_id}/files/{file_id}/content`, `GET /v1/sessions/{session_id}/files/archive` | `GET /api/sessions/{id}/files`, `…/files/{name}/content` and `…/files/archive`, over `<session dir>/out/` | Read-only, regular files only, with the `pr.md` checks. `container_id` is `cntr_<session id>`. `pr.md` is listed like any other file. The worktree is not an artifact: it still reaches the repository through the publish path, which does not change. |
+
+### 7.6 Cancellation
+
+| Colonizer today | Standard (UHP) | Wire location | Compat notes |
+| --- | --- | --- | --- |
+| `POST /api/sessions/{id}/stop` → `{"result": "stopped"}` or `"already_stopped"`, plus the session | `POST /v1/sessions/{session_id}/cancel` → `{id, status}` | `POST /uhp/v1/sessions/{id}/cancel`, on the stop handler | `POST /api/sessions/{id}/stop` keeps its name and reply. The UHP reply takes its `status` from §7.7. |
+| WS `{"type": "interrupt"}`: ends the current turn, no reply frame | `POST /v1/responses/{response_id}/cancel` → the response | `POST /uhp/v1/responses/{response_id}/cancel` | Interrupts that turn if it is still running. The colony and the output so far are kept, as UHP requires. |
+
+Every cancel is safe to retry: a repeat changes nothing and is not an error
+(Stop answers `already_stopped`, a response cancel returns the finished
+response). That holds after a mothership restart too, because the state lives in
+`sessions.json` and a colony whose microVM is gone after the restart is already
+`stopped`.
+
+| State when the cancel arrives | Stop or session cancel | Response cancel |
+| --- | --- | --- |
+| `queued` | Leaves the queue: `stopped`, `result: "stopped"`. No microVM or parallel slot was claimed. | A continuation waiting here ends `cancelled`, and the colony leaves the queue as with Stop. |
+| `starting`, `running`, `waiting_for_answer`, `idle` | microVM stopped, worktree kept: `stopped`, `result: "stopped"` | A turn that has not finished ends `cancelled`: interrupted if it is running, or, while the microVM is still booting, the colony is stopped as with Stop. A finished one: **200**, unchanged. |
+| `publishing` | Today **409** `"session is not running"`; becomes **409** `session_busy`. A retry after publishing gets `already_stopped`. | **200**, unchanged |
+| `pr_opened`, `merged`, `closed`, `no_changes`, `stopped`, `failed` | **200** `result: "already_stopped"`; nothing changes | **200**, unchanged |
+| unknown id | Today **404** `"no such session"`; becomes **404** `session_not_found`. | **404** `response_not_found` |
+
+### 7.7 Errors
+
+| Colonizer today | Standard (UHP) | Wire location | Compat notes |
+| --- | --- | --- | --- |
+| `{"error": "<message>"}` with the HTTP status, no code | `{"error": {"type", "code", "message", "param", "detail"}}` | UHP routes always; `/api/…` when the request sends `UHP-Version` | Otherwise `/api/…` keeps the string and adds a sibling `"code"`. The string form goes one release after the web UI reads the envelope. |
+| `Session.error` (free text) and `Session.attention.reason` | response `status`, `error.code`, `incomplete_details.reason` | new `Session.error_code`; every UHP response | `error` and `attention` stay. The watchdog, the autonomy judge and notifications read `error_code` and `attention.reason` instead of matching message text. |
+
+A response is `in_progress` from its first event until its turn ends. UHP has no
+`queued`, so a continuation waiting in the queue is `in_progress` too. How the
+turn ended fixes its final status; later changes to the colony, such as Stop or
+publishing, leave a finished response as it is. While a response runs,
+`metadata.colonizer_attention` carries the colony's `attention.reason`, if it
+has one.
+
+| The turn ended by | UHP `status` |
+| --- | --- |
+| `turn_end` with `is_error: false` | `completed` |
+| `turn_end` with `is_error: true` | `failed`, with a code from the table below |
+| an interrupt, or Stop while it ran | `cancelled` |
+| Stop while `attention.reason` was `nudges_exhausted` | `failed` with `colonizer_agent_stalled`: the stop is the stall's outcome |
+| the spend budget, the host-disk quota or the max session length | `incomplete` |
+| the plan's quota running out | `failed` with `quota_exhausted` |
+| the runner or its microVM going away | `failed` with `harness_error` |
+
+In the class table, *retryable* means the same request may succeed later, and
+*idempotent* means sending it again changes nothing beyond the first attempt:
+the same answer, no second microVM, no new spend.
+
+| Class | UHP `type` / `code` (HTTP) | Colonizer today | Retryable | Idempotent |
+| --- | --- | --- | --- | --- |
+| Invalid input | `invalid_request_error` / `invalid_input` (400), `harness_mismatch` (409), `colonizer_not_latest` (409), `file_too_large` (413) | **400** `{"error": …}` from create's checks | No: fix the request | Yes |
+| Not found | `invalid_request_error` / `session_not_found`, `response_not_found`, `harness_not_found`, `file_not_found` (404) | **404** `"no such session"` | No | Yes |
+| Expired | `invalid_request_error` / `session_expired` (404) | **409** `RESUME_CONFLICT` on a colony that cannot resume | No | Yes |
+| Busy | `invalid_request_error` / `session_busy` (409) | **409** `"session is not running"` while publishing; `RESUME_CONFLICT` on a live colony | Yes, once the running work ends | Yes |
+| Harness unavailable | `server_error` / `harness_unavailable` (503) before a run; `harness_error` / `harness_error` in a failed response | attention `agent_failed`; `Session.error` when agentd never became ready or the microVM was gone after a restart; `status` `exited` with no `turn_end` | Yes: Resume boots a fresh microVM on the same worktree | No: each try boots a microVM |
+| Provider failure | `harness_error` / `provider_error` in a failed response; `model_unavailable` (422) if refused up front | attention `model_error` (an upstream 4xx or 5xx ended the last turn); gateway `api_error`, `overloaded_error`, `authentication_error` | 5xx and overload: yes, with backoff. Auth: no, until the credentials are fixed | No: a retry is a new turn and spends tokens |
+| Agent stall | `harness_error` / `colonizer_agent_stalled` | watchdog `stalled` while nudging, then `nudges_exhausted`; both show in `metadata.colonizer_attention` while the response is `in_progress`, and the code applies once the colony is stopped after `nudges_exhausted` | Yes: a follow-up or Resume | No |
+| Rate limited | `rate_limit_error` / `rate_limited` (429) | an upstream 429 through the gateway | Yes, after `Retry-After` | Yes |
+| Quota exhausted | `rate_limit_error` / `quota_exhausted` (429) | attention `provider_quota_exhausted`; the colony is parked `stopped` | No, until the plan resets; Colonizer resumes parked colonies itself | Yes |
+| Budget stop | no error: `status: "incomplete"`, `incomplete_details.reason` `colonizer_spend_budget`, `colonizer_host_disk_quota` or `colonizer_max_session_length` | `stopped` with `error` "passed its spend budget …"; gateway **403** `permission_error` once over; `stopped` past the host-disk quota; the microVM stopped at the max session length | No, until the budget is raised; then Resume | Yes |
+| Cancelled | no error: `status: "cancelled"` | Stop, `interrupt` | Nothing to retry: continue or Resume | Yes |
+| Internal | `server_error` (500); `colonizer_publish_interrupted` in a failed response | **500** `{"error": …}`; a restart mid-publish | Yes, with backoff | Yes, except create without `Idempotency-Key` |
+
+Provider failure and agent stall stay apart: one is the model refusing, the
+other the agent not making progress, and they need different fixes.
+`waiting_for_answer` and `autopilot_held` are not classes: the first is a
+question waiting for a person, the second autopilot declining to publish after
+the turn's own error. UHP uses `incomplete` for budgets and does not reconcile
+that with its `timeout` code, so Colonizer does not emit `timeout`.

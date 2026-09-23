@@ -2,8 +2,8 @@
 //! Settings → Modules API.
 
 use crate::{
-    ApiResult, Shared, client_error,
-    config::{ModuleChoice, ModulesConfig},
+    ApiResult, App, Shared, client_error,
+    config::{ModuleChoice, ModulesConfig, Settings},
 };
 use axum::{
     Json,
@@ -56,39 +56,57 @@ impl AgentModule {
     }
 }
 
-pub fn discover_agents(assets: Option<&FsPath>) -> Vec<AgentModule> {
-    let Some(root) = assets else { return Vec::new() };
+/// Agent modules discovered under `modules/agents`, plus one problem per manifest that is there but
+/// unusable. A broken manifest is a misconfiguration, so it is named rather than silently skipped.
+pub fn discover_agents(assets: Option<&FsPath>) -> (Vec<AgentModule>, Vec<String>) {
+    let Some(root) = assets else { return (Vec::new(), Vec::new()) };
     let Ok(entries) = std::fs::read_dir(root.join("modules/agents")) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    let mut modules: Vec<AgentModule> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let dir = entry.path();
-            let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("module.json")).ok()?).ok()?;
-            let entry_cmd: Vec<String> = manifest["entry"]
-                .as_array()?
-                .iter()
-                .filter_map(|a| a.as_str().map(String::from))
-                .collect();
-            if entry_cmd.is_empty() {
-                return None;
+    let mut modules = Vec::new();
+    let mut problems = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path().join("module.json");
+        // A directory without a manifest is not a module; one with a broken manifest is.
+        if !path.is_file() {
+            continue;
+        }
+        match read_agent(&path) {
+            Ok(module) => modules.push(module),
+            Err(e) => {
+                let problem = format!("{}: {e}", path.display());
+                eprintln!("modules: {problem}");
+                problems.push(problem);
             }
-            let secrets = manifest["secrets"].to_string();
-            let binaries = manifest["requires"]["binaries"].to_string();
-            Some(AgentModule {
-                id: manifest["id"].as_str()?.to_string(),
-                name: manifest["name"].as_str().unwrap_or_default().to_string(),
-                description: manifest["description"].as_str().unwrap_or_default().to_string(),
-                entry: entry_cmd,
-                needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
-                schema: normalize_schema(&manifest["settings"]),
-                dir,
-            })
-        })
-        .collect();
+        }
+    }
     modules.sort_by(|a, b| a.id.cmp(&b.id));
-    modules
+    problems.sort();
+    (modules, problems)
+}
+
+fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let manifest: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    let Some(id) = manifest["id"].as_str() else {
+        return Err("missing \"id\"".into());
+    };
+    let entry_cmd: Vec<String> = manifest["entry"]
+        .as_array()
+        .and_then(|args| args.iter().map(|a| a.as_str().map(String::from)).collect::<Option<Vec<_>>>())
+        .filter(|args| !args.is_empty())
+        .ok_or("\"entry\" must be a non-empty array of strings")?;
+    let secrets = manifest["secrets"].to_string();
+    let binaries = manifest["requires"]["binaries"].to_string();
+    Ok(AgentModule {
+        id: id.to_string(),
+        name: manifest["name"].as_str().unwrap_or_default().to_string(),
+        description: manifest["description"].as_str().unwrap_or_default().to_string(),
+        entry: entry_cmd,
+        needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        schema: normalize_schema(&manifest["settings"]),
+        dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
+    })
 }
 
 /// Accepts either a full `{type: object, properties}` schema or a bare properties map.
@@ -141,6 +159,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "root_disk": {"type": "string", "title": "Root disk", "default": "16G"},
                 "max_duration": {"type": "string", "title": "Max session length", "description": "e.g. 8h", "default": "8h"},
                 "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
+                "repo_max_parallel": {"type": "integer", "title": "Parallel sessions per repository", "minimum": 1, "maximum": 32, "default": 3,
+                    "description": "Live colonies one repository may run at once, on top of the overall limit above and any org's own. An org can set its own figure in its settings."},
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
                     "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
                 "host_disk": {"type": "string", "title": "Host disk per colony", "default": "0", "format": "disk-size",
@@ -196,7 +216,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "Shared memory",
                 "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes",
                 json!({"type": "object", "properties": {
-                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context", "default": true}
+                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context. Off only lets repo notes through; org and global notes are always reviewed", "default": true}
                 }}),
             ),
             p(
@@ -204,7 +224,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "mem0",
                 "Approved notes stored in your mem0 project. Colonies read them exactly as they read files, most relevant to the task first; the key never enters a colony",
                 json!({"type": "object", "properties": {
-                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context", "default": true},
+                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context. Off only lets repo notes through; org and global notes are always reviewed", "default": true},
                     "base_url": {"type": "string", "title": "API base URL", "description": "The mem0 Platform API. Self-hosted mem0 serves a different API and is not supported", "default": "https://api.mem0.ai"}
                 }}),
             ),
@@ -280,21 +300,25 @@ pub fn schema_for(kind: &str, provider: &str, agents: &[AgentModule]) -> Value {
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}))
 }
 
-fn describe_kind(kind: &str, choice: &ModuleChoice, agents: &[AgentModule]) -> Value {
-    let providers = providers(kind, agents);
+fn describe_kind(kind: &str, choice: &ModuleChoice, app: &App) -> Value {
+    let providers = providers(kind, &app.agents);
     let schema = providers
         .iter()
         .find(|p| p.id == choice.provider)
         .map(|p| p.schema.clone())
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-    json!({
+    let mut described = json!({
         "kind": kind,
         "provider": choice.provider,
         "enabled": choice.enabled,
         "providers": providers.iter().map(|p| json!({"id": p.id, "name": p.name, "description": p.description})).collect::<Vec<_>>(),
         "settings": choice.settings,
         "schema": schema,
-    })
+    });
+    if kind == "agent" {
+        described["manifest_errors"] = json!(app.agent_problems);
+    }
+    described
 }
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
@@ -302,7 +326,7 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     Json(
         KINDS
             .iter()
-            .filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app.agents)))
+            .filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app)))
             .collect(),
     )
 }
@@ -338,6 +362,8 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
     }
     let settings =
         validate_settings(&provider.schema, &req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    check_plugin_dirs(&app.cfg, &provider.schema, &settings)
+        .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
 
     let mut modules = app.modules.write().await;
     let choice = modules
@@ -348,13 +374,28 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
         enabled: req.enabled,
         settings,
     };
-    let described = describe_kind(&kind, choice, &app.agents);
+    let described = describe_kind(&kind, choice, &app);
     save_modules(&app.modules_file(), &modules)?;
     Ok(Json(described))
 }
 
 fn save_modules(path: &FsPath, modules: &ModulesConfig) -> anyhow::Result<()> {
     modules.save(path)
+}
+
+/// Every skillset a `plugin-dirs` setting names must resolve now, not first fail when a colony boots.
+fn check_plugin_dirs(cfg: &Settings, schema: &Value, settings: &Map<String, Value>) -> Result<(), String> {
+    let Some(properties) = schema["properties"].as_object() else {
+        return Ok(());
+    };
+    for (key, spec) in properties {
+        if spec["format"].as_str() == Some("plugin-dirs")
+            && let Some(value) = settings.get(key).and_then(Value::as_str)
+        {
+            crate::plugins::check_skillsets(cfg, crate::plugins::parse_list(value).iter().map(String::as_str))?;
+        }
+    }
+    Ok(())
 }
 
 /// Keeps only known keys and checks types, enums and ranges.
@@ -408,6 +449,7 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn the_agent_entry_leaves_node_to_path() {
@@ -442,6 +484,102 @@ mod tests {
             "a bare `node` entrypoint must mount the vendored runtime: {command:?}"
         );
         std::fs::remove_dir_all(&module.dir).ok();
+    }
+
+    #[test]
+    fn a_broken_agent_manifest_is_reported_by_path_and_cause_instead_of_vanishing() {
+        let root = std::env::temp_dir().join(format!("colonizer-discover-{}", crate::util::short_id()));
+        let agents = root.join("modules/agents");
+        for (dir, manifest) in [
+            ("good", r#"{"id": "good", "entry": ["node", "runner.mjs"]}"#),
+            ("broken-json", "{not json"),
+            ("no-entry", r#"{"id": "no-entry", "entry": []}"#),
+            ("no-id", r#"{"entry": ["node"]}"#),
+        ] {
+            std::fs::create_dir_all(agents.join(dir)).unwrap();
+            std::fs::write(agents.join(dir).join("module.json"), manifest).unwrap();
+        }
+        // Not modules at all, so not problems either.
+        std::fs::create_dir_all(agents.join("test")).unwrap();
+        std::fs::write(agents.join("README.md"), "").unwrap();
+
+        let (modules, problems) = discover_agents(Some(&root));
+        assert_eq!(modules.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["good"]);
+        let manifest = |dir: &str| agents.join(dir).join("module.json").display().to_string();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(
+            problems.contains(&format!(
+                "{}: key must be a string at line 1 column 2",
+                manifest("broken-json")
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.contains(&format!(
+                "{}: \"entry\" must be a non-empty array of strings",
+                manifest("no-entry")
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.contains(&format!("{}: missing \"id\"", manifest("no-id"))),
+            "{problems:?}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn an_agent_setting_naming_an_unknown_skillset_is_refused_at_save_time() {
+        let root = std::env::temp_dir().join(format!("colonizer-plugin-dirs-{}", crate::util::short_id()));
+        let agent = AgentModule {
+            id: "claude-code".into(),
+            name: String::new(),
+            description: String::new(),
+            dir: root.clone(),
+            entry: vec!["node".into()],
+            needs_claude: true,
+            schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
+        };
+        let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
+        // A skillset needs a manifest to pass validation (plugins::validate).
+        std::fs::create_dir_all(app.cfg.data_dir.join("plugins/ecc")).unwrap();
+        std::fs::write(app.cfg.data_dir.join("plugins/ecc/plugin.json"), r#"{"name": "ecc"}"#).unwrap();
+        let save = |plugins: &str| {
+            let mut settings = Map::new();
+            settings.insert("plugins".into(), json!(plugins));
+            let req = UpdateModule {
+                provider: "claude-code".into(),
+                enabled: true,
+                settings,
+            };
+            update(State(app.clone()), Path("agent".into()), Json(req))
+        };
+        let err = save("ecc, superpower").await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "unknown skillset \"superpower\"; available: ecc");
+
+        let saved = save(" ecc, ,").await.unwrap_or_else(|e| panic!("save refused: {:#}", e.1)).0;
+        assert_eq!(saved["settings"]["plugins"], " ecc, ,");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn manifest_problems_found_at_boot_are_listed_on_the_agent_kind() {
+        let root = std::env::temp_dir().join(format!("colonizer-manifest-errors-{}", crate::util::short_id()));
+        let mut app = crate::tests::test_app(&root);
+        let problem = "/app/modules/agents/broken/module.json: missing \"id\"".to_string();
+        Arc::get_mut(&mut app).unwrap().agent_problems = vec![problem.clone()];
+        let listed = list(State(app)).await.0;
+        let agent = listed.iter().find(|k| k["kind"] == "agent").unwrap();
+        assert_eq!(agent["manifest_errors"], json!([problem]));
+        assert!(
+            listed
+                .iter()
+                .filter(|k| k["kind"] != "agent")
+                .all(|k| k.get("manifest_errors").is_none()),
+            "only the agent kind has manifests"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -79,6 +79,13 @@ impl Phases {
     pub fn to_json(&self) -> Value {
         json!({ "total_ms": self.total_ms(), "phases": self.phases })
     }
+
+    /// `{phases: [{name, ms}]}`, the breakdown while a boot is under way. `total_ms` is left out on
+    /// purpose: its absence is what tells a boot still running, or one that stopped part way, from a
+    /// finished one, whose end-to-end time readers would otherwise take a partial figure for.
+    pub fn progress_json(&self) -> Value {
+        json!({ "phases": self.phases })
+    }
 }
 
 impl Default for Phases {
@@ -130,6 +137,16 @@ mod tests {
         let v = p.to_json();
         assert!(v["total_ms"].is_u64());
         assert_eq!(v["phases"].as_array().expect("phases array").len(), 1);
+        assert_eq!(v["phases"][0]["name"], "clone");
+    }
+
+    #[test]
+    fn progress_json_has_the_phases_so_far_and_no_total() {
+        let mut p = Phases::new();
+        assert_eq!(p.progress_json(), json!({ "phases": [] }));
+        p.mark("clone");
+        let v = p.progress_json();
+        assert!(v.get("total_ms").is_none(), "a partial breakdown must not look finished: {v}");
         assert_eq!(v["phases"][0]["name"], "clone");
     }
 }

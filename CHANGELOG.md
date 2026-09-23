@@ -14,6 +14,36 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+### Added
+
+- **A parallel limit per repository.** Beside the global and per-org limits, the
+  sandbox module's `repo_max_parallel` caps the colonies live at once in any one
+  repository, and an org can set its own. All three apply and the tightest wins;
+  a colony held back by its repository queues without holding up colonies of
+  other repositories. ([#174])
+- **No-write kill-switch.** Set `COLONIZER_NO_EXTERNAL_EFFECTS` (or
+  `COLONIZER_NO_WRITE`) to anything but `0`, `false`, `off` or `no` and each
+  of these fails closed: Create PR answers 409,
+  autopilot logs a warning instead of publishing, the commit, push and
+  pull-request steps each refuse, stacked pull requests keep their old base,
+  fix-PR reviews neither merge nor comment, and findings are ignored. A draft
+  pull request counts as a write too. Unset, nothing changes. ([#84])
+- A publish refuses to open or reuse a pull request if the branch head moved
+  after the push, and logs the SHA-256 of the PR body it sends. ([#84])
+
+### Fixed
+
+- A mothership restart no longer forgets which providers are out of quota: the
+  record and its reset time are kept in `provider-quota.json` beside
+  `provider-usage.json`, so colonies parked on an exhausted quota stay parked
+  until the reset instead of all resuming at once and parking again. ([#358])
+
+### Take care
+
+- `repo_max_parallel` defaults to 3. An install that raised `max_parallel` and
+  ran more than 3 colonies on one repository now queues the rest; raise the
+  new setting (up to 32) to keep the old behaviour.
+
 ## [v0.1.7] - 2026-09-22
 
 ### Added
@@ -261,6 +291,7 @@ Macs. ([#74])
 [#80]: https://github.com/Colonizer-dev/harness/pull/80
 [#82]: https://github.com/Colonizer-dev/harness/pull/82
 [#83]: https://github.com/Colonizer-dev/harness/pull/83
+[#84]: https://github.com/Colonizer-dev/harness/issues/84
 [#97]: https://github.com/Colonizer-dev/harness/pull/97
 [#99]: https://github.com/Colonizer-dev/harness/pull/99
 [#104]: https://github.com/Colonizer-dev/harness/pull/104
@@ -275,6 +306,7 @@ Macs. ([#74])
 [#146]: https://github.com/Colonizer-dev/harness/pull/146
 [#150]: https://github.com/Colonizer-dev/harness/pull/150
 [#172]: https://github.com/Colonizer-dev/harness/pull/172
+[#174]: https://github.com/Colonizer-dev/harness/issues/174
 [#177]: https://github.com/Colonizer-dev/harness/issues/177
 [#178]: https://github.com/Colonizer-dev/harness/pull/178
 [#180]: https://github.com/Colonizer-dev/harness/pull/180
@@ -287,6 +319,7 @@ Macs. ([#74])
 [#215]: https://github.com/Colonizer-dev/harness/issues/215
 [#276]: https://github.com/Colonizer-dev/harness/pull/276
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
+[#358]: https://github.com/Colonizer-dev/harness/issues/358
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

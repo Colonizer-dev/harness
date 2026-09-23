@@ -87,6 +87,10 @@ pub struct OrgSettings {
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
     pub max_parallel: Option<u64>,
+    /// How many live colonies one repository of this org may run at once. `None` inherits the sandbox
+    /// module's `repo_max_parallel`; the global and org limits apply as well.
+    #[serde(default)]
+    pub repo_max_parallel: Option<u64>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -326,6 +330,13 @@ pub fn global_max_parallel(modules: &ModulesConfig) -> u64 {
     setting_u64(&modules.sandbox, &schema, "max_parallel").max(1)
 }
 
+/// The mothership-wide per-repository colony limit from the sandbox module. A module config written
+/// before the setting existed reads the schema default.
+pub fn global_repo_max_parallel(modules: &ModulesConfig) -> u64 {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting_u64(&modules.sandbox, &schema, "repo_max_parallel").max(1)
+}
+
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
 pub fn org_enabled(org: &OrgSettings) -> bool {
@@ -335,6 +346,11 @@ pub fn org_enabled(org: &OrgSettings) -> bool {
 /// An org's own colony limit, if it sets one. The global limit always applies as well.
 pub fn org_max_parallel(org: &OrgSettings) -> Option<u64> {
     org.max_parallel.map(|n| n.max(1))
+}
+
+/// An org's own per-repository colony limit, if it sets one; `None` inherits [`global_repo_max_parallel`].
+pub fn repo_max_parallel(org: &OrgSettings) -> Option<u64> {
+    org.repo_max_parallel.map(|n| n.max(1))
 }
 
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
@@ -499,6 +515,9 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
     if settings.max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("parallel limit must be between 1 and 32".into());
     }
+    if settings.repo_max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
+        return Err("per-repository parallel limit must be between 1 and 32".into());
+    }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
         return Err("budget must be 0 or more dollars (0 means no budget)".into());
     }
@@ -624,6 +643,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("max_parallel") {
         incoming.max_parallel = saved.max_parallel;
     }
+    if !named("repo_max_parallel") {
+        incoming.repo_max_parallel = saved.repo_max_parallel;
+    }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
     }
@@ -658,6 +680,20 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     let req: PutOrg =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("invalid org settings: {e}")))?;
     validate(&req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    let mut all = app.all_org_settings();
+    // A skillset switched on must exist, or boot fails. One switched off must exist only when this save
+    // adds the switch, which catches a misspelt disable; an off override already saved for a skillset
+    // since uninstalled is harmless and the org dialog sends it back on every save.
+    if let Some(skillsets) = req.settings.agent.as_ref().and_then(|agent| agent.skillsets.as_ref()) {
+        let saved_off = |name: &str| {
+            all.get(&org)
+                .and_then(|saved| saved.agent.as_ref()?.skillsets.as_ref()?.get(name))
+                .is_some_and(|on| !on)
+        };
+        let checked = skillsets.iter().filter(|(name, on)| **on || !saved_off(name));
+        crate::plugins::check_skillsets(&app.cfg, checked.map(|(name, _)| name.as_str()))
+            .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    }
     let mut req = req;
     // No skillset overrides is the same as inheriting all of them.
     if let Some(agent) = req.settings.agent.as_mut()
@@ -665,7 +701,6 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     {
         agent.skillsets = None;
     }
-    let mut all = app.all_org_settings();
     keep_unnamed_fields(
         &mut req.settings,
         all.get(&org).unwrap_or(&OrgSettings::default()),
@@ -882,6 +917,23 @@ mod tests {
     }
 
     #[test]
+    fn the_per_repository_limit_is_validated_and_inherits_the_global_one() {
+        let limit = |n| OrgSettings {
+            repo_max_parallel: n,
+            ..Default::default()
+        };
+        assert!(validate(&limit(Some(0))).is_err(), "0 would never start anything");
+        assert!(validate(&limit(Some(33))).is_err());
+        for n in [1, 32] {
+            assert!(validate(&limit(Some(n))).is_ok());
+            assert_eq!(repo_max_parallel(&limit(Some(n))), Some(n));
+        }
+        assert_eq!(repo_max_parallel(&limit(None)), None);
+        let modules = ModulesConfig::default();
+        assert_eq!(global_repo_max_parallel(&modules), 3, "the schema default");
+    }
+
+    #[test]
     fn org_settings_are_validated() {
         assert!(
             validate(&OrgSettings {
@@ -1054,6 +1106,7 @@ mod tests {
                 ..Default::default()
             }),
             max_parallel: Some(4),
+            repo_max_parallel: Some(2),
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
@@ -1102,6 +1155,15 @@ mod tests {
             incoming.max_parallel, None,
             "a field the client names as null is a real request to inherit"
         );
+        assert_eq!(
+            incoming.repo_max_parallel,
+            Some(2),
+            "a per-repository limit the client never heard of survives the save"
+        );
+        let clears = json!({"repo_max_parallel": null});
+        let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared, &saved, Some(&clears));
+        assert_eq!(cleared.repo_max_parallel, None, "a named null clears it back to inherit");
         assert_eq!(
             incoming.agent.map(|a| (a.model, a.skillsets)),
             Some((None, None)),
@@ -1186,6 +1248,7 @@ mod tests {
         let all: BTreeMap<String, OrgSettings> = serde_json::from_str(saved).unwrap();
         let org = all.get("acme").unwrap();
         assert_eq!(org.max_parallel, Some(2));
+        assert_eq!(org.repo_max_parallel, None, "no per-repository limit inherits the global one");
         assert_eq!(org.budget_usd, Some(5.5));
         assert_eq!(org.enabled, None);
         assert!(org_enabled(org), "an org the switch has never heard of stays on");
@@ -1526,6 +1589,58 @@ mod tests {
     }
 
     // -- answering the prompt --------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn an_org_override_naming_an_unknown_skillset_is_refused_with_the_available_ones() {
+        let (app, root) = org_app();
+        // A skillset needs a manifest to pass validation (plugins::validate).
+        let install = |name: &str| {
+            let dir = app.cfg.data_dir.join("plugins").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("plugin.json"), json!({"name": name}).to_string()).unwrap();
+        };
+        install("ecc");
+        for on in [true, false] {
+            let err = put(
+                State(app.clone()),
+                Path("acme".into()),
+                Json(json!({"settings": {"agent": {"skillsets": {"ecc": true, "superpower": on}}}})),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(err.message(), "unknown skillset \"superpower\"; available: ecc");
+        }
+        assert!(!app.all_org_settings().contains_key("acme"), "a refused save stores nothing");
+
+        // An off override saved while its skillset was installed outlives the uninstall: the org dialog
+        // sends it back on every save, and that must not block an unrelated change.
+        install("old");
+        let save = |skillsets: Value| {
+            put(
+                State(app.clone()),
+                Path("acme".into()),
+                Json(json!({"settings": {"max_parallel": 2, "agent": {"skillsets": skillsets}}})),
+            )
+        };
+        let _ = save(json!({"ecc": true, "old": false}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        std::fs::remove_dir_all(app.cfg.data_dir.join("plugins/old")).unwrap();
+        let _ = save(json!({"ecc": true, "old": false}))
+            .await
+            .unwrap_or_else(|e| panic!("a stale off override blocked the save: {:#}", e.1));
+        // A new off switch is still checked, and a stale one switched back on would fail boot.
+        for (skillsets, unknown) in [
+            (json!({"old": false, "ecc": false, "ecx": false}), "ecx"),
+            (json!({"old": true}), "old"),
+        ] {
+            let err = save(skillsets).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(err.message(), format!("unknown skillset {unknown:?}; available: ecc"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn answering_the_prompt_records_the_pending_avatar_with_the_answer() {

@@ -67,7 +67,7 @@ use chrono::{DateTime, Utc};
 use config::{ModulesConfig, Settings, setting_u64};
 use mesh::{Mesh, Ports};
 use modules::AgentModule;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sessions::Session;
 use std::{
@@ -97,12 +97,25 @@ pub struct ClaudeCred {
     pub source: &'static str,
 }
 
-/// The latest confirmed storage failure, shown by the UI until it is dismissed. Sticky on purpose:
-/// a later successful write does not clear it, because the gap the alert reports did happen. What
-/// the write does change is `recovered_at`, so the alert can say the mothership is writing again
-/// instead of reporting a healthy disk as broken until the next restart.
+/// What a `StorageAlert` reports, which decides whether it can recover. Serialized as the `kind` of
+/// `/api/status`'s `storage` key: `"write"` or `"load_damage"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageAlertKind {
+    /// A write failed; the next one that goes through recovers it.
+    Write,
+    /// `sessions.json` was damaged at startup and colonies went missing from the list. No later
+    /// save brings them back, so it never recovers: it stays until the operator dismisses it.
+    LoadDamage,
+}
+
+/// A confirmed storage failure, shown by the UI until it is dismissed. Sticky on purpose: a later
+/// successful write does not clear it, because the gap the alert reports did happen. What the
+/// write does change, for a `Write` alert, is `recovered_at`, so the alert can say the mothership
+/// is writing again instead of reporting a healthy disk as broken until the next restart.
 #[derive(Clone, Debug)]
 pub struct StorageAlert {
+    pub kind: StorageAlertKind,
     pub message: String,
     pub ts: DateTime<Utc>,
     pub failures: u64,
@@ -114,10 +127,18 @@ pub struct App {
     pub cfg: Settings,
     pub modules: RwLock<ModulesConfig>,
     pub agents: Vec<AgentModule>,
+    /// Agent manifests that are present but unusable, one line each naming the file and the fault;
+    /// logged at boot and reported as the agent kind's `manifest_errors` in GET /api/modules.
+    pub agent_problems: Vec<String>,
     pub sessions: RwLock<Vec<Session>>,
     pub redteam: redteam::RedTeamStore,
     session_persist: Mutex<()>,
+    /// The latest write failure. Only `Write` alerts go here.
     pub storage_alert: RwLock<Option<StorageAlert>>,
+    /// The `LoadDamage` alert `load_sessions` raised at startup, set once and never changed. Kept
+    /// apart from `storage_alert` so a later write failure cannot overwrite it and its `.corrupt-`
+    /// path, nor a later save mark it recovered.
+    pub load_damage: Option<StorageAlert>,
     pub runtimes: Mutex<HashMap<String, Arc<sessions::Runtime>>>,
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// One lifecycle lock per colony id. It serialises the moments a colony gains or loses its
@@ -265,6 +286,7 @@ impl App {
         let mut alert = self.storage_alert.write().await;
         let failures = alert.as_ref().map_or(0, |a| a.failures) + 1;
         *alert = Some(StorageAlert {
+            kind: StorageAlertKind::Write,
             message: format!("{what} failed: {err:#}"),
             ts: Utc::now(),
             failures,
@@ -272,23 +294,29 @@ impl App {
         });
     }
 
-    /// Records that a write went through, which is what turns a standing alert into a recovered
-    /// one. Only the first success after a failure stamps it, and the common case — no alert, or
-    /// one already recovered — takes only the read lock, since every session-list save calls this.
+    /// Records that a write went through, which is what turns a standing write alert into a
+    /// recovered one. Only the first success after a failure stamps it, and the common case — no
+    /// alert, or one already recovered — takes only the read lock, since every session-list save
+    /// calls this. Only a `Write` alert can recover; load damage is kept out of `storage_alert` anyway.
     pub async fn storage_succeeded(&self) {
-        if !self
-            .storage_alert
-            .read()
-            .await
-            .as_ref()
-            .is_some_and(|a| a.recovered_at.is_none())
-        {
+        let recoverable = |a: &StorageAlert| a.kind == StorageAlertKind::Write && a.recovered_at.is_none();
+        if !self.storage_alert.read().await.as_ref().is_some_and(recoverable) {
             return;
         }
         if let Some(alert) = self.storage_alert.write().await.as_mut()
-            && alert.recovered_at.is_none()
+            && recoverable(alert)
         {
             alert.recovered_at = Some(Utc::now());
+        }
+    }
+
+    /// The alert `/api/status` shows: a write failure that has not recovered, else the startup's
+    /// load damage, else a write failure that has. So load damage hidden by a write failure comes
+    /// back, unchanged, once writes go through again.
+    async fn shown_storage_alert(&self) -> Option<StorageAlert> {
+        match self.storage_alert.read().await.clone() {
+            Some(write) if write.recovered_at.is_none() => Some(write),
+            write => self.load_damage.clone().or(write),
         }
     }
 
@@ -456,11 +484,14 @@ pub type ApiResult<T> = Result<Json<T>, AppError>;
 /// The `storage` key of `/api/status`: `ok` while every write was confirmed, else the sticky alert
 /// (`ts` and `recovered_at` in the same RFC 3339 form the `harness_log` frames use). A recovered
 /// alert is `ok` again but keeps its message, time and count: the gap it reports still happened.
+/// `ok` says whether writes are going through, so load damage is `ok` with a null `recovered_at`:
+/// its `kind` is what keeps it on screen, since the colonies it reports never come back.
 fn storage_status(alert: Option<StorageAlert>) -> Value {
     match alert {
         None => json!({"ok": true}),
         Some(alert) => json!({
-            "ok": alert.recovered_at.is_some(),
+            "ok": alert.kind == StorageAlertKind::LoadDamage || alert.recovered_at.is_some(),
+            "kind": alert.kind,
             "message": alert.message,
             "ts": alert.ts,
             "failures": alert.failures,
@@ -559,7 +590,7 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
     let mesh = mesh_status(&modules, app.cfg.assets.as_deref(), live).await;
     let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
-    let storage_alert = app.storage_alert.read().await.clone();
+    let storage_alert = app.shown_storage_alert().await;
     // One entry per configured model provider, so a provider the colony fan-out is degrading is visible
     // from the status poll without opening the providers screen. Named `model_providers` because the
     // `modules` section's `sandbox`/`source`/`mesh` entries are this status's other "providers".
@@ -676,11 +707,20 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
     if !allowed {
         return (StatusCode::FORBIDDEN, "Host not allowed (set COLONIZER_ALLOWED_HOSTS)").into_response();
     }
-    if (req.method() != Method::GET || req.headers().contains_key(header::UPGRADE))
-        && let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok())
-        && origin.split("://").nth(1) != Some(host.as_str())
-    {
-        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    // Cross-origin writes and WebSocket upgrades are rejected, and a *missing* `Origin` on such a
+    // request is rejected by default rather than trusted. A browser always attaches `Origin` to a
+    // cross-origin write or upgrade, so only a non-browser client — which must not be allowed to
+    // drive this unauthenticated API — omits it. Same-origin requests, whose `Origin` matches the
+    // `Host`, still pass, so the served web UI is unaffected. See #375.
+    if req.method() != Method::GET || req.headers().contains_key(header::UPGRADE) {
+        let same_origin = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|o| o.to_str().ok())
+            .is_some_and(|origin| origin.split("://").nth(1) == Some(host.as_str()));
+        if !same_origin {
+            return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+        }
     }
     next.run(req).await
 }
@@ -743,6 +783,7 @@ fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> 
     Ok((
         sessions,
         Some(StorageAlert {
+            kind: StorageAlertKind::LoadDamage,
             message,
             ts: Utc::now(),
             failures: 1,
@@ -763,6 +804,7 @@ fn unusable(path: &FsPath, saved: &FsPath, reason: String) -> (Vec<Session>, Opt
     (
         Vec::new(),
         Some(StorageAlert {
+            kind: StorageAlertKind::LoadDamage,
             message,
             ts: Utc::now(),
             failures: 1,
@@ -963,15 +1005,17 @@ async fn serve() -> Result<()> {
         println!("sessions: cleared a stale attention flag from {stale_attention} finished colonies");
     }
     let modules = ModulesConfig::load(&cfg.config_dir.join("modules.json"));
-    let agents = modules::discover_agents(cfg.assets.as_deref());
+    let (agents, agent_problems) = modules::discover_agents(cfg.assets.as_deref());
 
     let app = Arc::new(App {
         modules: RwLock::new(modules),
         agents,
+        agent_problems,
         sessions: RwLock::new(sessions),
         redteam: redteam::RedTeamStore::new(&cfg.data_dir),
         session_persist: Mutex::new(()),
-        storage_alert: RwLock::new(corrupt),
+        storage_alert: RwLock::new(None),
+        load_damage: corrupt,
         runtimes: Mutex::new(HashMap::new()),
         repo_locks: Mutex::new(HashMap::new()),
         session_locks: Mutex::new(HashMap::new()),
@@ -1219,10 +1263,12 @@ pub(crate) mod tests {
             cfg,
             modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
             agents,
+            agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
             redteam: redteam::RedTeamStore::new(&root.join("data")),
             session_persist: Mutex::new(()),
             storage_alert: RwLock::new(None),
+            load_damage: None,
             runtimes: Mutex::new(HashMap::new()),
             repo_locks: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(HashMap::new()),
@@ -1306,6 +1352,7 @@ pub(crate) mod tests {
         let (sessions, alert) = load_sessions(&path).unwrap();
         assert!(sessions.is_empty());
         let alert = alert.unwrap();
+        assert_eq!(alert.kind, StorageAlertKind::LoadDamage);
         assert!(alert.message.contains(".corrupt-"), "{}", alert.message);
         assert!(
             alert.message.contains("worktrees, branches and microVMs"),
@@ -1338,6 +1385,7 @@ pub(crate) mod tests {
         assert_eq!(sessions[0].id, "first");
         assert_eq!(sessions[1].id, "third");
         let alert = alert.unwrap();
+        assert_eq!(alert.kind, StorageAlertKind::LoadDamage);
         assert!(alert.message.contains("kept 2 of 3 records"), "{}", alert.message);
         assert!(alert.message.contains("1 of them could not be loaded"), "{}", alert.message);
         assert!(alert.message.contains(".corrupt-"), "{}", alert.message);
@@ -1497,6 +1545,7 @@ pub(crate) mod tests {
     fn the_status_storage_key_is_ok_until_a_write_goes_unconfirmed() {
         assert_eq!(storage_status(None), json!({"ok": true}));
         let alert = StorageAlert {
+            kind: StorageAlertKind::Write,
             message: "save the session list failed: disk is full".into(),
             ts: Utc::now(),
             failures: 3,
@@ -1504,6 +1553,7 @@ pub(crate) mod tests {
         };
         let value = storage_status(Some(alert));
         assert_eq!(value["ok"], false);
+        assert_eq!(value["kind"], "write");
         assert_eq!(value["message"], "save the session list failed: disk is full");
         assert_eq!(value["failures"], 3);
         assert!(
@@ -1553,6 +1603,40 @@ pub(crate) mod tests {
         assert_eq!(failing_again["ok"], false, "a new failure makes the alert current again");
         assert!(failing_again["recovered_at"].is_null(), "{failing_again}");
         assert_eq!(failing_again["failures"], 2, "failures stay cumulative across a recovery");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Load damage reports colonies no save brings back (#371): the saves after startup must not mark
+    /// it recovered, and a write failure on top of it is shown while it lasts but must not overwrite
+    /// it, so once writes go through again the load damage is shown as it was.
+    #[tokio::test]
+    async fn load_damage_is_never_recovered_and_outlasts_a_write_failure() {
+        let root = temp_root();
+        let path = root.join("data/sessions.json");
+        std::fs::write(&path, b"this is not json").unwrap();
+        let (_, damage) = load_sessions(&path).unwrap();
+        let mut app = test_app(&root);
+        Arc::get_mut(&mut app).unwrap().load_damage = damage;
+
+        app.persist_sessions().await.unwrap();
+        let damaged = storage_status(app.shown_storage_alert().await);
+        assert_eq!(damaged["kind"], "load_damage");
+        assert_eq!(damaged["ok"], true, "writes are going through; the kind keeps it shown");
+        assert!(
+            damaged["recovered_at"].is_null(),
+            "a save does not bring the colonies back: {damaged}"
+        );
+        assert!(damaged["message"].as_str().unwrap().contains(".corrupt-"), "{damaged}");
+
+        app.storage_failed("save the session list", &anyhow!("disk is full")).await;
+        let failing = storage_status(app.shown_storage_alert().await);
+        assert_eq!(failing["kind"], "write");
+        assert_eq!(failing["ok"], false);
+        assert_eq!(failing["failures"], 1, "the load damage is not counted as a failed write");
+
+        app.persist_sessions().await.unwrap();
+        let after = storage_status(app.shown_storage_alert().await);
+        assert_eq!(after, damaged, "the load damage is shown again, unchanged");
         let _ = std::fs::remove_dir_all(root);
     }
 

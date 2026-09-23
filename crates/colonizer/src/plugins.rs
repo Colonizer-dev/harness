@@ -32,24 +32,201 @@ fn vendored_root(cfg: &Settings) -> Option<PathBuf> {
     cfg.assets.as_ref().map(|assets| assets.join("plugins"))
 }
 
+/// Where `name` lives, local copy first, without judging what is inside: `None` when it is not a plain
+/// name or neither the data directory nor the app has it. [`resolve`] adds validation on top, and
+/// [`check_skillsets`] uses the split to tell a missing skillset from a broken one.
+fn locate(cfg: &Settings, name: &str) -> Option<PathBuf> {
+    if !is_plain_name(name) {
+        return None;
+    }
+    let local = local_root(cfg).join(name);
+    if local.is_dir() {
+        return Some(local);
+    }
+    vendored_root(cfg)
+        .map(|vendored| vendored.join(name))
+        .filter(|dir| dir.is_dir())
+}
+
 /// The directory boot mounts for `name`. A local copy overrides a vendored one of the same name, and
-/// neither can be named by a path.
+/// neither can be named by a path. Whichever copy wins must pass [`validate`].
 pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
     let root = local_root(cfg);
     if !is_plain_name(name) {
         bail!("plugin directory {name:?} must be a plain name under {}", root.display());
     }
-    let local = root.join(name);
-    if local.is_dir() {
-        return Ok(local);
-    }
-    match vendored_root(cfg).map(|vendored| vendored.join(name)) {
-        Some(vendored) if vendored.is_dir() => Ok(vendored),
-        _ => bail!(
+    let Some(dir) = locate(cfg, name) else {
+        bail!(
             "plugin directory {name:?} is not in {} or among the app's vendored plugins",
             root.display()
-        ),
+        );
+    };
+    validate(&dir)?;
+    Ok(dir)
+}
+
+/// The plugin manifest: the root `plugin.json` when present, otherwise the
+/// legacy `.claude-plugin/plugin.json` the currently-staged packs use.
+fn manifest_file(dir: &Path) -> PathBuf {
+    let root = dir.join("plugin.json");
+    if root.is_file() {
+        root
+    } else {
+        dir.join(".claude-plugin/plugin.json")
     }
+}
+
+/// A legacy directory-style manifest entry (`"./skills/"`, `"skills/"`, `"."`):
+/// "every skill under that directory". True when `rel` — already stripped of a
+/// leading `./` and slashes — resolves under `dir` to a directory holding a
+/// `SKILL.md` at most two levels beneath it (`skills/<name>/SKILL.md`, or one
+/// level for a single-skill directory).
+fn is_skill_tree(dir: &Path, rel: &str) -> bool {
+    if rel.contains("..") {
+        return false;
+    }
+    let base = if rel == "." { dir.to_path_buf() } else { dir.join(rel) };
+    if !base.is_dir() {
+        return false;
+    }
+    let mut stack = vec![(base, 0u8)];
+    while let Some((sub, depth)) = stack.pop() {
+        if sub.join("SKILL.md").is_file() {
+            return true;
+        }
+        if depth >= 2 {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&sub) {
+            stack.extend(entries.flatten().filter(|e| e.path().is_dir()).map(|e| (e.path(), depth + 1)));
+        }
+    }
+    false
+}
+
+/// Boot-time structural validation for a plugin directory, run from
+/// [`resolve`]: the manifest must exist and parse (root or legacy path),
+/// every `skills/*/` directory carrying a `SKILL.md` must have a safe plain
+/// name, and every skill the manifest's `skills` array lists must exist on
+/// disk. A pack that fails any of these blocks its colony's launch with the
+/// named error rather than mounting a degraded colony. The deeper rule set —
+/// notably `mcp.json` host-gating — lives in `scripts/validate-plugins.mjs`
+/// and is deliberately not duplicated here.
+pub fn validate(dir: &Path) -> Result<()> {
+    let manifest_path = manifest_file(dir);
+    let data = match std::fs::read(&manifest_path) {
+        Ok(data) => data,
+        Err(_) => bail!(
+            "{}: missing plugin manifest (expected plugin.json or .claude-plugin/plugin.json)",
+            dir.display()
+        ),
+    };
+    let manifest: Value = match serde_json::from_slice(&data) {
+        Ok(manifest) => manifest,
+        Err(err) => bail!("{}: invalid plugin manifest: {err}", manifest_path.display()),
+    };
+    if !manifest.is_object() {
+        bail!("{}: invalid plugin manifest: expected a JSON object", manifest_path.display());
+    }
+    if let Ok(entries) = std::fs::read_dir(dir.join("skills")) {
+        for entry in entries.flatten() {
+            if !entry.path().join("SKILL.md").is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_plain_name(&name) {
+                bail!("{}: skill directory {name:?} must be a plain name", dir.display());
+            }
+        }
+    }
+    if let Some(listed) = manifest.get("skills").and_then(Value::as_array) {
+        for skill in listed.iter().filter_map(Value::as_str) {
+            let rel = skill.trim().trim_start_matches("./").trim_matches('/');
+            if rel.is_empty() || rel.contains("..") {
+                bail!("{}: manifest lists invalid skill {skill:?}", manifest_path.display());
+            }
+            // Legacy directory-style entries (`"./skills/"`, `"skills/"`, `"."`) mean
+            // "every skill under that directory" — the shape upstream ecc ships
+            // (`skills: ["./skills/"]`) — so they pass when the entry resolves to a
+            // directory with skills beneath it.
+            if is_skill_tree(dir, rel) {
+                continue;
+            }
+            let candidate = if rel.contains('/') {
+                dir.join(rel)
+            } else {
+                dir.join("skills").join(rel)
+            };
+            if !candidate.join("SKILL.md").is_file() && !candidate.is_file() {
+                bail!(
+                    "{}: manifest lists skill {skill:?} but it is missing on disk",
+                    manifest_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Skill names across the enabled packs must be unique: the model addresses a
+/// skill as `<pack>:<name>`, so two packs answering to the same name are
+/// ambiguous by construction. A collision blocks boot with both packs named.
+/// What counts is what Claude Code loads — `skills/<name>/SKILL.md` on disk —
+/// not what each manifest lists.
+pub fn check_skill_uniqueness(packs: &[(&str, PathBuf)]) -> Result<()> {
+    let mut owner: BTreeMap<String, &str> = BTreeMap::new();
+    for (pack, dir) in packs {
+        let Ok(entries) = std::fs::read_dir(dir.join("skills")) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.path().join("SKILL.md").is_file() {
+                continue;
+            }
+            let Ok(skill) = entry.file_name().into_string() else {
+                continue;
+            };
+            if let Some(first) = owner.insert(skill.clone(), *pack) {
+                bail!("skill {skill:?} is in both {first:?} and {pack:?}: skill names must be unique across enabled packs");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The vendored copy of `name` that a local copy hides, if both exist, so boot can say which one it
+/// mounted instead of letting the local copy win silently.
+pub fn shadowed_vendored(cfg: &Settings, name: &str) -> Option<PathBuf> {
+    if !is_plain_name(name) || !local_root(cfg).join(name).is_dir() {
+        return None;
+    }
+    vendored_root(cfg).map(|root| root.join(name)).filter(|dir| dir.is_dir())
+}
+
+/// Refuses, at save time, any name `resolve` would refuse at boot. A name that is not there is refused
+/// listing what could be named instead; one that is there but fails [`validate`] is refused with the
+/// validation error, which names the file and the rule, since listing it as "available" would not help.
+pub fn check_skillsets<'a>(cfg: &Settings, names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    for name in names {
+        let Some(dir) = locate(cfg, name) else {
+            return Err(unknown_skillset(cfg, name));
+        };
+        validate(&dir).map_err(|err| format!("skillset {name:?} is invalid: {err:#}"))?;
+    }
+    Ok(())
+}
+
+fn unknown_skillset(cfg: &Settings, name: &str) -> String {
+    let mut known: Vec<String> = directories(&local_root(cfg)).into_keys().collect();
+    known.extend(vendored_root(cfg).into_iter().flat_map(|root| directories(&root).into_keys()));
+    known.sort();
+    known.dedup();
+    let available = if known.is_empty() {
+        "none".to_string()
+    } else {
+        known.join(", ")
+    };
+    format!("unknown skillset {name:?}; available: {available}")
 }
 
 /// Entries directly under `dir` that `keep` accepts; 0 when the directory is absent.
@@ -62,7 +239,7 @@ fn count(dir: &Path, keep: impl Fn(&Path) -> bool) -> usize {
 /// What a switch in Settings needs to say about one plugin directory. The counts are the context cost
 /// of switching it on: Claude Code discovers `skills/<name>/SKILL.md`, `agents/*.md` and `commands/*.md`.
 fn describe(name: &str, dir: &Path, source: &str, shadows_vendored: bool) -> Value {
-    let manifest: Value = std::fs::read(dir.join(".claude-plugin/plugin.json"))
+    let manifest: Value = std::fs::read(manifest_file(dir))
         .ok()
         .and_then(|data| serde_json::from_slice(&data).ok())
         .unwrap_or_default();
@@ -161,6 +338,100 @@ mod tests {
         (root, cfg)
     }
 
+    fn write_manifest(dir: &Path, at_root: bool, manifest: Value) {
+        let path = if at_root {
+            dir.join("plugin.json")
+        } else {
+            dir.join(".claude-plugin/plugin.json")
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, manifest.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_directory_style_skills_entry_means_every_skill_beneath_it() {
+        let (root, cfg) = install();
+        // The exact shape upstream ecc ships: directory entries, not skill names.
+        let dir = cfg.data_dir.join("plugins/ecc-shape");
+        plugin(&dir, "2.2.1", &["tdd"], &[]);
+        write_manifest(
+            &dir,
+            false,
+            json!({"name": "ecc", "version": "2.2.1", "description": "d",
+                   "skills": ["./skills/"], "commands": ["./commands/"]}),
+        );
+        assert!(resolve(&cfg, "ecc-shape").is_ok(), "ecc must keep booting unchanged");
+        // ...but a directory entry with no skills beneath it still fails.
+        let dir = cfg.data_dir.join("plugins/empty-shape");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::remove_dir_all(dir.join("skills/not-a-skill")).unwrap();
+        write_manifest(
+            &dir,
+            false,
+            json!({"name": "x", "version": "1.0.0", "description": "d", "skills": ["./skills/"]}),
+        );
+        assert!(resolve(&cfg, "empty-shape").is_err(), "an empty skills tree is not a skill");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_skill_in_two_enabled_packs_fails_naming_both_packs() {
+        let (root, cfg) = install();
+        let a = cfg.data_dir.join("plugins/pack-a");
+        let b = cfg.data_dir.join("plugins/pack-b");
+        plugin(&a, "1.0.0", &["shared", "only-a"], &[]);
+        plugin(&b, "1.0.0", &["shared", "only-b"], &[]);
+        let err = check_skill_uniqueness(&[("pack-a", a), ("pack-b", b)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pack-a") && err.contains("pack-b"), "names both packs: {err}");
+        assert!(err.contains("shared"), "names the skill: {err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_listed_skill_missing_on_disk_fails_with_a_named_error() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/ghost-pack");
+        plugin(&dir, "1.0.0", &["real"], &[]);
+        write_manifest(
+            &dir,
+            false,
+            json!({"name": "x", "version": "1.0.0", "description": "d", "skills": ["skills/real", "ghost"]}),
+        );
+        let err = resolve(&cfg, "ghost-pack").unwrap_err().to_string();
+        assert!(err.contains("ghost"), "names the skill: {err}");
+        assert!(err.contains("plugin.json"), "names the file: {err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unsafe_skill_directory_name_fails_validation() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/unsafe-pack");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::create_dir_all(dir.join("skills/.hidden")).unwrap();
+        std::fs::write(dir.join("skills/.hidden/SKILL.md"), "---\n").unwrap();
+        let err = resolve(&cfg, "unsafe-pack").unwrap_err().to_string();
+        assert!(err.contains(".hidden"), "names the directory: {err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_root_manifest_is_preferred_over_the_legacy_one() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/rooted");
+        plugin(&dir, "1.0.0-legacy", &[], &[]);
+        write_manifest(&dir, true, json!({"name": "x", "version": "2.0.0-root", "description": "d"}));
+        // The legacy manifest is broken, but the root one carries the pack.
+        std::fs::write(dir.join(".claude-plugin/plugin.json"), "{broken").unwrap();
+        assert!(resolve(&cfg, "rooted").is_ok());
+        let plugins = available(&cfg)["plugins"].as_array().unwrap().clone();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["version"], "2.0.0-root");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn plugin_lists_parse_in_order_without_blanks_or_repeats() {
         assert_eq!(
@@ -185,6 +456,81 @@ mod tests {
         for bad in ["../ecc", "a/b", ".hidden", ""] {
             assert!(resolve(&cfg, bad).is_err(), "{bad:?} must be refused");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_copy_that_shadows_a_vendored_one_is_reported() {
+        let (root, cfg) = install();
+        let vendored = cfg.assets.clone().unwrap().join("plugins/ecc");
+        plugin(&vendored, "2.2.1", &[], &[]);
+        assert_eq!(
+            shadowed_vendored(&cfg, "ecc"),
+            None,
+            "nothing is shadowed without a local copy"
+        );
+
+        plugin(&cfg.data_dir.join("plugins/ecc"), "9.9.9", &[], &[]);
+        plugin(&cfg.data_dir.join("plugins/team-skills"), "1.0.0", &[], &[]);
+        assert_eq!(shadowed_vendored(&cfg, "ecc"), Some(vendored));
+        assert_eq!(
+            shadowed_vendored(&cfg, "team-skills"),
+            None,
+            "a local-only copy shadows nothing"
+        );
+        assert_eq!(shadowed_vendored(&cfg, "../ecc"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_skillsets_are_refused_with_what_is_available() {
+        let (root, cfg) = install();
+        assert_eq!(
+            check_skillsets(&cfg, ["ecc"]).unwrap_err(),
+            "unknown skillset \"ecc\"; available: none"
+        );
+
+        plugin(&cfg.assets.clone().unwrap().join("plugins/ecc"), "2.2.1", &[], &[]);
+        plugin(&cfg.assets.clone().unwrap().join("plugins/superpowers"), "6.3.0", &[], &[]);
+        plugin(&cfg.data_dir.join("plugins/ecc"), "9.9.9", &[], &[]);
+        plugin(&cfg.data_dir.join("plugins/team-skills"), "1.0.0", &[], &[]);
+        assert_eq!(check_skillsets(&cfg, ["ecc", "superpowers", "team-skills"]), Ok(()));
+        assert_eq!(check_skillsets(&cfg, []), Ok(()));
+        assert_eq!(
+            check_skillsets(&cfg, ["ecc", "ec"]).unwrap_err(),
+            "unknown skillset \"ec\"; available: ecc, superpowers, team-skills"
+        );
+        assert!(
+            check_skillsets(&cfg, ["../ecc"])
+                .unwrap_err()
+                .starts_with("unknown skillset \"../ecc\"")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_existing_but_invalid_skillset_is_refused_with_the_validation_error() {
+        let (root, cfg) = install();
+        // There, but with no manifest at either path: broken, not unknown.
+        std::fs::create_dir_all(cfg.data_dir.join("plugins/ecc/skills")).unwrap();
+        let err = check_skillsets(&cfg, ["ecc"]).unwrap_err();
+        assert!(!err.contains("unknown skillset"), "{err}");
+        assert!(err.starts_with("skillset \"ecc\" is invalid: "), "{err}");
+        assert!(err.contains("missing plugin manifest"), "names the rule: {err}");
+        assert!(err.contains("plugin.json"), "names the file: {err}");
+
+        // A manifest that does not parse is named by its path.
+        std::fs::write(cfg.data_dir.join("plugins/ecc/plugin.json"), "{broken").unwrap();
+        let err = check_skillsets(&cfg, ["ecc"]).unwrap_err();
+        assert!(err.contains("plugins/ecc/plugin.json: invalid plugin manifest"), "{err}");
+
+        // Fixed, it passes, and a name that is truly absent is still "unknown".
+        std::fs::write(cfg.data_dir.join("plugins/ecc/plugin.json"), r#"{"name": "ecc"}"#).unwrap();
+        assert_eq!(check_skillsets(&cfg, ["ecc"]), Ok(()));
+        assert_eq!(
+            check_skillsets(&cfg, ["ecc", "ec"]).unwrap_err(),
+            "unknown skillset \"ec\"; available: ecc"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

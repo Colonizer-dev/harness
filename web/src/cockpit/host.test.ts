@@ -127,7 +127,7 @@ describe("colonyFacts", () => {
       session({
         boot_cpus: 4,
         boot_memory: "8G",
-        boot_timing: { total_ms: 94_000 },
+        boot_timing: { total_ms: 94_000, phases: [] },
         mesh: { name: "colony-s1", ip: "100.64.0.3" },
       }),
     );
@@ -150,7 +150,13 @@ describe("colonyFacts", () => {
   });
 
   it("shows the boot without the seated microVM, and vice versa", () => {
-    expect(colonyFacts(session({ boot_timing: { total_ms: 4_120 } })).map((f) => f.value)).toContain("boot 4s");
+    expect(colonyFacts(session({ boot_timing: { total_ms: 4_120, phases: [] } })).map((f) => f.value)).toContain("boot 4s");
     expect(colonyFacts(session({ boot_cpus: 2 })).map((f) => f.value)).toContain("2c");
+  });
+
+  it("a boot under way or stopped part way has no total, so no boot fact", () => {
+    // `total_ms` is only sent once a boot finished; the phases alone must not read as "last boot, end to end".
+    const partial = session({ boot_timing: { phases: [{ name: "issue", ms: 240 }] } });
+    expect(colonyFacts(partial).map((f) => f.value)).toEqual(["claude-code"]);
   });
 });

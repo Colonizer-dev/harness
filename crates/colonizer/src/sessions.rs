@@ -314,7 +314,9 @@ pub struct Session {
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
-    /// Set when a colony finishes booting, and replaced on resume.
+    /// Cleared when a colony is claimed for a (re)boot, then `{phases}` with the phases done so far
+    /// while it boots; `total_ms` appears only once the boot finishes. A boot that stops part way
+    /// keeps its `{phases}`.
     pub boot_timing: Option<Value>,
     /// How this colony's microVM was sized at boot: vCPUs and memory exactly as `msb run` received
     /// them. microsandbox/agentd expose no guest CPU% or RSS metrics today — agentd serves only
@@ -1103,7 +1105,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
-    let org_limit = orgs::org_max_parallel(&app.org_settings(owner));
+    let org_settings = app.org_settings(owner);
+    let org_limit = orgs::org_max_parallel(&org_settings);
+    let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
 
     let id = short_id();
     let slug = match req.issue {
@@ -1177,17 +1181,25 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // The duplicate-issue check is re-checked here too: the fast-path pre-check above reads under a
     // read lock, so two launches can both pass it before either inserts — the loser is refused with
     // the same 409 inside the lock, where check and insert are one atomic step.
-    let claimed = with_slot(&app.sessions, owner, max_parallel, org_limit, |sessions, room| {
-        try_claim_session(
-            sessions,
-            room,
-            session,
-            &repo,
-            req.issue,
-            req.allow_duplicate,
-            wait_for_parent,
-        )
-    })
+    let claimed = with_slot(
+        &app.sessions,
+        owner,
+        &repo,
+        max_parallel,
+        org_limit,
+        repo_limit,
+        |sessions, room| {
+            try_claim_session(
+                sessions,
+                room,
+                session,
+                &repo,
+                req.issue,
+                req.allow_duplicate,
+                wait_for_parent,
+            )
+        },
+    )
     .await;
     let (session, queued, waiting) = match claimed {
         Ok(admitted) => admitted,
@@ -1237,8 +1249,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             } else {
                 format!(", behind {waiting} already waiting")
             };
-            app.session_log(&id, "info", format!("queued: the parallel limit is {max_parallel}{ahead}"))
-                .await;
+            let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
+            app.session_log(&id, "info", format!("queued: {limits}{ahead}")).await;
         }
     } else {
         tokio::spawn(boot(app.clone(), id, false));
@@ -1306,6 +1318,15 @@ async fn ensure_starting(app: &App, id: &str) -> Result<Session> {
     }
 }
 
+/// Closes a boot phase and publishes the breakdown so far, so a colony still `starting` shows which
+/// phases it has got through, and a boot that fails keeps them. Written without `total_ms`, which
+/// only the finished boot carries.
+async fn mark_phase(app: &App, id: &str, timing: &mut crate::timing::Phases, name: &str) {
+    timing.mark(name);
+    let breakdown = timing.progress_json();
+    app.update_session(id, |x| x.boot_timing = Some(breakdown)).await;
+}
+
 /// The repository's default branch, with access failures worded the way boots report them.
 /// Transient blips ride out the boot retry budget first; only a lasting or permanent failure
 /// reaches the caller.
@@ -1323,6 +1344,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
     let mut timing = crate::timing::Phases::new();
     let s = ensure_starting(app, id).await?;
+    // An empty breakdown up front, so a boot that stops before its first phase still reads as a boot that stopped.
+    app.update_session(id, |x| x.boot_timing = Some(timing.progress_json())).await;
     // The retry clock starts before the first pre-worktree step and is persisted, so a harness
     // restart resumes the same budget instead of starting a new one: `lifecycle::recover`
     // re-queues a boot that died before its worktree existed, carrying this stamp with it.
@@ -1398,7 +1421,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     .await;
     ensure_starting(app, id).await?;
 
-    timing.mark("issue");
+    mark_phase(app, id, &mut timing, "issue").await;
 
     let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
@@ -1442,7 +1465,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let stack = resolve_stack(&modules, &sandbox_schema, &org_settings, &wt, &log).await;
 
-    timing.mark("git");
+    mark_phase(app, id, &mut timing, "git").await;
 
     let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
@@ -1577,7 +1600,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             .await;
         }
     }
-    timing.mark("providers");
+    mark_phase(app, id, &mut timing, "providers").await;
 
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
@@ -1664,10 +1687,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     );
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
+        let mut resolved = Vec::new();
         for name in &plugin_names {
             // The operator's data directory first, then what shipped with the app; the same resolution the
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
+            resolved.push((name.as_str(), source.clone()));
+            if let Some(vendored) = crate::plugins::shadowed_vendored(&app.cfg, name) {
+                log.info(format!(
+                    "skillset {name:?}: the local copy at {} shadows the vendored one at {}",
+                    source.display(),
+                    vendored.display()
+                ))
+                .await;
+            }
             let target = format!("/opt/colonizer/plugins/{name}");
             mounts.push(Mount {
                 source,
@@ -1676,6 +1709,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             });
             targets.push(target);
         }
+        // Two packs answering to the same skill name are ambiguous by
+        // construction (docs/skill-packs.md): bail naming both packs.
+        crate::plugins::check_skill_uniqueness(&resolved)?;
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its
@@ -1823,7 +1859,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             hosts: vec![CLAUDE_API_HOST.into()],
         });
     }
-    let mut net_profiles = vec!["public".to_string()];
+    let net_profiles = vec!["public".to_string()];
     let mut net_rules = Vec::new();
     let mut publish = None;
     if mesh_on {
@@ -1844,8 +1880,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         });
         env.push(("COLONIZER_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
         env.push(("COLONIZER_MESH_HOSTNAME".into(), s.sandbox.clone()));
-        net_profiles.push("host".into());
+        // Reach the host only where the colony must — the headscale control port — not every
+        // loopback service. The untrusted colony agent must not be able to drive the cockpit API
+        // (127.0.0.1:7878) or other host-loopback services, so we no longer hand it the broad
+        // `host` profile (which allows every host-loopback port). See #375. The WireGuard rules
+        // keep the direct UDP path to the harness node; explicit `--net-rule` entries are matched
+        // before the profile rules, so this allow stands and the default deny closes the rest.
         net_rules = mesh.direct_path_rules().await;
+        net_rules.push(format!("allow@host:tcp:{}", mesh.ports().control));
         app.update_session(id, |x| {
             x.mesh = Some(MeshInfo {
                 name: s.sandbox.clone(),
@@ -1859,9 +1901,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
 
-    // Model providers are reached through the gateway on the mothership.
-    if !routing.routes.is_empty() && !net_profiles.iter().any(|p| p == "host") {
-        net_profiles.push("host".into());
+    // Model providers are reached through the gateway on the mothership. Allow only the gateway
+    // port on the host, never the broad `host` profile: general host-loopback reach would expose
+    // the cockpit API and every other loopback service to the untrusted colony agent (#375).
+    if !routing.routes.is_empty() {
+        let gateway_port = app
+            .cfg
+            .gateway_bind
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(41750);
+        net_rules.push(format!("allow@host:tcp:{gateway_port}"));
     }
 
     // The chosen stack fills in image and machine size — detected from the
@@ -1894,7 +1945,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         x.boot_memory = Some(spec.memory.clone());
     })
     .await;
-    timing.mark("mesh-start");
+    mark_phase(app, id, &mut timing, "mesh-start").await;
 
     // `msb run` pulls an uncached image itself, so this is not what makes the
     // download happen — it is what stops it being an unexplained wait. On a cold
@@ -1920,7 +1971,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             .await;
         }
     }
-    timing.mark("image-pull");
+    mark_phase(app, id, &mut timing, "image-pull").await;
 
     log.info(format!(
         "booting microVM {} ({}, {} vCPU, {})",
@@ -1930,7 +1981,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     sandbox::boot(&app.cfg.msb, &spec).await?;
     // The pull is its own phase above, so this is the VM itself — unless the
     // pre-pull failed, in which case `msb run` pulls and this absorbs it.
-    timing.mark("vm-boot");
+    mark_phase(app, id, &mut timing, "vm-boot").await;
     let s = ensure_starting(app, id).await?;
 
     if mesh_on {
@@ -1947,7 +1998,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     }
 
-    timing.mark("mesh-join");
+    mark_phase(app, id, &mut timing, "mesh-join").await;
 
     let s = ensure_starting(app, id).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
@@ -2695,7 +2746,20 @@ pub(crate) mod tests {
         org_limit: Option<u64>,
         id: String,
     ) {
-        with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
+        admit_create_in(sessions, &format!("{org}/repo"), max_parallel, org_limit, 32, id).await
+    }
+
+    /// `admit_create` for a colony of a named repository, under a per-repository limit as well.
+    pub(crate) async fn admit_create_in(
+        sessions: &RwLock<Vec<Session>>,
+        repo: &str,
+        max_parallel: usize,
+        org_limit: Option<u64>,
+        repo_limit: u64,
+        id: String,
+    ) {
+        let org = repo.split_once('/').map_or(repo, |(org, _)| org);
+        with_slot(sessions, org, repo, max_parallel, org_limit, repo_limit, |sessions, room| {
             let mut s = colony(
                 org,
                 if room {
@@ -2705,6 +2769,7 @@ pub(crate) mod tests {
                 },
             );
             s.id = id;
+            s.repo = repo.into();
             sessions.push(s);
         })
         .await
@@ -2718,7 +2783,8 @@ pub(crate) mod tests {
         org_limit: Option<u64>,
         id: &str,
     ) {
-        with_slot(sessions, org, max_parallel, org_limit, |sessions, room| {
+        let repo = format!("{org}/repo");
+        with_slot(sessions, org, &repo, max_parallel, org_limit, 32, |sessions, room| {
             let Some(s) = sessions.iter_mut().find(|s| s.id == id) else {
                 return;
             };
@@ -3141,7 +3207,7 @@ pub(crate) mod tests {
                 let mut fresh = colony("acme", SessionStatus::Starting);
                 fresh.id = format!("racer-{i}");
                 fresh.issue = Some(7);
-                with_slot(&sessions, "acme", 8, None, |guard, room| {
+                with_slot(&sessions, "acme", "acme/repo", 8, None, 8, |guard, room| {
                     try_claim_session(guard, room, fresh, "acme/repo", Some(7), false, false)
                 })
                 .await

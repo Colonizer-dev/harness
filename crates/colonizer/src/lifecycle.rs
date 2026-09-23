@@ -577,7 +577,9 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let modules = app.modules.read().await.clone();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
-    let org_limit = orgs::org_max_parallel(&app.org_settings(&s.org));
+    let org_settings = app.org_settings(&s.org);
+    let org_limit = orgs::org_max_parallel(&org_settings);
+    let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
     // The colony's lifecycle lock, held from here to the end of the handler. The claim below is the
     // moment this colony gains a microVM (or a queue slot), and everything between it and the boot
     // spawn — dropping the old agent link, rotating the event log, the revert if the rotation fails —
@@ -597,28 +599,38 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // a refused resume leaves the agent link and the event log as it found them.
     // The closure distinguishes its two non-outcomes: `Err` is the not-resumable re-check, answered with
     // a 409 below, while `Ok(None)` is a colony that has vanished, which stays a 404.
-    let claimed = with_slot(&app.sessions, &s.org, max_parallel, org_limit, |sessions, room| {
-        // Counted before the flip: the colony itself is Stopped or Failed here, so it isn't counted.
-        let waiting = sessions.iter().filter(|other| other.status == SessionStatus::Queued).count();
-        let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
-            return Ok(None);
-        };
-        // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
-        if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
-            return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
-        }
-        x.status = if room {
-            SessionStatus::Starting
-        } else {
-            SessionStatus::Queued
-        };
-        x.error = None;
-        x.attention = None;
-        x.mesh = None;
-        x.local_port = None;
-        x.updated_at = Utc::now();
-        Ok(Some((x.clone(), room, waiting)))
-    })
+    let claimed = with_slot(
+        &app.sessions,
+        &s.org,
+        &s.repo,
+        max_parallel,
+        org_limit,
+        repo_limit,
+        |sessions, room| {
+            // Counted before the flip: the colony itself is Stopped or Failed here, so it isn't counted.
+            let waiting = sessions.iter().filter(|other| other.status == SessionStatus::Queued).count();
+            let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
+                return Ok(None);
+            };
+            // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
+            if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
+                return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
+            }
+            x.status = if room {
+                SessionStatus::Starting
+            } else {
+                SessionStatus::Queued
+            };
+            x.error = None;
+            x.attention = None;
+            x.mesh = None;
+            x.local_port = None;
+            // The last boot's phases would read as this one's under `starting` or `queued`.
+            x.boot_timing = None;
+            x.updated_at = Utc::now();
+            Ok(Some((x.clone(), room, waiting)))
+        },
+    )
     .await;
     let (s, admitted, waiting) = match claimed {
         Ok(Some(claimed)) => claimed,
@@ -678,17 +690,37 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         } else {
             format!(", behind {waiting} already waiting")
         };
+        let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
         app.session_log(
             &id,
             "info",
-            format!("queued: the parallel limit is {max_parallel}{ahead}; the colony resumes when a slot frees up"),
+            format!("queued: {limits}{ahead}; the colony resumes when a slot frees up"),
         )
         .await;
     }
     Ok(Json(s))
 }
 
-pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+/// What a stop did. A colony that is already over is the outcome a stop asks for, so a script's retry,
+/// a double click or a stop racing the colony's own finish is told `already_stopped` rather than
+/// handed an error it has to special-case.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopResult {
+    Stopped,
+    AlreadyStopped,
+}
+
+/// The stop's answer: the result beside the colony it leaves, flattened so callers that read the
+/// reply as a `Session` keep working.
+#[derive(Debug, serde::Serialize)]
+pub struct StopReply {
+    pub result: StopResult,
+    #[serde(flatten)]
+    pub session: Session,
+}
+
+pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<StopReply> {
     // Checked before the lifecycle lock so a stop of an unknown id does not leave a lock slot behind
     // for a colony that does not exist; the claim below stays the authority.
     if app.session(&id).await.is_none() {
@@ -718,18 +750,33 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
     app.note_cleared_attention(&id, attention).await;
+    let stopped = |session| {
+        Json(StopReply {
+            result: StopResult::Stopped,
+            session,
+        })
+    };
     // A queued colony never started, so there is no microVM to remove.
     if was == SessionStatus::Queued {
         app.session_log(&id, "info", "left the queue before it started".into()).await;
-        return Ok(Json(app.session(&id).await.unwrap_or(s)));
+        return Ok(stopped(app.session(&id).await.unwrap_or(s)));
     }
+    // `was` is read under the same write lock that would have claimed the colony, so the status
+    // reported here is the one this stop found, not a later one.
+    if was.is_terminal() {
+        return Ok(Json(StopReply {
+            result: StopResult::AlreadyStopped,
+            session: s,
+        }));
+    }
+    // Only `publishing` is left: neither live nor over, its push in flight and settling on its own.
     if !was.is_live() {
         return Err(client_error(StatusCode::CONFLICT, "session is not running"));
     }
     app.session_log(&id, "info", "stopping: removing the microVM (the worktree is kept)".into())
         .await;
     teardown_vm(&app, &s).await;
-    Ok(Json(app.session(&id).await.unwrap_or(s)))
+    Ok(stopped(app.session(&id).await.unwrap_or(s)))
 }
 
 /// Whether a colony in this state can be cleaned up — its worktree and local branch freed. A live or
@@ -1279,8 +1326,9 @@ mod tests {
         .await
         .unwrap();
         let stopped = stop(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert_eq!(stopped.result, StopResult::Stopped);
         assert_eq!(
-            stopped.status,
+            stopped.session.status,
             SessionStatus::Stopped,
             "the stop answers with the stopped colony"
         );
@@ -1314,10 +1362,76 @@ mod tests {
             &app,
             "abc",
             "stop",
-            stop(State(app.clone()), Path("abc".to_string())),
+            {
+                let app = app.clone();
+                async move { stop(State(app), Path("abc".to_string())).await.map(|Json(r)| Json(r.session)) }
+            },
             |s| s.status == SessionStatus::Stopped,
         )
         .await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_second_stop_of_a_stopped_colony_answers_already_stopped_instead_of_an_error() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let first = stop(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert_eq!(first.result, StopResult::Stopped, "the live colony is stopped");
+        assert_eq!(first.session.status, SessionStatus::Stopped);
+        let second = stop(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert_eq!(second.result, StopResult::AlreadyStopped, "a retried stop is a success");
+        assert_eq!(second.session.status, SessionStatus::Stopped);
+        let body = serde_json::to_value(&second.0).unwrap();
+        assert_eq!(body["result"], json!("already_stopped"), "{body}");
+        assert_eq!(
+            body["status"],
+            json!("stopped"),
+            "the reply still reads as the colony: {body}"
+        );
+        assert_eq!(body["id"], json!("abc"), "{body}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_colony_that_is_already_over_answers_already_stopped_and_changes_nothing() {
+        use SessionStatus::*;
+        for status in [PrOpened, NoChanges, Merged, Closed, Failed] {
+            let (app, root) = app_with_colony("abc", status).await;
+            let before = app.session("abc").await.unwrap();
+            let out = stop(State(app.clone()), Path("abc".to_string())).await.unwrap();
+            assert_eq!(out.result, StopResult::AlreadyStopped, "{status:?}");
+            assert_eq!(out.session.status, status, "the reply carries the status it found");
+            let after = app.session("abc").await.unwrap();
+            assert_eq!(after.status, status, "{status:?} is not rewritten to stopped");
+            assert_eq!(after.updated_at, before.updated_at, "{status:?}: nothing was claimed");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_takes_a_queued_colony_out_of_the_queue_and_refuses_a_publishing_one() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Queued).await;
+        let out = stop(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        assert_eq!(out.result, StopResult::Stopped);
+        assert_eq!(out.session.status, SessionStatus::Stopped);
+        let _ = std::fs::remove_dir_all(root);
+
+        let (app, root) = app_with_colony("abc", SessionStatus::Publishing).await;
+        let err = stop(State(app.clone()), Path("abc".to_string())).await.unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::CONFLICT,
+            "a push in flight is neither live nor over"
+        );
+        assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::Publishing);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stopping_an_unknown_colony_is_still_not_found() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        let err = stop(State(app.clone()), Path("nope".to_string())).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(root);
     }
 

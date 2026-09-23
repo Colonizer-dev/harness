@@ -257,9 +257,25 @@ struct Limit {
     slots: Arc<Semaphore>,
 }
 
-/// One provider's quota-exhaustion record: when the plan refills, and when it ran out. In-memory
-/// only — a restart forgets it, and the next error re-learns it.
-#[derive(Clone, Debug)]
+/// Writes `value` to `path` atomically (tmp + rename). The tmp path is unique per call: writers sharing
+/// one path interleave their writes and can rename a half-overwritten file into place, which
+/// `Gateway::new` would read as corrupt and silently reset.
+fn write_json_atomic(path: &std::path::Path, value: &impl Serialize) {
+    if let Ok(data) = serde_json::to_vec_pretty(value) {
+        let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+        if std::fs::write(&tmp, data).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        } else {
+            // A failed write may have left a partial tmp behind; it must not pile up in the data dir.
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// One provider's quota-exhaustion record: when the plan refills, and when it ran out. Kept across
+/// restarts in `<data_dir>/provider-quota.json`: a restart that forgot it would resume every
+/// quota-parked colony at once, only for each to hit the quota again and re-park.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QuotaState {
     pub reset_at: Option<String>,
     pub reset_unix: Option<i64>,
@@ -277,6 +293,7 @@ pub struct Gateway {
     usage_file: PathBuf,
     /// Quota-exhausted providers by id; entries with a passed `reset_unix` read as recovered.
     quota: Mutex<HashMap<String, QuotaState>>,
+    quota_file: PathBuf,
 }
 
 impl Gateway {
@@ -296,6 +313,17 @@ impl Gateway {
             .into_iter()
             .map(|(id, usage)| (id, Arc::new(UsageCounters::seeded(usage))))
             .collect();
+        let quota_file = data_dir.join("provider-quota.json");
+        // Likewise a missing or corrupt quota file means no provider is out, and the next quota error
+        // re-learns it. Lapsed records are dropped here so they never outlive the restart that finds them.
+        let now = Utc::now();
+        let quota: HashMap<String, QuotaState> = std::fs::read(&quota_file)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<HashMap<String, QuotaState>>(&data).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, q)| provider_quota::quota_active(q.reset_unix, q.since, now))
+            .collect();
         Ok(Self {
             client,
             stats: Default::default(),
@@ -303,7 +331,8 @@ impl Gateway {
             colonies: Default::default(),
             usage: Mutex::new(usage),
             usage_file,
-            quota: Default::default(),
+            quota: Mutex::new(quota),
+            quota_file,
         })
     }
 
@@ -326,11 +355,9 @@ impl Gateway {
         self.usage_counters(provider).snapshot()
     }
 
-    /// Writes the whole usage map atomically (tmp + rename). Unlike the crate's other JSON state this file
-    /// has three concurrent writers — the flush loop, the shutdown flush and [`Self::forget_usage`] — so the
-    /// tmp path is unique per call: writers sharing one path interleave their writes and can rename a
-    /// half-overwritten file into place, which `Gateway::new` would read as corrupt and silently reset every
-    /// provider's tally. Renames can still land out of order, but each one is a complete snapshot, so the
+    /// Writes the whole usage map atomically (see [`write_json_atomic`]). Unlike the crate's other JSON
+    /// state this file has three concurrent writers — the flush loop, the shutdown flush and
+    /// [`Self::forget_usage`]. Renames can land out of order, but each one is a complete snapshot, so the
     /// worst a lost race does is persist a slightly stale tally until the next flush.
     fn write_usage(&self) {
         let snapshot: BTreeMap<String, ProviderUsage> = self
@@ -340,15 +367,18 @@ impl Gateway {
             .iter()
             .map(|(id, counters)| (id.clone(), counters.snapshot()))
             .collect();
-        if let Ok(data) = serde_json::to_vec_pretty(&snapshot) {
-            let tmp = self.usage_file.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
-            if std::fs::write(&tmp, data).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.usage_file);
-            } else {
-                // A failed write may have left a partial tmp behind; it must not pile up in the data dir.
-                let _ = std::fs::remove_file(&tmp);
-            }
+        write_json_atomic(&self.usage_file, &snapshot);
+    }
+
+    /// Writes the quota map while its lock is held. Unlike the usage tally there is no later flush to
+    /// repair a stale snapshot, so writers are serialized: a mark renamed over a newer clear would
+    /// re-park colonies after the next restart.
+    fn write_quota(&self, quota: &HashMap<String, QuotaState>) {
+        if let Some(dir) = self.quota_file.parent() {
+            let _ = std::fs::create_dir_all(dir);
         }
+        let snapshot: BTreeMap<&String, &QuotaState> = quota.iter().collect();
+        write_json_atomic(&self.quota_file, &snapshot);
     }
 
     /// Writes the usage counters if anything changed since the last flush. Called every
@@ -386,7 +416,8 @@ impl Gateway {
 
     /// Records a provider's plan as exhausted, with the reset the error named, if any.
     pub fn mark_quota_exhausted(&self, provider: &str, reset_at: Option<String>, reset_unix: Option<i64>) {
-        self.quota.lock().unwrap().insert(
+        let mut quota = self.quota.lock().unwrap();
+        quota.insert(
             provider.to_string(),
             QuotaState {
                 reset_at,
@@ -394,6 +425,7 @@ impl Gateway {
                 since: Utc::now(),
             },
         );
+        self.write_quota(&quota);
     }
 
     /// The provider's quota record, if it has one — expired or not; [`Self::is_quota_exhausted`] judges.
@@ -430,12 +462,16 @@ impl Gateway {
     /// An upstream 2xx for the provider proves the plan is back: forget its quota record, so the
     /// queue unpauses and parked colonies resume on the next tick.
     pub fn clear_quota_on_success(&self, provider: &str) {
-        self.quota.lock().unwrap().remove(provider);
+        self.forget_quota(provider);
     }
 
     /// Forgets a provider's quota record with its usage, so a deleted provider recovers by removal.
+    /// Writes only when a record went: every upstream 2xx lands here, and most have nothing to clear.
     pub fn forget_quota(&self, provider: &str) {
-        self.quota.lock().unwrap().remove(provider);
+        let mut quota = self.quota.lock().unwrap();
+        if quota.remove(provider).is_some() {
+            self.write_quota(&quota);
+        }
     }
 
     /// `COLONIZER_QUOTA_FALLBACK=0` (or `false`) opts every role out of quota failover at once;
@@ -1361,12 +1397,16 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
                 .as_array()
                 .map(|data| data.iter().filter_map(|m| m["id"].as_str()).map(|id| json!(id)).collect())
                 .unwrap_or_default();
+            // An Anthropic-compatible endpoint need not serve /v1/models (Alibaba's /apps/anthropic
+            // doesn't): a 404 there means reachable with no published list, not a broken provider.
+            let note = (provider.wire == crate::providers::Wire::Anthropic && status == 404).then_some("no model list");
             json!({
                 "reachable": true,
                 "status": status,
                 "latency_ms": started.elapsed().as_millis() as u64,
                 "models": models,
                 "error": null,
+                "note": note,
                 "checked_at": checked_at,
             })
         }
@@ -1378,7 +1418,7 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
             } else {
                 e.without_url().to_string()
             };
-            json!({"reachable": false, "status": null, "latency_ms": null, "models": [], "error": error, "checked_at": checked_at})
+            json!({"reachable": false, "status": null, "latency_ms": null, "models": [], "error": error, "note": null, "checked_at": checked_at})
         }
     }
 }
@@ -1527,6 +1567,48 @@ mod tests {
             "refused locally, so nothing counts as provider usage"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Probes a provider of the given wire whose upstream answers `/v1/models` with `status`.
+    async fn probe_answering(wire: crate::providers::Wire, status: StatusCode) -> Value {
+        let router = Router::new().route("/v1/models", axum::routing::get(move || async move { status }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-probe-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            wire,
+            ..provider("x", None)
+        };
+        let health = probe(&app, &provider).await;
+        let _ = std::fs::remove_dir_all(root);
+        health
+    }
+
+    /// An Anthropic-compatible endpoint that does not serve `/v1/models` still routes, so its 404
+    /// reads as reachable with no published list rather than as a failed probe.
+    #[tokio::test]
+    async fn an_anthropic_provider_without_a_model_list_probes_as_reachable() {
+        let health = probe_answering(crate::providers::Wire::Anthropic, StatusCode::NOT_FOUND).await;
+        assert_eq!(health["reachable"], true);
+        assert_eq!(health["status"], 404, "the real status is kept");
+        assert_eq!(health["error"], Value::Null);
+        assert_eq!(health["models"], json!([]));
+        assert_eq!(health["note"], "no model list");
+    }
+
+    /// Only the anthropic-wire 404 is softened: a refused key, or a 404 from an OpenAI-wire
+    /// endpoint (which must serve `/v1/models`), come back as they are.
+    #[tokio::test]
+    async fn other_probe_failures_carry_no_note() {
+        let refused = probe_answering(crate::providers::Wire::Anthropic, StatusCode::UNAUTHORIZED).await;
+        assert_eq!(refused["status"], 401);
+        assert_eq!(refused.get("note"), Some(&Value::Null), "the key is always present");
+        let openai = probe_answering(crate::providers::Wire::Openai, StatusCode::NOT_FOUND).await;
+        assert_eq!(openai["status"], 404);
+        assert_eq!(openai.get("note"), Some(&Value::Null));
     }
 
     /// A gateway whose usage file lives in a fresh temp directory.
@@ -1868,9 +1950,47 @@ mod tests {
         gateway.clear_quota_on_success("strix");
         assert!(!gateway.is_quota_exhausted("strix"), "success proves the plan is back");
         assert!(gateway.quota_exhausted().is_empty(), "nothing exhausted, no pause");
-        // Quota marks live in memory and this test never flushes usage, so the
-        // temp dir may never have been created; its absence is the clean state.
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!usage_gateway(&dir).is_quota_exhausted("strix"), "the clear reached disk too");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A quota record survives a restart until its reset, so a restarted mothership does not resume
+    /// every parked colony into the same exhausted plan; a record that lapsed meanwhile is dropped.
+    #[test]
+    fn a_quota_record_survives_a_restart_until_its_reset() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        gateway.mark_quota_exhausted("strix", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
+        gateway.mark_quota_exhausted("zai", None, None);
+        drop(gateway);
+
+        let reopened = usage_gateway(&dir);
+        assert!(reopened.is_quota_exhausted("strix"), "the reset is ahead, so still out");
+        assert_eq!(
+            reopened.quota_state("strix").unwrap().reset_at.as_deref(),
+            Some("09-23 07:54 UTC")
+        );
+        assert!(
+            reopened.is_quota_exhausted("zai"),
+            "a reset-less mark keeps its TTL across the restart"
+        );
+
+        // Reset passed (and a reset-less mark past its TTL) while the mothership was down.
+        reopened.mark_quota_exhausted("strix", None, Some(Utc::now().timestamp() - 10));
+        reopened.quota.lock().unwrap().get_mut("zai").unwrap().since =
+            Utc::now() - chrono::Duration::seconds(provider_quota::QUOTA_DEFAULT_TTL_SECS + 1);
+        reopened.write_quota(&reopened.quota.lock().unwrap());
+        let after_reset = usage_gateway(&dir);
+        assert!(!after_reset.is_quota_exhausted("strix"), "past its reset, recovered");
+        assert!(after_reset.quota_state("strix").is_none(), "and dropped on load");
+        assert!(after_reset.quota_state("zai").is_none(), "past its TTL, dropped on load");
+
+        std::fs::write(dir.join("provider-quota.json"), b"{not json").unwrap();
+        assert!(
+            usage_gateway(&dir).quota_exhausted().is_empty(),
+            "a corrupt file means nothing is out"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A reset-less mark counts while fresh and lapses past its TTL, bounding the retry loop.
@@ -1887,8 +2007,7 @@ mod tests {
             gateway.quota_exhausted().is_empty(),
             "the queue and resume see the recovery too"
         );
-        // As above: quota marks never touch disk, so the temp dir may not exist.
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
