@@ -129,7 +129,7 @@ pub async fn touched_files(worktree: &Path, base_ref: &str) -> Vec<String> {
 /// git failed, timed out, or said nothing.
 async fn git_lines(worktree: &Path, args: &[&str]) -> Option<Vec<String>> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.current_dir(worktree).args(args);
+    cmd.current_dir(worktree).args(crate::github::HOST_GIT_NO_EXEC).args(args);
     let out = crate::util::exec_within(Duration::from_secs(10), &mut cmd).await.ok()?;
     let lines: Vec<String> = out
         .lines()

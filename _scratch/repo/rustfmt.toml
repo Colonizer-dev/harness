@@ -1,6 +1,0 @@
-# The tree was written before it was formatted, in a style that runs wider than rustfmt's 100-column
-# default: 99% of its lines already fit in 129 columns, and the long ones are deliberate — a match arm
-# or a `format!` that reads better whole than wrapped. Formatting at 130 keeps that style and makes the
-# one-time reflow as small as it can be; at 100 it would be nearly twice the churn, for lines nobody
-# asked to be broken.
-max_width = 130

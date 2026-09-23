@@ -1,6 +1,0 @@
-# Security-hunter binaries, downloaded on demand at a pinned version and checksum-verified before they
-# run (src/hunters.rs). Never vendored: Strix is Apache-2.0. Same columns as vendor/vendor.lock and
-# headroom.lock: id, version, platform, kind, sha256, url. Only self-contained binary runtimes are pinned
-# here; Shannon installs via npx (a Node package), so it is not a binary download.
-strix  1.6.2  linux-x86_64   binary  f3f29fa64bee420bf64f8911fb9f38e20270d406f6df44cc2436252c2af0bc81  https://github.com/usestrix/strix/releases/download/v1.6.2/strix-1.6.2-linux-x86_64.tar.gz
-strix  1.6.2  linux-aarch64  binary  4a4cba115bda8b89d7bbfabe960246a480ff43563144959b2e33477955aa6df2  https://github.com/usestrix/strix/releases/download/v1.6.2/strix-1.6.2-linux-arm64.tar.gz

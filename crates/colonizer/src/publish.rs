@@ -251,7 +251,7 @@ pub(crate) enum RebaseOutcome {
 /// Runs `git` in a worktree with a deadline: trimmed stdout, or the reason it failed.
 async fn git_in(worktree: &std::path::Path, args: &[&str], secs: u64) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.current_dir(worktree).args(args);
+    cmd.current_dir(worktree).args(crate::github::HOST_GIT_NO_EXEC).args(args);
     Ok(crate::util::exec_within(Duration::from_secs(secs), &mut cmd)
         .await?
         .trim()
@@ -1074,6 +1074,43 @@ mod tests {
             Some("abc"),
             None
         ));
+    }
+
+    #[tokio::test]
+    async fn host_git_in_a_colony_worktree_never_runs_the_worktrees_hooks() {
+        // A colony can write into its worktree's git config; the host's rebase must not run a hook
+        // it planted there (post-checkout fires on the checkout below).
+        let dir = std::env::temp_dir().join(format!("git-in-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hooks = dir.join("planted-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let marker = dir.join("hook-ran");
+        let hook = hooks.join("post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_fixture(&repo, &["init", "-q", "-b", "main"]);
+        git_fixture(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        git_fixture(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+
+        git_in(&repo, &["checkout", "-q", "-b", "other"], 30).await.unwrap();
+        assert!(!marker.exists(), "host-side git ran a hook the worktree configured");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Runs a `git` command synchronously against a fixture repo built for this test only — setup,

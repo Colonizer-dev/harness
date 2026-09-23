@@ -1,6 +1,0 @@
-# The standalone CPython the Headroom bundle runs on: astral-sh/python-build-standalone,
-# install_only_stripped. Carried inside the bundle, so a colony stack needs no Python of its own.
-# Checksums are from that release's SHA256SUMS.
-# arch     version            sha256                                                            url
-x86_64     3.13.15+20260901   8a689a077337bea6d1c4bc0b7df1d52fcaa28f5f67e50df8bf417c1e3f9d8874  https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
-aarch64    3.13.15+20260901   01ce0ce9189feaead3298abf10d4efe998c55a489b3d5d38ca4f83dda7e7977e  https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz

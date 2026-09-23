@@ -3139,6 +3139,7 @@ pub(crate) mod tests {
             model_tier: None,
             claude_account: None,
             after: None,
+            stack: false,
             origin: None,
             serialize,
         })

@@ -57,22 +57,10 @@ impl App {
     /// Host-side git, hardened so nothing inside a repository can make it execute code.
     pub fn git_plain(&self) -> Command {
         let mut c = Command::new("git");
-        c.args([
-            "-c",
-            "credential.helper=",
-            "-c",
-            "credential.helper=!gh auth git-credential",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
-        ])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GH_PROMPT_DISABLED", "1");
+        c.args(["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"])
+            .args(HOST_GIT_NO_EXEC)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GH_PROMPT_DISABLED", "1");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
@@ -89,6 +77,20 @@ impl App {
         self.cfg.data_dir.join("repos").join(format!("{repo}.git"))
     }
 }
+
+/// `-c` overrides that stop host-side git from executing anything a repository (or a colony that
+/// can write into it) controls: no hooks, no fsmonitor, no auto gc or maintenance. Every git the
+/// host runs against a colony's worktree or mirror carries these.
+pub(crate) const HOST_GIT_NO_EXEC: [&str; 8] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+];
 
 /// One cached `gh api user` answer: which credential it was read with, when, and what it said.
 /// `Err` keeps the rendered failure. The credential itself is never stored, only its fingerprint,
