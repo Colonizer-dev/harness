@@ -7,7 +7,7 @@
 use crate::{
     ApiResult, App, CLAUDE_API_HOST, Shared, client_error,
     config::{ModulesConfig, setting, setting_str, setting_u64},
-    github, memory,
+    diagnosis, github, memory,
     modules::{AgentModule, schema_for},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
@@ -171,12 +171,20 @@ pub(crate) fn cleared_attention_message(attention: &Option<Value>) -> Option<Str
 /// Startup migration, run in `serve` next to the org backfill and before `recover`: colonies
 /// persisted as finished while still carrying an attention flag predate the clearing every
 /// terminal transition now does. A finished colony that still carries one looks like it needs
-/// attention it no longer does, so drop the flag from every terminal colony that has one.
-/// Returns how many flags were cleared.
+/// attention it no longer does, so drop the flag from every terminal colony that has one — except a
+/// quota-parked colony, whose flag is its resume ticket: stripping it would strand the colony,
+/// parked with no reason for the queue to ever requeue. Returns how many flags were cleared.
 pub(crate) fn clear_stale_attention(sessions: &mut [Session]) -> usize {
     let mut cleared = 0;
     for s in sessions.iter_mut() {
         if s.status.is_terminal() && s.attention.is_some() {
+            let quota_parked = s
+                .attention
+                .as_ref()
+                .is_some_and(|a| a["reason"].as_str() == Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON));
+            if quota_parked {
+                continue;
+            }
             s.attention = None;
             cleared += 1;
         }
@@ -2243,12 +2251,12 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Session>> {
     Json(out)
 }
 
-pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<diagnosis::SessionDetail> {
     let session = app
         .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    Ok(Json(with_activity(&app, session).await))
+    Ok(Json(diagnosis::for_session(&app, with_activity(&app, session).await).await))
 }
 
 #[derive(Deserialize)]
@@ -2435,9 +2443,32 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
             rt.interrupted.store(true, Ordering::SeqCst);
             json!({"type": "interrupt"})
         }
+        Some("set_model") => {
+            let Some(model) = set_model_id(command["model"].as_str().unwrap_or_default()) else {
+                return;
+            };
+            json!({"type": "set_model", "model": model})
+        }
         _ => return,
     };
     let _ = rt.commands.send(forward);
+}
+
+/// The model a `set_model` switches the colony to, trimmed, or `None` to drop the command.
+///
+/// Only the shape is checked, in the forms a model setting takes (§6.1): a Claude alias or ID,
+/// a `[1m]` suffix, `<provider>/<model>`, same characters as a provider's model list. Whether the
+/// id resolves is the colony's to find out against the routes it booted with, and a refused switch
+/// comes back as a `warn` log.
+fn set_model_id(raw: &str) -> Option<&str> {
+    // The longest id `/api/models` lists, so every model the picker offers gets through:
+    // `<provider id>/<model>`, a provider id of at most 32 bytes (providers.rs `valid_id`) and a
+    // model of at most 120 (`valid_model`).
+    const MAX_MODEL_ID: usize = 32 + 1 + 120;
+    let model = raw.trim();
+    let shaped =
+        (1..=MAX_MODEL_ID).contains(&model.len()) && model.chars().all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c));
+    shaped.then_some(model)
 }
 
 #[derive(Deserialize)]
@@ -2534,6 +2565,30 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn set_model_forwards_only_what_a_model_setting_could_hold() {
+        for id in [
+            "opus",
+            "claude-opus-5-5",
+            "claude-opus-5-5[1m]",
+            "deepseek/deepseek-flash",
+            "together/deepseek-ai/DeepSeek-V4.1-Flash",
+            "local/qwen3:32b",
+        ] {
+            assert_eq!(set_model_id(id), Some(id), "{id}");
+        }
+        assert_eq!(set_model_id("  sonnet\n"), Some("sonnet"), "trimmed");
+        assert!(set_model_id(&"m".repeat(128)).is_some());
+        // No model id has whitespace, quotes or non-ASCII in it.
+        for bad in ["", "   ", "has space", "opus\"}", "opus\n{\"type\":\"shutdown\"}", "claudé"] {
+            assert_eq!(set_model_id(bad), None, "{bad:?}");
+        }
+        // The longest id `/api/models` can list: a 32-byte provider id, `/`, a 120-byte model.
+        let longest = format!("{}/{}", "p".repeat(32), "m".repeat(120));
+        assert_eq!(set_model_id(&longest), Some(longest.as_str()), "the longest listed id");
+        assert_eq!(set_model_id(&format!("{longest}m")), None, "one byte over");
+    }
+
+    #[test]
     fn a_stale_boot_only_reaps_a_colony_that_is_still_not_live() {
         use SessionStatus::*;
         // Stopped/Failed mid-boot: the stop's `msb rm` ran before `sandbox::boot`, so the
@@ -2592,6 +2647,26 @@ pub(crate) mod tests {
             "a finished colony without a flag is untouched"
         );
         assert_eq!(clear_stale_attention(&mut sessions), 0, "the migration is idempotent");
+    }
+
+    #[test]
+    fn startup_migration_keeps_a_quota_parked_colony_resumable() {
+        let mut parked = stopped_colony_with_worktree("acme", "parked".into());
+        parked.status = SessionStatus::Stopped;
+        parked.error = Some("provider quota exhausted (resets 7am (UTC))".into());
+        parked.attention =
+            Some(json!({"reason": crate::provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        let mut sessions = vec![parked];
+        assert_eq!(
+            clear_stale_attention(&mut sessions),
+            0,
+            "the park reason is the resume ticket, not stale"
+        );
+        assert_eq!(
+            sessions[0].attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON),
+            "a restart must not strand the parked colony"
+        );
     }
 
     /// sessions.json written before `routed_cost_usd` existed must still load, cost and all.

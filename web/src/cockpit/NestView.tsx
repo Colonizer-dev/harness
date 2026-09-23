@@ -6,7 +6,7 @@
 // looks like. One honest limit shapes it: the mothership streams events for one colony at a time,
 // so only the selected colony has real settlers. Every other chamber shows a single ant standing in
 // for the colony itself, with its state read off the colony's status.
-import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, type CSSProperties, type ReactElement } from "react";
 
 import { AntAvatar, type AntState } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
@@ -16,10 +16,13 @@ import { isActive, isRaiding } from "../redTeam";
 import type { SubagentView } from "../sessionStream";
 import type { RedTeamRun, Session, SessionStatus } from "../types";
 import { KIND_DOT } from "./InboxView";
+import { AntBubble } from "./AntBubble";
+import { BUBBLE_TONE, colonySays, planAntBubbles, settlerSays } from "./bubbles";
+import { ChamberZoom, zoomReducer } from "./ChamberZoom";
 import { feedEntry } from "./feed";
 import { RedAnts } from "./RedAnts";
 import {
-  MAX_CHAMBERS,
+  chamberCount,
   SURFACE_Y,
   branchPaths,
   normalizeBox,
@@ -126,6 +129,7 @@ export function planBalloons(anchors: BalloonAnchor[]): BalloonAnchor[] {
 
 export function NestView({
   sessions,
+  capacity = null,
   selectedId,
   mothershipSelected,
   redRuns = [],
@@ -138,8 +142,10 @@ export function NestView({
   onSelectMothership,
   onLaunch,
 }: {
-  /** Already filtered to the chosen org and sorted; the view takes the first MAX_CHAMBERS. */
+  /** Already filtered to the chosen org and sorted; the view takes the first chambers. */
   sessions: Session[];
+  /** What the machine runs at once (`sandbox.max_parallel`); unknown reads as the default 5. */
+  capacity?: number | null;
   selectedId: string | null;
   mothershipSelected: boolean;
   /** Red-team runs (issue #212): a live one targeting this nest's org marches ants over the plot. */
@@ -163,6 +169,8 @@ export function NestView({
 }): ReactElement {
   const plotRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<NestBox>(() => normalizeBox(0, 0));
+  // The chamber zoom (issue #396): closed until a chamber or tunnel click grows it.
+  const [zoom, dispatchZoom] = useReducer(zoomReducer, { phase: "closed" });
 
   useLayoutEffect(() => {
     const element = plotRef.current;
@@ -179,17 +187,41 @@ export function NestView({
     return () => observer.disconnect();
   }, []);
 
-  const chambers = sessions.slice(0, MAX_CHAMBERS);
+  const count = chamberCount(capacity);
+  const chambers = sessions.slice(0, count);
+
+  // A chamber click selects the colony AND zooms into it. An outside move drops the zoom —
+  // the reducer ignores a selection naming the zoomed colony, so the opening click stays open.
+  // A colony that leaves `sessions` closes outright; there is no chamber to animate back into.
+  useEffect(() => {
+    dispatchZoom({ type: "selection", id: selectedId });
+    if (zoom.phase !== "closed" && !sessions.some((s) => s.id === zoom.id)) dispatchZoom({ type: "closed" });
+  }, [selectedId, sessions, zoom]);
+  const select = (id: string, at: { x: number; y: number }) => {
+    onSelect(id);
+    dispatchZoom({ type: "open", id, x: at.x, y: at.y });
+  };
+  // Opening the colony view closes the zoom at once, so coming back never lands in a stale one.
+  const openColony = useCallback(
+    (id: string) => {
+      dispatchZoom({ type: "closed" });
+      onOpen(id);
+    },
+    [onOpen],
+  );
+  // Stable so the zoom's Escape and zoom-out-timer effects don't re-arm on every stream render.
+  const zoomClose = useCallback(() => dispatchZoom({ type: "close" }), []);
+  const zoomClosed = useCallback(() => dispatchZoom({ type: "closed" }), []);
   // Side tunnels are the work a colony has done, and steps are only known for the open colony.
   const selectedSteps = settlers.reduce((total, settler) => total + settler.steps, 0);
   const mothershipX = Math.round(box.width / 2);
   const returned = sessions.filter((s) => s.status === "pr_opened").slice(0, 3);
   const queued = sessions.filter((s) => s.status === "queued").slice(0, 2);
   const waiting = sessions.filter(needsYou);
-  const freeSlot = chambers.length < MAX_CHAMBERS ? slotAt(chambers.length, box) : null;
+  const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
 
   const placed = chambers.map((session, index) => {
-    const slot = slotAt(index, box);
+    const slot = slotAt(index, box, count);
     const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
     const seed = tunnelSeed(session.repo, session.issue);
     // Steps are only known for the colony whose stream is open, so only its branches are dug.
@@ -230,6 +262,9 @@ export function NestView({
   // Its ants render only while the run is live — a done or stopped run has isActive() false,
   // so the column vanishes with it.
   const raid = redRuns.find((r) => isActive(r) && sessions.some((s) => sameOrg(orgOf(s), r.org || r.repo.split("/")[0])));
+  // The zoomed colony, if its chamber is still on the plot.
+  const zoomSession = zoom.phase === "closed" ? null : (sessions.find((s) => s.id === zoom.id) ?? null);
+  const zoomPlaced = zoomSession ? placed.find((p) => p.session.id === zoomSession.id) : null;
 
   return (
     <div className="cockpit nest relative grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
@@ -309,7 +344,7 @@ export function NestView({
               )),
             )}
 
-            {placed.map(({ session, path, edge }) => {
+            {placed.map(({ session, slot, path, edge }) => {
               const hot = isBusy(session.status) || needsYou(session);
               const busy = isBusy(session.status);
               const digging = session.status === "starting";
@@ -338,7 +373,7 @@ export function NestView({
                     stroke="transparent"
                     strokeWidth="22"
                     className="pointer-events-stroke cursor-pointer"
-                    onClick={() => onSelect(session.id)}
+                    onClick={() => select(session.id, slot)}
                   />
                 </g>
               );
@@ -350,19 +385,33 @@ export function NestView({
               has no settler list, so it sends the one ant that stands for the colony itself. */}
           {placed
             .filter(({ session }) => isBusy(session.status))
-            .flatMap(({ session, path, slot, index, branches }) => {
+            .flatMap(({ session, path, slot, index, edge, branches }) => {
               const facingLeft = slot.x < mothershipX;
               const mine = session.id === selectedId ? settlers : [];
               const active = mine.filter((a) => a.state === "working" || a.state === "thinking");
               const crew = active.length ? active : mine.slice(0, 1);
               // No real crew to show: one nameless ant for the colony.
               const riders: (SubagentView | null)[] = crew.length ? crew : [null];
+              // Only the open colony has real settlers, so only its carriers speak: one bubble
+              // per ant, at most four, the newest crew kept (settlers ride in launch order).
+              const voiced =
+                session.id === selectedId
+                  ? new Set(planAntBubbles(riders.map((rider) => rider?.agent.id ?? "solo")))
+                  : null;
               return riders.map((settler, k) => {
                 const branch = k > 0 && branches.length ? branches[(k - 1) % branches.length] : null;
                 const ride = branch ? branch.d : path;
                 const seconds = branch ? 12 + ((index * 7 + k * 5) % 6) : 26 + index * 3 + k * 4;
                 const doing = settler?.current?.name ?? settler?.last?.name ?? "working";
                 const who = settler ? `${settler.name} · ${doing}` : `${chamberLabel(session, 112)} · working`;
+                // The colony's own ant falls back to the live stream detail, like the selected
+                // chamber's balloon; a settler's own state picks its tone.
+                const bubble =
+                  voiced?.has(settler?.agent.id ?? "solo") ?? false
+                    ? settler
+                      ? { ...settlerSays(settler), tone: BUBBLE_TONE[settler.state] }
+                      : { ...colonySays(liveDetail, feedEntry(session).text), tone: edge }
+                    : null;
                 return (
                   <div
                     key={`carry-${session.id}-${settler?.agent.id ?? "solo"}`}
@@ -374,6 +423,13 @@ export function NestView({
                       animation: `ck-carry ${seconds}s ease-in-out ${-((index * 5.3 + k * 7.1) % seconds)}s infinite`,
                     } as CSSProperties}
                   >
+                    {/* The bubble rides in the offset-path div so it travels with the ant, but
+                        outside the mirrored span below: the ant flips, the words never do. */}
+                    {bubble && (
+                      <span className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-full pb-4">
+                        <AntBubble text={bubble.text} title={bubble.title} tone={bubble.tone} />
+                      </span>
+                    )}
                     <button
                       type="button"
                       onClick={() => onSelect(session.id)}
@@ -459,8 +515,8 @@ export function NestView({
               <button
                 key={session.id}
                 type="button"
-                onClick={() => onSelect(session.id)}
-                onDoubleClick={() => onOpen(session.id)}
+                onClick={() => select(session.id, slot)}
+                onDoubleClick={() => openColony(session.id)}
                 title={`${session.repo}#${session.issue ?? ""} · ${session.issue_title || status?.label}`}
                 aria-label={`${session.repo} ${session.issue != null ? `#${session.issue}` : ""}, ${status?.label ?? ""}`}
                 className="absolute flex cursor-pointer flex-col items-center justify-center gap-[3px] overflow-hidden border-[1.5px] p-1.5 text-center transition-[transform,box-shadow] duration-300"
@@ -564,6 +620,22 @@ export function NestView({
             mode={isRaiding(raid) ? "raiding" : "waiting"}
             count={raid.swarm_size}
             className="z-[1]"
+          />
+        )}
+
+        {/* The chamber zoom grows out of the chamber's slot and back into it on close. */}
+        {zoom.phase !== "closed" && zoomSession && (
+          <ChamberZoom
+            session={zoomSession}
+            settlers={zoomSession.id === selectedId ? settlers : []}
+            liveDetail={zoomSession.id === selectedId ? liveDetail : null}
+            slot={{ x: zoom.x, y: zoom.y }}
+            blob={BLOBS[(zoomPlaced?.index ?? 0) % BLOBS.length]}
+            edge={zoomPlaced?.edge ?? "var(--accent)"}
+            closing={zoom.phase === "closing"}
+            onClose={zoomClose}
+            onClosed={zoomClosed}
+            onOpen={openColony}
           />
         )}
       </div>

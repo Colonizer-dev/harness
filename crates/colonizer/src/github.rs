@@ -1,7 +1,9 @@
 //! GitHub source and publish modules: repositories, issues, worktrees and pull requests.
 
 use crate::{
-    ApiResult, App, Shared, client_error, orgs,
+    ApiResult, App, Shared, client_error,
+    config::CoAuthor,
+    orgs,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
     util::{
@@ -118,7 +120,7 @@ impl ViewerStatus {
     }
 }
 
-/// The signed-in GitHub user, for the status poll, access messages and commit trailers. Cached and
+/// The signed-in GitHub user, for the status poll, access messages and commit authorship. Cached and
 /// coalesced: the cache lock is held across the lookup, so concurrent status polls share one
 /// `gh api user` instead of stacking several — the same property `claude_login::account_status`
 /// gives the Anthropic profile lookup.
@@ -799,36 +801,78 @@ pub fn pr_state_from(state: &str) -> Option<PrState> {
     }
 }
 
-/// The fields `pr_state` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
+/// A pull request's mergeability as the watcher needs it: a branch that fell behind its base or
+/// conflicts with it gets a nudge in the colony's log, everything else stays quiet. `BLOCKED`
+/// (required checks or reviews not yet met), `UNSTABLE` and `HAS_HOOKS` all read as `Clean` here:
+/// they say the branch is held for checks, not that it is stale or conflicting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mergeability {
+    Clean,
+    Behind,
+    Conflicted,
+    Unknown,
+}
+
+/// Reads `mergeable` plus `mergeStateStatus` into a [`Mergeability`]: `CONFLICTING` or `DIRTY`
+/// means conflicted, `BEHIND` means behind, `UNKNOWN` or a missing field means not yet computed
+/// (no news, never a licence to log or merge), and everything else means clean. Case is tolerated.
+pub fn mergeability_from(mergeable: Option<&str>, merge_state_status: Option<&str>) -> Mergeability {
+    let mergeable = mergeable.unwrap_or("UNKNOWN").trim().to_ascii_uppercase();
+    let status = merge_state_status.unwrap_or("UNKNOWN").trim().to_ascii_uppercase();
+    if mergeable == "CONFLICTING" || status == "DIRTY" {
+        Mergeability::Conflicted
+    } else if mergeable == "UNKNOWN" || status == "UNKNOWN" {
+        Mergeability::Unknown
+    } else if status == "BEHIND" {
+        Mergeability::Behind
+    } else {
+        Mergeability::Clean
+    }
+}
+
+/// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
 /// the struct and a test holds the two together.
-const PR_VIEW_FIELDS: &str = "state";
+const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus";
 
 /// Unknown fields are refused so the test below catches a requested field this struct would ignore;
-/// `gh --json` prints only the fields it was asked for, so real output never trips it.
+/// `gh --json` prints only the fields it was asked for, so real output never trips it. The
+/// mergeability fields default to missing rather than failing: a field `gh` leaves out reads as not
+/// yet computed, never as a licence to merge.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrView {
     state: String,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: Option<String>,
 }
 
-/// Asks GitHub for one pull request's state through the user's `gh` login. A deleted PR, no `gh`
-/// binary, no auth and a network error all surface as errors; callers must treat those as no news.
-pub async fn pr_state(app: &App, url: &str) -> Result<PrState> {
+/// Asks GitHub for one pull request's state and mergeability through the user's `gh` login. A deleted
+/// PR, no `gh` binary, no auth and a network error all surface as errors; callers must treat those as
+/// no news.
+pub async fn pr_info(app: &App, url: &str) -> Result<(PrState, Mergeability)> {
     let out = tokio::time::timeout(
         Duration::from_secs(20),
         exec(&mut app.gh(["pr", "view", url, "--json", PR_VIEW_FIELDS])),
     )
     .await
     .context("GitHub API timed out")??;
-    pr_state_from_json(&out)
+    pr_info_from_json(&out)
 }
 
-/// Reads `gh pr view --json` output into a `PrState`, split from `pr_state` so it is tested without `gh`.
-fn pr_state_from_json(out: &str) -> Result<PrState> {
+/// Reads `gh pr view --json` output into a state plus a mergeability, split from `pr_info` so it is
+/// tested without `gh`.
+fn pr_info_from_json(out: &str) -> Result<(PrState, Mergeability)> {
     let view: PrView = serde_json::from_str(out).context("could not parse `gh pr view` output")?;
-    pr_state_from(&view.state).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))
+    let state =
+        pr_state_from(&view.state).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))?;
+    Ok((
+        state,
+        mergeability_from(view.mergeable.as_deref(), view.merge_state_status.as_deref()),
+    ))
 }
 
 /// Points an open pull request at a different base branch: the moment a colony's stack resolves. A
@@ -850,20 +894,17 @@ pub async fn retarget_pr(app: &App, pr_url: &str, base: &str) -> Result<()> {
     Ok(())
 }
 
-const COLONIZER_CO_AUTHOR: &str = "Co-Authored-By: Colonizer <noreply@colonizer.dev>";
-
-/// The commit's closing paragraph: what the work refers to, then Colonizer's co-author line unless
-/// `colonizer.toml` turns it off. Git reads trailers from the last paragraph, so the reference sits
+/// The commit's closing paragraph: what the work refers to, then the configured co-author's trailer
+/// unless `colonizer.toml` turns it off. Git reads trailers from the last paragraph, so the reference sits
 /// in its own.
-fn commit_trailer(issue: Option<u64>, session_id: &str, co_author: bool) -> String {
+fn commit_trailer(issue: Option<u64>, session_id: &str, co_author: Option<&CoAuthor>) -> String {
     let reference = match issue {
         Some(number) => format!("Refs #{number}"),
         None => format!("Colonizer session {session_id}"),
     };
-    if co_author {
-        format!("{reference}\n\n{COLONIZER_CO_AUTHOR}")
-    } else {
-        reference
+    match co_author {
+        Some(who) => format!("{reference}\n\n{}", who.trailer()),
+        None => reference,
     }
 }
 
@@ -1004,6 +1045,14 @@ impl GitPublishOps<'_> {
         c.arg("--work-tree").arg(&self.wt);
         c
     }
+
+    /// The co-author `colonizer.toml` configures, for the commit trailer and the pull request body.
+    fn co_author(&self) -> Option<CoAuthor> {
+        crate::config::FileConfig::load(&self.app.cfg.config_dir)
+            .publish
+            .co_author
+            .clone()
+    }
 }
 
 impl PublishOps for GitPublishOps<'_> {
@@ -1012,8 +1061,7 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     fn trailer(&self) -> String {
-        let co_author = crate::config::FileConfig::load(&self.app.cfg.config_dir).publish.co_author;
-        commit_trailer(self.s.issue, &self.s.id, co_author)
+        commit_trailer(self.s.issue, &self.s.id, self.co_author().as_ref())
     }
 
     async fn stage_all(&self) -> Result<bool> {
@@ -1113,7 +1161,7 @@ impl PublishOps for GitPublishOps<'_> {
         let _ = exec(self.app.git(&self.bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
         let behind = count_behind(self.app, &self.bare, &self.s.branch, &self.base).await;
         let body_path = self.session_dir.join("pr-body.md");
-        let body = compose_pr_body(body, self.s.issue, behind, &self.base);
+        let body = compose_pr_body(body, self.s.issue, behind, &self.base, self.co_author().as_ref());
         // The audit trail names the exact body that goes out (`publish_candidate_hash`, issue #98).
         let bound = crate::publish::publish_candidate_hash(body.as_bytes());
         self.log.info(format!("opening the pull request; body sha256 {bound}")).await;
@@ -1328,7 +1376,7 @@ fn strip_agent_attribution(body: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
-fn compose_pr_body(body: &str, issue: Option<u64>, behind: Option<u64>, base: &str) -> String {
+fn compose_pr_body(body: &str, issue: Option<u64>, behind: Option<u64>, base: &str, co_author: Option<&CoAuthor>) -> String {
     let mut out = strip_agent_attribution(body);
     if let Some(number) = issue {
         let lower = out.to_lowercase();
@@ -1353,6 +1401,13 @@ fn compose_pr_body(body: &str, issue: Option<u64>, behind: Option<u64>, base: &s
         ));
     }
     out.push_str("\n\n---\n🤖 Generated by [Colonizer](https://colonizer.dev) in a microVM\n");
+    // Last, so `strip_agent_attribution` above cannot peel it and GitHub reads it as a trailer when
+    // a squash merge uses this description as the commit message. The footer above ends with a
+    // newline, so one more opens the blank line.
+    if let Some(who) = co_author {
+        out.push('\n');
+        out.push_str(&who.trailer());
+    }
     out
 }
 
@@ -2038,15 +2093,42 @@ mod tests {
     #[test]
     fn pr_body_is_signed_by_colonizer_not_the_agent() {
         let body = "Change\n\n---\nCo-Authored-By: Claude <noreply@anthropic.com>\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n";
-        let out = compose_pr_body(body, Some(5), None, "main");
+        let out = compose_pr_body(body, Some(5), None, "main", None);
         assert!(!out.to_lowercase().contains("claude"), "{out}");
         assert!(out.starts_with("Change\n\nCloses #5"), "{out}");
         assert!(out.contains("Generated by [Colonizer]"), "{out}");
+        assert!(!out.contains("Co-Authored-By"), "{out}");
+    }
+
+    #[test]
+    fn pr_body_ends_with_the_configured_co_author_trailer() {
+        let out = compose_pr_body("Change", Some(5), None, "main", Some(&CoAuthor::settlers()));
+        let trailer = "Co-Authored-By: Colonizer Settlers <331648616+colonizer-settlers@users.noreply.github.com>";
+        let footer = "---\n🤖 Generated by [Colonizer](https://colonizer.dev) in a microVM";
+        assert!(out.ends_with(trailer), "{out}");
+        assert!(
+            out.find(footer).unwrap() < out.rfind(trailer).unwrap(),
+            "the trailer is its own last paragraph, after the footer: {out}"
+        );
+        assert!(
+            out.contains(&format!("{footer}\n\n{trailer}")),
+            "separated from the footer by a blank line: {out}"
+        );
+        // An agent-supplied trailer is still stripped first, so the configured one appears exactly once.
+        let sneaky = compose_pr_body(
+            &format!("Change\n\n{trailer}\n"),
+            Some(5),
+            None,
+            "main",
+            Some(&CoAuthor::settlers()),
+        );
+        assert_eq!(sneaky.matches("Co-Authored-By").count(), 1, "{sneaky}");
+        assert!(sneaky.ends_with(trailer), "{sneaky}");
     }
 
     #[test]
     fn pr_body_notes_how_far_behind_the_branch_was_when_it_matters() {
-        let noted = compose_pr_body("Change", Some(5), Some(3), "main");
+        let noted = compose_pr_body("Change", Some(5), Some(3), "main", None);
         assert!(noted.contains("> Note: this branch was 3 commit(s) behind main"), "{noted}");
         assert!(noted.contains("when this pull request was opened."), "{noted}");
         assert!(noted.contains("Closes #5"), "the Closes line still comes first: {noted}");
@@ -2059,26 +2141,38 @@ mod tests {
             "and before the footer: {noted}"
         );
         for (behind, base) in [(None, "main"), (Some(0), "main")] {
-            let out = compose_pr_body("Change", Some(5), behind, base);
+            let out = compose_pr_body("Change", Some(5), behind, base, None);
             assert!(!out.contains("> Note:"), "no note when {behind:?}: {out}");
         }
     }
 
     #[test]
     fn colonizer_signs_the_commit_unless_the_config_says_otherwise() {
+        let settlers = CoAuthor::settlers();
         assert_eq!(
-            commit_trailer(Some(5), "ab12cd34", true),
-            format!("Refs #5\n\n{COLONIZER_CO_AUTHOR}")
+            commit_trailer(Some(5), "ab12cd34", Some(&settlers)),
+            "Refs #5\n\nCo-Authored-By: Colonizer Settlers <331648616+colonizer-settlers@users.noreply.github.com>"
         );
-        assert_eq!(commit_trailer(Some(5), "ab12cd34", false), "Refs #5");
-        assert_eq!(commit_trailer(None, "ab12cd34", false), "Colonizer session ab12cd34");
-        // The reference keeps its own paragraph, so git still reads the trailer from the last one.
-        assert!(commit_trailer(None, "ab12cd34", true).ends_with(&format!("\n\n{COLONIZER_CO_AUTHOR}")));
+        assert_eq!(commit_trailer(Some(5), "ab12cd34", None), "Refs #5");
+        assert_eq!(
+            commit_trailer(None, "ab12cd34", Some(&settlers)),
+            "Colonizer session ab12cd34\n\nCo-Authored-By: Colonizer Settlers \
+             <331648616+colonizer-settlers@users.noreply.github.com>"
+        );
+        assert_eq!(commit_trailer(None, "ab12cd34", None), "Colonizer session ab12cd34");
+        let custom = CoAuthor {
+            name: "Someone Else".into(),
+            email: "someone@example.com".into(),
+        };
+        assert_eq!(
+            commit_trailer(Some(5), "ab12cd34", Some(&custom)),
+            "Refs #5\n\nCo-Authored-By: Someone Else <someone@example.com>"
+        );
     }
 
     #[test]
     fn attribution_inside_the_description_is_kept() {
-        let body = "Fixtures generated with the claude-api mock.\n\n```\nCo-Authored-By: Colonizer <noreply@colonizer.dev>\n```";
+        let body = "Fixtures generated with the claude-api mock.\n\n```\nCo-Authored-By: Colonizer Settlers <331648616+colonizer-settlers@users.noreply.github.com>\n```";
         assert_eq!(strip_agent_attribution(body), body);
     }
 
@@ -2095,12 +2189,26 @@ mod tests {
     }
 
     #[test]
-    fn gh_pr_view_output_reads_into_the_right_state() {
-        assert_eq!(pr_state_from_json(r#"{"state":"MERGED"}"#).unwrap(), PrState::Merged);
-        assert_eq!(pr_state_from_json(r#"{"state":"CLOSED"}"#).unwrap(), PrState::Closed);
-        assert_eq!(pr_state_from_json(r#"{"state":"OPEN"}"#).unwrap(), PrState::Open);
-        assert!(pr_state_from_json(r#"{"state":"DRAFT"}"#).is_err());
-        assert!(pr_state_from_json("not json").is_err());
+    fn gh_pr_view_output_reads_into_the_right_state_and_mergeability() {
+        assert_eq!(pr_info_from_json(r#"{"state":"MERGED"}"#).unwrap().0, PrState::Merged);
+        assert_eq!(pr_info_from_json(r#"{"state":"CLOSED"}"#).unwrap().0, PrState::Closed);
+        assert_eq!(pr_info_from_json(r#"{"state":"OPEN"}"#).unwrap().0, PrState::Open);
+        assert!(pr_info_from_json(r#"{"state":"DRAFT"}"#).is_err());
+        assert!(pr_info_from_json("not json").is_err());
+        assert_eq!(
+            pr_info_from_json(r#"{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BEHIND"}"#).unwrap(),
+            (PrState::Open, Mergeability::Behind)
+        );
+        assert_eq!(
+            pr_info_from_json(r#"{"state":"OPEN","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}"#).unwrap(),
+            (PrState::Open, Mergeability::Conflicted)
+        );
+        // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
+        assert_eq!(
+            pr_info_from_json(r#"{"state":"MERGED"}"#).unwrap(),
+            (PrState::Merged, Mergeability::Unknown)
+        );
+        assert!(pr_info_from_json(r#"{"state":"DRAFT","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#).is_err());
     }
 
     #[test]
@@ -2115,6 +2223,30 @@ mod tests {
             .collect();
         let view: PrView = serde_json::from_value(Value::Object(sample)).unwrap();
         assert_eq!(view.state, "MERGED");
+        assert_eq!(view.mergeable.as_deref(), Some("MERGED"));
+        assert_eq!(view.merge_state_status.as_deref(), Some("MERGED"));
+    }
+
+    #[test]
+    fn mergeability_reads_conflicted_behind_and_unknown_apart_from_clean() {
+        for (mergeable, status, want) in [
+            (Some("CONFLICTING"), Some("CLEAN"), Mergeability::Conflicted),
+            (Some("MERGEABLE"), Some("DIRTY"), Mergeability::Conflicted),
+            (Some("conflicting"), Some("dirty"), Mergeability::Conflicted),
+            (Some("MERGEABLE"), Some("BEHIND"), Mergeability::Behind),
+            (Some("mergeable"), Some("behind"), Mergeability::Behind),
+            (Some("UNKNOWN"), Some("UNKNOWN"), Mergeability::Unknown),
+            (Some("MERGEABLE"), Some("UNKNOWN"), Mergeability::Unknown),
+            (None, None, Mergeability::Unknown),
+            (Some("MERGEABLE"), None, Mergeability::Unknown),
+            (Some("MERGEABLE"), Some("CLEAN"), Mergeability::Clean),
+            // Held for checks, not stale or conflicting: quiet for the watcher.
+            (Some("MERGEABLE"), Some("BLOCKED"), Mergeability::Clean),
+            (Some("MERGEABLE"), Some("UNSTABLE"), Mergeability::Clean),
+            (Some("MERGEABLE"), Some("HAS_HOOKS"), Mergeability::Clean),
+        ] {
+            assert_eq!(mergeability_from(mergeable, status), want, "{mergeable:?}/{status:?}");
+        }
     }
 
     // ----- run_publish against a fake repository -----

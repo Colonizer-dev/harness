@@ -7,7 +7,7 @@ import { useId, useMemo, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { IconAlert, IconChevron, IconCpu, IconMemory, IconServer } from "../components/icons";
-import { SESSION_STATUS, type Tone, attentionText, cx, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, attentionText, cx, formatDuration, isLive, orgOf, sameOrg, timeAgo } from "../components/ui";
 import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { isActive, isRaiding } from "../redTeam";
@@ -16,7 +16,7 @@ import { formatCost, orgCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { FleetPanel } from "./FleetPanel";
-import { headlineFor, OVERVIEW_FILTERS, matchesOverviewFilter, overviewCounts, overviewSessions, overviewVisibleSessions, type OverviewFilter } from "./feed";
+import { headlineFor, OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, overviewSessions, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
 import { colonyFacts, hostFacts } from "./host";
 import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
@@ -162,6 +162,7 @@ export function OverviewView({
   runs = [],
   initialFilter = null,
   quota = null,
+  quotaBannerVisible = false,
   onStart,
   onStop,
   onOpenOrg,
@@ -182,6 +183,10 @@ export function OverviewView({
   initialFilter?: OverviewFilter | null;
   /** Quota exhaustion across providers (issue #225); a paused queue banners the page. */
   quota?: StatusQuota | null;
+  /** True while the cockpit's global quota banner shows (issue #404): the page's own scoped
+    * queue-paused banner hides, so a paused queue banners exactly once. Defaults to false, which
+    * keeps the scoped banner for every caller that renders this page without the global one. */
+  quotaBannerVisible?: boolean;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
   onOpenOrg: (org: string) => void;
@@ -206,6 +211,11 @@ export function OverviewView({
   const visibleSessions = overviewVisibleSessions(sessions, orgs);
   const counts = overviewCounts(visibleSessions);
   const shown = overviewSessions(visibleSessions, filter);
+  // Held slots (issue #217): idle colonies whose PR autopilot holds occupy parallel slots without
+  // doing work. When every slot-occupying colony is held and something queues, nothing can drain
+  // until a hold times out — the queued chip must read as stalled, never as a healthy busy queue.
+  const held = heldSlots(visibleSessions);
+  const stalled = queueStalled(visibleSessions);
   // Colonies the chips deliberately do not count: their org is switched off, so no card can show
   // them. They are named in the scope line below instead of being silently hidden.
   const hiddenSessions = sessions.filter((session) => !visibleSessions.includes(session));
@@ -263,7 +273,7 @@ export function OverviewView({
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
       <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-5">
-        {quota?.paused ? (
+        {quota?.paused && !quotaBannerVisible ? (
           <div role="status" className="rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn">
             Queue paused — {quota.reason ?? "every provider's quota is exhausted"}
           </div>
@@ -277,21 +287,37 @@ export function OverviewView({
             {OVERVIEW_FILTERS.map((name) => {
               const count = counts[name];
               const active = filter === name;
+              const stalledQueue = name === "queued" && stalled;
               return (
                 <button
                   key={name}
                   type="button"
                   aria-pressed={active}
                   onClick={() => setFilter(active ? null : name)}
+                  title={stalledQueue ? "every slot-occupying colony is held — the queue cannot drain until a hold times out" : undefined}
                   className={cx(
                     "cursor-pointer rounded-full border px-2.5 py-1 text-[11.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]",
-                    active ? "border-accent bg-accent-soft text-text" : "border-border text-muted hover:border-accent hover:text-text",
+                    active
+                      ? "border-accent bg-accent-soft text-text"
+                      : stalledQueue
+                        ? "border-warn bg-warn-soft text-warn"
+                        : "border-border text-muted hover:border-accent hover:text-text",
                   )}
                 >
-                  <span className={COUNT_COLOR[name](count)}>{count}</span> {name}
+                  <span className={stalledQueue ? "text-warn" : COUNT_COLOR[name](count)}>{count}</span>{" "}
+                  {stalledQueue ? "queued · stalled" : name}
                 </button>
               );
             })}
+            {held.count > 0 && (
+              <span
+                role="status"
+                title="idle colonies holding parallel slots while autopilot holds their pull request"
+                className="whitespace-nowrap px-1 text-muted"
+              >
+                {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
+              </span>
+            )}
             {headerCost !== null && (
               <span className="whitespace-nowrap px-1" title="what every colony has spent in total">
                 {formatCost(headerCost)} spent

@@ -2,6 +2,7 @@
 {"type":"user_message","id":"initial","text":"Fix the issue"}
 {"type":"status","state":"working"}
 {"type":"log","level":"info","message":"Claude Code session s1 started (model fake-model)"}
+{"type":"model_changed","model":"fake-model","previous":null}
 {"type":"assistant_text_delta","message_id":"msg_1","block_index":0,"delta":"Let me "}
 {"type":"assistant_text_delta","message_id":"msg_1","block_index":0,"delta":"ask."}
 {"type":"assistant_text","message_id":"msg_1","block_index":0,"text":"Let me ask."}

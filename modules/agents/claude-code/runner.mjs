@@ -552,6 +552,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   const subagents = new Map(); // Task tool_use id -> { id, name, description }
   let streamMessageId = null;
   let jevDebugOffset = 0; // bytes of the debug log already scanned for a Jev verdict
+  let currentModel = null; // the orchestrator model last announced in a model_changed
 
   /**
    * Who produced a message. The SDK sets `parent_tool_use_id` to the Task call that started the
@@ -796,6 +797,11 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
                   emit({ type: 'log', level: 'warn', message: "Jev compaction is switched on, but Claude Code didn't load the fast-jev-compaction plugin; compaction falls back to the built-in summary" });
                 }
               }
+              // init can come once per turn: announce the model only when it is news to clients.
+              if (typeof msg.model === 'string' && msg.model && msg.model !== currentModel) {
+                emit({ type: 'model_changed', model: msg.model, previous: currentModel });
+                currentModel = msg.model;
+              }
             } else if (msg.subtype === 'compact_boundary' && jevEnabled(options)) {
               let added = '';
               let fd;
@@ -862,6 +868,22 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
           .then(() => q.interrupt?.())
           .catch((err) => emit({ type: 'log', level: 'warn', message: `interrupt failed: ${err?.message ?? err}` }));
         break;
+      case 'set_model': {
+        // Same session and conversation; the SDK applies it from the next response on.
+        const model = typeof command.model === 'string' ? command.model.trim() : '';
+        if (!model) {
+          emit({ type: 'log', level: 'warn', message: 'ignored a set_model without a model' });
+          break;
+        }
+        Promise.resolve()
+          .then(() => q.setModel(model))
+          .then(() => {
+            emit({ type: 'model_changed', model, previous: currentModel });
+            currentModel = model;
+          })
+          .catch((err) => emit({ type: 'log', level: 'warn', message: `set_model ${model} failed: ${err?.message ?? err}` }));
+        break;
+      }
       case 'shutdown':
         break commandLoop;
       default:

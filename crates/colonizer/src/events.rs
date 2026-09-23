@@ -218,10 +218,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         .await;
     }
 
-    // Progress for the watchdog: anything but status changes and the echo of its own nudges.
+    // Progress for the watchdog: anything but status changes, the echo of its own nudges, and a
+    // `model_changed` (a user's switch, or init announcing the model, is not the agent working).
     let watchdog_echo =
         matches!(&deserialised, Ok(AgentEvent::UserMessage { id: echoed, .. }) if echoed.starts_with("watchdog-"));
-    if !matches!(&deserialised, Ok(AgentEvent::Status { .. })) && !watchdog_echo {
+    let model_changed = event["type"] == "model_changed";
+    if !matches!(&deserialised, Ok(AgentEvent::Status { .. })) && !watchdog_echo && !model_changed {
         {
             let mut activity = rt.activity.lock().await;
             activity.last = Utc::now();
@@ -401,6 +403,11 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     let provider = provider_quota::mentioned_provider(text, &ids, &names);
     if let Some(pid) = &provider {
         app.gateway.mark_quota_exhausted(pid, hit.reset_at.clone(), hit.reset_unix);
+    } else if hit.account_wide {
+        // The Claude account's own cap names no provider — the colony side never learns one — so
+        // the park records it on the dedicated account record instead of any real provider: healthy
+        // providers stay healthy, and the queue pauses on the account record alone.
+        app.gateway.mark_account_quota_exhausted(hit.reset_at.clone(), hit.reset_unix);
     }
     let Some(s) = app.session(id).await else { return };
     if !s.status.is_live() {
@@ -733,6 +740,125 @@ mod tests {
         memory_proposal(&app, "abc", Some("repo"), "Commit style", "Keep commits small.", &[]).await;
         assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
         assert_eq!(app.memory.proposals().await.len(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An account-level session-limit hit names no provider, so the park records the dedicated
+    /// account record instead of any real provider: healthy providers stay healthy, the queue pauses
+    /// on the account record alone, a routed success does not lift it, and the colony resumes when it
+    /// lapses.
+    #[tokio::test]
+    async fn an_unattributed_session_limit_hit_parks_the_account_record() {
+        let root = std::env::temp_dir().join(format!("colonizer-session-limit-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let providers: Vec<Value> = ["bailian", "zai"]
+            .iter()
+            .map(|id| json!({"id": id, "name": id, "base_url": "http://127.0.0.1:1", "auth": "none"}))
+            .collect();
+        std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&providers).unwrap()).unwrap();
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+        s.id = "parked".into();
+        s.git_admin_dir = Some("git".into());
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir("parked")).await.unwrap();
+
+        let text = "You've hit your session limit · resets 7am (UTC)";
+        let hit = provider_quota::classify_quota_exhaustion(0, "", text).expect("session limit classifies");
+        park_quota_colony(&app, "parked", text, &hit).await;
+
+        let sessions = app.sessions.read().await;
+        let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
+        assert_eq!(parked.status, SessionStatus::Stopped, "the turn failure parks the colony");
+        assert_eq!(
+            parked.attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(provider_quota::QUOTA_EXHAUSTED_REASON)
+        );
+        assert!(
+            parked.error.as_deref().unwrap_or_default().contains("resets 7am (UTC)"),
+            "{}",
+            parked.error.as_deref().unwrap_or_default()
+        );
+        drop(sessions);
+        assert!(app.gateway.is_account_quota_exhausted(), "the account record holds the pause");
+        assert!(
+            !app.gateway.is_quota_exhausted("bailian") && !app.gateway.is_quota_exhausted("zai"),
+            "with no provider named, no real provider reads exhausted"
+        );
+        let status = crate::providers::quota_status(&app).await;
+        assert!(status.paused, "an account-wide hit pauses the queue");
+        assert!(
+            status.reason.as_deref().unwrap_or_default().contains("account"),
+            "the reason is account-level: {}",
+            status.reason.as_deref().unwrap_or_default()
+        );
+        assert!(status.providers.is_empty(), "no real provider is named exhausted");
+        crate::queue::resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "parked").unwrap().status,
+            SessionStatus::Stopped,
+            "the unnamed colony stays parked while the account record holds"
+        );
+        drop(sessions);
+        // One routed success proves nothing about the account cap; the lapse resumes the colony.
+        app.gateway.clear_quota_on_success("bailian");
+        assert!(
+            crate::providers::quota_status(&app).await.paused,
+            "a provider success does not lift the account pause"
+        );
+        app.gateway.forget_account_quota();
+        assert!(
+            !crate::providers::quota_status(&app).await.paused,
+            "the resume lifts the pause"
+        );
+        crate::queue::resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "parked").unwrap().status,
+            SessionStatus::Queued,
+            "the colony rejoins the queue once the account record lapses"
+        );
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With no gateway providers at all, the account record alone still pauses the queue.
+    #[tokio::test]
+    async fn an_account_hit_pauses_with_no_providers_configured() {
+        let root = std::env::temp_dir().join(format!("colonizer-session-limit-none-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        assert!(
+            !crate::providers::quota_status(&app).await.paused,
+            "nothing exhausted, no pause"
+        );
+        app.gateway
+            .mark_account_quota_exhausted(Some("7am (UTC)".into()), Some(chrono::Utc::now().timestamp() + 3600));
+        assert!(
+            crate::providers::quota_status(&app).await.paused,
+            "the account record alone pauses with zero providers"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A model switch is the user's doing, not the agent's: it must not clear a held colony or reset nudges.
+    #[tokio::test]
+    async fn model_changed_is_not_watchdog_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let held = json!({"reason": "autopilot_held", "nudges": 0});
+        app.update_session("abc", |x| x.attention = Some(held)).await;
+        rt.activity.lock().await.nudges = 2;
+        let switched = r#"{"seq":1,"type":"model_changed","model":"opus","previous":"sonnet"}"#;
+        handle_agent_event(&app, "abc", &rt, switched).await;
+        assert!(app.session("abc").await.unwrap().attention.is_some(), "attention survives");
+        assert_eq!(rt.activity.lock().await.nudges, 2, "nudges survive");
+
+        let progress = r#"{"seq":2,"type":"log","level":"info","message":"working"}"#;
+        handle_agent_event(&app, "abc", &rt, progress).await;
+        let attention = app.session("abc").await.unwrap().attention;
+        assert!(attention.is_none(), "real progress still clears it");
+        assert_eq!(rt.activity.lock().await.nudges, 0);
         let _ = std::fs::remove_dir_all(root);
     }
 }

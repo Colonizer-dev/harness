@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "rea
 import type { Api } from "../api";
 import { useBehind } from "../behind";
 import { errorMessage, useApi, useToast } from "../context";
+import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
 import type { Session } from "../types";
@@ -83,6 +84,9 @@ export function SessionView({
 
   // How far the colony branch lags origin/{base} (issue #173). Errors hide the line, never toast.
   const { behind, refresh: refreshBehind } = useBehind(state.session ?? fallback);
+
+  // Why this colony is not progressing, polled from the single-session route (issue #230).
+  const { diagnosis } = useSessionDiagnosis(state.session ?? fallback);
 
   const session = state.session ?? fallback;
   if (!session) {
@@ -373,6 +377,12 @@ export function SessionView({
         {session.error && (
           <div role="alert" className="mt-3 rounded-lg bg-err-soft px-3 py-2 text-[13px] text-err [overflow-wrap:anywhere]">
             {session.error}
+          </div>
+        )}
+        {diagnosis && (
+          <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-[13px] [overflow-wrap:anywhere]">
+            <span className="font-semibold">Status: </span>
+            <span className="text-muted">{diagnosis.text}</span>
           </div>
         )}
         {publishStage && <div className="mt-2 text-[12.5px] text-muted">{publishStage}</div>}

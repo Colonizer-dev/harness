@@ -7,12 +7,14 @@
 //! credential is injected by microsandbox's host-side TLS proxy for the API host only, and model
 //! provider keys are added by the mothership's provider gateway.
 
+mod auth;
 mod authority;
 mod autonomy;
 mod burn_down;
 mod claude_accounts;
 mod claude_login;
 mod config;
+mod diagnosis;
 mod events;
 mod execution;
 mod findings;
@@ -57,8 +59,8 @@ mod watchdog;
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
-    extract::{Query, Request, State},
-    http::{Method, StatusCode, header},
+    extract::{Extension, Query, Request, State},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -125,6 +127,8 @@ pub struct StorageAlert {
 
 pub struct App {
     pub cfg: Settings,
+    /// The per-install cockpit API token (`<config_dir>/api-token`), checked by `host_guard`.
+    pub api_token: String,
     pub modules: RwLock<ModulesConfig>,
     pub agents: Vec<AgentModule>,
     /// Agent manifests that are present but unusable, one line each naming the file and the fault;
@@ -536,7 +540,74 @@ pub struct StatusQuery {
     fresh: Option<String>,
 }
 
-async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> Json<Value> {
+/// The `GET /api/status` body for callers without the API token: an allowlist — version, counts,
+/// capacity figures and health only — built from scratch, never the full body with fields removed.
+/// Fleet peers poll this endpoint without a token, so `fleet::summary_from_status_json` reads
+/// exactly these keys and defaults the rest. NEVER add identity here: no repo or issue names, no
+/// org names, no paths or URLs, no hostnames or host ids, no GitHub or Claude account details.
+async fn reduced_status(app: &Shared) -> Value {
+    let modules = app.modules.read().await.clone();
+    let sessions = app.sessions.read().await;
+    let queue_depth = sessions
+        .iter()
+        .filter(|s| s.status == sessions::SessionStatus::Queued)
+        .count();
+    // The same "holds a slot" definition the full body counts.
+    let microvms_live = sessions.iter().filter(|s| s.holds_slot()).count();
+    drop(sessions);
+    let microvms_ceiling = orgs::global_max_parallel(&modules);
+    // Cached probes only: strangers must not force the probe subprocesses to rerun.
+    let (runtime, host) = tokio::join!(runtime::status_runtime(app, false), runtime::status_host(app, false),);
+    let mut host_value = json!({
+        "microvms_live": microvms_live,
+        "microvms_ceiling": microvms_ceiling,
+    });
+    // Numeric capacity figures only: the id, the hostname and the probe timestamp stay in the full
+    // body, and a measurement that failed is omitted rather than faked as zero.
+    for (key, value) in [
+        ("cpu_cores", host.cpu_cores.map(|n| json!(n))),
+        ("memory_total_bytes", host.memory_total_bytes.map(|n| json!(n))),
+        ("memory_used_bytes", host.memory_used_bytes.map(|n| json!(n))),
+        ("load", host.load.map(|load| json!(load))),
+        ("disk_total_bytes", host.disk_total_bytes.map(|n| json!(n))),
+        ("disk_used_bytes", host.disk_used_bytes.map(|n| json!(n))),
+        ("disk_free_bytes", host.disk_free_bytes.map(|n| json!(n))),
+    ] {
+        if let Some(value) = value {
+            host_value[key] = value;
+        }
+    }
+    // The storage message names files, so only its verdict crosses over.
+    let storage_ok = storage_status(app.shown_storage_alert().await)
+        .get("ok")
+        .cloned()
+        .unwrap_or(json!(true));
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "queue_depth": queue_depth,
+        "host": host_value,
+        "runtime": {
+            "platform": runtime.platform,
+            "os": {
+                "vendor": runtime.os.vendor,
+                "name": runtime.os.name,
+                "version": runtime.os.version,
+            },
+        },
+        "storage": {"ok": storage_ok},
+    })
+}
+
+async fn status(
+    State(app): State<Shared>,
+    Extension(authenticated): Extension<auth::Authenticated>,
+    Query(query): Query<StatusQuery>,
+) -> Json<Value> {
+    // No token: the allowlist body for fleet peers and other strangers, built fresh below — never
+    // the full body with fields removed.
+    if !authenticated.0 {
+        return Json(reduced_status(&app).await);
+    }
     let mut msb = Command::new(&app.cfg.msb);
     msb.arg("--version");
     let cred = app.claude_cred();
@@ -613,9 +684,13 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
     // Whether every routable provider's plan is out, and the earliest reset: the queue holder's
     // own words, so the overview banner and the queue gate never disagree.
     let quota = providers::quota_status(&app).await;
+    // The host-wide stall (§diagnosis): live colonies, a waiting queue, and no colony producing
+    // an event for ten minutes. Cheap — runtime stamps, else file mtimes, never file contents.
+    let stall = diagnosis::status_stall(&app).await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
+        "stall": stall,
         "reclaim": {"reclaimable": reclaimable, "unpushed": unpushed},
         "github": match user {
             Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
@@ -643,6 +718,7 @@ async fn status(State(app): State<Shared>, Query(query): Query<StatusQuery>) -> 
             "reset_at": quota.reset_at,
             "reset_unix": quota.reset_unix,
             "providers": quota.providers,
+            "kind": quota.kind,
         }),
         "modules": {
             "source": modules.source.provider,
@@ -686,9 +762,12 @@ async fn delete_claude_token(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(json!({"ok": true})))
 }
 
-/// Rejects DNS rebinding (unexpected Host) and cross-origin writes or WebSocket upgrades; the API has
-/// no other authentication, so it binds to loopback by default.
-async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Response {
+/// Rejects DNS rebinding (unexpected Host), then requires the per-install API token (issue #405):
+/// `Authorization: Bearer` or the `colonizer_token` cookie. Bearer requests skip the `Origin`
+/// check (no CORS preflight is ever granted); cookie writes and upgrades keep the same-origin
+/// requirement. Unauthenticated `GET /api/status` answers the reduced body; other `/api` requests
+/// get a 401; page loads get the sign-in page, or set the cookie from the link's `?token=`.
+async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -707,22 +786,55 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
     if !allowed {
         return (StatusCode::FORBIDDEN, "Host not allowed (set COLONIZER_ALLOWED_HOSTS)").into_response();
     }
-    // Cross-origin writes and WebSocket upgrades are rejected, and a *missing* `Origin` on such a
-    // request is rejected by default rather than trusted. A browser always attaches `Origin` to a
-    // cross-origin write or upgrade, so only a non-browser client — which must not be allowed to
-    // drive this unauthenticated API — omits it. Same-origin requests, whose `Origin` matches the
-    // `Host`, still pass, so the served web UI is unaffected. See #375.
-    if req.method() != Method::GET || req.headers().contains_key(header::UPGRADE) {
-        let same_origin = req
-            .headers()
-            .get(header::ORIGIN)
-            .and_then(|o| o.to_str().ok())
-            .is_some_and(|origin| origin.split("://").nth(1) == Some(host.as_str()));
-        if !same_origin {
-            return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    // Writes and upgrades need a same-origin `Origin`, or a request no browser could have made:
+    // a missing `Origin` is rejected rather than trusted (see #375), and only an authenticated
+    // request passes at all.
+    let upgrade = req.headers().contains_key(header::UPGRADE);
+    let bearer_ok = auth::bearer_token(req.headers()).is_some_and(|token| auth::tokens_match(&token, &app.api_token));
+    let cookie_ok = auth::cookie_token(req.headers()).is_some_and(|token| auth::tokens_match(&token, &app.api_token));
+    if bearer_ok || cookie_ok {
+        // Cookie-authenticated writes and upgrades keep the same-origin requirement; header
+        // authentication already proves a non-browser caller.
+        if !bearer_ok && (req.method() != Method::GET || upgrade) {
+            let same_origin = req
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|o| o.to_str().ok())
+                .is_some_and(|origin| origin.split("://").nth(1) == Some(host.as_str()));
+            if !same_origin {
+                return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+            }
         }
+        req.extensions_mut().insert(auth::Authenticated(true));
+        return next.run(req).await;
     }
-    next.run(req).await
+    // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
+    let path = req.uri().path().to_string();
+    if path == "/api" || path.starts_with("/api/") {
+        if req.method() == Method::GET && path == "/api/status" {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
+        return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+    }
+    if req.method() == Method::GET
+        && let Some(token) = auth::query_token(req.uri().query())
+        && auth::tokens_match(&token, &app.api_token)
+    {
+        // The token must not linger in caches or leak via the Referer header on the next click.
+        let mut res = Html(auth::login_page()).into_response();
+        let headers = res.headers_mut();
+        if let Ok(cookie) = auth::set_cookie_header(&app.api_token).parse() {
+            headers.insert(header::SET_COOKIE, cookie);
+        }
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        return res;
+    }
+    let mut res = (StatusCode::UNAUTHORIZED, Html(auth::locked_page())).into_response();
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
 }
 
 async fn shutdown_signal() {
@@ -883,12 +995,13 @@ fn copy_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
 const USAGE: &str = "colonizer — turn a task into a pull request; see https://colonizer.dev/docs
 
 usage: colonizer
-       colonizer version | update
+       colonizer version | update | open
        colonizer telemetry show|on|off
 
   (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
   version         print what this build is, and whether it is a release (also --version, -V)
   update          install the newest release against a running mothership and restart into it
+  open            print the cockpit sign-in link and open it in a browser
   telemetry show  print the exact anonymous usage batch that would be sent
   telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
   telemetry off   record no to anonymous usage reporting
@@ -906,6 +1019,7 @@ enum Args {
     Serve,
     Version,
     Update,
+    Open,
     TelemetryShow,
     TelemetrySet(bool),
 }
@@ -924,6 +1038,7 @@ impl Args {
             }
             "version" | "--version" | "-V" => Self::Version,
             "update" => Self::Update,
+            "open" => Self::Open,
             "telemetry" => {
                 let sub = iter
                     .next()
@@ -953,6 +1068,15 @@ impl Args {
                 Ok(())
             }
             Self::Update => update::command().await,
+            // Reprints the sign-in link (startup prints it too) and opens it the same way.
+            Self::Open => {
+                let cfg = Settings::from_env()?;
+                let token = auth::load_or_create(&cfg.config_dir)?;
+                let url = auth::login_url(&cfg.bind, &token);
+                println!("{url}");
+                auth::open_browser(&url);
+                Ok(())
+            }
             Self::TelemetryShow => {
                 let cfg = Settings::from_env()?;
                 usage::cli_show(&cfg.config_dir)
@@ -1007,6 +1131,9 @@ async fn serve() -> Result<()> {
     let modules = ModulesConfig::load(&cfg.config_dir.join("modules.json"));
     let (agents, agent_problems) = modules::discover_agents(cfg.assets.as_deref());
 
+    // The cockpit API token, minted on first run: every request to the API proves itself with it.
+    let api_token = auth::load_or_create(&cfg.config_dir)?;
+
     let app = Arc::new(App {
         modules: RwLock::new(modules),
         agents,
@@ -1039,6 +1166,7 @@ async fn serve() -> Result<()> {
         updates: version::Updates::new(&cfg.config_dir)?,
         updater: update::Updater::new(),
         usage: usage::Usage::new(&cfg.config_dir),
+        api_token,
         cfg,
     });
 
@@ -1124,6 +1252,16 @@ async fn serve() -> Result<()> {
         Some(assets) => println!("assets: {}", assets.display()),
         None => println!("assets: not found (run scripts/install.sh)"),
     }
+    // The sign-in link: printed always, opened when there is a browser to open in.
+    let login_url = auth::login_url(&app.cfg.bind, &app.api_token);
+    println!("cockpit: {login_url}");
+    if !auth::bind_is_loopback(&app.cfg.bind) {
+        eprintln!(
+            "warning: colonizer is bound to {}, so the API answers to the network; requests need the API token, but plain HTTP exposes the token to anyone on the path — use a TLS reverse proxy or an SSH tunnel",
+            app.cfg.bind
+        );
+    }
+    auth::open_browser(&login_url);
     // The first-run notice: once, while nobody has answered yet, show the exact usage batch on stderr.
     usage::first_run_notice(&app).await;
     match tokio::net::TcpListener::bind(&app.cfg.gateway_bind).await {
@@ -1261,6 +1399,9 @@ pub(crate) mod tests {
         settings(&mut cfg);
         Arc::new(App {
             cfg,
+            // A throwaway token: these tests never bind a port, and each one reads the token it
+            // needs off the App itself.
+            api_token: crate::util::random_token(),
             modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
             agents,
             agent_problems: Vec::new(),
@@ -1321,6 +1462,206 @@ pub(crate) mod tests {
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
         })
+    }
+
+    /// The real `host_guard` and `status`, a dummy POST route and page: `Router<()>` so tests can
+    /// drive it with `oneshot`.
+    fn auth_router(app: &Shared) -> Router<()> {
+        Router::new()
+            .route("/api/status", get(status))
+            .route("/api/sessions", post(|| async { "created" }))
+            .fallback(|| async { Html("test page") })
+            .layer(middleware::from_fn_with_state(app.clone(), host_guard))
+            .with_state(app.clone())
+    }
+
+    use axum::http::HeaderName;
+    use tower::ServiceExt as _;
+
+    async fn body_text(res: Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// A request to the auth test router: loopback Host plus the given headers. The guard runs
+    /// before routing, so reaching the dummy POST route proves the guard passed.
+    fn guarded(method: Method, uri: &str, headers: Vec<(HeaderName, String)>) -> Request {
+        let mut request = Request::builder().method(method).uri(uri);
+        request = request.header(header::HOST, "127.0.0.1:7878");
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        request.body(axum::body::Body::from("")).unwrap()
+    }
+
+    fn bearer(app: &Shared) -> (HeaderName, String) {
+        (header::AUTHORIZATION, format!("Bearer {}", app.api_token))
+    }
+
+    fn cookie(app: &Shared) -> (HeaderName, String) {
+        (header::COOKIE, format!("{}={}", auth::COOKIE_NAME, app.api_token))
+    }
+
+    fn origin(value: &str) -> (HeaderName, String) {
+        (header::ORIGIN, value.to_string())
+    }
+
+    /// The WebSocket handshake headers: their presence is what marks a request as an upgrade.
+    fn upgrade() -> Vec<(HeaderName, String)> {
+        [
+            (header::UPGRADE, "websocket".to_string()),
+            (header::CONNECTION, "Upgrade".to_string()),
+            (header::SEC_WEBSOCKET_VERSION, "13".to_string()),
+            (header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==".to_string()),
+        ]
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_api_requests_are_rejected_even_with_a_same_origin_origin() {
+        let root = temp_root();
+        let app = test_app(&root);
+        // A correct same-origin Origin used to be enough for scripts; now the token is required.
+        for (method, uri) in [
+            (Method::POST, "/api/sessions"),
+            (Method::GET, "/api/sessions"),
+            (Method::GET, "/api/version"),
+        ] {
+            let res = auth_router(&app)
+                .oneshot(guarded(method.clone(), uri, vec![origin("http://127.0.0.1:7878")]))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+            assert!(body_text(res).await.contains("colonizer open"), "{method} {uri}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_bad_host_is_forbidden_even_with_a_valid_token() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let mut req = guarded(Method::POST, "/api/sessions", vec![bearer(&app)]);
+        req.headers_mut()
+            .insert(header::HOST, HeaderValue::from_static("evil.example"));
+        let res = auth_router(&app).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn bearer_requests_pass_without_an_origin_and_fail_with_a_wrong_token() {
+        let root = temp_root();
+        let app = test_app(&root);
+        // No Origin anywhere: the token decides, upgrade or not; without one, told to sign in.
+        let token = format!("Bearer {}", app.api_token);
+        for (auth, is_upgrade, expected) in [
+            (Some(token.clone()), false, StatusCode::OK),
+            (Some("Bearer wrong-token".to_string()), false, StatusCode::UNAUTHORIZED),
+            (Some(token), true, StatusCode::OK),
+            (None, false, StatusCode::UNAUTHORIZED),
+            (None, true, StatusCode::UNAUTHORIZED),
+        ] {
+            let mut headers: Vec<_> = auth.into_iter().map(|auth| (header::AUTHORIZATION, auth)).collect();
+            if is_upgrade {
+                headers.extend(upgrade());
+            }
+            let res = auth_router(&app)
+                .oneshot(guarded(Method::POST, "/api/sessions", headers))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), expected, "upgrade={is_upgrade}");
+            if expected == StatusCode::OK {
+                assert_eq!(body_text(res).await, "created");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cookie_posts_keep_the_same_origin_origin_requirement() {
+        let root = temp_root();
+        let app = test_app(&root);
+        for (value, is_upgrade, expected) in [
+            ("http://127.0.0.1:7878", false, StatusCode::OK),
+            ("http://evil.example", false, StatusCode::FORBIDDEN),
+            ("http://127.0.0.1:7878", true, StatusCode::OK),
+            ("http://evil.example", true, StatusCode::FORBIDDEN),
+        ] {
+            let mut headers = vec![cookie(&app), origin(value)];
+            if is_upgrade {
+                headers.extend(upgrade());
+            }
+            let res = auth_router(&app)
+                .oneshot(guarded(Method::POST, "/api/sessions", headers))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), expected, "origin {value} upgrade={is_upgrade}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_sign_in_link_sets_the_cookie_and_a_bad_token_is_rejected() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let res = auth_router(&app)
+            .oneshot(guarded(Method::GET, &format!("/?token={}", app.api_token), vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let set_cookie = res.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
+        assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+        assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
+        // The token must not linger in caches or leak via the Referer header on the next click.
+        assert_eq!(res.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(res.headers().get(header::REFERRER_POLICY).unwrap(), "no-referrer");
+        assert!(
+            body_text(res).await.contains("location.replace"),
+            "the page signs in with JS, not a redirect"
+        );
+
+        for uri in ["/", "/?token=wrong"] {
+            let res = auth_router(&app).oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "GET {uri}");
+            assert_eq!(res.headers().get(header::CACHE_CONTROL).unwrap(), "no-store", "GET {uri}");
+            assert!(body_text(res).await.contains("colonizer open"), "GET {uri}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_public_status_is_an_allowlist_and_the_signed_in_status_is_not() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let public = auth_router(&app)
+            .oneshot(guarded(Method::GET, "/api/status", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(public.status(), StatusCode::OK);
+        let public_text = body_text(public).await;
+        let public_body: Value = serde_json::from_str(&public_text).unwrap();
+        let mut keys: Vec<&str> = public_body.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["host", "queue_depth", "runtime", "storage", "version"]);
+
+        let signed_in = auth_router(&app)
+            .oneshot(guarded(Method::GET, "/api/status", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(signed_in.status(), StatusCode::OK);
+        let full: Value = serde_json::from_str(&body_text(signed_in).await).unwrap();
+        for key in ["github", "claude", "assets", "modules", "sandbox", "mesh"] {
+            assert!(full.get(key).is_some(), "the signed-in body keeps {key}");
+            assert!(public_body.get(key).is_none(), "the public body drops {key}");
+        }
+        // Whatever the probes found — the host id, the hostname — must not cross over.
+        let id = full["host"]["id"].as_str().unwrap().to_string();
+        assert!(!public_text.contains(&id), "the host id stays in the signed-in body");
+        if let Some(hostname) = full["host"]["hostname"].as_str() {
+            assert!(!public_text.contains(hostname), "the hostname stays in the signed-in body");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1649,7 +1990,12 @@ pub(crate) mod tests {
     async fn the_status_mesh_is_unavailable_with_a_null_error_where_no_binaries_are_vendored() {
         let root = temp_root();
         let app = test_app(&root);
-        let Json(payload) = status(State(app), Query(StatusQuery { fresh: None })).await;
+        let Json(payload) = status(
+            State(app),
+            Extension(auth::Authenticated(true)),
+            Query(StatusQuery { fresh: None }),
+        )
+        .await;
         let mesh = &payload["mesh"];
         assert_eq!(mesh["enabled"], true);
         assert_eq!(mesh["provider"], "headscale");
@@ -1729,7 +2075,12 @@ pub(crate) mod tests {
         std::fs::set_permissions(&wedged, std::fs::Permissions::from_mode(0o755)).unwrap();
         Arc::get_mut(&mut app).unwrap().cfg.msb = wedged.display().to_string();
         let started = std::time::Instant::now();
-        let Json(payload) = status(State(app), Query(StatusQuery { fresh: None })).await;
+        let Json(payload) = status(
+            State(app),
+            Extension(auth::Authenticated(true)),
+            Query(StatusQuery { fresh: None }),
+        )
+        .await;
         assert!(
             payload["sandbox"]["msb_version"].is_null(),
             "the wedged probe is reported as absent, not hung: {payload}"
@@ -1750,7 +2101,12 @@ pub(crate) mod tests {
     async fn the_status_payload_carries_a_host_object_with_the_microvm_counts() {
         let root = temp_root();
         let app = test_app(&root);
-        let Json(payload) = status(State(app), Query(StatusQuery { fresh: None })).await;
+        let Json(payload) = status(
+            State(app),
+            Extension(auth::Authenticated(true)),
+            Query(StatusQuery { fresh: None }),
+        )
+        .await;
         let host = &payload["host"];
         assert!(host["id"].as_str().is_some_and(|s| !s.is_empty()), "{host}");
         assert!(

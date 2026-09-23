@@ -124,7 +124,7 @@ stateDiagram-v2
 5. **Publish** – "Create PR", or autopilot (the `publish` module's `autopilot` setting, on by default)
    when a turn ends without an error or open question and the agent wrote or updated `pr.md` during
    it: agentd shuts the runner down, the VM is removed, and the host publishes with the hardened
-   publish step: committing (co-authored by Colonizer) only what is uncommitted, pushing the colony's
+   publish step: committing (co-authored by Colonizer Settlers) only what is uncommitted, pushing the colony's
    own `colonizer/…` branch only when origin is behind it, and reusing a pull request that is already
    open for the branch instead of opening a second one. It refuses to push anything else, checked
    before the VM is removed. A publish that fails part-way leaves the colony `failed`, and it can be
@@ -137,6 +137,8 @@ stateDiagram-v2
    on the same worktree and branch and tells the agent to continue from what is already there. A resume past
    the parallel limit queues instead, and boots on its worktree when a slot frees. The new
    agentd numbers its events from 1, so the previous transcript is rotated to `events-<n>.jsonl` first.
+   Changing models does not need a resume: a live `set_model` switches the running colony's model for
+   its next turns and keeps the session (docs/protocol.md §6.1b).
 
 ## Per-colony limits
 

@@ -450,9 +450,38 @@ pub(crate) struct QuotaStatus {
     pub reset_at: Option<String>,
     pub reset_unix: Option<i64>,
     pub providers: Vec<String>,
+    /// Which scope the pause covers: the Claude account's own cap (`"account"`) or named exhausted
+    /// providers (`"provider"`). `None` when the queue is not paused. The cockpit honors it when
+    /// present and otherwise derives the scope from `providers`, so older web builds keep working.
+    pub kind: Option<String>,
 }
 
 pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
+    let waiting = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status == crate::sessions::SessionStatus::Queued)
+        .count();
+    // The Claude account's own cap pauses the queue on its own record — even with no providers
+    // configured — and names no real provider as exhausted.
+    if app.gateway.is_account_quota_exhausted() {
+        let record = app.gateway.account_quota_state();
+        let pause = provider_quota::account_pause(
+            record.as_ref().and_then(|q| q.reset_at.clone()),
+            record.as_ref().and_then(|q| q.reset_unix),
+            waiting,
+        );
+        return QuotaStatus {
+            paused: true,
+            reason: Some(pause.reason),
+            reset_at: pause.reset_at,
+            reset_unix: pause.reset_unix,
+            providers: pause.providers,
+            kind: Some("account".to_string()),
+        };
+    }
     let envs = runner_envs(app).await;
     let providers = app.providers();
     let exhausted = app.gateway.quota_exhausted();
@@ -469,13 +498,6 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             }
         })
         .collect();
-    let waiting = app
-        .sessions
-        .read()
-        .await
-        .iter()
-        .filter(|s| s.status == crate::sessions::SessionStatus::Queued)
-        .count();
     match provider_quota::quota_pause(&states, waiting) {
         Some(pause) => QuotaStatus {
             paused: true,
@@ -483,6 +505,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             reset_at: pause.reset_at,
             reset_unix: pause.reset_unix,
             providers: pause.providers,
+            kind: Some("provider".to_string()),
         },
         None => QuotaStatus {
             paused: false,
@@ -490,6 +513,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             reset_at: None,
             reset_unix: None,
             providers: Vec::new(),
+            kind: None,
         },
     }
 }

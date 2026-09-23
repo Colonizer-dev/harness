@@ -108,12 +108,14 @@ sequenceDiagram
 {"type":"user_message","id":"u-1","text":"Also update the docs"}
 {"type":"answer","question_id":"toolu_01…","answers":{"Which database?":"Postgres","Features?":["Auth","Billing"]},"response":null}
 {"type":"interrupt"}
+{"type":"set_model","model":"claude-sonnet-5"}   // switch the orchestrator model, same session (§6.1b)
 {"type":"shutdown"}          // finish gracefully and exit(0) within 10 s
 ```
 
 `answers` maps each question's exact `question` text to the chosen option label, an array of labels
 (multi-select), or free text ("Other"). `response` (optional) is a free-form reply that dismisses the
-whole question card instead.
+whole question card instead. `set_model` takes the forms a model setting does (§6.1); the runner
+answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
 
 ### Events (runner stdout → agentd)
 
@@ -133,6 +135,7 @@ whole question card instead.
 {"type":"turn_end","is_error":false,"result":"final text or null","cost_usd":0.42,"duration_ms":81234,
  "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}}}  // model_usage optional
 {"type":"log","level":"info|warn|error","message":"…"}
+{"type":"model_changed","model":"claude-sonnet-5","previous":"claude-opus-5-5"}
 ```
 
 Every event above, with its exact fields, is also machine-readable: `docs/agent-events.schema.json`
@@ -157,6 +160,9 @@ Rules:
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
   options; UIs always add "Other".
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
+- `model_changed` names the orchestrator model. The runner emits it when Claude Code's init first
+  names the model (`previous: null`), so a client always knows it, and after each `set_model` the
+  SDK accepted. An init that names the model already announced emits nothing.
 - On `shutdown` or stdin EOF: emit `status exited` and exit.
 
 ---
@@ -181,7 +187,7 @@ UTC), appends it to `/var/lib/colonizer/events.jsonl`, and broadcasts it. agentd
 
 - Server → client text frames: every stored event with `seq > since`, then live events.
 - Client → server text frames: runner commands (§2). agentd forwards `user_message`, `answer`,
-  `interrupt` to the runner's stdin unchanged. Invalid frames are ignored.
+  `interrupt`, `set_model` to the runner's stdin unchanged. Invalid frames are ignored.
 - Multiple concurrent clients are allowed.
 
 ### `GET /v1/pty?cols=<n>&rows=<n>` (WebSocket)
@@ -211,10 +217,10 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, autofix?, automerge?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
-| `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
+| `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
-| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
+| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped). Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
@@ -335,6 +341,28 @@ comes. Both are estimates. A colony's budget answers to `cost_usd + routed_cost_
 host-disk quota to `host_disk_bytes`; past either, the mothership stops the colony: `status` `stopped`,
 the reason in `error`, and the worktree kept, so raising the limit (or, for the quota, cleaning up) and
 pressing Resume continues it.
+
+`GET /api/sessions/{id}` — only that route, never the list or the WS session frame — adds two fields,
+each omitted when absent. `recent_events` is the last ≤ 20 events from the tail of `events.jsonl`
+(at most the last 64 KiB are read, never the whole file), oldest first, as
+`[{seq, ts, type, summary}]`: `seq`/`ts` are whatever the line carried (`ts` is `null` when the line
+has none); `summary` is a one-line digest — the text for `assistant_text`/`user_message`, the pending
+question for `question`, the `state` for `status`, the tool name for `tool_call`, the output for
+`tool_result`, the result (or `"ok"`) for `turn_end` — newlines collapsed and cut to 200 chars plus `…`. `assistant_text_delta`
+and `thinking` lines are skipped as noise. `diagnosis` is the best guess for a non-terminal colony
+(`queued`, `starting`, `running`, `waiting_for_answer`, `idle`), exactly one of `queued`, `booting`,
+`working`, `waiting_on_human`, `waiting_on_provider` or `stuck`, first match wins: `queued` reads
+"queued, waiting for a free slot"; `starting` reads "booting: \<last boot phase\> for \<dur\>"
+(`"starting"` when no phase finished yet, clocked from the boot attempt, else the colony's birth);
+a quota attention flag, or the tail's most recent `assistant_text` with no `user_message` after it
+classifying as provider exhaustion, reads "waiting on provider: quota exhausted[, resets \<X\>]" with
+`resets_at` carrying the provider's reset words verbatim when it named a reset; a colony waiting for
+an answer, held by autopilot, or `idle` otherwise reads "waiting for an answer[: \<question\>]" /
+"autopilot held, waiting for the next message" / "idle, waiting for the next message", naming the
+tail's pending question when it has one; a `running` colony active within the last
+15 minutes (the watchdog's stall default) reads "working (last activity \<dur\> ago)"; anything else
+reads "no activity for \<dur\>; last event: \<type\>: \<summary>" (or "no events yet"). Durations are
+compact (`45s`, `12m`, `3h 5m`).
 
 #### Automatic reclamation
 
@@ -638,6 +666,15 @@ microVM slot (disjoint from `host.microvms_live`, which counts colonies that alr
 peer polling this endpoint for the fleet view (`GET /api/hosts`, below) reads everything it needs
 straight off this one response; nothing extra is asked of it.
 
+`"stall"` is `null` normally, or
+`{"idle_secs", "last_event_at", "live", "queued"}` when at least one colony is live, the queue is
+non-empty, and no live colony has produced an event for ≥ 10 minutes: `idle_secs` is how long every
+live colony has been event-quiet, `last_event_at` (RFC 3339) is the
+newest event any live colony produced, and `live`/`queued` are the counts behind the decision. The
+"last event" time comes from the runtimes' in-memory activity stamps, falling back to `events.jsonl`
+mtimes for live colonies without one — metadata only, never file contents — so the poll stays cheap
+under the endpoint's 10 s cache.
+
 ### `GET /api/hosts`
 
 Fleet visibility (issue #231): this host's own numbers, `self` first, plus one row per configured
@@ -703,7 +740,10 @@ ever dials **out** to the URLs it is given, over whatever private network the op
 by default everywhere, exactly as before; an operator who wants a given host to answer these polls
 sets *that host's own* `COLONIZER_BIND` to a private interface IP of their choosing — never
 `0.0.0.0` — the same opt-in a Settings operator has always had to make to reach the API from another
-machine at all.
+machine at all. Peer polls carry no token, so a peer answers the reduced `GET /api/status`
+(version, queue depth, microVM counts, numeric host capacity, platform/OS, storage verdict — no
+hostnames, host ids, repos, or account identities); the row keys on the configured URL and defaults
+the rest.
 
 ### `GET /api/version`
 
@@ -865,7 +905,12 @@ Client → server:
 {"type":"user_message","text":"…"}                        // harness assigns the id
 {"type":"answer","question_id":"…","answers":{…},"response":null}
 {"type":"interrupt"}
+{"type":"set_model","model":"claude-sonnet-5"}              // trimmed; 1–153 of A–Z a–z 0–9 . _ : - / [ ]
 ```
+
+The harness drops a `set_model` whose trimmed model is empty, too long or has any other character.
+It checks the shape only: whether the model exists is known only inside the colony, so a refused
+switch surfaces as the runner's `warn` log and no `model_changed`.
 
 ### `GET /api/sessions/{id}/terminal?cols=<n>&rows=<n>` (WebSocket)
 
@@ -975,6 +1020,16 @@ The decision is recorded three ways:
 
 An operator override is §4's `model_tier` on `POST /api/sessions`; it wins over the rule for that
 colony, whether or not routing is on.
+
+A live colony can also switch models without a restart: `set_model` (§2, §4) changes the
+orchestrator model for the session's subsequent turns, and the conversation context, microVM and
+worktree are kept. The switch lasts for the life of that session, so Stop and Resume derive the
+model from the settings and tier again, as before. Subagents that inherit the orchestrator's model
+follow the switch; a configured `subagent_model` and the background model are unchanged.
+The provider timeouts and context cap the runner derived at boot from the boot models (§6.5) are
+not recomputed, so switching to a slower provider or one with a smaller context window is at the
+user's risk. A `<provider>/<model>` switch also needs a route the colony booted with: a provider
+added after boot has none, and its requests go to Anthropic like any unrouted model.
 
 ### 6.1c Jev second opinion (shadow mode)
 
@@ -1198,7 +1253,9 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 `max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
 (`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
 layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's
-`max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The two
+`max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The sandbox
+module's `hold_timeout_minutes` (default 30, 1 to 1440) bounds how long an autopilot-held colony keeps
+counting: past it the queue parks the colony and frees its slot (see the Watchdog section). The two
 per-colony limits override the global ones: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
 host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
 `host_disk`); `0` (or `"0"`) means unlimited, which is how an org opts out of a global limit. The same
@@ -1276,7 +1333,7 @@ settings `enabled` = true, `require_review` = true; off lets only `repo` notes s
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout", "since": "…", "nudges": 2}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -1288,7 +1345,11 @@ autopilot colony whose turn ends with an error (not an interrupt) is not publish
 it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
-announce here either.
+announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
+(default 30) parks the same way: an `idle` colony with `attention.reason` `autopilot_held` past the
+timeout is stopped with its worktree kept and `attention.reason` `hold_timeout`, so its microVM slot
+frees for queued colonies (one org's held colonies cannot block every other org past the timeout)
+while staying resumable. Within the timeout a held colony still counts against the parallel limits.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,

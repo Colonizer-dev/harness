@@ -1035,6 +1035,8 @@ body {
 @keyframes ck-dig { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
 @keyframes ck-flow { to { stroke-dashoffset: -20; } }
 @keyframes ck-grow { from { opacity: 0; transform: scale(0.2); } }
+@keyframes ck-zoom { from { opacity: 0; transform: scale(0.15); } to { opacity: 1; transform: scale(1); } }
+@keyframes ck-wander { 0%, 100% { transform: translate(0, 0); } 25% { transform: translate(24px, -14px); } 50% { transform: translate(44px, 6px); } 75% { transform: translate(18px, 14px); } }
 @keyframes ck-slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* Red-team raids (issue #212): the red ant column that marches onto a nest under attack.

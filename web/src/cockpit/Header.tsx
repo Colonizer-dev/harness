@@ -45,8 +45,10 @@ export function Header(props: {
   cost: number | null;
   update: UpdateStatus | null;
   onOpenUpdates: () => void;
+  /** The status poll is failing: the counts beside it are stale, and the header says so. */
+  statusError: boolean;
 }): ReactElement {
-  const { orgs, hiddenOrgs, selectedOrg, onSelectOrg, onOpenOrgSettings, needByOrg, crumb, liveCount, needCount, cost, update, onOpenUpdates } =
+  const { orgs, hiddenOrgs, selectedOrg, onSelectOrg, onOpenOrgSettings, needByOrg, crumb, liveCount, needCount, cost, update, onOpenUpdates, statusError } =
     props;
   const [menuOpen, setMenuOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -213,6 +215,12 @@ export function Header(props: {
       <div className="flex-1" />
 
       <div className="flex items-center gap-3.5 font-mono text-xs text-muted">
+        {statusError && (
+          <span role="status" title="Mothership unreachable" className="inline-flex items-center gap-1.5 tabular-nums text-err">
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-err" />
+            Mothership unreachable
+          </span>
+        )}
         <span className="inline-flex items-center gap-1.5 tabular-nums">
           <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-ok" />
           {liveCount} live
