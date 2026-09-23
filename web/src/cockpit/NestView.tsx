@@ -19,7 +19,7 @@ import { KIND_DOT } from "./InboxView";
 import { feedEntry } from "./feed";
 import { RedAnts } from "./RedAnts";
 import {
-  MAX_CHAMBERS,
+  chamberCount,
   SURFACE_Y,
   branchPaths,
   normalizeBox,
@@ -126,6 +126,7 @@ export function planBalloons(anchors: BalloonAnchor[]): BalloonAnchor[] {
 
 export function NestView({
   sessions,
+  capacity = null,
   selectedId,
   mothershipSelected,
   redRuns = [],
@@ -138,8 +139,10 @@ export function NestView({
   onSelectMothership,
   onLaunch,
 }: {
-  /** Already filtered to the chosen org and sorted; the view takes the first MAX_CHAMBERS. */
+  /** Already filtered to the chosen org and sorted; the view takes the first chambers. */
   sessions: Session[];
+  /** What the machine runs at once (`sandbox.max_parallel`); unknown reads as the default 5. */
+  capacity?: number | null;
   selectedId: string | null;
   mothershipSelected: boolean;
   /** Red-team runs (issue #212): a live one targeting this nest's org marches ants over the plot. */
@@ -179,17 +182,18 @@ export function NestView({
     return () => observer.disconnect();
   }, []);
 
-  const chambers = sessions.slice(0, MAX_CHAMBERS);
+  const count = chamberCount(capacity);
+  const chambers = sessions.slice(0, count);
   // Side tunnels are the work a colony has done, and steps are only known for the open colony.
   const selectedSteps = settlers.reduce((total, settler) => total + settler.steps, 0);
   const mothershipX = Math.round(box.width / 2);
   const returned = sessions.filter((s) => s.status === "pr_opened").slice(0, 3);
   const queued = sessions.filter((s) => s.status === "queued").slice(0, 2);
   const waiting = sessions.filter(needsYou);
-  const freeSlot = chambers.length < MAX_CHAMBERS ? slotAt(chambers.length, box) : null;
+  const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
 
   const placed = chambers.map((session, index) => {
-    const slot = slotAt(index, box);
+    const slot = slotAt(index, box, count);
     const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
     const seed = tunnelSeed(session.repo, session.issue);
     // Steps are only known for the colony whose stream is open, so only its branches are dug.
