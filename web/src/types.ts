@@ -169,7 +169,7 @@ export interface HarnessStatus {
     detail?: string | null;
     error?: string | null;
   } | null;
-  /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */
+  /** `{ ok: true }` alone until there is a storage alert: a failed disk write, which can recover, or colony records lost at startup, which cannot (see `StorageHealth.kind`). Sticky server-side; older mothership builds omit it. */
   storage?: StorageHealth;
   /** Aggregate reclamation counts from the same poll (issue #223); older mothership builds omit it. */
   reclaim?: { reclaimable: number; unpushed: number };
@@ -281,13 +281,20 @@ export interface FleetHost {
 
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
 export interface StorageHealth {
-  /** False while writes are failing; true when every write was confirmed, or once one succeeds after a failure (then `recovered_at` is set). */
+  /** False while writes are failing; true when every write was confirmed, or once one succeeds after a failure (then `recovered_at` is set). Always true for load damage. */
   ok: boolean;
-  /** The underlying write error, for showing verbatim. Kept after a recovery: the gap it reports still happened. */
+  /**
+   * Which alert this is (issue #371). `write`: a disk write failed; it recovers once one goes through.
+   * `load_damage`: sessions.json was unreadable or partly damaged at startup, so colony records were
+   * lost; `ok` only says writes work, it never recovers, and `message` names the `.corrupt-` copy.
+   * Older motherships omit it: read a missing kind as `write`.
+   */
+  kind?: "write" | "load_damage" | null;
+  /** The underlying write error (for load damage: what was lost and where the original went), for showing verbatim. Kept after a recovery: the gap it reports still happened. */
   message?: string | null;
-  /** When the latest failure was recorded; same representation as a harness_log `ts`. */
+  /** When the latest failure was recorded (for load damage: when startup found it); same representation as a harness_log `ts`. */
   ts?: string | null;
-  /** Failed writes since the mothership started; a recovery does not reset it. */
+  /** Failed writes since the mothership started; a recovery does not reset it. A load_damage alert always carries 1, which is not a write count. */
   failures?: number | null;
   /** When a write first succeeded after the latest failure; null while writes are still failing. Absent from older motherships, whose alert stays until a restart. */
   recovered_at?: string | null;
