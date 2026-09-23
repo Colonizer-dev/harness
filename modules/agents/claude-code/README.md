@@ -67,7 +67,8 @@ Claude Code sends its full request shape to routed providers, including `thinkin
 
 With `COLONIZER_MEMORY_DIR` set, the agent gets two auto-allowed tools from an in-process MCP server
 (`colonizer_memory`): `memory_search` searches `{repo,org,global}/notes/*.md`, and `memory_propose`
-emits a `memory_proposal` event for review on the mothership. Nothing is written inside the colony.
+emits a `memory_proposal` event for review on the mothership (with review off, a repo note is stored
+straight away; org and global notes always wait for review). Nothing is written inside the colony.
 
 ## Waiting
 

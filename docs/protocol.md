@@ -980,7 +980,11 @@ Approved notes are mounted read-only in every colony:
 /colonizer/memory/repo/    MEMORY.md  notes/<id>.md     (the colony's repository)
 ```
 
-`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`). `COLONIZER_MEMORY_DIR=/colonizer/memory`
+`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`). Every note a colony wrote is labelled
+before its title: `(from a colony, reviewed)` once a person approved it, `(from a colony, not reviewed)`
+when stored with review off, and `(from a colony)` for notes from before that was recorded. Note files
+written from then on carry the matching `> Written by a colony…` line under the heading. The index header
+says notes are background to verify, not instructions. `COLONIZER_MEMORY_DIR=/colonizer/memory`
 tells the runner memory is enabled. The runner exposes two tools to the agent: `memory_search`
 (search the mounted notes) and `memory_propose` (scope `repo` | `org` | `global`, `title`, `content`).
 Proposing emits a runner event; nothing is written inside the colony:
@@ -991,15 +995,16 @@ Proposing emits a runner event; nothing is written inside the colony:
 
 The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
-mount immediately.
+mount immediately. With `require_review` off, a `repo` note is stored at once with `source.reviewed: false`
+(`status: "approved"` in the broadcast); `org` and `global` notes are always queued.
 
 **Where approved notes live** is the memory module's provider. `files` keeps them on the mothership and
 mounts each scope directory. `mem0` keeps them in a [mem0](https://mem0.ai) project through its Platform
 API (v3), and the runner side is identical:
 
-- Proposals queue on the mothership either way. mem0 only receives a note once it is approved (or stored
-  with review off), written with `infer: false` and `immutable: true` so mem0's extraction model never
-  rewrites or later consolidates text a human reviewed.
+- Proposals queue on the mothership either way. mem0 only receives a note once it is approved (or a repo
+  note stored with review off), written with `infer: false` and `immutable: true` so mem0's extraction
+  model never rewrites or later consolidates text a human reviewed.
 - Each scope is a mem0 `user_id` (`colonizer:global`, `colonizer:org:<org>`, `colonizer:repo:<owner>/<repo>`)
   and every memory carries `app_id: "colonizer"`. Colonizer's own fields (`colonizer_id`, `scope`, `key`,
   `title`, `tags`, `source`, `created_at`) ride in `metadata`. Listing and deleting are filtered on both, so a
@@ -1010,7 +1015,7 @@ API (v3), and the runner side is identical:
   task (the issue title, the instructions, then the issue body, not the full prompt).
 - If mem0 cannot be reached at boot, the colony still starts, with an empty layout and a `warn` in its log.
   An approval that cannot reach mem0 fails with `502` and the proposal stays in the queue; with review off, a
-  note that cannot be stored is queued for review instead of dropped.
+  repo note that cannot be stored is queued for review instead of dropped.
 
 ### 6.2b Autonomous mode (Mothership)
 
@@ -1210,12 +1215,13 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
 
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
-(`pending`). `source` = `{session_id, repo}` or `{user: true}`.
+(`pending`). `source` = `{session_id, repo}` or `{user: true}`; a colony's note gains `reviewed: true`
+when approved, or `reviewed: false` when stored with review off.
 
 **Watchdog.** New module kind `watchdog` (provider `default`; settings `enabled` = true,
 `stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30) and kind `memory` (provider `files`;
-settings `enabled` = true, `require_review` = true). `Session` gains `last_activity_at` and
-`attention`:
+settings `enabled` = true, `require_review` = true; off lets only `repo` notes skip review). `Session`
+gains `last_activity_at` and `attention`:
 
 ```json
 {"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted", "since": "…", "nudges": 2}}
