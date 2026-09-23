@@ -987,6 +987,32 @@ function mockFleet(live: number): { hosts: FleetHost[] } {
   };
 }
 
+/**
+ * GET /api/status `quota` (issue #404): null on a healthy mothership, which is the default.
+ * `?quota=paused` parks the queue behind a Claude session limit so the cockpit's global banner is
+ * exercisable — and flags the mock's stopped colony quota-parked to match, so Resume all has
+ * something to resume.
+ */
+const mockQuotaParam = () => {
+  try {
+    return new URLSearchParams(location.search).get("quota");
+  } catch {
+    return null;
+  }
+};
+
+function mockQuota(): HarnessStatus["quota"] {
+  if (mockQuotaParam() !== "paused") return null;
+  return {
+    paused: true,
+    reason: "Claude session limit reached",
+    reset_at: "09-23 07:54 UTC",
+    reset_unix: 1_789_000_000,
+    providers: [],
+    kind: "account",
+  };
+}
+
 /** The mesh payload for this load. A Mac vendors no tailscaled, so its mesh is `unavailable` by
  *  design (#32) and must never read as a fault (#128): `?runtime=mac` implies it unless `?mesh=`
  *  says otherwise, and `?mesh=error` stays a genuine failure. */
@@ -1176,6 +1202,10 @@ export function createMockApi(): Api {
   sessions.set(failed.session.id, failed);
   sessions.set(old.session.id, old);
   sessions.set(stuck.session.id, stuck);
+  if (mockQuotaParam() === "paused") {
+    // The banner's Resume all needs a parked colony to resume: stopped, flagged, worktree kept.
+    sessions.get("fail4321")?.patch({ attention: { reason: "provider_quota_exhausted", since: ago(10), nudges: 0 } });
+  }
 
   const mem0: Mem0Status = { has_key: false, source: null, active: false };
 
@@ -1764,6 +1794,9 @@ export function createMockApi(): Api {
             avg_latency_ms: p.health?.avg_latency_ms ?? 0,
             degraded: p.health?.degraded ?? false,
           })),
+          // The cockpit's global session-limit banner (issue #404); null by default, paused
+          // behind a Claude session limit under `?quota=paused`.
+          quota: mockQuota(),
         };
       }),
     hosts: () => later(() => mockFleet([...sessions.values()].filter((s) => isLive(s.session.status)).length)),

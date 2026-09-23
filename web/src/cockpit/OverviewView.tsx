@@ -162,6 +162,7 @@ export function OverviewView({
   runs = [],
   initialFilter = null,
   quota = null,
+  quotaBannerVisible = false,
   onStart,
   onStop,
   onOpenOrg,
@@ -182,6 +183,10 @@ export function OverviewView({
   initialFilter?: OverviewFilter | null;
   /** Quota exhaustion across providers (issue #225); a paused queue banners the page. */
   quota?: StatusQuota | null;
+  /** True while the cockpit's global quota banner shows (issue #404): the page's own scoped
+    * queue-paused banner hides, so a paused queue banners exactly once. Defaults to false, which
+    * keeps the scoped banner for every caller that renders this page without the global one. */
+  quotaBannerVisible?: boolean;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
   onOpenOrg: (org: string) => void;
@@ -268,7 +273,7 @@ export function OverviewView({
   return (
     <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
       <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-5">
-        {quota?.paused ? (
+        {quota?.paused && !quotaBannerVisible ? (
           <div role="status" className="rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn">
             Queue paused — {quota.reason ?? "every provider's quota is exhausted"}
           </div>
