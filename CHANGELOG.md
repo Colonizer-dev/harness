@@ -27,12 +27,27 @@ setting) is called out under **Take care** rather than left for you to find.
 - **Realtime Cockpit dashboards.** The dashboards now update over a single authenticated `/api/stream` WebSocket (sessions including running cost/tokens, orgs, fleet hosts, storage), with a Live indicator, tweened counters, reduced-motion support, and a fallback to the existing poll schedule with reconnect/backoff when the stream drops. ([#446])
 - **Colony PRs rebase themselves when GitHub marks them DIRTY or BEHIND.** A live colony is asked to rebase onto fresh main and re-run its own gates itself, in its own microVM, and push; a colony that's gone has its branch rebased on the host instead (git only, no gates — GitHub's own CI covers that push), and if that host rebase conflicts, it's flagged needs-rebase and notified instead — once per main SHA, with SHA-aware backoff. A newly launched colony can opt in to queueing behind a live colony already touching the same repository (off by default; pass `serialize` to ask for it), starting from fresh main once that colony publishes, merges or finishes; the cockpit shows `queued behind <colony>` and a needs-rebase indicator. ([#453])
 - **Skill-pack validation at every gate.** The vendored-plugin updater validates a pin's new archive with the skill-pack validator and skips the pin instead of pinning a pack that breaks a rule — the errors land in the proposal when another pin is adopted, otherwise the run fails with them in its log; CI and the updater's workflow stage the pinned packs and run the validator over them; and colony boot now enforces the `mcp.json` rules too (every server needs a stdio command or a remote url, and a remote one its declared hosts), with the declared hosts readable for the future egress gate. ([#370])
+- **Security-hunter modules, phase one (Strix).** A `Manifest` per hunter, a `hunters.lock` pin
+  per platform, and an on-demand install (`POST /api/hunters/strix/install`) that downloads the
+  pinned tarball and unpacks one verified binary — behind the `COLONIZER_HUNTER_INSTALL=1`
+  opt-in, Linux only. Strix `vulnerabilities.json` + SARIF parsers exist but no scan runs yet;
+  Shannon ships as a manifest-only stub. See
+  [docs/security-hunters.md](docs/security-hunters.md). ([#440])
 
 ### Fixed
 
 - A mothership restart no longer stops every live colony when `msb ls` fails outright. After a host reboot the microsandbox daemon can come up after the harness, and recovery read that failure as "nothing is running" and removed every live colony's microVM; it now waits — retrying with backoff — until `msb ls` answers before it decides what to tear down, so colonies that kept running across the restart are reconnected once the daemon appears. ([#407])
 - **A malformed `COLONIZER_GATEWAY_BIND` refuses startup instead of silently falling back to 41750.** The bind is parsed once as an IP:port socket address and the listener, the colony model routes and the per-colony network fence all use that port, so a typo'd bind (or a hostname like `localhost:41750`, which is no longer resolved) can no longer hand colonies an allow rule for a port nothing listens on. The fence is extracted into `colony_network` and unit-tested: a colony always boots with the `public` profile alone, and its only host allows are the mesh control port and the gateway port. ([#406])
 - **A damaged `orgs.json`, `providers.json` or `modules.json` is no longer silently replaced by defaults.** A settings save over a file that will not parse is refused with an error naming it, the cockpit's storage banner says defaults are in effect until it is fixed or removed, `modules.json` is moved aside to a `.corrupt-*` file at startup like `sessions.json`, and concurrent saves are serialised so two at once cannot lose each other's org or provider. ([#408])
+
+### Security
+
+- **Hunter installs are fenced off the host Docker daemon and hardened.** The capability probe
+  no longer touches the host's Docker daemon and never suggests pointing at it: Docker-dependent
+  hunters stay not-ready until Docker runs inside the colony microVM. Installs are Linux-only,
+  serialised per hunter, verified by checksum over the downloaded bytes before anything is
+  unpacked, capped at 256 MiB, follow https redirects only, and land atomically with mode
+  `0o555`. ([#442])
 
 ## [v0.1.8] - 2026-09-23
 
@@ -75,11 +90,6 @@ setting) is called out under **Take care** rather than left for you to find.
 - **Switch a running colony's model.** A `set_model` command changes the model
   for the colony's next turns in the same session, conversation and microVM,
   until it is stopped. ([#240])
-- **Security-hunter modules (Strix).** On-demand, checksum-verified install of
-  the pinned Strix binary, Strix `vulnerabilities.json` + SARIF findings
-  parsers, a capability probe (runtime + Docker), and
-  [docs/security-hunters.md](docs/security-hunters.md). Shannon ships as a
-  manifest-only stub for now.
 
 ### Fixed
 
@@ -421,6 +431,8 @@ Macs. ([#74])
 [#407]: https://github.com/Colonizer-dev/harness/issues/407
 [#408]: https://github.com/Colonizer-dev/harness/issues/408
 [#370]: https://github.com/Colonizer-dev/harness/issues/370
+[#440]: https://github.com/Colonizer-dev/harness/pull/440
+[#442]: https://github.com/Colonizer-dev/harness/issues/442
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
