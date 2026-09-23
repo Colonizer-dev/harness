@@ -4,7 +4,8 @@
 //! them rather than around mem0's own model:
 //!
 //! - **Review stays on the Mothership.** Proposals queue locally exactly as before. mem0 only ever
-//!   receives a note a human approved, or one stored with review switched off.
+//!   receives a note a human approved, or a repo note stored with review switched off: org and
+//!   global notes are always reviewed.
 //! - **Colonies never reach mem0 and never see the key.** At boot the Mothership writes a colony's
 //!   memories into the read-only layout `files` mounts, so `memory_search` and the prompt that
 //!   points the agent at `MEMORY.md` work without a line changing inside the colony.

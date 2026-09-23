@@ -26,7 +26,7 @@ These held when the audit checked them against the code.
   VM ran, nested `.git` directories are removed, and `pr.md` must be a regular file within a size
   limit.
 - **Memory review.** Proposals arrive pending, and only an approved note is mounted into another
-  colony. Review is on unless an operator turns it off.
+  colony. An operator can turn this off for repo notes only; org and global notes are always reviewed.
 - **Host and Origin checks.** The API binds to loopback, rejects unknown `Host` values, and requires
   a matching `Origin` on non-GET requests and WebSocket upgrades.
 - **Pinned inputs.** The vendored artefacts, the agent binary and the Headroom bundles are verified
