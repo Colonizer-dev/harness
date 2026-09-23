@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import type { Api } from "../api";
 import { ApiContext } from "../context";
-import type { Repo } from "../types";
-import { Composer, appendHeard, composerRepos, defaultRepo } from "./Composer";
+import type { Issue, Repo } from "../types";
+import { session } from "./testFixtures";
+import { Composer, appendHeard, composerRepos, defaultRepo, mentionedIssue, suggestedIssues } from "./Composer";
 
 const repo = (full_name: string, pushed_at: string | null, archived = false): Repo => ({
   full_name,
@@ -39,6 +40,26 @@ describe("appendHeard", () => {
     expect(appendHeard("", " fix the login bug ")).toBe("fix the login bug");
     expect(appendHeard("Fix the login bug  ", "and add a test")).toBe("Fix the login bug and add a test");
     expect(appendHeard("typed", "  ")).toBe("typed");
+  });
+});
+
+const issue = (number: number, updatedAt: string): Issue => ({ number, title: `Issue ${number}`, body: null, labels: [], author: null, updatedAt, url: "" });
+const issues = [issue(1, "2026-09-01"), issue(2, "2026-09-20"), issue(3, "2026-09-10")];
+
+describe("mentionedIssue", () => {
+  it("links a #number the repository has open, and ignores the rest", () => {
+    expect(mentionedIssue("fix #3 please", issues)?.number).toBe(3);
+    expect(mentionedIssue("(#2) then", issues)?.number).toBe(2);
+    expect(mentionedIssue("fix #99", issues)).toBeNull();
+    expect(mentionedIssue("colour#3", issues)).toBeNull();
+  });
+});
+
+describe("suggestedIssues", () => {
+  it("suggests the freshest open issues that no live colony holds", () => {
+    const sessions = [session({ repo: "acme/api", issue: 2, status: "running" }), session({ id: "b", repo: "acme/api", issue: 3, status: "merged" })];
+    expect(suggestedIssues(issues, sessions, "acme/api").map((i) => i.number)).toEqual([3, 1]);
+    expect(suggestedIssues(issues, [], "acme/api", 2).map((i) => i.number)).toEqual([2, 3]);
   });
 });
 

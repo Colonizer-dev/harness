@@ -463,6 +463,7 @@ export function Cockpit({
               repos={repos}
               githubConnected={status?.github.connected ?? false}
               autopilotDefault={autopilotDefault}
+              sessions={sessions}
               onCreated={(session) => {
                 onCreated(session);
                 setView("home");

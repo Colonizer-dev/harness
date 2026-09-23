@@ -7,9 +7,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 
 import { errorMessage, useApi, useToast } from "../context";
 import { sameOrg, store, stored } from "../components/ui";
-import type { Repo, Session } from "../types";
+import { isLive } from "../components/ui";
+import type { Issue, Repo, Session } from "../types";
 
 const REPO_KEY = "colonizer.repo";
+/** How many bars the listening waveform draws. */
+const WAVE_BARS = 36;
 
 /** The repositories a prompt can go to: the workspace's own, unarchived, most recently pushed first. */
 export function composerRepos(repos: readonly Repo[], org: string | null): Repo[] {
@@ -22,6 +25,24 @@ export function composerRepos(repos: readonly Repo[], org: string | null): Repo[
 export function defaultRepo(choices: readonly Repo[], remembered: string | null): string | null {
   if (remembered && choices.some((r) => r.full_name === remembered)) return remembered;
   return choices[0]?.full_name ?? null;
+}
+
+/** The issue a prompt names with `#123`, when the repository has it open. */
+export function mentionedIssue(text: string, issues: readonly Issue[]): Issue | null {
+  for (const match of text.matchAll(/(?:^|[\s(])#(\d{1,7})\b/g)) {
+    const found = issues.find((i) => i.number === Number(match[1]));
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Up to `limit` open issues worth suggesting: freshest first, none a live colony already holds. */
+export function suggestedIssues(issues: readonly Issue[], sessions: readonly Session[], repo: string, limit = 4): Issue[] {
+  const held = new Set(sessions.filter((s) => s.repo === repo && s.issue != null && isLive(s.status)).map((s) => s.issue));
+  return [...issues]
+    .filter((i) => !held.has(i.number))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, limit);
 }
 
 // --- Speech ------------------------------------------------------------------------------------
@@ -69,12 +90,54 @@ function useDictation(onFinal: (phrase: string) => void) {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The microphone's loudness, 0–1, sampled while listening: what the waveform draws. A second,
+  // local-only read of the mic (Web Audio); recognition keeps its own stream.
+  const [levels, setLevels] = useState<number[]>([]);
+  const meter = useRef<{ stream: MediaStream; ctx: AudioContext; raf: number } | null>(null);
   const final = useRef(onFinal);
   final.current = onFinal;
 
+  const stopMeter = useCallback(() => {
+    const m = meter.current;
+    meter.current = null;
+    if (!m) return;
+    cancelAnimationFrame(m.raf);
+    m.stream.getTracks().forEach((t) => t.stop());
+    void m.ctx.close();
+    setLevels([]);
+  }, []);
+
+  const startMeter = useCallback(async () => {
+    if (meter.current || !navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new AudioContext();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      const buf = new Uint8Array(analyser.fftSize);
+      let last = 0;
+      const tick = (now: number) => {
+        if (!meter.current) return;
+        meter.current.raf = requestAnimationFrame(tick);
+        if (now - last < 45) return;
+        last = now;
+        analyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (const v of buf) sum += ((v - 128) / 128) ** 2;
+        const level = Math.min(1, Math.sqrt(sum / buf.length) * 4.5);
+        setLevels((prev) => [...prev.slice(-(WAVE_BARS - 1)), level]);
+      };
+      meter.current = { stream, ctx, raf: requestAnimationFrame(tick) };
+    } catch {
+      /* no meter: the waveform falls back to its idle animation */
+    }
+  }, []);
+
   const stop = useCallback(() => {
     rec.current?.stop();
-  }, []);
+    stopMeter();
+  }, [stopMeter]);
 
   const start = useCallback(() => {
     if (!ctor || rec.current) return;
@@ -98,21 +161,29 @@ function useDictation(onFinal: (phrase: string) => void) {
       rec.current = null;
       setListening(false);
       setInterim("");
+      stopMeter();
     };
     rec.current = r;
     setError(null);
     setListening(true);
     try {
       r.start();
+      void startMeter();
     } catch {
       rec.current = null;
       setListening(false);
     }
-  }, [ctor]);
+  }, [ctor, startMeter, stopMeter]);
 
-  useEffect(() => () => rec.current?.stop(), []);
+  useEffect(
+    () => () => {
+      rec.current?.stop();
+      stopMeter();
+    },
+    [stopMeter],
+  );
 
-  return { supported: ctor !== null, listening, interim, error, start, stop };
+  return { supported: ctor !== null, listening, interim, error, levels, start, stop };
 }
 
 // --- The composer -------------------------------------------------------------------------------
@@ -122,11 +193,14 @@ export function Composer({
   repos,
   githubConnected,
   autopilotDefault,
+  sessions = [],
   onCreated,
 }: {
   /** The workspace in scope; the repository chip only offers its repositories. */
   org: string | null;
   repos: readonly Repo[];
+  /** The colony list, so a suggested issue is never one a live colony already holds. */
+  sessions?: readonly Session[];
   githubConnected: boolean;
   autopilotDefault: boolean;
   onCreated: (session: Session) => void;
@@ -143,9 +217,41 @@ export function Composer({
   const repo = chosen && choices.some((r) => r.full_name === chosen) ? chosen : defaultRepo(choices, stored(REPO_KEY));
   const field = useRef<HTMLTextAreaElement>(null);
   const root = useRef<HTMLDivElement>(null);
+  // The repository's open issues, fetched once per repository while the composer is open.
+  const issueCache = useRef(new Map<string, Issue[]>());
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [picked, setPicked] = useState<Issue | null>(null);
+
+  useEffect(() => {
+    if (!open || !repo || !githubConnected) return;
+    const cached = issueCache.current.get(repo);
+    if (cached) {
+      setIssues(cached);
+      return;
+    }
+    let cancelled = false;
+    setIssues([]);
+    api
+      .issues(repo)
+      .then((list) => {
+        issueCache.current.set(repo, list);
+        if (!cancelled) setIssues(list);
+      })
+      .catch(() => {
+        /* no suggestions; typing still launches */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, open, repo, githubConnected]);
+
+  // A chip or a #123 in the prompt links an issue; the chip wins, and switching repository drops it.
+  useEffect(() => setPicked(null), [repo]);
 
   const voice = useDictation((phrase) => setText((current) => appendHeard(current, phrase)));
   const shown = voice.interim ? appendHeard(text, voice.interim) : text;
+  const linked = picked ?? mentionedIssue(shown, issues);
+  const suggestions = repo && !linked && !shown.trim() ? suggestedIssues(issues, sessions, repo) : [];
 
   // ⌘K / Ctrl+K opens and focuses from anywhere; Escape closes.
   useEffect(() => {
@@ -192,18 +298,23 @@ export function Composer({
     else voice.start();
   };
 
-  const canSend = !sending && githubConnected && repo !== null && shown.trim().length > 0;
+  const canSend = !sending && githubConnected && repo !== null && (shown.trim().length > 0 || linked !== null);
 
   const send = async () => {
     if (!canSend || !repo) return;
     if (voice.listening) voice.stop();
-    const instructions = shown.trim();
+    const instructions = shown.trim() || undefined;
     setSending(true);
     try {
-      const session = await api.createSession({ repo, instructions, autopilot: autopilotDefault });
+      const session = await api.createSession(
+        linked
+          ? { repo, issue: linked.number, title: linked.title, instructions, autopilot: autopilotDefault }
+          : { repo, instructions, autopilot: autopilotDefault },
+      );
       store(REPO_KEY, repo);
       toast(session.status === "queued" ? `Queued on ${repo} — it starts when a colony finishes` : `Colony launched on ${repo}`);
       setText("");
+      setPicked(null);
       setOpen(false);
       onCreated(session);
     } catch (error) {
@@ -214,14 +325,14 @@ export function Composer({
   };
 
   const filtered = query.trim() ? choices.filter((r) => r.full_name.toLowerCase().includes(query.trim().toLowerCase())) : choices;
-  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.listening ? "Listening…" : "Describe a task for a new colony…";
+  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.listening ? "Listening…" : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, or pick an issue below…";
 
   return (
     <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6">
       <div
         data-open={open}
         data-listening={voice.listening}
-        className={`composer v3-pop pointer-events-auto w-full rounded-[22px] border border-border-strong shadow-[0_18px_60px_-12px_rgb(0_0_0/0.55)] transition-[max-width] duration-300 ease-out ${open ? "max-w-[720px]" : "max-w-[460px]"}`}
+        className={`composer v3-pop pointer-events-auto relative w-full rounded-[22px] border border-border-strong shadow-[0_18px_60px_-12px_rgb(0_0_0/0.55)] transition-[max-width] duration-300 ease-out ${open ? "composer-open max-w-[760px]" : "max-w-[480px]"}`}
       >
         {!open ? (
           <div className="flex h-12 items-center gap-2 pl-4 pr-1.5">
@@ -261,11 +372,50 @@ export function Composer({
                 }}
                 placeholder={placeholder}
                 aria-label="task for a new colony"
-                className="bare-field min-h-[26px] flex-1 resize-none border-0 bg-transparent p-0 text-[15px] leading-[1.6] text-text outline-none placeholder:text-faint focus-visible:outline-none"
+                className="bare-field min-h-[28px] flex-1 resize-none border-0 bg-transparent p-0 text-[16px] leading-[1.6] text-text outline-none placeholder:text-faint focus-visible:outline-none"
               />
             </div>
 
-            {voice.listening && <Waveform />}
+            {voice.listening && <Waveform levels={voice.levels} />}
+
+            {linked && (
+              <div className="px-2.5 pt-2">
+                <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-accent/40 bg-accent-soft py-1 pl-2.5 pr-1 text-[12.5px] text-text">
+                  <span className="font-mono text-accent">#{linked.number}</span>
+                  <span className="truncate">{linked.title}</span>
+                  <button
+                    type="button"
+                    aria-label={`unlink issue #${linked.number}`}
+                    onClick={() => {
+                      setPicked(null);
+                      setText((t) => t.replace(new RegExp(`(^|\\s)#${linked.number}\\b`), "$1").trim());
+                    }}
+                    className="grid h-5 w-5 cursor-pointer place-items-center rounded-full border-0 bg-transparent text-muted hover:bg-panel-3 hover:text-text"
+                  >
+                    ×
+                  </button>
+                </span>
+              </div>
+            )}
+
+            {suggestions.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 px-2.5 pt-2.5" aria-label="open issues">
+                {suggestions.map((issue) => (
+                  <button
+                    key={issue.number}
+                    type="button"
+                    onClick={() => {
+                      setPicked(issue);
+                      field.current?.focus();
+                    }}
+                    className="flex max-w-[260px] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted transition-colors hover:border-border-strong hover:bg-panel-2 hover:text-text"
+                  >
+                    <span className="font-mono text-faint">#{issue.number}</span>
+                    <span className="truncate">{issue.title}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             {voice.error && <div className="px-3 pt-1 text-[12.5px] text-warn">{voice.error}</div>}
 
             <div className="mt-2 flex items-center gap-2 px-1">
@@ -326,7 +476,9 @@ export function Composer({
                   </div>
                 )}
               </div>
-              <span className="hidden text-[12px] text-faint sm:inline">{autopilotDefault ? "autopilot on" : "you review the PR"}</span>
+              <span className="hidden text-[12px] text-faint md:inline">
+                {autopilotDefault ? "autopilot on" : "you review the PR"} · <kbd className="font-sans">↵</kbd> launch · <kbd className="font-sans">⇧↵</kbd> new line
+              </span>
               <div className="flex-1" />
               {voice.supported && <MicButton listening={voice.listening} onClick={toggleVoice} />}
               <button
@@ -380,12 +532,16 @@ function MicButton({ listening, onClick }: { listening: boolean; onClick: () => 
   );
 }
 
-/** A soft waveform while the microphone is open — motion that says "I'm listening". */
-function Waveform(): ReactElement {
+
+/** The waveform while the microphone is open: the voice's real loudness, newest on the right; an
+ *  idle ripple until (or unless) the level meter is running. */
+function Waveform({ levels }: { levels: readonly number[] }): ReactElement {
+  const live = levels.length > 0;
+  const bars = live ? [...Array(Math.max(0, WAVE_BARS - levels.length)).fill(0), ...levels] : Array(WAVE_BARS).fill(0);
   return (
-    <div aria-hidden="true" className="composer-wave flex h-8 items-center justify-center gap-[3px] px-3 pt-1">
-      {Array.from({ length: 28 }, (_, i) => (
-        <span key={i} style={{ animationDelay: `${(i * 67) % 900}ms` }} />
+    <div aria-hidden="true" data-live={live} className="composer-wave flex h-9 items-center justify-center gap-[3px] px-3 pt-1">
+      {bars.map((level: number, i: number) => (
+        <span key={i} style={live ? { height: `${Math.max(3, Math.round(level * 30))}px` } : { animationDelay: `${(i * 67) % 900}ms` }} />
       ))}
     </div>
   );
