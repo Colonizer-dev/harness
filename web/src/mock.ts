@@ -3,6 +3,8 @@ import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import type {
+  ArchMap,
+  RepoMap,
   AgentEvent,
   AgentEventBody,
   AgentRef,
@@ -1168,8 +1170,47 @@ const mockOrgSpend: Record<string, OrgSpend> = {
   },
 };
 
+/** A demo architecture map (the shape GET /api/maps returns) for the mock's main repository. */
+export const DEMO_MAP: ArchMap = {
+  title: "acme/webshop",
+  subtitle: "storefront · checkout · webhooks",
+  components: [
+    { id: "web", type: "frontend", label: "Storefront", sublabel: "Next.js", pos: [0, 0], size: [160, 60], sources: [{ path: "apps/web/src/app/layout.tsx" }] },
+    { id: "api", type: "backend", label: "API gateway", sublabel: "routes · auth", pos: [260, 0], size: [170, 60], sources: [{ path: "services/api/src/server.ts" }] },
+    { id: "checkout", type: "backend", label: "Checkout", sublabel: "cart · payments", pos: [120, 170], size: [170, 64], sources: [{ path: "services/checkout/src/checkout.ts" }] },
+    { id: "email", type: "backend", label: "Email", sublabel: "templates", pos: [420, 170], size: [140, 56], sources: [{ path: "services/email/templates/order.mjml" }] },
+    { id: "webhooks", type: "backend", label: "Webhooks", sublabel: "retries · backoff", pos: [260, 330], size: [160, 60], sources: [{ path: "services/webhooks/src/deliver.ts" }] },
+    { id: "db", type: "database", label: "Postgres", pos: [0, 330], size: [140, 60], sources: [{ path: "db/migrations/0001_init.sql" }] },
+    { id: "stripe", type: "external", label: "Stripe", pos: [560, 330], size: [120, 56], sources: [] },
+  ],
+  connections: [
+    { from: "web", to: "api" },
+    { from: "api", to: "checkout" },
+    { from: "api", to: "email" },
+    { from: "checkout", to: "db" },
+    { from: "checkout", to: "webhooks" },
+    { from: "webhooks", to: "stripe" },
+    { from: "email", to: "webhooks" },
+  ],
+  boundaries: [
+    { label: "services", wraps: ["api", "checkout", "email", "webhooks"] },
+  ],
+};
+
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
+  // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
+  // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
+  const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
+  const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
+  const repoMap = (repo: string): RepoMap => {
+    const map = maps.get(repo);
+    return {
+      repo,
+      map: map ? { repo, revision: "4f2c9e1", generated_at: new Date(Date.now() - 3_600_000).toISOString(), session: "map_demo", map } : null,
+      mapping: mappings.get(repo) ?? null,
+    };
+  };
   const demo = new MockSession({
     ...baseSession("demo1234", "acme/webshop", 42, "Checkout fails for guest users"),
     status: "running",
@@ -2664,6 +2705,27 @@ export function createMockApi(): Api {
       mem0.source = mem0.has_key ? "saved" : null;
       return { ...mem0 };
     },
+    repoMap: (repo) => later(() => repoMap(repo)),
+    mapRepo: async (repo) => {
+      await sleep(250);
+      if (!maps.has(repo) && !mappings.has(repo)) {
+        mappings.set(repo, { id: `map_${repo.replace(/\W/g, "")}`, status: "running", created_at: new Date().toISOString() });
+        setTimeout(() => {
+          maps.set(repo, { ...DEMO_MAP, title: repo });
+          const m = mappings.get(repo);
+          if (m) m.status = "no_changes";
+        }, 6000);
+      }
+      return repoMap(repo);
+    },
+    touched: () =>
+      later(() => ({
+        sessions: {
+          demo1234: ["services/checkout/src/guest.ts", "services/checkout/src/checkout.ts", "apps/web/src/app/checkout/page.tsx"],
+          stall5678: ["services/email/templates/order-dark.mjml"],
+          burn_a1b2c3: ["services/webhooks/src/retry.ts", "services/checkout/src/retry.ts"],
+        },
+      })),
     voice: () => later(voiceStatus),
     saveVoiceKey: async (provider, apiKey) => {
       await sleep(250);

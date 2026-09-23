@@ -1198,4 +1198,36 @@ export interface KeychainHealth {
 export interface SecretsListing {
   keychain: KeychainHealth;
   secrets: SecretRow[];
+/** One component of a repository's architecture map (GET /api/maps/{owner}/{repo}, from an archify
+ *  architecture diagram): archify's own layout (`pos` top-left, `size`), and the repository files
+ *  it lives in. */
+export interface ArchComponent {
+  id: string;
+  type: string;
+  label: string;
+  sublabel?: string | null;
+  pos: [number, number];
+  size: [number, number];
+  sources: { path: string; line?: number; label?: string }[];
+}
+
+/** The fields of an archify architecture diagram the cockpit draws, as the mothership stores them. */
+export interface ArchMap {
+  title: string;
+  subtitle?: string | null;
+  components: ArchComponent[];
+  connections: { from: string; to: string; label?: string }[];
+  boundaries: { label: string; wraps: string[] }[];
+}
+
+/** GET /api/maps/{owner}/{repo}: the stored map, if any, and the newest mapping colony, if any. */
+export interface RepoMap {
+  repo: string;
+  map: { repo: string; revision: string | null; generated_at: string; session: string; map: ArchMap } | null;
+  mapping: { id: string; status: SessionStatus; created_at: string } | null;
+}
+
+/** GET /api/touched: the files each live colony's worktree has changed, keyed by session id. */
+export interface TouchedFiles {
+  sessions: Record<string, string[]>;
 }

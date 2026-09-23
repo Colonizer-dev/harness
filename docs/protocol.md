@@ -446,12 +446,13 @@ and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
 
 `scripts/fetch-vendor.sh` stages vendored plugins at `dist/plugins/<name>`, which `install.sh` copies to
 `<COLONIZER_HOME>/plugins/<name>`, and `install.sh` fails if a `plugin` entry in `vendor/vendor.lock` didn't
-land there. It stages three vendored plugins today:
+land there. It stages four vendored plugins today:
 
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
 | `ecc` | [affaan-m/ECC](https://github.com/affaan-m/ECC) v2.2.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (286), `agents/` (68), `commands/` (94), `scripts/`, `LICENSE`. 8.2 MB of the 58 MB source |
 | `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.4.1, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (13 of 15), `LICENSE`. 596 KB of the 2.4 MB source |
+| `archify` | [tt-a1i/archify](https://github.com/tt-a1i/archify) at a commit, MIT, pinned by sha256 in `vendor/vendor.lock` | `skills/archify/` (upstream's `archify/` skill: `SKILL.md`, schemas, examples, renderers, the dependency-free `bin/archify.mjs`) minus `test/` and `scripts/check-update.mjs`, generated root and `.claude-plugin/` manifests, `LICENSE`, `THIRD_PARTY_NOTICES.md`. 6.4 MB. Loaded by mapping colonies (see "Architecture maps") |
 | `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (146 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 6.5 MB |
 
 **Canonical layout.** `superpowers` is staged in the Agent Plugins folder layout in
@@ -494,6 +495,22 @@ upstream's 604-character one as a bare name. Not staged: upstream's `plugins/` (
 submodules a codeload archive doesn't include). `fetch-vendor.sh` fails on any catalog entry it can't map
 to a staged file, on a hook or MCP configuration anywhere in the plugin, on a `raw.githubusercontent.com`
 URL left in the catalog or the finder, and on any second skill under `skills/`.
+
+**Architecture maps.** `POST /api/maps/{owner}/{repo}` launches a mapping colony: an ordinary colony
+with `origin: "map"` and autopilot on, whose boot adds the `archify` skillset to its plugins and whose
+instructions are to draw the repository at HEAD as an archify architecture diagram — every component
+tied to the repository files it lives in (`sources`), validated with archify's own
+`bin/archify.mjs validate architecture … --repo-root /workspace`, which checks each source is a file at
+the pinned revision — written to `/harness/out/architecture.json`, and to leave the worktree untouched.
+Its publish then finds nothing to push and ends in `no_changes`: no pull request. As the publish
+finishes (or on the next `GET /api/maps/…` for a colony publish never reached), the mothership reads the
+file, keeps only what the cockpit draws after checking it (an architecture diagram, plain unique ids,
+connections and boundary members that name components, repository-relative source paths with no `..`,
+at least one sourced component, at most 1 MB and 120 components) and stores it at
+`<data>/maps/<owner>/<repo>.json` with the revision, time and colony. The cockpit's nest has a Map mode
+that draws it as the nest: components are chambers at archify's layout, boundaries the mounds they sit
+in, connections tunnels, and each live colony's ants walk from the mothership's mouth along the tunnels
+to the chambers whose sources share a directory with the files `GET /api/touched` says it changed.
 
 **Keeping vendored plugins current.** `scripts/update-vendored-plugins.mjs` checks every `plugin` entry in
 `vendor/vendor.lock` against its upstream (the latest GitHub release for a `refs/tags/` pin, the default
@@ -1436,6 +1453,9 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `GET /api/voice` | `{provider, name, model, language, configured, has_key, source, key_optional, max_seconds, max_bytes}`: the voice module's active speech-to-text service. `provider` is `browser` when the module is unset or off; `source` is `saved`, the provider's env var (`OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY`) or `provider:<id>` when a model provider's key on the same host is reused. Never the key |
 | `PUT /api/voice/key` | `{provider, api_key}`: save a voice service's key on the mothership (`config/voice-keys/<provider>`, mode 0600, encrypted under `COLONIZER_MASTER_KEY` when set); an empty string removes it. Answers like `GET /api/voice` |
 | `POST /api/voice/transcribe` | Body: the raw clip, `Content-Type` `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg` or `audio/wav`, at most 25 MB. Answers `{text, provider}`. `409` when the module is `browser` or the service lacks its key/base URL, `413` too large, `415` another type, `502` when the service fails (its 401/429 said plainly; the key is never echoed). The clip is forwarded once and not stored |
+| `GET /api/maps/{owner}/{repo}` | `{repo, map, mapping}`: the repository's architecture map, `map` = `{repo, revision, generated_at, session, map: {title, subtitle, components: [{id, type, label, sublabel, pos, size, sources: [{path, line?, label?}]}], connections: [{from, to, label?}], boundaries: [{label, wraps}]}}` or `null`, and `mapping` = the newest mapping colony `{id, status, created_at}` or `null`. A mapping colony that ended with a valid `/harness/out/architecture.json` newer than the stored map is picked up here (see "Architecture maps") |
+| `POST /api/maps/{owner}/{repo}` | `{repo, mapping}`: launches a mapping colony through the ordinary admission path (`origin: "map"`, autopilot on, the `archify` skillset loaded whatever the org enables), or returns the one already running. 409 when the app has no `archify` skillset |
+| `GET /api/touched` | `{sessions: {id: [path…]}}`: every live colony's changed files, host-side `git status --porcelain -z --untracked-files=all` plus `git diff --name-only origin/<base>...HEAD`, at most 200 a colony, cached for 4 s |
 
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
 (`pending`). `source` = `{session_id, repo}` or `{user: true}`; a colony's note gains `reviewed: true`

@@ -28,6 +28,7 @@ mod headroom;
 mod hunters;
 mod jev;
 mod lifecycle;
+mod maps;
 mod mem0;
 mod memory;
 mod mesh;
@@ -1379,6 +1380,8 @@ async fn serve() -> Result<()> {
             post(voice::transcribe).layer(DefaultBodyLimit::max(voice::MAX_BYTES + 1)),
         )
         .route("/api/repos", get(github::list_repos))
+        .route("/api/maps/{owner}/{name}", get(maps::get).post(maps::create))
+        .route("/api/touched", get(maps::touched))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
