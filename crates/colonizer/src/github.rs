@@ -830,6 +830,18 @@ pub fn mergeability_from(mergeable: Option<&str>, merge_state_status: Option<&st
     }
 }
 
+/// One pull request's state, mergeability, and raw merge-state status from a single `gh pr view`
+/// call: the only place mergeability is read, so the watcher and the automerge agree on it.
+/// `Mergeability` coarsens `BLOCKED` and `DRAFT` to `Clean` (a branch held for checks, not stale or
+/// conflicting), and the automerge still needs to tell those apart — hence the raw status alongside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrInfo {
+    pub state: PrState,
+    pub mergeability: Mergeability,
+    /// The raw `mergeStateStatus`, uppercased and trimmed; `"UNKNOWN"` when `gh` left it out.
+    pub merge_state_status: String,
+}
+
 /// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
@@ -850,10 +862,10 @@ struct PrView {
     merge_state_status: Option<String>,
 }
 
-/// Asks GitHub for one pull request's state and mergeability through the user's `gh` login. A deleted
-/// PR, no `gh` binary, no auth and a network error all surface as errors; callers must treat those as
-/// no news.
-pub async fn pr_info(app: &App, url: &str) -> Result<(PrState, Mergeability)> {
+/// Asks GitHub for one pull request's state, mergeability and merge-state status through the user's
+/// `gh` login. A deleted PR, no `gh` binary, no auth and a network error all surface as errors;
+/// callers must treat those as no news.
+pub async fn pr_info(app: &App, url: &str) -> Result<PrInfo> {
     let out = tokio::time::timeout(
         Duration::from_secs(20),
         exec(&mut app.gh(["pr", "view", url, "--json", PR_VIEW_FIELDS])),
@@ -863,16 +875,23 @@ pub async fn pr_info(app: &App, url: &str) -> Result<(PrState, Mergeability)> {
     pr_info_from_json(&out)
 }
 
-/// Reads `gh pr view --json` output into a state plus a mergeability, split from `pr_info` so it is
-/// tested without `gh`.
-fn pr_info_from_json(out: &str) -> Result<(PrState, Mergeability)> {
+/// Reads `gh pr view --json` output into a [`PrInfo`], split from `pr_info` so it is tested
+/// without `gh`.
+fn pr_info_from_json(out: &str) -> Result<PrInfo> {
     let view: PrView = serde_json::from_str(out).context("could not parse `gh pr view` output")?;
     let state =
         pr_state_from(&view.state).with_context(|| format!("`gh pr view` reported an unexpected state {:?}", view.state))?;
-    Ok((
+    let merge_state_status = view
+        .merge_state_status
+        .as_deref()
+        .unwrap_or("UNKNOWN")
+        .trim()
+        .to_ascii_uppercase();
+    Ok(PrInfo {
         state,
-        mergeability_from(view.mergeable.as_deref(), view.merge_state_status.as_deref()),
-    ))
+        mergeability: mergeability_from(view.mergeable.as_deref(), Some(&merge_state_status)),
+        merge_state_status,
+    })
 }
 
 /// Points an open pull request at a different base branch: the moment a colony's stack resolves. A
@@ -2190,23 +2209,43 @@ mod tests {
 
     #[test]
     fn gh_pr_view_output_reads_into_the_right_state_and_mergeability() {
-        assert_eq!(pr_info_from_json(r#"{"state":"MERGED"}"#).unwrap().0, PrState::Merged);
-        assert_eq!(pr_info_from_json(r#"{"state":"CLOSED"}"#).unwrap().0, PrState::Closed);
-        assert_eq!(pr_info_from_json(r#"{"state":"OPEN"}"#).unwrap().0, PrState::Open);
+        assert_eq!(pr_info_from_json(r#"{"state":"MERGED"}"#).unwrap().state, PrState::Merged);
+        assert_eq!(pr_info_from_json(r#"{"state":"CLOSED"}"#).unwrap().state, PrState::Closed);
+        assert_eq!(pr_info_from_json(r#"{"state":"OPEN"}"#).unwrap().state, PrState::Open);
         assert!(pr_info_from_json(r#"{"state":"DRAFT"}"#).is_err());
         assert!(pr_info_from_json("not json").is_err());
         assert_eq!(
             pr_info_from_json(r#"{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BEHIND"}"#).unwrap(),
-            (PrState::Open, Mergeability::Behind)
+            PrInfo {
+                state: PrState::Open,
+                mergeability: Mergeability::Behind,
+                merge_state_status: "BEHIND".to_string(),
+            }
         );
         assert_eq!(
             pr_info_from_json(r#"{"state":"OPEN","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}"#).unwrap(),
-            (PrState::Open, Mergeability::Conflicted)
+            PrInfo {
+                state: PrState::Open,
+                mergeability: Mergeability::Conflicted,
+                merge_state_status: "DIRTY".to_string(),
+            }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
         assert_eq!(
             pr_info_from_json(r#"{"state":"MERGED"}"#).unwrap(),
-            (PrState::Merged, Mergeability::Unknown)
+            PrInfo {
+                state: PrState::Merged,
+                mergeability: Mergeability::Unknown,
+                merge_state_status: "UNKNOWN".to_string(),
+            }
+        );
+        // The raw status rides along uppercased, so the automerge can tell a clean-but-held
+        // pull request (blocked for checks, still a draft) apart from a clean-and-ready one.
+        assert_eq!(
+            pr_info_from_json(r#"{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"blocked"}"#)
+                .unwrap()
+                .merge_state_status,
+            "BLOCKED"
         );
         assert!(pr_info_from_json(r#"{"state":"DRAFT","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#).is_err());
     }

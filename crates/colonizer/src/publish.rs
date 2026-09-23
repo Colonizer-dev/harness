@@ -221,7 +221,8 @@ pub async fn watch_pull_requests(app: Shared) {
             }
             poll.last_checked = now;
             match github::pr_info(&app, &url).await {
-                Ok((state, mergeability)) => {
+                Ok(info) => {
+                    let (state, mergeability) = (info.state, info.mergeability);
                     poll.failing = false;
                     let target = match state {
                         github::PrState::Open => SessionStatus::PrOpened, // also picks a reopened PR back up
