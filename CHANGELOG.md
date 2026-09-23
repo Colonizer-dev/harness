@@ -21,6 +21,15 @@ setting) is called out under **Take care** rather than left for you to find.
   repository, and an org can set its own. All three apply and the tightest wins;
   a colony held back by its repository queues without holding up colonies of
   other repositories. ([#174])
+- **No-write kill-switch.** Set `COLONIZER_NO_EXTERNAL_EFFECTS` (or
+  `COLONIZER_NO_WRITE`) to anything but `0`, `false`, `off` or `no` and each
+  of these fails closed: Create PR answers 409,
+  autopilot logs a warning instead of publishing, the commit, push and
+  pull-request steps each refuse, stacked pull requests keep their old base,
+  fix-PR reviews neither merge nor comment, and findings are ignored. A draft
+  pull request counts as a write too. Unset, nothing changes. ([#84])
+- A publish refuses to open or reuse a pull request if the branch head moved
+  after the push, and logs the SHA-256 of the PR body it sends. ([#84])
 
 ### Take care
 
@@ -275,6 +284,7 @@ Macs. ([#74])
 [#80]: https://github.com/Colonizer-dev/harness/pull/80
 [#82]: https://github.com/Colonizer-dev/harness/pull/82
 [#83]: https://github.com/Colonizer-dev/harness/pull/83
+[#84]: https://github.com/Colonizer-dev/harness/issues/84
 [#97]: https://github.com/Colonizer-dev/harness/pull/97
 [#99]: https://github.com/Colonizer-dev/harness/pull/99
 [#104]: https://github.com/Colonizer-dev/harness/pull/104
