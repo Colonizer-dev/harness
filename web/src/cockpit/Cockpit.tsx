@@ -302,7 +302,7 @@ export function Cockpit({
   // Resume-all has no bulk endpoint: one resume per parked colony through the existing act path,
   // settled per colony so a single 409 cannot block the rest.
   const resumeAllQuotaParked = useCallback(
-    () => resumeQuotaParkedSessions(sessions, (id) => act(id, (x) => api.resumeSession(x))),
+    () => resumeQuotaParkedSessions(sessions, (id) => act(id, "resume", (x) => api.resumeSession(x))),
     [sessions, act, api],
   );
 
