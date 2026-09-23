@@ -102,6 +102,21 @@ const GLYPH: Record<string, ReactNode> = {
   ),
 };
 
+/** ⌘B on a Mac, Ctrl+B elsewhere — what the toggle's tooltip names. */
+const SHORTCUT = typeof navigator !== "undefined" && /Mac|iP(hone|ad)/.test(navigator.platform) ? "⌘B" : "Ctrl+B";
+
+/** The outpost: a hexagon with a beacon, on the accent tile. */
+function BrandMark(): ReactElement {
+  return (
+    <span className="v3-brand grid h-8 w-8 shrink-0 place-items-center rounded-[10px] text-accent">
+      <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
+        <circle cx="12" cy="12" r="2.6" fill="currentColor" />
+      </svg>
+    </span>
+  );
+}
+
 function Glyph({ name, size = 20 }: { name: string; size?: number }): ReactElement {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
@@ -188,6 +203,22 @@ export function NavRail(props: {
       return !open;
     });
 
+  // ⌘B / Ctrl+B minimises and restores the sidebar from anywhere but a text field.
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "b") return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      event.preventDefault();
+      setExpanded((open) => {
+        store(EXPANDED_KEY, open ? "0" : "1");
+        return !open;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const pad = expanded ? "px-3" : "justify-center px-0";
   const tabs = navTabs({ needCount: inboxCount, liveCount, pendingMemory });
   const tip = !expanded;
@@ -198,21 +229,54 @@ export function NavRail(props: {
       data-expanded={expanded}
       className={`v3-rail relative z-20 flex h-full min-h-0 shrink-0 flex-col gap-1 border-r border-border px-3 py-4 transition-[width] duration-200 ease-out ${expanded ? "w-[232px]" : "w-16"}`}
     >
-      {/* Brand: the outpost mark, and the name once there is room for it. */}
-      <button
-        type="button"
-        aria-label="overview · every colony"
-        onClick={() => onNavigate("overview")}
-        className={`mb-3 flex h-10 cursor-pointer items-center gap-2.5 rounded-[10px] border-0 bg-transparent ${expanded ? "px-1.5" : "justify-center"}`}
-      >
-        <span className="v3-brand grid h-8 w-8 shrink-0 place-items-center rounded-[10px] text-accent">
-          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
-            <circle cx="12" cy="12" r="2.6" fill="currentColor" />
-          </svg>
-        </span>
-        {expanded && <span className="text-[15px] font-semibold tracking-[-0.02em] text-text">Colonizer</span>}
-      </button>
+      {/* Brand and the minimise toggle. Expanded: the mark and name open the overview, and the
+          panel button beside them folds the sidebar away. Collapsed: the mark turns into the
+          expand button on hover, so the way back out is exactly where the way in was. */}
+      <div className={`mb-3 flex h-10 items-center ${expanded ? "justify-between" : "justify-center"}`}>
+        {expanded ? (
+          <>
+            <button
+              type="button"
+              aria-label="overview · every colony"
+              onClick={() => onNavigate("overview")}
+              className="flex h-10 min-w-0 cursor-pointer items-center gap-2.5 rounded-[10px] border-0 bg-transparent px-1.5"
+            >
+              <BrandMark />
+              <span className="text-[15px] font-semibold tracking-[-0.02em] text-text">Colonizer</span>
+            </button>
+            <Tip label={`Minimise sidebar · ${SHORTCUT}`} show>
+              <button
+                type="button"
+                aria-label="collapse sidebar"
+                aria-expanded
+                aria-keyshortcuts="Meta+B Control+B"
+                onClick={toggle}
+                className="grid h-8 w-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-faint transition-colors hover:bg-panel-2 hover:text-text"
+              >
+                <Glyph name="panel" size={18} />
+              </button>
+            </Tip>
+          </>
+        ) : (
+          <Tip label={`Expand sidebar · ${SHORTCUT}`} show>
+            <button
+              type="button"
+              aria-label="expand sidebar"
+              aria-expanded={false}
+              aria-keyshortcuts="Meta+B Control+B"
+              onClick={toggle}
+              className="group/brand grid h-10 w-10 cursor-pointer place-items-center rounded-[10px] border-0 bg-transparent"
+            >
+              <span className="group-hover/brand:hidden group-focus-visible/brand:hidden">
+                <BrandMark />
+              </span>
+              <span className="hidden h-8 w-8 place-items-center rounded-[10px] bg-panel-2 text-text group-hover/brand:grid group-focus-visible/brand:grid">
+                <Glyph name="panel" size={18} />
+              </span>
+            </button>
+          </Tip>
+        )}
+      </div>
 
       <ScopeSwitcher
         orgs={orgs}
@@ -287,18 +351,6 @@ export function NavRail(props: {
         >
           <Glyph name={theme === "dark" ? "sun" : "moon"} />
           {expanded && (theme === "dark" ? "Light theme" : "Dark theme")}
-        </button>
-      </Tip>
-      <Tip label="Expand sidebar" show={tip}>
-        <button
-          type="button"
-          aria-label={expanded ? "collapse sidebar" : "expand sidebar"}
-          aria-expanded={expanded}
-          onClick={toggle}
-          className={`${ITEM} ${pad} text-faint hover:bg-panel-2 hover:text-text`}
-        >
-          <Glyph name="panel" />
-          {expanded && "Collapse"}
         </button>
       </Tip>
     </nav>
