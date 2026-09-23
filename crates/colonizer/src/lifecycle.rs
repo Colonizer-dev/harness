@@ -577,7 +577,9 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let modules = app.modules.read().await.clone();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
-    let org_limit = orgs::org_max_parallel(&app.org_settings(&s.org));
+    let org_settings = app.org_settings(&s.org);
+    let org_limit = orgs::org_max_parallel(&org_settings);
+    let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
     // The colony's lifecycle lock, held from here to the end of the handler. The claim below is the
     // moment this colony gains a microVM (or a queue slot), and everything between it and the boot
     // spawn — dropping the old agent link, rotating the event log, the revert if the rotation fails —
@@ -597,30 +599,38 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // a refused resume leaves the agent link and the event log as it found them.
     // The closure distinguishes its two non-outcomes: `Err` is the not-resumable re-check, answered with
     // a 409 below, while `Ok(None)` is a colony that has vanished, which stays a 404.
-    let claimed = with_slot(&app.sessions, &s.org, max_parallel, org_limit, |sessions, room| {
-        // Counted before the flip: the colony itself is Stopped or Failed here, so it isn't counted.
-        let waiting = sessions.iter().filter(|other| other.status == SessionStatus::Queued).count();
-        let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
-            return Ok(None);
-        };
-        // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
-        if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
-            return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
-        }
-        x.status = if room {
-            SessionStatus::Starting
-        } else {
-            SessionStatus::Queued
-        };
-        x.error = None;
-        x.attention = None;
-        x.mesh = None;
-        x.local_port = None;
-        // The last boot's phases would read as this one's under `starting` or `queued`.
-        x.boot_timing = None;
-        x.updated_at = Utc::now();
-        Ok(Some((x.clone(), room, waiting)))
-    })
+    let claimed = with_slot(
+        &app.sessions,
+        &s.org,
+        &s.repo,
+        max_parallel,
+        org_limit,
+        repo_limit,
+        |sessions, room| {
+            // Counted before the flip: the colony itself is Stopped or Failed here, so it isn't counted.
+            let waiting = sessions.iter().filter(|other| other.status == SessionStatus::Queued).count();
+            let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
+                return Ok(None);
+            };
+            // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
+            if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
+                return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
+            }
+            x.status = if room {
+                SessionStatus::Starting
+            } else {
+                SessionStatus::Queued
+            };
+            x.error = None;
+            x.attention = None;
+            x.mesh = None;
+            x.local_port = None;
+            // The last boot's phases would read as this one's under `starting` or `queued`.
+            x.boot_timing = None;
+            x.updated_at = Utc::now();
+            Ok(Some((x.clone(), room, waiting)))
+        },
+    )
     .await;
     let (s, admitted, waiting) = match claimed {
         Ok(Some(claimed)) => claimed,
@@ -680,10 +690,11 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         } else {
             format!(", behind {waiting} already waiting")
         };
+        let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
         app.session_log(
             &id,
             "info",
-            format!("queued: the parallel limit is {max_parallel}{ahead}; the colony resumes when a slot frees up"),
+            format!("queued: {limits}{ahead}; the colony resumes when a slot frees up"),
         )
         .await;
     }
