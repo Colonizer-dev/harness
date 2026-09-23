@@ -95,33 +95,40 @@ async fn poll_peer(client: &reqwest::Client, base_url: &str, timeout: Duration) 
         return None;
     }
     let body: Value = response.json().await.ok()?;
-    summary_from_status_json(&body)
+    summary_from_status_json(base_url, &body)
 }
 
 /// The parse half of [`poll_peer`], sealed from the network call so it is testable on a literal
-/// JSON value. Pulls exactly the fields `/api/status` adds for this purpose; anything missing or
-/// the wrong shape is `None`.
-fn summary_from_status_json(body: &Value) -> Option<HostSummary> {
-    let host = body.get("host")?;
-    let runtime = body.get("runtime")?;
-    let id = host.get("id")?.as_str()?.to_string();
-    let name = host.get("hostname").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
+/// JSON value. Peers answer without this install's token, so they serve the reduced status: no id,
+/// no hostname, only version, counts, capacity and health. Missing fields fall back to
+/// the configured URL and zeroes rather than failing the row; only a body with neither a `host`
+/// nor a `runtime` object is not a status shape at all.
+fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary> {
+    let host = body.get("host");
+    let runtime = body.get("runtime");
+    if host.is_none() && runtime.is_none() {
+        return None;
+    }
+    let host_str = |key: &str| host.and_then(|host| host.get(key)).and_then(Value::as_str);
+    let host_num = |key: &str| host.and_then(|host| host.get(key)).and_then(Value::as_u64).unwrap_or(0) as usize;
+    let id = host_str("id").unwrap_or(base_url).to_string();
+    let name = host_str("hostname").unwrap_or(&id).to_string();
     let platform = runtime
-        .get("platform")
-        .and_then(|v| v.as_str())
+        .and_then(|runtime| runtime.get("platform"))
+        .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
     let os = runtime
-        .get("os")
-        .and_then(|o| o.get("name"))
-        .and_then(|v| v.as_str())
+        .and_then(|runtime| runtime.get("os"))
+        .and_then(|os| os.get("name"))
+        .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let version = body.get("version").and_then(|v| v.as_str()).map(str::to_string);
-    let slots_in_use = host.get("microvms_live")?.as_u64()? as usize;
-    let slots_ceiling = host.get("microvms_ceiling")?.as_u64()? as usize;
-    let queue_depth = body.get("queue_depth").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let disk_free_bytes = host.get("disk_free_bytes").and_then(|v| v.as_u64());
+    let version = body.get("version").and_then(Value::as_str).map(str::to_string);
+    let slots_in_use = host_num("microvms_live");
+    let slots_ceiling = host_num("microvms_ceiling");
+    let queue_depth = body.get("queue_depth").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let disk_free_bytes = host.and_then(|host| host.get("disk_free_bytes")).and_then(Value::as_u64);
     Some(HostSummary {
         id,
         name,
@@ -282,6 +289,38 @@ mod tests {
         assert_eq!(peer.queue_depth, 2);
         assert_eq!(peer.disk_free_bytes, Some(123456));
         assert!(peer.last_heartbeat.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A peer answering without our token serves the reduced status (no id, no hostname): the row
+    /// still parses off the configured URL, while a body with no `host` or `runtime` is not one.
+    #[tokio::test]
+    async fn a_peer_serving_the_reduced_status_still_lists_with_defaults() {
+        assert!(summary_from_status_json("http://peer:7878", &json!({"version": "1"})).is_none());
+        assert!(summary_from_status_json("http://peer:7878", &json!(null)).is_none());
+        let peer_url = fake_peer(json!({
+            "version": "9.9.9",
+            "queue_depth": 1,
+            "host": {"microvms_live": 2, "microvms_ceiling": 4, "disk_free_bytes": 777},
+            "runtime": {"platform": "linux-x86_64", "os": {"vendor": "debian", "name": "Debian"}},
+            "storage": {"ok": true},
+        }))
+        .await;
+        let root = temp_root();
+        let peer_url_clone = peer_url.clone();
+        let app = test_app_with(&root, move |cfg| cfg.fleet_peers = vec![peer_url_clone.clone()]);
+        let hosts = list_hosts(&app).await;
+        assert_eq!(hosts.len(), 2);
+        let peer = &hosts[1];
+        assert_eq!(peer.health, HostHealth::Online);
+        assert_eq!(peer.id, peer_url, "no id in the reduced body: the url stands in");
+        assert_eq!(peer.name, peer_url);
+        assert_eq!(peer.platform, "linux-x86_64");
+        assert_eq!(peer.os, "Debian");
+        assert_eq!(peer.slots_in_use, 2);
+        assert_eq!(peer.slots_ceiling, 4);
+        assert_eq!(peer.queue_depth, 1);
+        assert_eq!(peer.disk_free_bytes, Some(777));
         let _ = std::fs::remove_dir_all(root);
     }
 

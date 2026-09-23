@@ -219,9 +219,9 @@ if [ "$install_app" = 1 ]; then
   swap_app "$dist"
   mkdir -p "$HOME/.local/bin"
   relink "$app/bin/colonizer" "$HOME/.local/bin/colonizer"
-  echo "installed: run 'colonizer' and open http://127.0.0.1:7878"
+  echo "installed: run 'colonizer'; it prints and opens a sign-in link ('colonizer open' reprints it)"
 else
-  echo "built: run '$dist/bin/colonizer' and open http://127.0.0.1:7878"
+  echo "built: run '$dist/bin/colonizer'; it prints and opens a sign-in link ('colonizer open' reprints it)"
 fi
 
 # The colony image is the one large thing that otherwise arrives lazily, during

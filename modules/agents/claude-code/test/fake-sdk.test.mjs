@@ -36,7 +36,7 @@ const user = (content) => ({ type: 'user', message: { role: 'user', content }, p
 
 /** A fake Agent SDK `query`: runs `turn` once per prompt message. */
 function fakeQuery(turn) {
-  const calls = { prompts: [], decisions: [], interrupts: 0, closed: false, options: null };
+  const calls = { prompts: [], decisions: [], interrupts: 0, models: [], closed: false, options: null };
   const query = ({ prompt, options }) => {
     calls.options = options;
     const generator = (async function* () {
@@ -47,6 +47,9 @@ function fakeQuery(turn) {
     })();
     generator.interrupt = async () => {
       calls.interrupts += 1;
+    };
+    generator.setModel = async (model) => {
+      calls.models.push(model);
     };
     generator.close = () => {
       calls.closed = true;
@@ -256,6 +259,7 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
     'question_answered',
     'turn_end',
     'log',
+    'model_changed',
     'memory_proposal',
     'finding',
   ];
@@ -279,6 +283,59 @@ test('interrupt reaches the query, unknown answers are logged, EOF exits', async
   assert.equal(calls.interrupts, 1);
   assert.ok(events.some((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('nope')));
   assert.deepEqual(events.at(-1), { type: 'status', state: 'exited' });
+});
+
+test('set_model switches the live query and announces the model it replaced', async () => {
+  // init names the model in effect, as Claude Code's does at the start of each turn.
+  const { query, calls } = fakeQuery(async function* (options, c) {
+    yield { type: 'system', subtype: 'init', session_id: 's1', model: c.models.at(-1) ?? 'claude-opus-5-5' };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0, duration_ms: 1 };
+  });
+  const events = [];
+  const commands = new AsyncQueue();
+  let turns = 0;
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'turn_end') commands.push(turns++ ? { type: 'shutdown' } : { type: 'set_model', model: ' deepseek/deepseek-flash ' });
+    if (event.type === 'model_changed' && event.previous) commands.push({ type: 'user_message', text: 'again' });
+  };
+  commands.push({ type: 'user_message', text: 'go' });
+
+  await runAgent({ query, commands, emit, graceMs: 100 });
+
+  assert.deepEqual(calls.models, ['deepseek/deepseek-flash']);
+  assert.equal(calls.prompts.length, 2, 'the same query carries on after the switch');
+  // The second turn's init names the model already announced, so it is not news.
+  assert.deepEqual(
+    events.filter((e) => e.type === 'model_changed'),
+    [
+      { type: 'model_changed', model: 'claude-opus-5-5', previous: null },
+      { type: 'model_changed', model: 'deepseek/deepseek-flash', previous: 'claude-opus-5-5' },
+    ],
+  );
+});
+
+test('a set_model the SDK refuses, or one without a model, is a warning and changes nothing', async () => {
+  const { query } = fakeQuery(async function* () {});
+  const refusing = (args) =>
+    Object.assign(query(args), {
+      setModel: async (model) => {
+        throw new Error(`unknown model ${model}`);
+      },
+    });
+  const events = [];
+  const commands = new AsyncQueue();
+  commands.push({ type: 'set_model', model: 'nope' });
+  commands.push({ type: 'set_model', model: '  ' });
+  commands.close();
+
+  await runAgent({ query: refusing, commands, emit: (e) => events.push(e), graceMs: 100 });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(!events.some((e) => e.type === 'model_changed'));
+  const warnings = events.filter((e) => e.type === 'log' && e.level === 'warn').map((e) => e.message);
+  assert.ok(warnings.some((m) => m.includes('unknown model nope')), warnings.join('\n'));
+  assert.ok(warnings.includes('ignored a set_model without a model'), warnings.join('\n'));
 });
 
 test('shutdown cancels an open question with a deny', async () => {

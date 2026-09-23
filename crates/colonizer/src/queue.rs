@@ -360,7 +360,8 @@ fn stamp_hold_timeout(x: &mut Session) {
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
 /// worktree never left, so the normal admission loop resumes them like any operator resume. A
 /// named provider recovers when its record lapses (reset passed) or is gone (provider deleted); an
-/// unnamed one recovers when nothing is exhausted anywhere.
+/// unnamed one recovers when nothing is exhausted anywhere, the account record included — an
+/// account-parked colony stays parked while the account record holds and resumes when it lapses.
 pub(crate) async fn resume_quota_parked(app: &Shared) {
     let ids: Vec<String> = {
         let sessions = app.sessions.read().await;
@@ -859,6 +860,57 @@ mod tests {
         let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
         assert_eq!(parked.status, SessionStatus::Stopped, "the saved record still holds");
         assert!(parked.attention.is_some(), "the attention stays until recovery");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An account pause rides out a mothership restart: the account record persists in
+    /// provider-quota.json, the migration keeps the parked colony's resume ticket, the reloaded
+    /// queue stays paused, and auto-resume still fires once the record lapses.
+    #[tokio::test]
+    async fn quota_resume_after_a_restart_keeps_an_account_parked_colony_until_the_account_lapses() {
+        let root = std::env::temp_dir().join(format!("colonizer-account-restart-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        crate::gateway::Gateway::new(&root.join("data"))
+            .unwrap()
+            .mark_account_quota_exhausted(Some("7am (UTC)".into()), Some(Utc::now().timestamp() + 3600));
+        let app = crate::tests::test_app(&root);
+        *app.sessions.write().await = vec![quota_parked("parked", "provider quota exhausted (resets 7am (UTC))")];
+        // The restart migration keeps the resume ticket, and the reload keeps the pause.
+        let mut snapshot = app.sessions.read().await.clone();
+        assert_eq!(crate::sessions::clear_stale_attention(&mut snapshot), 0);
+        *app.sessions.write().await = snapshot;
+        let status = crate::providers::quota_status(&app).await;
+        assert!(status.paused, "the reloaded account record still pauses");
+        assert!(status.providers.is_empty(), "no real provider is named exhausted");
+        assert!(
+            !app.gateway.is_quota_exhausted("bailian"),
+            "the healthy provider stayed healthy across the restart"
+        );
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
+        assert_eq!(parked.status, SessionStatus::Stopped, "the saved account record still holds");
+        assert!(parked.attention.is_some(), "the attention stays until recovery");
+        drop(sessions);
+        // The reset passes while the mothership is down: a fresh gateway drops the lapsed record
+        // and the parked colony rejoins the queue on its own.
+        crate::gateway::Gateway::new(&root.join("data"))
+            .unwrap()
+            .mark_account_quota_exhausted(Some("7am (UTC)".into()), Some(Utc::now().timestamp() - 10));
+        let app2 = crate::tests::test_app(&root);
+        *app2.sessions.write().await = app.sessions.read().await.clone();
+        assert!(
+            !crate::providers::quota_status(&app2).await.paused,
+            "the lapsed account record reads as recovered"
+        );
+        resume_quota_parked(&app2).await;
+        let sessions = app2.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "parked").unwrap().status,
+            SessionStatus::Queued,
+            "auto-resume still works after the restart"
+        );
         drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }

@@ -282,6 +282,12 @@ pub struct QuotaState {
     pub since: DateTime<Utc>,
 }
 
+/// The quota-store id for the Claude account's own cap (session/usage/weekly limits name no routed
+/// provider). A dedicated record — never a real provider's — so healthy providers stay healthy
+/// while the account pause holds. Persisted in `provider-quota.json` with the rest, so it survives
+/// a restart like any provider record.
+pub const ACCOUNT_QUOTA_ID: &str = "claude-account";
+
 pub struct Gateway {
     client: reqwest::Client,
     stats: Mutex<HashMap<String, Arc<ProviderStats>>>,
@@ -428,6 +434,30 @@ impl Gateway {
         self.write_quota(&quota);
     }
 
+    /// Records the Claude account's own cap as exhausted, with the reset the error named, if any.
+    /// Marks no real provider: the queue pauses on this record alone, and a routed success on any
+    /// provider leaves it held — only its lapse or an explicit account resume clears it.
+    pub fn mark_account_quota_exhausted(&self, reset_at: Option<String>, reset_unix: Option<i64>) {
+        self.mark_quota_exhausted(ACCOUNT_QUOTA_ID, reset_at, reset_unix);
+    }
+
+    /// The account's quota record, if it has one — expired or not;
+    /// [`Self::is_account_quota_exhausted`] judges.
+    pub fn account_quota_state(&self) -> Option<QuotaState> {
+        self.quota_state(ACCOUNT_QUOTA_ID)
+    }
+
+    /// True while the Claude account's cap holds: recorded and still active — a named reset ahead,
+    /// or a reset-less mark younger than its TTL.
+    pub fn is_account_quota_exhausted(&self) -> bool {
+        self.is_quota_exhausted(ACCOUNT_QUOTA_ID)
+    }
+
+    /// Forgets the account's quota record: the explicit account resume. A routed success never
+    /// lands here (see [`Self::clear_quota_on_success`).
+    pub fn forget_account_quota(&self) {
+        self.forget_quota(ACCOUNT_QUOTA_ID);
+    }
     /// The provider's quota record, if it has one — expired or not; [`Self::is_quota_exhausted`] judges.
     pub fn quota_state(&self, provider: &str) -> Option<QuotaState> {
         self.quota.lock().unwrap().get(provider).cloned()
@@ -444,7 +474,9 @@ impl Gateway {
             .is_some_and(|q| provider_quota::quota_active(q.reset_unix, q.since, now))
     }
 
-    /// Every still-exhausted provider with its reset, by id: what the status poll and the queue read.
+    /// Every still-exhausted provider with its reset, by id — the account record under
+    /// [`ACCOUNT_QUOTA_ID`] included while it holds, so an unnamed account-parked colony stays
+    /// parked on it and resumes when it lapses. What the status poll and the queue read.
     pub fn quota_exhausted(&self) -> Vec<(String, Option<String>, Option<i64>)> {
         let now = Utc::now();
         let mut out: Vec<_> = self
@@ -460,8 +492,13 @@ impl Gateway {
     }
 
     /// An upstream 2xx for the provider proves the plan is back: forget its quota record, so the
-    /// queue unpauses and parked colonies resume on the next tick.
+    /// queue unpauses and parked colonies resume on the next tick. Never the account record: one
+    /// routed success says nothing about the Claude account's own cap, which lifts only on its lapse
+    /// or an explicit account resume ([`Self::forget_account_quota`]).
     pub fn clear_quota_on_success(&self, provider: &str) {
+        if provider == ACCOUNT_QUOTA_ID {
+            return;
+        }
         self.forget_quota(provider);
     }
 
@@ -538,7 +575,9 @@ impl App {
     }
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// Compares two secrets without short-circuiting, so a wrong guess costs the same regardless of
+/// where it differs. Lengths are not hidden (every token here has a fixed length).
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -1951,6 +1990,43 @@ mod tests {
         assert!(!gateway.is_quota_exhausted("strix"), "success proves the plan is back");
         assert!(gateway.quota_exhausted().is_empty(), "nothing exhausted, no pause");
         assert!(!usage_gateway(&dir).is_quota_exhausted("strix"), "the clear reached disk too");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The account record pauses alone, marks no real provider, and survives both a routed
+    /// success and a restart: only its lapse or an explicit account resume clears it.
+    #[test]
+    fn an_account_mark_holds_without_marking_any_provider() {
+        let dir = std::env::temp_dir().join(format!("colonizer-account-{}", uuid::Uuid::new_v4()));
+        let gateway = usage_gateway(&dir);
+        gateway.mark_account_quota_exhausted(Some("7am (UTC)".into()), Some(Utc::now().timestamp() + 3600));
+        assert!(gateway.is_account_quota_exhausted(), "the account cap holds");
+        assert!(!gateway.is_quota_exhausted("strix"), "a healthy provider stays healthy");
+        assert!(
+            gateway.quota_exhausted().iter().any(|(id, _, _)| id == ACCOUNT_QUOTA_ID),
+            "the queue's unnamed rule sees the account record"
+        );
+        // One routed success proves nothing about the account's own cap.
+        gateway.mark_quota_exhausted("strix", None, None);
+        gateway.clear_quota_on_success("strix");
+        assert!(!gateway.is_quota_exhausted("strix"), "the provider record cleared");
+        assert!(gateway.is_account_quota_exhausted(), "the account pause holds through it");
+        // ... nor does clearing for the account id itself: only lapse or explicit resume.
+        gateway.clear_quota_on_success(ACCOUNT_QUOTA_ID);
+        assert!(
+            gateway.is_account_quota_exhausted(),
+            "a success never lifts the account pause"
+        );
+        gateway.forget_account_quota();
+        assert!(!gateway.is_account_quota_exhausted(), "the explicit resume lifts it");
+        assert!(gateway.quota_exhausted().is_empty());
+
+        // And the record rides out a restart in provider-quota.json.
+        gateway.mark_account_quota_exhausted(Some("7am (UTC)".into()), Some(Utc::now().timestamp() + 3600));
+        drop(gateway);
+        let reopened = usage_gateway(&dir);
+        assert!(reopened.is_account_quota_exhausted(), "the reload keeps the account pause");
+        assert_eq!(reopened.account_quota_state().unwrap().reset_at.as_deref(), Some("7am (UTC)"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

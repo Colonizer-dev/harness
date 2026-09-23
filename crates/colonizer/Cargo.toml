@@ -17,6 +17,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10"
 futures-util = "0.3.34"
 # Already built for rustls; used directly to check the Headroom bundle's sha256 while it downloads.
 ring = "0.17.14"
@@ -33,3 +34,5 @@ uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
+# `ServiceExt::oneshot` for the auth tests, which drive a router through the real `host_guard`.
+tower = { version = "0.5.3", features = ["util"] }

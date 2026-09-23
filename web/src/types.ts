@@ -23,6 +23,31 @@ export interface Attention {
   nudges: number;
 }
 
+/** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
+export interface RecentEvent {
+  seq: number;
+  ts: string | null;
+  type: string;
+  summary: string;
+}
+
+export type DiagnosisState = "queued" | "booting" | "working" | "waiting_on_human" | "waiting_on_provider" | "stuck";
+
+/** Why this colony is not progressing — GET /api/sessions/{id} only, non-terminal colonies (issue #230). */
+export interface Diagnosis {
+  state: DiagnosisState;
+  text: string;
+  resets_at?: string;
+}
+
+/** GET /api/status `stall` (issue #230): the queue-wide idle readout; null when nothing is stalled. */
+export interface StallInfo {
+  idle_secs: number;
+  last_event_at: string | null;
+  live: number;
+  queued: number;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -82,6 +107,10 @@ export interface Session {
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+  /** Why the colony is not progressing — single-session GET only (issue #230). */
+  diagnosis?: Diagnosis | null;
+  /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
+  recent_events?: RecentEvent[] | null;
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -181,6 +210,8 @@ export interface HarnessStatus {
   model_providers?: ModelProviderStatus[];
   /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
   quota?: StatusQuota | null;
+  /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
+  stall?: StallInfo | null;
 }
 
 /** GET /api/status `runtime` (issue #129): what kind of machine the mothership runs on, and what it can reach. The mothership re-probes all of it; the frontend only reads. */
@@ -344,6 +375,12 @@ export interface StatusQuota {
   reset_unix: number | null;
   /** Every exhausted provider's id. */
   providers: string[];
+  /**
+   * Which scope the pause covers: the Claude account's own cap (`"account"`) or named exhausted
+   * providers (`"provider"`). Null when the queue is not paused; absent from older mothership
+   * builds, which the banner derives from `providers` instead (see `quotaPauseKind`).
+   */
+  kind?: "account" | "provider" | null;
 }
 
 export interface ModuleProviderInfo {
@@ -880,6 +917,8 @@ export type AgentEventBody =
       model_usage?: Record<string, ModelTokens>;
     }
   | { type: "log"; level: LogLevel; message: string }
+  /** The model the colony's next turns use: sent at start with no `previous`, then after each `set_model` that took. */
+  | { type: "model_changed"; model: string; previous: string | null }
   /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
   | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
@@ -897,7 +936,9 @@ export type ServerFrame =
 export type ClientCommand =
   | { type: "user_message"; text: string }
   | { type: "answer"; question_id: string; answers: Answers; response: string | null }
-  | { type: "interrupt" };
+  | { type: "interrupt" }
+  /** Switches the model for the colony's next turns, keeping the conversation; `model_changed` confirms it. */
+  | { type: "set_model"; model: string };
 
 export interface NewSessionRequest {
   repo: string;

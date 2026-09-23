@@ -204,10 +204,17 @@ async fn events_auth_replay_commands_shutdown_and_restart() {
         .await
         .unwrap();
     events
+        .send(Message::Text(
+            json!({"type": "set_model", "model": "sonnet"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    events
         .send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
         .await
         .unwrap(); // not forwarded
-    collect_until(&mut events, |e| e["type"] == "log" && e["message"] == "got interrupt").await;
+    let forwarded = collect_until(&mut events, |e| e["type"] == "log" && e["message"] == "got set_model").await;
+    assert!(has(&forwarded, |e| e["type"] == "log" && e["message"] == "got interrupt"));
 
     // Replay from a later point starts exactly after `since`.
     let mut replay = ws(port, &format!("/v1/events?since={turn1}"), Some(TOKEN)).await.unwrap();

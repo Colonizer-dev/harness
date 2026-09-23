@@ -36,7 +36,8 @@ use serde_json::{Value, json};
 use tokio::{process::Command, sync::Mutex};
 
 use crate::{
-    Shared,
+    Shared, auth,
+    config::Settings,
     sessions::{Session, SessionStatus},
     util, version,
 };
@@ -483,14 +484,6 @@ fn preflight(status: &Value, force: bool) -> Result<Preflight> {
     })
 }
 
-/// What the CLI sends as `Origin` on its apply POST. The mothership's
-/// `host_guard` rejects a non-GET whose `Origin` does not name the request's
-/// own host, so this is the base URL the request goes to — the same authority
-/// reqwest puts in its `Host` header.
-fn origin(base: &str) -> String {
-    base.to_string()
-}
-
 /// `colonizer update [--force]` — a thin client of a running mothership.
 ///
 /// The work belongs to the mothership: it knows what is installed, which
@@ -502,17 +495,22 @@ fn origin(base: &str) -> String {
 /// release newer than it, after saying what is at risk. It never skips the
 /// wait for a publishing colony: that refusal comes from the mothership.
 pub async fn command(force: bool) -> Result<()> {
-    let bind = util::env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into());
-    let base = format!("http://{bind}");
+    let cfg = Settings::from_env()?;
+    let base = format!("http://{}", cfg.bind);
+    // The mothership's API needs the per-install token; this CLI reads the file the server minted.
+    let token = auth::load_or_create(&cfg.config_dir)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
 
     let status: Value = client
         .get(format!("{base}/api/update"))
+        .bearer_auth(&token)
         .send()
         .await
-        .with_context(|| format!("no mothership answering on {bind}; start `colonizer` first"))?
+        .with_context(|| format!("no mothership answering on {}; start `colonizer` first", cfg.bind))?
+        // A wrong token answers 401, which must surface as refused, not as unparsable JSON.
+        .error_for_status()?
         .json()
         .await?;
 
@@ -531,9 +529,7 @@ pub async fn command(force: bool) -> Result<()> {
 
     // No body, like the Settings button, unless forcing: the route reads a
     // missing body as "just install the newer release".
-    let request = client
-        .post(format!("{base}/api/update/apply"))
-        .header("Origin", origin(&base));
+    let request = client.post(format!("{base}/api/update/apply")).bearer_auth(&token);
     let started = if force {
         request.json(&json!({ "force": true })).send().await?
     } else {
@@ -550,7 +546,7 @@ pub async fn command(force: bool) -> Result<()> {
     let mut backup_announced = false;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let Ok(response) = client.get(format!("{base}/api/update")).send().await else {
+        let Ok(response) = client.get(format!("{base}/api/update")).bearer_auth(&token).send().await else {
             println!("the mothership is restarting into {latest}");
             return Ok(());
         };
@@ -911,13 +907,6 @@ mod tests {
         // back: this read names no release and no development flag.
         let read = status("v0.1.4", None, false, Some("v0.1.5"), true, None);
         assert!(matches!(preflight(&read, false), Ok(Preflight::Proceed { .. })));
-    }
-
-    #[test]
-    fn the_cli_origin_names_the_base_url_it_posts_to() {
-        // `host_guard` compares `Origin` against the request's own `Host`, so
-        // the apply POST carries the base URL it is already connecting to.
-        assert_eq!(origin("http://127.0.0.1:7878"), "http://127.0.0.1:7878");
     }
 
     #[test]

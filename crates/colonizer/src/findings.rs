@@ -7,6 +7,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error,
+    config::CoAuthor,
     sessions::Session,
     util::{exec, truncate},
 };
@@ -99,13 +100,18 @@ pub fn duplicate_of(title: &str, issues: &Value) -> Option<String> {
 }
 
 /// The issue body: the finding, how it was confirmed, and where it came from.
-pub fn issue_body(finding: &Finding, s: &Session) -> String {
+pub fn issue_body(finding: &Finding, s: &Session, co_author: Option<&CoAuthor>) -> String {
     let origin = match s.issue {
         Some(n) => format!("while working on #{n}"),
         None => "during an open session on this repository".to_string(),
     };
+    // A markdown link, not a bare @mention, so filing does not ping the account.
+    let credit = match co_author.and_then(|who| who.github_login()) {
+        Some(login) => format!(", credited to [@{login}](https://github.com/{login})"),
+        None => String::new(),
+    };
     format!(
-        "{}\n\n### How it was confirmed\n\n{}\n\n---\n\n<sub>Found by a [Colonizer](https://colonizer.dev) colony {origin}, and confirmed by the colony's orchestrator before filing. It is outside that task, so nothing here has been changed. Colony `{}`.</sub>\n",
+        "{}\n\n### How it was confirmed\n\n{}\n\n---\n\n<sub>Found by a [Colonizer](https://colonizer.dev) colony {origin}{credit}, and confirmed by the colony's orchestrator before filing. It is outside that task, so nothing here has been changed. Colony `{}`.</sub>\n",
         finding.body, finding.evidence, s.id
     )
 }
@@ -263,7 +269,8 @@ pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -
         }
     }
 
-    std::fs::write(body_path, issue_body(finding, s))?;
+    let co_author = crate::config::FileConfig::load(&app.cfg.config_dir).publish.co_author;
+    std::fs::write(body_path, issue_body(finding, s, co_author.as_ref()))?;
     // Best effort: the label may exist already, or the token may not be allowed to create labels.
     let _ = exec(&mut app.gh([
         "label",
@@ -447,5 +454,37 @@ mod tests {
         let err = file(&app, &s, &finding, &root.join("body.md")).await.unwrap_err();
         assert!(format!("{err:#}").contains("external writes are blocked"), "{err:#}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_findings_footer_credits_the_configured_co_author_once() {
+        let finding = Finding {
+            title: "A title".into(),
+            body: "A body".into(),
+            evidence: "Checked".into(),
+        };
+        let mut s = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        s.id = "abc123".into();
+        s.issue = Some(7);
+        let settlers = CoAuthor::settlers();
+        let out = issue_body(&finding, &s, Some(&settlers));
+        let credit = "[@colonizer-settlers](https://github.com/colonizer-settlers)";
+        assert_eq!(out.matches(credit).count(), 1, "{out}");
+        assert_eq!(out.matches("<sub>").count(), 1, "still one footer: {out}");
+        assert!(
+            out.contains(&format!("colony while working on #7, credited to {credit}, and confirmed by")),
+            "{out}"
+        );
+        // Off, or an address with no GitHub account behind it, means no credit clause.
+        let off = issue_body(&finding, &s, None);
+        assert!(!off.contains("credited to"), "{off}");
+        assert_eq!(off.matches("<sub>").count(), 1, "{off}");
+        let custom = CoAuthor {
+            name: "Someone Else".into(),
+            email: "someone@example.com".into(),
+        };
+        let plain = issue_body(&finding, &s, Some(&custom));
+        assert!(!plain.contains("credited to"), "{plain}");
+        assert_eq!(plain.matches("<sub>").count(), 1, "{plain}");
     }
 }
