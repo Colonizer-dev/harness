@@ -1525,7 +1525,7 @@ export function createMockApi(): Api {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
       enabled: true,
-      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false },
+      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false, jev_compaction: false },
       schema: {
         type: "object",
         properties: {
@@ -1558,6 +1558,14 @@ export function createMockApi(): Api {
             description: "Token savings: shell commands the agent runs go through rtk, which shortens their output.",
             default: false,
           },
+          jev_compaction: {
+            type: "boolean",
+            title: "Jev compaction",
+            description: "Token savings: at compaction, stale tool calls are deleted by Jev score instead of the built-in summary. Sends conversation history to TypeSafe.",
+            default: false,
+          },
+          jev_keep_threshold: { type: "number", title: "Jev keep threshold", minimum: 0, maximum: 1, default: 0.5 },
+          jev_preserve_recent: { type: "integer", title: "Jev preserve recent", minimum: 0, maximum: 100, default: 6 },
         },
       },
     },

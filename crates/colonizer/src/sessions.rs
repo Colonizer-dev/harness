@@ -1782,6 +1782,31 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             }
         }
     }
+    // Remembered for the secrets below: msb keeps the value host-side and the guest env only
+    // holds a placeholder, swapped at the TLS edge for the listed hosts.
+    let mut jev_key: Option<String> = None;
+    if switched_on(&runner_env, "COLONIZER_JEV_COMPACTION") {
+        match jev_compaction(
+            app.cfg
+                .asset("vendor/fast-jev-compaction/hooks/hooks.json")
+                .and_then(|_| app.cfg.asset("vendor/fast-jev-compaction"))
+                .ok(),
+            crate::jev::api_key(),
+        ) {
+            Ok((source, key)) => {
+                mounts.push(Mount {
+                    source,
+                    target: "/opt/colonizer/jev-compaction".into(),
+                    read_only: true,
+                });
+                jev_key = Some(key);
+            }
+            Err(reason) => {
+                runner_env.remove("COLONIZER_JEV_COMPACTION");
+                log.info(reason).await;
+            }
+        }
+    }
 
     // Written only now, after the last change to `runner_env`: the plugin paths and the token-savings
     // switches above are decided here, and a session.json written earlier carried a plugin's bare name
@@ -1857,6 +1882,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             env: cred.env.into(),
             value: cred.value,
             hosts: vec![CLAUDE_API_HOST.into()],
+        });
+    }
+    if let Some(key) = jev_key {
+        // The hook reads TYPESAFE_API_KEY; the guest sees only msb's placeholder for it.
+        secrets.push(Secret {
+            env: "TYPESAFE_API_KEY".into(),
+            value: key,
+            hosts: vec!["api.typesafe.ai".into()],
         });
     }
     let net_profiles = vec!["public".to_string()];
@@ -2059,6 +2092,21 @@ pub(crate) fn node_mount(source: PathBuf) -> Mount {
         target: "/opt/node/bin/node".into(),
         read_only: true,
     }
+}
+
+/// Decides the Jev compaction switch for one colony: the staged payload and the mothership's
+/// TypeSafe key both have to be there. Takes the probe result rather than the app, so tests cover
+/// it without a colony on disk. Ok carries the mount source and the key the secret below needs.
+pub(crate) fn jev_compaction(
+    payload: Option<PathBuf>,
+    key: Option<String>,
+) -> std::result::Result<(PathBuf, String), &'static str> {
+    let source = payload.ok_or(
+        "Jev compaction is switched on, but fast-jev-compaction isn't installed (scripts/install.sh stages it); running without it",
+    )?;
+    let key =
+        key.ok_or("Jev compaction is switched on, but the mothership has no TypeSafe key (set JEV_API_KEY); running without it")?;
+    Ok((source, key))
 }
 
 const BOOT_SCRIPT: &str = r#"#!/bin/sh
@@ -3686,6 +3734,24 @@ pub(crate) mod tests {
         assert!(
             BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:$PATH""#),
             "node first, claude entry unchanged"
+        );
+    }
+
+    /// The Jev compaction switch mounts the payload only with the staged files and a key to go with them.
+    #[test]
+    fn jev_compaction_mounts_only_with_a_payload_and_a_key() {
+        let payload = Some(PathBuf::from("/dist/vendor/fast-jev-compaction"));
+        let (source, key) =
+            jev_compaction(payload.clone(), Some("ts-key".into())).expect("a payload and a key switch compaction on");
+        assert_eq!(source, payload.clone().unwrap());
+        assert_eq!(key, "ts-key");
+        assert_eq!(
+            jev_compaction(None, Some("ts-key".into())).unwrap_err(),
+            "Jev compaction is switched on, but fast-jev-compaction isn't installed (scripts/install.sh stages it); running without it"
+        );
+        assert_eq!(
+            jev_compaction(payload, None).unwrap_err(),
+            "Jev compaction is switched on, but the mothership has no TypeSafe key (set JEV_API_KEY); running without it"
         );
     }
 }

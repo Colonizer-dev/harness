@@ -1518,6 +1518,17 @@ function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadroom> })
   }
 }
 
+/** Shown in the agent pane while Jev compaction is switched on: the data-egress and cost warning. */
+export function JevCompactionNotice() {
+  return (
+    <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-warn">
+      Sends this colony&apos;s conversation and tool-call history — file paths, command output — to TypeSafe
+      (api.typesafe.ai) at each compaction. TypeSafe bills it directly: the cost isn&apos;t tracked by the
+      Colonizer gateway or shown in colony cost. Read TypeSafe&apos;s data terms before using it on private repos.
+    </div>
+  );
+}
+
 function ImagePullRow({ pull }: { pull: ImagePull }) {
   const { status, error, start } = pull;
   // Re-render once a second while pulling so the elapsed time moves.
@@ -1696,6 +1707,13 @@ function ModulePane({
         )}
 
         {fields.map(([key, field]) => {
+          // Jev's tunables only mean anything with the switch on.
+          if (
+            module.kind === "agent" &&
+            (key === "jev_keep_threshold" || key === "jev_preserve_recent") &&
+            draft.settings.jev_compaction !== true
+          )
+            return null;
           const setting = (
             <SettingField
               key={key}
@@ -1711,10 +1729,13 @@ function ModulePane({
             module.kind === "agent" &&
             key === "headroom" &&
             (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
-          return showHeadroom ? (
+          // The data-egress warning sits under the switch that asks for it, one divider group with it.
+          const showJevWarning = module.kind === "agent" && key === "jev_compaction" && draft.settings.jev_compaction === true;
+          return showHeadroom || showJevWarning ? (
             <div key={key} className="pb-2.5">
               {setting}
-              <HeadroomRow headroom={headroom} />
+              {showHeadroom && <HeadroomRow headroom={headroom} />}
+              {showJevWarning && <JevCompactionNotice />}
             </div>
           ) : (
             setting

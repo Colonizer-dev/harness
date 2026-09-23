@@ -50,3 +50,10 @@ caveman      2.7.0     any           prompt  0f8b833ef65be67b565573d075264b7acab
 # loading: one discoverable skill, Colonizer's copy of the finder (vendor/google-skills/), reads a local
 # catalog of the other 146. The finder never fetches from GitHub; see scripts/fetch-vendor.sh.
 google-skills 2026.09.21-6e3838f any       plugin  9f2825b72bd391de1302d550f5ac2226a9b96d522d348ca94f0b661363b09d21  https://codeload.github.com/google/skills/tar.gz/6e3838f1152fafc05a36a9a3a4995ec15c07ef33
+
+# fast-jev-compaction is github.com/tamaratran/fast-jev-compaction at commit e3f262a: Jev-scored
+# deletion of stale tool calls for colonies that switch compaction on. Pinned as a commit tarball,
+# not the npm fast-jev-compaction@0.4.0 release, which ships only the library dist/ (not the plugin
+# hooks/, .claude-plugin/ and src/ the hook actually runs) and is published by a different account
+# than the repo owner with extra CLIs not in the repo.
+fast-jev-compaction e3f262a any           hook    4b1de046ee17f93079968c0865a12bf94fa264f007b2527c0a11eb6794550e77  https://codeload.github.com/tamaratran/fast-jev-compaction/tar.gz/e3f262a7f4d42bd8dd32ced30d26176f7cb545b0

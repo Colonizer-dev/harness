@@ -443,7 +443,7 @@ can switch single skillsets on or off over that list with `agent.skillsets` (see
 
 ### Token savings
 
-Three `claude-code` module settings cut what a colony spends on tokens. All are off by default, and each
+Four `claude-code` module settings cut what a colony spends on tokens. All are off by default, and each
 works only when the install has what it needs; otherwise the colony boots without it and its log says why.
 
 | Setting | What it does | Needs |
@@ -451,6 +451,7 @@ works only when the install has what it needs; otherwise the colony boots withou
 | `caveman` (`COLONIZER_CAVEMAN`), `caveman_level` (`lite`, `full`, `ultra`; default `full`) | The agent replies in [caveman](https://github.com/juliusbrussee/caveman)'s compressed style: output tokens | `<COLONIZER_HOME>/vendor/caveman/`, mounted at `/opt/colonizer/caveman` |
 | `headroom` (`COLONIZER_HEADROOM`) | Model requests pass through [Headroom](https://github.com/headroomlabs-ai/headroom), which compacts large tool results before the model reads them: input tokens | The Headroom bundle for the machine's architecture, downloaded to `<data>/headroom/<release>` when Headroom is switched on and mounted at `/opt/colonizer/headroom` |
 | `rtk` (`COLONIZER_RTK`) | Shell commands go through [rtk](https://github.com/rtk-ai/rtk), which shortens their output before the agent reads it: input tokens | `<COLONIZER_HOME>/bin/rtk`, mounted at `/opt/colonizer/bin/rtk` |
+| `jev_compaction` (`COLONIZER_JEV_COMPACTION`), `jev_keep_threshold` (default `0.5`), `jev_preserve_recent` (default `6`) | At compaction, stale tool calls are deleted by Jev score instead of the lossy built-in summary: input tokens on later requests | `vendor/fast-jev-compaction/`, staged by `scripts/fetch-vendor.sh` (which `scripts/install.sh` runs) to `dist/vendor/fast-jev-compaction` and mounted at `/opt/colonizer/jev-compaction`, plus a `JEV_API_KEY` on the mothership |
 
 **caveman.** caveman switches itself on with `SessionStart` and `UserPromptSubmit` hooks that inject its
 ruleset and track a per-session level. In a colony the level is the setting, and the runner puts the
@@ -509,6 +510,37 @@ inside a `rust:1-alpine` microVM, like `colonizer-agentd`, and skips the build w
 built for the machine and the build mode. Upstream's aarch64 Linux release is linked against glibc
 2.39, newer than the colony image's 2.36, so it would not start in a colony on Apple Silicon. rtk's
 telemetry is opt-in and never switched on in a colony.
+
+**Jev compaction.** When the context fills, Claude Code's built-in `/compact` summarizes the
+transcript — lossy rewriting. Jev compaction instead deletes stale tool calls by Jev score and keeps
+the rest verbatim: nothing kept is rewritten, and when scoring fails or the reduction is too small
+it falls back to the built-in summary. It runs as a Claude Code plugin, staged from
+github.com/tamaratran/fast-jev-compaction (MIT) pinned by git commit in `vendor/vendor.lock` and
+unpacked by `scripts/fetch-vendor.sh` (which `scripts/install.sh` runs) to `dist/vendor/fast-jev-compaction` — never `dist/plugins`, so it
+can't be picked as a skillset. A git pin rather than npm: the npm tarball ships only the library,
+without the hooks and plugin manifest. The Agent SDK can observe a compaction but can't replace the
+compacted messages, so driving the library from the runner would have meant rewriting Claude Code's
+session file and resuming — more code and fragile. The runner hands the plugin directory to the SDK,
+sets `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in Claude Code's environment only while the switch is on
+(function hooks need Claude Code ≥ 2.1.274; session init warns on anything older, or when the plugin
+didn't load), and forwards `jev_keep_threshold` (default `0.5`: what scores high enough to keep) and
+`jev_preserve_recent` (default `6`: newest messages never touched, alongside the first message, which is always kept) as plugin config. The mothership
+gives the colony its own `JEV_API_KEY` — the same key the Jev routing second opinion uses — as
+microsandbox secret `TYPESAFE_API_KEY` for `api.typesafe.ai`, so the guest sees only a placeholder.
+Without the staged payload or the key the colony runs without it and its log says why. With the
+switch on, the runner also turns on Claude Code's debug log (a scratch file in the VM's temp dir),
+because headless Claude Code keeps the plugin's verdict only there. Each
+compaction is reported on the event stream, e.g. `Compaction (auto, 182344 → 41210 tokens): kept
+41/180 messages, no summary (…)`. It composes with both other savings: rtk shrinks command output at
+tool time, Jev prunes the transcript at compaction, Headroom compresses each request in flight — and
+Jev talks to `api.typesafe.ai` directly, never touching `ANTHROPIC_BASE_URL`, so no two proxies
+contend.
+
+With it on, the colony's conversation and tool-call history — file paths, command output — leaves
+the machine for TypeSafe (`api.typesafe.ai`) at each compaction: an exception to "code doesn't leave
+the machine". TypeSafe bills that traffic directly; it doesn't pass through the Colonizer gateway,
+so it's invisible to `model_usage` and colony cost. There is no per-org override for agent settings,
+so it can't be switched on per org. Read TypeSafe's data terms before using it on private repos.
 
 ### Pre-flight scan
 
@@ -976,6 +1008,10 @@ This ships shadow mode only: zero applied decisions. Promoting Jev's tier to an 
 records where `jev.tier` disagreed with `rule` against those sessions' eventual `total_cost_usd` and
 misroute outcomes over a meaningful sample, to show the second opinion would have beaten the heuristic
 before anything is asked to act on it.
+
+This second opinion and Jev compaction (Token savings) are separate features sharing only the
+`JEV_API_KEY`: the opinion reads condensed metadata at boot, while compaction sends conversation
+history at each compaction.
 
 A caveat worth stating plainly: this integration's specific vendor claims — the endpoint, its pricing,
 its latency — could not be independently verified while it was built. The design leans on that: with
