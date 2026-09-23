@@ -14,8 +14,26 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+## [v0.1.8] - 2026-09-23
+
 ### Added
 
+- **Cockpit dashboards.** The Overview is redesigned: a 7, 30 or 90-day range
+  with a compare-to-previous-period toggle, a KPI strip (launched, returned,
+  merged, spend, needs you) with deltas and sparklines, spend per day by
+  workspace, and a table comparing workspaces. Each org card opens a per-org
+  dashboard: outcomes per day, spend per day by model, a launch → PR → merged
+  funnel, the model mix, and a per-repository table with the cost per merged
+  pull request. Every figure comes from data the mothership already serves;
+  the ones the design shows without a source yet (CI pass rate, lead time,
+  MTTR, latency) are left out rather than invented. A workspace setting hides
+  orgs with no colonies. ([#398])
+- **An account usage limit pauses the nest instead of failing colonies.** A
+  Claude session or usage limit ("You've hit your session limit · resets …")
+  is recorded once for the account: colonies park until the reset, the cockpit
+  shows the pause and when it ends, and one action resumes them all. ([#404])
+- **A stuck colony can be diagnosed from the API:** a per-session diagnosis,
+  the tail of its recent events, and a host-level stall signal. ([#230])
 - **A parallel limit per repository.** Beside the global and per-org limits, the
   sandbox module's `repo_max_parallel` caps the colonies live at once in any one
   repository, and an org can set its own. All three apply and the tightest wins;
@@ -40,6 +58,14 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Fixed
 
+- Colony pull-request automerge and the publish watcher handle a pull request
+  that is behind main or has conflicts, instead of attempting a merge that
+  fails. ([#338])
+- The desktop cockpit shows **Mothership unreachable** when the API stops
+  answering, and a toast when a Stop or Resume fails, instead of keeping stale
+  data without a word. ([#417])
+- Release builds carry their version, so `colonizer update` no longer takes a
+  Linux release for a development build and refuses to update it. ([#365])
 - The cockpit's org list works as a switcher. The rail and the header menu both
   have an **All workspaces** choice, and clicking the selected org again clears
   the filter. The header menu opens settings for the selected org and lists
@@ -53,8 +79,25 @@ setting) is called out under **Take care** rather than left for you to find.
   `provider-usage.json`, so colonies parked on an exhausted quota stay parked
   until the reset instead of all resuming at once and parking again. ([#358])
 
+### Security
+
+- **Colonies are fenced off the cockpit API and the host's other loopback
+  ports.** A colony could reach the mothership's management API through the
+  host network profile; each colony now gets port-scoped allows for only the
+  ports it needs. ([#375])
+- **The cockpit API requires a per-install token.** It is created on first
+  start in `api-token` in the config directory, readable by you only. The
+  browser signs in once through the link the mothership prints at start (or
+  `colonizer open`), which sets an HttpOnly cookie; scripts send
+  `Authorization: Bearer <token>`. Anything else gets 401, except a reduced
+  `GET /api/status` for fleet peers. ([#405])
+
 ### Take care
 
+- **Sign in again after updating.** Open the link the mothership prints when it
+  starts, or run `colonizer open`. Scripts that call the API need the token
+  from `api-token`. A mothership bound to anything but loopback warns that
+  plain HTTP exposes the token: put TLS or an SSH tunnel in front of it.
 - `repo_max_parallel` defaults to 3. An install that raised `max_parallel` and
   ran more than 3 colonies on one repository now queues the rest; raise the
   new setting (up to 32) to keep the old behaviour.
@@ -338,9 +381,18 @@ Macs. ([#74])
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
 [#358]: https://github.com/Colonizer-dev/harness/issues/358
 [#411]: https://github.com/Colonizer-dev/harness/issues/411
+[#230]: https://github.com/Colonizer-dev/harness/issues/230
+[#338]: https://github.com/Colonizer-dev/harness/issues/338
+[#365]: https://github.com/Colonizer-dev/harness/issues/365
+[#375]: https://github.com/Colonizer-dev/harness/issues/375
+[#398]: https://github.com/Colonizer-dev/harness/issues/398
+[#404]: https://github.com/Colonizer-dev/harness/issues/404
+[#405]: https://github.com/Colonizer-dev/harness/issues/405
+[#417]: https://github.com/Colonizer-dev/harness/pull/417
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
+[v0.1.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.8
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2
