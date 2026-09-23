@@ -24,6 +24,7 @@ import { feedEntry } from "./feed";
 import { LiveCost } from "./Live";
 import { BUMP_MS, isBumped, isFlashed, useLiveEvents, type LiveEvent, type LiveEventKind, type LiveEvents } from "./liveEvents";
 import { RedAnts } from "./RedAnts";
+import { useOpenQuestions } from "./questions";
 import {
   chamberCount,
   SURFACE_Y,
@@ -336,6 +337,8 @@ export function NestView({
   const returned = sessions.filter((s) => s.status === "pr_opened").slice(0, 3);
   const queued = sessions.filter((s) => s.status === "queued").slice(0, 2);
   const waiting = sessions.filter(needsYou);
+  // What each waiting colony is asking, for its balloon and the needs-you rows.
+  const questions = useOpenQuestions(sessions);
   const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
   const liveCount = sessions.filter((s) => isLive(s.status)).length;
   const queuedCount = sessions.filter((s) => s.status === "queued").length;
@@ -370,7 +373,7 @@ export function NestView({
       diameter: slot.r * 2,
       edge: TONE_VAR[tone],
       dot: KIND_DOT[entry.kind],
-      text: session.id === selectedId && liveDetail ? liveDetail : entry.text,
+      text: session.id === selectedId && liveDetail ? liveDetail : questions[session.id] ? `asks: ${questions[session.id]}` : entry.text,
     };
   });
   const visibleBalloonIds = new Set(
@@ -549,7 +552,7 @@ export function NestView({
                   voiced?.has(settler?.agent.id ?? "solo") ?? false
                     ? settler
                       ? { ...settlerSays(settler), tone: BUBBLE_TONE[settler.state] }
-                      : { ...colonySays(liveDetail, feedEntry(session).text), tone: edge }
+                      : { ...colonySays(liveDetail, questions[session.id] ? `asks: ${questions[session.id]}` : feedEntry(session).text), tone: edge }
                     : null;
                 return (
                   <div
@@ -830,9 +833,12 @@ export function NestView({
                   className="h-[7px] w-[7px] shrink-0 rounded-full bg-warn"
                   style={{ animation: "ck-beacon 1.8s ease-out infinite" }}
                 />
-                <span className="min-w-0 truncate text-[14px]">
-                  {session.issue_title || "waiting on your answer"}{" "}
-                  <span className="font-mono text-[12px] text-faint">{chamberLabel(session, 112)}</span>
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate text-[14px]">
+                    {session.issue_title || "waiting on your answer"}{" "}
+                    <span className="font-mono text-[12px] text-faint">{chamberLabel(session, 112)}</span>
+                  </span>
+                  {questions[session.id] && <span className="truncate text-[12.5px] text-warn">{questions[session.id]}</span>}
                 </span>
                 <span className="shrink-0 rounded-md bg-text px-3 py-1 text-[13px] font-medium text-bg">answer →</span>
               </button>

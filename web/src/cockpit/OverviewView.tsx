@@ -56,6 +56,7 @@ import { OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, ove
 import { hostFacts } from "./host";
 import { RedTeamCard } from "./RedTeamCard";
 import { StoragePanel } from "./StoragePanel";
+import { useOpenQuestions } from "./questions";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
 import type { LiveConnection } from "../liveStream";
 
@@ -160,6 +161,7 @@ export function OverviewView({
   const [showAll, setShowAll] = useState(false);
   // What moved since the last push: flashes the row whose status changed, lights a risen cost.
   const events = useLiveEvents(sessions);
+  const questions = useOpenQuestions(sessions);
   // The page covers exactly the visible workspaces — never the whole list. Counting switched-off
   // orgs while their colonies have no row is the divergence behind issue #246.
   const visibleSessions = overviewVisibleSessions(sessions, orgs);
@@ -376,6 +378,7 @@ export function OverviewView({
                   >
                     <span className="flex min-w-0 flex-col gap-0.5">
                       <span className="truncate text-[14px]">{session.issue_title || short}</span>
+                      {questions[session.id] && <span className="line-clamp-2 text-[13px] text-warn [text-wrap:pretty]">{questions[session.id]}</span>}
                       <span className="text-[12.5px] text-faint">
                         <span className="font-mono text-[12px]">{short}</span> · {org}
                       </span>

@@ -9,6 +9,7 @@ import { useState, type ReactElement } from "react";
 import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { Session } from "../types";
+import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { feedEntries, type FeedKind } from "./feed";
 
 const READ_AT = "colonizer.inboxReadAt";
@@ -37,6 +38,7 @@ export function InboxView({
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
 
   const waiting = sessions.filter(needsYou);
+  const questions = useOpenQuestions(sessions);
   const entries = feedEntries(sessions);
 
   const markAllRead = () => {
@@ -94,8 +96,8 @@ export function InboxView({
                   Answer
                 </button>
               </div>
-              <div className="mt-2 text-[15px] font-semibold">
-                {session.attention ? "the watchdog flagged this colony" : "the colony asked you a question"}
+              <div className="mt-2 text-[15px] font-semibold [text-wrap:pretty]">
+                {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
               </div>
               <div className="mt-1 text-[13px] text-muted">{session.issue_title || "no title yet"}</div>
             </div>
