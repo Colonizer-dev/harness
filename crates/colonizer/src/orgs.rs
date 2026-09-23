@@ -1543,7 +1543,13 @@ mod tests {
     #[tokio::test]
     async fn an_org_override_naming_an_unknown_skillset_is_refused_with_the_available_ones() {
         let (app, root) = org_app();
-        std::fs::create_dir_all(app.cfg.data_dir.join("plugins/ecc")).unwrap();
+        // A skillset needs a manifest to pass validation (plugins::validate).
+        let install = |name: &str| {
+            let dir = app.cfg.data_dir.join("plugins").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("plugin.json"), json!({"name": name}).to_string()).unwrap();
+        };
+        install("ecc");
         for on in [true, false] {
             let err = put(
                 State(app.clone()),
@@ -1559,7 +1565,7 @@ mod tests {
 
         // An off override saved while its skillset was installed outlives the uninstall: the org dialog
         // sends it back on every save, and that must not block an unrelated change.
-        std::fs::create_dir_all(app.cfg.data_dir.join("plugins/old")).unwrap();
+        install("old");
         let save = |skillsets: Value| {
             put(
                 State(app.clone()),
@@ -1570,7 +1576,7 @@ mod tests {
         let _ = save(json!({"ecc": true, "old": false}))
             .await
             .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
-        std::fs::remove_dir(app.cfg.data_dir.join("plugins/old")).unwrap();
+        std::fs::remove_dir_all(app.cfg.data_dir.join("plugins/old")).unwrap();
         let _ = save(json!({"ecc": true, "old": false}))
             .await
             .unwrap_or_else(|e| panic!("a stale off override blocked the save: {:#}", e.1));
