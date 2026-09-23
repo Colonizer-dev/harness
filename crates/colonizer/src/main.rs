@@ -718,6 +718,7 @@ async fn status(
             "reset_at": quota.reset_at,
             "reset_unix": quota.reset_unix,
             "providers": quota.providers,
+            "kind": quota.kind,
         }),
         "modules": {
             "source": modules.source.provider,

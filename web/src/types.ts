@@ -375,6 +375,12 @@ export interface StatusQuota {
   reset_unix: number | null;
   /** Every exhausted provider's id. */
   providers: string[];
+  /**
+   * Which scope the pause covers: the Claude account's own cap (`"account"`) or named exhausted
+   * providers (`"provider"`). Null when the queue is not paused; absent from older mothership
+   * builds, which the banner derives from `providers` instead (see `quotaPauseKind`).
+   */
+  kind?: "account" | "provider" | null;
 }
 
 export interface ModuleProviderInfo {
