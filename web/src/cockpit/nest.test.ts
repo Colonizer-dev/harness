@@ -3,7 +3,7 @@
 // against hand-computed values for the default 880×470 plot.
 import { describe, expect, it } from "vitest";
 
-import { MAX_CHAMBERS, SURFACE_Y, branchPaths, normalizeBox, scaleFor, slotAt, surfaceGrass, tunnelPath, tunnelSeed } from "./nest";
+import { MAX_CHAMBERS, SURFACE_Y, branchPaths, chamberCount, normalizeBox, scaleFor, slotAt, surfaceGrass, tunnelPath, tunnelSeed } from "./nest";
 
 const DEFAULT = normalizeBox(880, 470);
 
@@ -35,6 +35,23 @@ describe("scaleFor", () => {
   });
 });
 
+describe("chamberCount", () => {
+  it("reads unknown capacity as the default 5", () => {
+    expect(chamberCount(null)).toBe(5);
+    expect(chamberCount(undefined)).toBe(5);
+    expect(chamberCount(NaN)).toBe(5);
+  });
+
+  it("clamps to what the nest can hold", () => {
+    expect(chamberCount(14)).toBe(8);
+    expect(chamberCount(0)).toBe(1);
+  });
+
+  it("floors a fractional capacity", () => {
+    expect(chamberCount(4.7)).toBe(4);
+  });
+});
+
 describe("slotAt", () => {
   it("places every slot inside the plot, below the surface", () => {
     for (const box of [DEFAULT, normalizeBox(520, 360), normalizeBox(1400, 900)]) {
@@ -55,6 +72,34 @@ describe("slotAt", () => {
   it("throws past the last slot", () => {
     expect(() => slotAt(MAX_CHAMBERS, DEFAULT)).toThrow(RangeError);
     expect(() => slotAt(99, DEFAULT)).toThrow(RangeError);
+  });
+
+  it("keeps the roomier five-slot layout inside the plot, below the surface", () => {
+    for (const box of [DEFAULT, normalizeBox(520, 360), normalizeBox(1400, 900)]) {
+      for (let i = 0; i < 5; i++) {
+        const slot = slotAt(i, box, 5);
+        expect(slot.x - slot.r).toBeGreaterThanOrEqual(0);
+        expect(slot.x + slot.r).toBeLessThanOrEqual(box.width);
+        expect(slot.y - slot.r).toBeGreaterThanOrEqual(SURFACE_Y);
+        expect(slot.y + slot.r).toBeLessThanOrEqual(box.height);
+      }
+    }
+  });
+
+  it("leaves room to breathe between the five-slot chambers", () => {
+    for (const box of [DEFAULT, normalizeBox(520, 360), normalizeBox(1400, 900)]) {
+      const slots = Array.from({ length: 5 }, (_, i) => slotAt(i, box, 5));
+      for (let a = 0; a < slots.length; a++) {
+        for (let b = a + 1; b < slots.length; b++) {
+          const distance = Math.hypot(slots[a].x - slots[b].x, slots[a].y - slots[b].y);
+          expect(distance).toBeGreaterThan(slots[a].r + slots[b].r);
+        }
+      }
+    }
+  });
+
+  it("throws past the fifth slot when the count picks the five-slot layout", () => {
+    expect(() => slotAt(5, DEFAULT, 5)).toThrow(RangeError);
   });
 });
 
