@@ -108,12 +108,14 @@ sequenceDiagram
 {"type":"user_message","id":"u-1","text":"Also update the docs"}
 {"type":"answer","question_id":"toolu_01…","answers":{"Which database?":"Postgres","Features?":["Auth","Billing"]},"response":null}
 {"type":"interrupt"}
+{"type":"set_model","model":"claude-sonnet-5"}   // switch the orchestrator model, same session (§6.1b)
 {"type":"shutdown"}          // finish gracefully and exit(0) within 10 s
 ```
 
 `answers` maps each question's exact `question` text to the chosen option label, an array of labels
 (multi-select), or free text ("Other"). `response` (optional) is a free-form reply that dismisses the
-whole question card instead.
+whole question card instead. `set_model` takes the forms a model setting does (§6.1); the runner
+answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
 
 ### Events (runner stdout → agentd)
 
@@ -133,6 +135,7 @@ whole question card instead.
 {"type":"turn_end","is_error":false,"result":"final text or null","cost_usd":0.42,"duration_ms":81234,
  "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}}}  // model_usage optional
 {"type":"log","level":"info|warn|error","message":"…"}
+{"type":"model_changed","model":"claude-sonnet-5","previous":"claude-opus-5-5"}
 ```
 
 Every event above, with its exact fields, is also machine-readable: `docs/agent-events.schema.json`
@@ -157,6 +160,9 @@ Rules:
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
   options; UIs always add "Other".
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
+- `model_changed` names the orchestrator model. The runner emits it when Claude Code's init first
+  names the model (`previous: null`), so a client always knows it, and after each `set_model` the
+  SDK accepted. An init that names the model already announced emits nothing.
 - On `shutdown` or stdin EOF: emit `status exited` and exit.
 
 ---
@@ -181,7 +187,7 @@ UTC), appends it to `/var/lib/colonizer/events.jsonl`, and broadcasts it. agentd
 
 - Server → client text frames: every stored event with `seq > since`, then live events.
 - Client → server text frames: runner commands (§2). agentd forwards `user_message`, `answer`,
-  `interrupt` to the runner's stdin unchanged. Invalid frames are ignored.
+  `interrupt`, `set_model` to the runner's stdin unchanged. Invalid frames are ignored.
 - Multiple concurrent clients are allowed.
 
 ### `GET /v1/pty?cols=<n>&rows=<n>` (WebSocket)
@@ -828,7 +834,12 @@ Client → server:
 {"type":"user_message","text":"…"}                        // harness assigns the id
 {"type":"answer","question_id":"…","answers":{…},"response":null}
 {"type":"interrupt"}
+{"type":"set_model","model":"claude-sonnet-5"}              // trimmed; 1–128 of A–Z a–z 0–9 . _ : - / [ ]
 ```
+
+The harness drops a `set_model` whose trimmed model is empty, too long or has any other character.
+It checks the shape only: whether the model exists is known only inside the colony, so a refused
+switch surfaces as the runner's `warn` log and no `model_changed`.
 
 ### `GET /api/sessions/{id}/terminal?cols=<n>&rows=<n>` (WebSocket)
 
@@ -938,6 +949,16 @@ The decision is recorded three ways:
 
 An operator override is §4's `model_tier` on `POST /api/sessions`; it wins over the rule for that
 colony, whether or not routing is on.
+
+A live colony can also switch models without a restart: `set_model` (§2, §4) changes the
+orchestrator model for the session's subsequent turns, and the conversation context, microVM and
+worktree are kept. The switch lasts for the life of that session, so Stop and Resume derive the
+model from the settings and tier again, as before. Subagents that inherit the orchestrator's model
+follow the switch; a configured `subagent_model` and the background model are unchanged.
+The provider timeouts and context cap the runner derived at boot from the boot models (§6.5) are
+not recomputed, so switching to a slower provider or one with a smaller context window is at the
+user's risk. A `<provider>/<model>` switch also needs a route the colony booted with: a provider
+added after boot has none, and its requests go to Anthropic like any unrouted model.
 
 ### 6.1c Jev second opinion (shadow mode)
 

@@ -19,7 +19,7 @@ import {
   type ToolBlock,
   type TurnSummary,
 } from "./sessionStream";
-import type { AgentEventBody, AgentRef, MemoryProposal, ServerFrame } from "./types";
+import type { AgentEventBody, AgentRef, MemoryProposal, ServerFrame, Session } from "./types";
 import type { Api, SocketLike } from "./api";
 
 const SENT_AT = "2026-09-17T10:00:00Z";
@@ -452,6 +452,33 @@ describe("reduceFrame", () => {
     it("files agent logs next to the harness's", () => {
       const s = send(colony(), event({ type: "log", level: "error", message: "tool failed" }));
       expect(s.logs).toEqual([{ source: "agent", level: "error", message: "tool failed", ts: SENT_AT }]);
+    });
+  });
+
+  describe("model_changed (issue #240)", () => {
+    it("the latest report is the colony's model, and it ends a switch in flight", () => {
+      let s = send(colony(), event({ type: "model_changed", model: "claude-opus-5", previous: null }));
+      expect(s.model).toBe("claude-opus-5");
+      s = send({ ...s, switchingModel: "sonnet" }, event({ type: "model_changed", model: "sonnet", previous: "claude-opus-5" }));
+      expect(s).toMatchObject({ model: "sonnet", switchingModel: null });
+      expect(s.messages).toEqual([]);
+    });
+
+    it("a warning ends the wait for a switch that failed, and the model stays", () => {
+      let s = send(colony(), event({ type: "model_changed", model: "claude-opus-5", previous: null }));
+      s = send({ ...s, switchingModel: "nope" }, event({ type: "log", level: "info", message: "still working" }));
+      expect(s.switchingModel).toBe("nope");
+      s = send(s, event({ type: "log", level: "warn", message: "set_model failed" }));
+      expect(s).toMatchObject({ model: "claude-opus-5", switchingModel: null, refusedModel: "nope" });
+      s = send(s, event({ type: "model_changed", model: "sonnet", previous: "claude-opus-5" }));
+      expect(s.refusedModel).toBeNull();
+    });
+
+    it("a colony that stops being live ends the wait, as the harness drops the command", () => {
+      let s = send({ ...colony(), switchingModel: "sonnet" }, { type: "session", session: { status: "idle" } as Session });
+      expect(s.switchingModel).toBe("sonnet");
+      s = send(s, { type: "session", session: { status: "publishing" } as Session });
+      expect(s).toMatchObject({ switchingModel: null, refusedModel: null });
     });
   });
 
