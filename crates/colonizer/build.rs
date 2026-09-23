@@ -27,12 +27,26 @@ fn main() {
         }
     }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=COLONIZER_DESCRIBE");
+    println!("cargo:rerun-if-env-changed=COLONIZER_COMMIT");
 
-    // `--tags` so a release build reports `v0.1.4`; `--always` so an untagged
-    // one still reports its commit; `--dirty` so a build from a modified tree
-    // can never be mistaken for the release it is descended from.
-    let describe = git(&["describe", "--tags", "--always", "--dirty"]).unwrap_or_default();
-    let commit = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    // A release is not always built where git is: the Linux harness is built
+    // inside rust:1-alpine, which has none. Unstamped, it would read as a
+    // development build and refuse to update itself, so the release workflow
+    // passes the tag and commit in. The commit is only taken together with the
+    // tag, so the two always come from the same place.
+    //
+    // Otherwise git is asked: `--tags` so a release build reports `v0.1.4`;
+    // `--always` so an untagged one still reports its commit; `--dirty` so a
+    // build from a modified tree can never be mistaken for the release it is
+    // descended from.
+    let (describe, commit) = match from_env("COLONIZER_DESCRIBE") {
+        Some(describe) => (describe, from_env("COLONIZER_COMMIT").unwrap_or_default()),
+        None => (
+            git(&["describe", "--tags", "--always", "--dirty"]).unwrap_or_default(),
+            git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+        ),
+    };
 
     // Honour SOURCE_DATE_EPOCH so a release can still be built reproducibly:
     // an unconditional clock reading would give every rebuild a different
@@ -55,6 +69,14 @@ fn main() {
 /// Where git keeps `name` for this checkout, as an absolute path.
 fn git_path(name: &str) -> Option<String> {
     git(&["rev-parse", "--path-format=absolute", "--git-path", name])
+}
+
+/// A variable from the build's environment, when it is set to something.
+fn from_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn git(args: &[&str]) -> Option<String> {

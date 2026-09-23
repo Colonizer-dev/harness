@@ -19,7 +19,10 @@ v0.1.4 (1367191, built 2026-09-17T17:21:32Z)
 The same three facts — the tag, the commit and the build time — are in
 **Settings → Updates**, and at `GET /api/version`. They are stamped into the
 binary at build time from git, not read from a file next to it, so a binary
-cannot be made to claim a version it is not.
+cannot be made to claim a version it is not. The release workflow passes the
+tag and commit in as `COLONIZER_DESCRIBE` and `COLONIZER_COMMIT`, because the
+Linux harness is built in a container without git; a build that sets them is
+stamped with them rather than asking git.
 
 A build that is not a release says so:
 
@@ -73,12 +76,14 @@ What happens, in order:
    update: its microVM is already gone and the host is committing and pushing,
    and interrupting that leaves a colony `failed` with its pull request
    unopened. The pane says which colony, and you try again when it is done.
-2. **The release is unpacked beside the running app**, into whichever of the two
+2. **The colony list is copied aside**, to `sessions.json.pre-update-<unix-timestamp>`
+   next to `sessions.json`. If the copy cannot be made, nothing is installed.
+3. **The release is unpacked beside the running app**, into whichever of the two
    slots — `app-a`, `app-b` — the running version is not using. A failure
    part-way leaves the running version exactly as it was.
-3. **The `app` symlink is moved with one rename.** There is no moment at which
+4. **The `app` symlink is moved with one rename.** There is no moment at which
    it points at half an install.
-4. **The process replaces itself** with the new binary. Colonies are detached
+5. **The process replaces itself** with the new binary. Colonies are detached
    microVMs, so each live one is reconnected and its event stream carries on
    from the sequence number it had. The pane lists every colony and what
    happened to it.
@@ -108,6 +113,7 @@ the same reason:
 
 | Reason | What to do |
 | :--- | :--- |
+| This is a development build — commits after a tag, a modified tree, or no tag | Update it from source: `git pull && scripts/install.sh --install` |
 | This install has no `scripts/install-release.sh` — it did not come from a release | Update the way you installed: `git pull && scripts/install.sh` for a checkout |
 | The app path is not the symlink the installer maintains | Install once from a release, or set `COLONIZER_APP` to the symlink |
 | Running without an installed app directory | Same |

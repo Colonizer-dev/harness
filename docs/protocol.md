@@ -697,7 +697,7 @@ whose version cannot be placed is never told it is behind.
 
 `apply` reports an update being installed: `phase` is `idle`, `installing`, `restarting` or `failed`,
 with the installer's output and a line per live colony. `can_apply` says whether this install can update
-itself at all: a source checkout cannot, and says so.
+itself at all: a source checkout or a development build cannot, and says so.
 
 ### `POST /api/update/apply`
 
@@ -705,7 +705,12 @@ Installs the latest release and restarts into it. Answers as soon as the work st
 
 It runs `scripts/install-release.sh` from inside the app (the same installer a person would run) so the
 download, its checksum and the symlink swap are not reimplemented. A failure leaves the running version
-untouched, because the installer unpacks beside it and moves the symlink last.
+untouched, because the installer unpacks beside it and moves the symlink last. Before it runs,
+`sessions.json` is copied to `sessions.json.pre-update-<unix-timestamp>` beside it; if that copy fails,
+nothing is installed and `apply.phase` is `failed`.
+
+Refused with `409` when this mothership is a development build (`installed.development`): a release could
+replace changes it does not contain, so the answer points at `git pull && scripts/install.sh --install`.
 
 Refused with `409` when a colony is `publishing`: its microVM is already gone and the host is committing
 and pushing, and interrupting that leaves the colony failed with its pull request unopened. A colony that

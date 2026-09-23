@@ -66,10 +66,14 @@ jobs:
       - name: Build inside rust:1-alpine
         env:
           ARCH: ${{ matrix.arch }}
+          # The container has no git, so the harness is told which release it is (crates/colonizer/build.rs).
+          # Empty off a tag, and build.rs then asks git as usual.
+          COLONIZER_DESCRIBE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          COLONIZER_COMMIT: ${{ github.sha }}
         run: |
           # The image is pinned by digest, because the tag alone would move under us between builds.
           # The tag stays in the reference so a human can still read it; the digest is what pins it.
-          docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e OWNER="$(id -u):$(id -g)" \
+          docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e COLONIZER_DESCRIBE -e COLONIZER_COMMIT -e OWNER="$(id -u):$(id -g)" \
             -v "$PWD:/src" -w /src rust:1-alpine@sha256:1716b3aa042d735f4566d14dc54e8037de9d69556e2d5dd58131d93a613d173d sh -euc '
               apk add --no-cache musl-dev file >/dev/null
               scripts/build-agentd.sh
@@ -141,6 +145,9 @@ jobs:
           # scripts: on this job their Linux binaries come from prebuilt_bin, so build-tailscaled.sh is
           # the only one that sees COLONIZER_BUILD_HERE.
           COLONIZER_BUILD_HERE: ${{ matrix.platform == 'darwin-arm64' && '1' || '' }}
+          # The Mac leg builds the harness here; stamped the same way as the Linux one above.
+          COLONIZER_DESCRIBE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          COLONIZER_COMMIT: ${{ github.sha }}
         run: |
           chmod 755 prebuilt/*
           COLONIZER_PREBUILT="$PWD/prebuilt" scripts/install.sh --bundle
@@ -161,8 +168,19 @@ jobs:
 
       - name: Smoke test
         run: |
+          set -o pipefail
           mkdir -p smoke/home
           tar -xzf "out/colonizer-$PLATFORM.tar.gz" -C smoke
+          # A release must know it is one: a build that reads as a development build refuses to update itself.
+          smoke/colonizer/bin/colonizer version | tee smoke/version
+          if [ "${VERSION#dev-}" = "$VERSION" ]; then
+            read -r stamped _ < smoke/version
+            [ "$stamped" = "$VERSION" ] || { echo "the app reports $stamped, not $VERSION" >&2; exit 1; }
+            if grep -q "development build" smoke/version; then
+              echo "the app reports itself as a development build" >&2
+              exit 1
+            fi
+          fi
           HOME="$PWD/smoke/home" COLONIZER_BIND=127.0.0.1:17878 COLONIZER_GATEWAY_BIND=127.0.0.1:17879 \
             smoke/colonizer/bin/colonizer > smoke/log 2>&1 &
           pid=$!
