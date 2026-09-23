@@ -101,6 +101,12 @@ export interface CatchUpResult {
   behind_by: number | null;
 }
 
+/**
+ * POST /api/sessions/{id}/stop: the colony plus what the stop did. `already_stopped` is a 200 like
+ * `stopped` — the colony was already over — so a retried or stale stop lands as a success.
+ */
+export type StopReply = Session & { result: "stopped" | "already_stopped" };
+
 export interface Api {
   readonly mock: boolean;
   /**
@@ -132,7 +138,7 @@ export interface Api {
   createSession(body: NewSessionRequest): Promise<Session>;
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
-  stopSession(id: string): Promise<Session>;
+  stopSession(id: string): Promise<StopReply>;
   cleanupSession(id: string): Promise<Session>;
   /** GET /api/storage: disk usage plus the reclaimable / unpushed / orphan breakdown (issue #223). */
   storageSummary(): Promise<StorageSummary>;
