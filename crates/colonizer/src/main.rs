@@ -179,6 +179,9 @@ pub struct App {
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
     /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
     pub new_orgs: RwLock<BTreeMap<String, Option<String>>>,
+    /// Each org's GitHub description, from the same `/user/orgs` fetch, for the workspace page.
+    /// In-memory: the first refresh after a restart fills it again.
+    pub org_descriptions: RwLock<BTreeMap<String, String>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
     /// When the last org refresh failed, so a `gh` that keeps failing is retried once a minute
@@ -1271,6 +1274,7 @@ async fn serve() -> Result<()> {
         gateway: gateway::Gateway::new(&cfg.data_dir)?,
         repo_owners: RwLock::new(BTreeSet::new()),
         new_orgs: RwLock::new(BTreeMap::new()),
+        org_descriptions: RwLock::new(BTreeMap::new()),
         orgs_refreshed: Mutex::new(None),
         orgs_failed_at: Mutex::new(None),
         claude_account: Mutex::new(None),
@@ -1562,6 +1566,7 @@ pub(crate) mod tests {
             gateway: gateway::Gateway::new(&root.join("data")).unwrap(),
             repo_owners: RwLock::new(BTreeSet::new()),
             new_orgs: RwLock::new(BTreeMap::new()),
+            org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_refreshed: Mutex::new(None),
             orgs_failed_at: Mutex::new(None),
             pull: Mutex::new(Default::default()),

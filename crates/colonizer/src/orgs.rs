@@ -276,7 +276,23 @@ pub(crate) fn recordable_sightings<'a>(
     fetched.keys().filter(move |login| !awaiting.contains_key(*login))
 }
 
-/// One line of `gh api /user/orgs --jq '.[] | {login, avatar_url}'`: a login and, when GitHub has
+/// The description on one line of the `/user/orgs` fetch, when GitHub has a non-blank one. Read
+/// beside [`parse_org_line`] rather than through it, so the seen-set and avatar record keep their
+/// shape; trimmed and capped, since it is shown as a one-line subtitle.
+pub(crate) fn parse_org_description(line: &str) -> Option<(String, String)> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let login = v["login"].as_str()?;
+    if !valid_org(login) {
+        return None;
+    }
+    let text = v["description"].as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some((login.to_string(), text.chars().take(400).collect()))
+}
+
+/// One line of `gh api /user/orgs --jq '.[] | {login, avatar_url, description}'`: a login and, when GitHub has
 /// one, its avatar. `gh` prints each jq result as one compact JSON line (`--paginate` concatenates
 /// the pages' lines, the same shape [`crate::github::list_repos`] reads its repository rows as), so
 /// the refresh parses line by line and skips whatever does not parse instead of losing the batch.
@@ -560,6 +576,7 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     let saved = app.all_org_settings();
     let known = app.known_orgs().unwrap_or_default();
     let new_orgs = app.new_orgs.read().await.clone();
+    let descriptions = app.org_descriptions.read().await.clone();
     let sessions = app.sessions.read().await.clone();
     // The workspace set: orgs with settings of their own (a switched-off or declined one keeps its
     // entry, so it stays reachable), orgs with colonies, orgs the account belongs to, and orgs still
@@ -604,6 +621,9 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                 });
                 if let Some(avatar_url) = avatar {
                     entry["avatar_url"] = Value::String(avatar_url);
+                }
+                if let Some(description) = descriptions.get(&org) {
+                    entry["description"] = Value::String(description.clone());
                 }
                 if awaiting {
                     entry["awaiting_decision"] = Value::Bool(true);
@@ -1776,5 +1796,38 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(root);
+    #[test]
+    fn an_org_description_is_read_trimmed_and_only_when_there_is_one() {
+        assert_eq!(
+            parse_org_description(r#"{"login":"acme","avatar_url":null,"description":"  Tools for makers  "}"#),
+            Some(("acme".to_string(), "Tools for makers".to_string()))
+        );
+        assert_eq!(
+            parse_org_description(r#"{"login":"acme","description":"   "}"#),
+            None,
+            "blank is none"
+        );
+        assert_eq!(
+            parse_org_description(r#"{"login":"acme","description":null}"#),
+            None,
+            "null is none"
+        );
+        assert_eq!(
+            parse_org_description(r#"{"login":"../x","description":"hi"}"#),
+            None,
+            "an invalid login is skipped"
+        );
+        let long = "x".repeat(1000);
+        let line = format!(r#"{{"login":"acme","description":"{long}"}}"#);
+        assert_eq!(
+            parse_org_description(&line).unwrap().1.chars().count(),
+            400,
+            "capped for a one-line subtitle"
+        );
+        // The avatar reader is unaffected by the extra field.
+        assert_eq!(
+            parse_org_line(r#"{"login":"acme","avatar_url":"https://a.png","description":"hi"}"#),
+            Some(("acme".to_string(), Some("https://a.png".to_string())))
+        );
     }
 }

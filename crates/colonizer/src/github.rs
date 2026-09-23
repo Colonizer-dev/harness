@@ -1833,7 +1833,7 @@ pub async fn refresh_orgs(app: &App) {
             "--paginate",
             "/user/orgs?per_page=100",
             "--jq",
-            ".[] | {login, avatar_url}",
+            ".[] | {login, avatar_url, description}",
         ]),
     )
     .await
@@ -1848,6 +1848,9 @@ pub async fn refresh_orgs(app: &App) {
         }
     };
     let mut fetched: BTreeMap<String, Option<String>> = out.lines().filter_map(orgs::parse_org_line).collect();
+    // Descriptions ride the same fetch; a successful one replaces the cache, so a cleared
+    // description on GitHub clears here too.
+    *app.org_descriptions.write().await = out.lines().filter_map(orgs::parse_org_description).collect();
     // The signed-in login comes from the cached viewer — its TTL is the point, one `gh api user`
     // serving every poll — with a plain lookup as the fallback, and neither failing aborts the
     // refresh; it just proceeds without a login of its own.
