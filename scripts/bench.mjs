@@ -15,7 +15,7 @@
 // and opens real pull requests on that repository, and on nothing else.
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -23,6 +23,20 @@ import { analyze, loadColonies, totalCost } from './colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MOTHERSHIP = process.env.COLONIZER_URL || 'http://127.0.0.1:7878';
+
+// The mothership's API needs its per-install token: `COLONIZER_API_TOKEN` wins, else the same
+// `api-token` file the server minted. Absent entirely, requests go out unauthenticated.
+function apiToken() {
+  if (process.env.COLONIZER_API_TOKEN) return process.env.COLONIZER_API_TOKEN;
+  const dir = process.env.COLONIZER_CONFIG_DIR || join(homedir(), '.config/colonizer');
+  try {
+    return readFileSync(join(dir, 'api-token'), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+const TOKEN = apiToken();
+const authHeaders = TOKEN ? { authorization: `Bearer ${TOKEN}` } : {};
 const TASKS = JSON.parse(readFileSync(join(ROOT, 'scripts/bench/tasks.json'), 'utf8'));
 const ISSUE_MARK = '<!-- colonizer-bench -->';
 
@@ -31,7 +45,8 @@ const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8' }).
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function api(path, init) {
-  const res = await fetch(`${MOTHERSHIP}${path}`, { headers: { 'content-type': 'application/json' }, ...init });
+  // authHeaders last: a caller must not be able to clobber the token.
+  const res = await fetch(`${MOTHERSHIP}${path}`, { ...init, headers: { 'content-type': 'application/json', ...init?.headers, ...authHeaders } });
   const text = await res.text();
   let body = null;
   try {
@@ -103,7 +118,8 @@ function benchIssues(repo) {
  */
 function autoAnswer(sessionId, task, log) {
   const url = `${MOTHERSHIP.replace(/^http/, 'ws')}/api/sessions/${sessionId}/events?since=0`;
-  const socket = new WebSocket(url);
+  // The token rides the handshake: Node's WebSocket takes custom `{ headers }` since Node 22.
+  const socket = TOKEN ? new WebSocket(url, { headers: { authorization: `Bearer ${TOKEN}` } }) : new WebSocket(url);
   socket.addEventListener('message', (event) => {
     let frame;
     try {
