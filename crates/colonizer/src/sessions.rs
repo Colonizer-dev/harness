@@ -171,12 +171,20 @@ pub(crate) fn cleared_attention_message(attention: &Option<Value>) -> Option<Str
 /// Startup migration, run in `serve` next to the org backfill and before `recover`: colonies
 /// persisted as finished while still carrying an attention flag predate the clearing every
 /// terminal transition now does. A finished colony that still carries one looks like it needs
-/// attention it no longer does, so drop the flag from every terminal colony that has one.
-/// Returns how many flags were cleared.
+/// attention it no longer does, so drop the flag from every terminal colony that has one — except a
+/// quota-parked colony, whose flag is its resume ticket: stripping it would strand the colony,
+/// parked with no reason for the queue to ever requeue. Returns how many flags were cleared.
 pub(crate) fn clear_stale_attention(sessions: &mut [Session]) -> usize {
     let mut cleared = 0;
     for s in sessions.iter_mut() {
         if s.status.is_terminal() && s.attention.is_some() {
+            let quota_parked = s
+                .attention
+                .as_ref()
+                .is_some_and(|a| a["reason"].as_str() == Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON));
+            if quota_parked {
+                continue;
+            }
             s.attention = None;
             cleared += 1;
         }
@@ -2591,6 +2599,26 @@ pub(crate) mod tests {
             "a finished colony without a flag is untouched"
         );
         assert_eq!(clear_stale_attention(&mut sessions), 0, "the migration is idempotent");
+    }
+
+    #[test]
+    fn startup_migration_keeps_a_quota_parked_colony_resumable() {
+        let mut parked = stopped_colony_with_worktree("acme", "parked".into());
+        parked.status = SessionStatus::Stopped;
+        parked.error = Some("provider quota exhausted (resets 7am (UTC))".into());
+        parked.attention =
+            Some(json!({"reason": crate::provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        let mut sessions = vec![parked];
+        assert_eq!(
+            clear_stale_attention(&mut sessions),
+            0,
+            "the park reason is the resume ticket, not stale"
+        );
+        assert_eq!(
+            sessions[0].attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON),
+            "a restart must not strand the parked colony"
+        );
     }
 
     /// sessions.json written before `routed_cost_usd` existed must still load, cost and all.
