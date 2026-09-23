@@ -27,6 +27,19 @@
   --term-bg: #0b0e14;
   --term-fg: #dfe5ee;
   --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 4px 16px rgb(18 23 34 / 0.07);
+  /* Dashboard series (issue #398, from the Cockpit Dashboards design): outcome stacks, model
+     stacks and p50/p95 lines. The oklch fills are theme-independent on purpose — the design pins
+     the same hues in both renders — while --out-stopped tracks the border, which adapts. */
+  --out-merged: oklch(0.76 0.17 158);
+  --out-pr: oklch(0.7 0.16 258);
+  --out-nochg: oklch(0.82 0.15 85);
+  --out-failed: oklch(0.66 0.21 20);
+  --out-stopped: #c3cbd7;
+  --model-deepseek: oklch(0.74 0.14 205);
+  --model-opus: oklch(0.72 0.17 48);
+  --model-spark: oklch(0.68 0.18 295);
+  --lat-p50: oklch(0.74 0.14 210);
+  --lat-p95: oklch(0.7 0.19 340);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
   color-scheme: light;
@@ -59,6 +72,16 @@
     --term-bg: #05070b;
     --term-fg: #dfe5ee;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.35);
+    --out-merged: oklch(0.76 0.17 158);
+    --out-pr: oklch(0.7 0.16 258);
+    --out-nochg: oklch(0.82 0.15 85);
+    --out-failed: oklch(0.66 0.21 20);
+    --out-stopped: #323c4f;
+    --model-deepseek: oklch(0.74 0.14 205);
+    --model-opus: oklch(0.72 0.17 48);
+    --model-spark: oklch(0.68 0.18 295);
+    --lat-p50: oklch(0.74 0.14 210);
+    --lat-p95: oklch(0.7 0.19 340);
     color-scheme: dark;
   }
 }
@@ -85,6 +108,16 @@
   --color-err-soft: var(--err-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
+  --color-out-merged: var(--out-merged);
+  --color-out-pr: var(--out-pr);
+  --color-out-nochg: var(--out-nochg);
+  --color-out-failed: var(--out-failed);
+  --color-out-stopped: var(--out-stopped);
+  --color-model-deepseek: var(--model-deepseek);
+  --color-model-opus: var(--model-opus);
+  --color-model-spark: var(--model-spark);
+  --color-lat-p50: var(--lat-p50);
+  --color-lat-p95: var(--lat-p95);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -975,6 +1008,16 @@ body {
   --dots: rgb(18 23 34 / 0.08);
   --tunnel-wall: #b89a78;
   --tunnel-floor: #dcc3a2;
+  --out-merged: oklch(0.76 0.17 158);
+  --out-pr: oklch(0.7 0.16 258);
+  --out-nochg: oklch(0.82 0.15 85);
+  --out-failed: oklch(0.66 0.21 20);
+  --out-stopped: #c3cbd7;
+  --model-deepseek: oklch(0.74 0.14 205);
+  --model-opus: oklch(0.72 0.17 48);
+  --model-spark: oklch(0.68 0.18 295);
+  --lat-p50: oklch(0.74 0.14 210);
+  --lat-p95: oklch(0.7 0.19 340);
   color-scheme: light;
 }
 
@@ -1010,6 +1053,16 @@ body {
   --dots: rgb(255 255 255 / 0.07);
   --tunnel-wall: #241a12;
   --tunnel-floor: #3a2b1c;
+  --out-merged: oklch(0.76 0.17 158);
+  --out-pr: oklch(0.7 0.16 258);
+  --out-nochg: oklch(0.82 0.15 85);
+  --out-failed: oklch(0.66 0.21 20);
+  --out-stopped: #323c4f;
+  --model-deepseek: oklch(0.74 0.14 205);
+  --model-opus: oklch(0.72 0.17 48);
+  --model-spark: oklch(0.68 0.18 295);
+  --lat-p50: oklch(0.74 0.14 210);
+  --lat-p95: oklch(0.7 0.19 340);
   color-scheme: dark;
 }
 

@@ -1130,6 +1130,30 @@ const MOCK_SPEND_MODELS: ModelSpend[] = [
   { model: "claude-haiku-4-5", tokens: 212_000, cost_usd: 0.18 },
 ];
 const MOCK_SPEND_TOKENS: SpendTokens = { input: 4_320_000, output: 1_140_000, cache_read: 3_200_000, cache_write: 180_000 };
+
+/**
+ * Splits one history day's measured cost/tokens across the cumulative model mix, so the
+ * spend-by-model stacks agree with the day total instead of repeating the rollup. Tokens
+ * follow the mix weights (largest remainder, so they add up exactly); cost follows the priced
+ * weights in cents with the rounding drift on the largest share, and the unpriced model keeps
+ * cost null, like the rollup.
+ */
+function splitDayModels(cost: number, input: number, output: number): ModelSpend[] {
+  const dayTotal = input + output;
+  const tokenTotal = MOCK_SPEND_MODELS.reduce((n, m) => n + m.tokens, 0);
+  const shares = MOCK_SPEND_MODELS.map((m) => (dayTotal * m.tokens) / tokenTotal);
+  const tokens = shares.map(Math.floor);
+  let rest = dayTotal - tokens.reduce((n, v) => n + v, 0);
+  const order = shares.map((_, i) => i).sort((a, b) => shares[b] - tokens[b] - (shares[a] - tokens[a]));
+  for (let k = 0; k < rest; k++) tokens[order[k % order.length]] += 1;
+  const cents = Math.round(cost * 100);
+  const costTotal = MOCK_SPEND_MODELS.reduce((n, m) => n + (m.cost_usd ?? 0), 0);
+  const costs: (number | null)[] = MOCK_SPEND_MODELS.map((m) => (m.cost_usd == null || costTotal <= 0 ? null : Math.round((cents * m.cost_usd) / costTotal) / 100));
+  const drift = cents - costs.reduce<number>((n, c) => n + Math.round((c ?? 0) * 100), 0);
+  const biggest = costs.indexOf(Math.max(...costs.map((c) => c ?? -1)));
+  if (biggest >= 0 && costs[biggest] != null) costs[biggest] = (costs[biggest] as number) + drift / 100;
+  return MOCK_SPEND_MODELS.map((m, i) => ({ model: m.model, tokens: tokens[i], cost_usd: costs[i] }));
+}
 const mockOrgSpend: Record<string, OrgSpend> = {
   acme: { cost_usd: 44.37, routed_cost_usd: 0, tokens: MOCK_SPEND_TOKENS, models: MOCK_SPEND_MODELS },
   octocat: {
@@ -1380,6 +1404,84 @@ export function createMockApi(): Api {
   });
   closed.session.updated_at = ago(690);
   sessions.set(closed.session.id, closed);
+
+  // Overview dashboard seeds (issue #398): merged PRs spread over the last month so the
+  // merged-per-day chart has something honest to stack, a few failures for the change-failure
+  // reading, and colonies waiting on answers at staggered waits so the needs-you queue's
+  // oldest-first order is visible. There is no merge timestamp on the mothership, so the
+  // overview buckets merged PRs by created_at — these seeds spread that field, not updated_at.
+  const HOUR = 60;
+  const DAY = 24 * HOUR;
+  const mergedSeeds: Array<{ id: string; repo: string; issue: number; title: string; daysAgo: number; cost: number; pr: number }> = [
+    { id: "merge_w1", repo: "acme/webshop", issue: 58, title: "Retry failed webhooks with backoff", daysAgo: 1, cost: 0.84, pr: 71 },
+    { id: "merge_w2", repo: "acme/webshop", issue: 57, title: "Guest cart survives sign-in", daysAgo: 2, cost: 1.12, pr: 70 },
+    { id: "merge_w2b", repo: "acme/webshop", issue: 59, title: "Scoped tokens for the API", daysAgo: 2, cost: 0.58, pr: 72 },
+    { id: "merge_d1", repo: "acme/design-system", issue: 15, title: "Export logo set as SVG", daysAgo: 3, cost: 0.22, pr: 22 },
+    { id: "merge_w3", repo: "acme/webshop", issue: 56, title: "Paginate the activity feed", daysAgo: 5, cost: 2.05, pr: 69 },
+    { id: "merge_o1", repo: "octocat/hello-world", issue: 9, title: "Refresh the README examples", daysAgo: 6, cost: 0.31, pr: 10 },
+    { id: "merge_d2", repo: "acme/design-system", issue: 14, title: "Dark-mode token scale", daysAgo: 8, cost: 0.64, pr: 21 },
+    { id: "merge_w4", repo: "acme/webshop", issue: 55, title: "Stricter CSP headers", daysAgo: 11, cost: 1.48, pr: 68 },
+    { id: "merge_w5", repo: "acme/webshop", issue: 54, title: "Locale fallback for dates", daysAgo: 15, cost: 0.92, pr: 67 },
+    { id: "merge_o2", repo: "octocat/hello-world", issue: 8, title: "Pin base images in CI", daysAgo: 19, cost: 0.18, pr: 9 },
+    { id: "merge_d3", repo: "acme/design-system", issue: 13, title: "Skeleton loaders for balances", daysAgo: 24, cost: 0.77, pr: 20 },
+    { id: "merge_w6", repo: "acme/webshop", issue: 53, title: "Index on transfers.created_at", daysAgo: 28, cost: 1.9, pr: 66 },
+    // Older than the default 30d window, so the compare toggle has a previous period to draw.
+    { id: "merge_w7", repo: "acme/webshop", issue: 52, title: "Cache the pricing lookup", daysAgo: 35, cost: 1.05, pr: 65 },
+    { id: "merge_d4", repo: "acme/design-system", issue: 11, title: "High-contrast focus states", daysAgo: 45, cost: 0.41, pr: 19 },
+    { id: "merge_o3", repo: "octocat/hello-world", issue: 7, title: "Document the webhook secret", daysAgo: 55, cost: 0.12, pr: 8 },
+    { id: "merge_w8", repo: "acme/webshop", issue: 51, title: "Trim the session payload", daysAgo: 32, cost: 0.66, pr: 64 },
+    { id: "merge_o4", repo: "octocat/hello-world", issue: 6, title: "Bump the actions pins", daysAgo: 35, cost: 0.09, pr: 7 },
+    { id: "merge_w9", repo: "acme/webshop", issue: 50, title: "Order confirmation copy", daysAgo: 41, cost: 1.31, pr: 63 },
+    { id: "merge_d5", repo: "acme/design-system", issue: 10, title: "Spinner alignment pass", daysAgo: 41, cost: 0.35, pr: 18 },
+    { id: "merge_w10", repo: "acme/webshop", issue: 49, title: "Discount code validation", daysAgo: 52, cost: 0.97, pr: 62 },
+    { id: "merge_o5", repo: "octocat/hello-world", issue: 5, title: "Fix the broken badge", daysAgo: 52, cost: 0.14, pr: 6 },
+  ];
+  for (const seed of mergedSeeds) {
+    const merged = new MockSession({
+      ...baseSession(seed.id, seed.repo, seed.issue, seed.title),
+      status: "merged",
+      mesh: null,
+      pr_url: `https://github.com/${seed.repo}/pull/${seed.pr}`,
+      cost_usd: seed.cost,
+      created_at: ago(seed.daysAgo * DAY),
+      updated_at: ago(Math.max(0, seed.daysAgo * DAY - 300)),
+    });
+    sessions.set(merged.session.id, merged);
+  }
+  const failedSeeds: Array<{ id: string; repo: string; issue: number; title: string; daysAgo: number; error: string }> = [
+    { id: "fail_w1", repo: "acme/webshop", issue: 62, title: "Migrate to Postgres 17", daysAgo: 6, error: "colony failed: the migration timed out on staging" },
+    { id: "fail_d1", repo: "acme/design-system", issue: 16, title: "Android 15 edge-to-edge", daysAgo: 13, error: "colony failed: checks never reported" },
+  ];
+  for (const seed of failedSeeds) {
+    const failedSeed = new MockSession({
+      ...baseSession(seed.id, seed.repo, seed.issue, seed.title),
+      status: "failed",
+      mesh: null,
+      error: seed.error,
+      created_at: ago(seed.daysAgo * DAY),
+      updated_at: ago(Math.max(0, seed.daysAgo * DAY - 120)),
+    });
+    sessions.set(failedSeed.session.id, failedSeed);
+  }
+  // Colonies paused on a question at staggered waits: the needs-you queue sorts oldest first.
+  const waitingSeeds: Array<{ id: string; repo: string; issue: number; title: string; waitMinutes: number }> = [
+    { id: "wait_w1", repo: "acme/webshop", issue: 63, title: "Checkout copy review before release", waitMinutes: 7 * HOUR },
+    { id: "wait_w2", repo: "acme/webshop", issue: 64, title: "Fleet panel: flag stalled peers", waitMinutes: HOUR },
+    { id: "wait_o1", repo: "octocat/hello-world", issue: 11, title: "Rotate staging TLS certs", waitMinutes: 24 },
+  ];
+  for (const seed of waitingSeeds) {
+    const since = ago(seed.waitMinutes);
+    const waiting = new MockSession({
+      ...baseSession(seed.id, seed.repo, seed.issue, seed.title),
+      status: "waiting_for_answer",
+      mesh: { name: `colony-${seed.id}`, ip: `100.64.0.${20 + seed.id.length}` },
+      attention: { reason: "waiting_for_answer", since, nudges: 0 },
+      last_activity_at: since,
+      created_at: ago(seed.waitMinutes + 180),
+      updated_at: since,
+    });
+    sessions.set(waiting.session.id, waiting);
+  }
 
   const DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
   const zeroUsage = () => ({ requests: 0, failures: 0, fallbacks: 0, duration_ms: 0, since: null, last_request_at: null });
@@ -2292,24 +2394,27 @@ export function createMockApi(): Api {
           };
         });
       }),
-    spendHistory: () =>
+    spendHistory: (days = 8) =>
       later((): SpendHistory => {
-        // Eight deterministic days, oldest first. acme is measured and roars some days; octocat is
-        // measured-but-never-priced so its costs stay null. Two days only octocat appears, so acme's
-        // sparkline has zero-height (gap) slots.
-        const dayCount = 8;
+        // Deterministic days, oldest first. acme is measured and roars some days; octocat is
+        // measured-but-never-priced so its costs stay null. Every fourth day only octocat appears,
+        // so acme's sparkline has zero-height (gap) slots. The default eight days keep the
+        // long-standing shape; an explicit window (the overview asks for twice its range) extends
+        // the same pattern further back.
+        const dayCount = Math.max(0, Math.floor(days));
         const acmeCosts = [0.35, 1.1, 0.8, 2.3, 0.6, 1.7, 0.4, 0.9];
-        const acmeAway = new Set([1, 5]);
-        const days: SpendDay[] = Array.from({ length: dayCount }, (_, i) => {
+        const result: SpendDay[] = Array.from({ length: dayCount }, (_, i) => {
           const orgs: SpendOrgDay[] = [];
-          if (!acmeAway.has(i)) {
-            const cost = acmeCosts[i];
+          if (i % 4 !== 1) {
+            const cost = acmeCosts[i % acmeCosts.length];
+            const input = 40_000 * (cost + 1);
+            const output = 8_000 * (cost + 1);
             orgs.push({
               org: "acme",
               cost_usd: cost,
               routed_cost_usd: 0,
-              tokens: { input: 40_000 * (cost + 1), output: 8_000 * (cost + 1), cache_read: 0, cache_write: 0 },
-              models: MOCK_SPEND_MODELS,
+              tokens: { input, output, cache_read: 0, cache_write: 0 },
+              models: splitDayModels(cost, input, output),
               launched: i % 2 === 0 ? 1 : 0,
               returned: i % 3 === 0 ? 1 : 0,
             });
@@ -2327,7 +2432,7 @@ export function createMockApi(): Api {
           }
           return { day: isoDay(dayCount - 1 - i), orgs };
         });
-        return { days };
+        return { days: result };
       }),
     saveOrg: async (org, settings) => {
       await sleep(250);

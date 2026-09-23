@@ -8,6 +8,7 @@ import {
   dailyCosts,
   formatDelta,
   funnelFor,
+  providerSnapshots,
   relDelta,
   repoRows,
   slicePeriods,
@@ -93,5 +94,24 @@ describe("funnelFor and repoRows", () => {
     expect(costPerMerged(2, 1)).toBe(2);
     expect(costPerMerged(null, 1)).toBeNull();
     expect(costPerMerged(2, 0)).toBeNull();
+  });
+});
+
+describe("providerSnapshots", () => {
+  it("maps GET /api/status model_providers onto the org dashboard's tallies", () => {
+    const snaps = providerSnapshots([
+      { id: "strix", name: "Strix Halo", requests: 32_689, failure_pct: 29.4, avg_latency_ms: 12_800, degraded: true },
+      { id: "lab", name: "Lab vLLM", requests: 0, failure_pct: 0, avg_latency_ms: 0, degraded: false },
+    ]);
+    // Failures re-derive from the rounded pct, so the displayed rate reads back exactly.
+    expect(snaps[0]).toMatchObject({ name: "Strix Halo", requests: 32_689, avgLatencyMs: 12_800 });
+    expect(snaps[0].failures / snaps[0].requests).toBeCloseTo(0.294, 3);
+    // No requests: zero latency reads as unmeasured, not 0ms.
+    expect(snaps[1]).toMatchObject({ requests: 0, failures: 0, avgLatencyMs: null });
+    expect(snaps[1].since).toBeUndefined();
+  });
+  it("reads empty without a status payload", () => {
+    expect(providerSnapshots(null)).toEqual([]);
+    expect(providerSnapshots(undefined)).toEqual([]);
   });
 });

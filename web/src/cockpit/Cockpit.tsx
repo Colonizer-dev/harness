@@ -25,6 +25,7 @@ import { OverviewView } from "./OverviewView";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { Rail, type CockpitView } from "./Rail";
 import { needCountByOrg } from "./feed";
+import { providerSnapshots } from "./dash";
 
 const VIEW_KEY = "colonizer.cockpitView";
 const THEME_KEY = "colonizer.theme";
@@ -325,19 +326,12 @@ export function Cockpit({
             runs={redRuns}
             quota={status?.quota ?? null}
             quotaBannerVisible={quotaBanner !== null}
+            // The org dashboard's API-error tile reads the status poll's cumulative provider
+            // tallies (mapped in dash.ts); nothing here fetches.
+            providers={providerSnapshots(status?.model_providers)}
             onStart={onRedStart}
             onStop={onRedStop}
-            onOpenOrg={(org) => {
-              onSelectOrg(org);
-              setView("home");
-              setInspector(null);
-            }}
             onOpenColony={openColonyById}
-            onSelect={(session) => {
-              // "answer in the pane": land on the nest with the colony's question in the inspector.
-              setInspector({ kind: "colony", session });
-              setView("home");
-            }}
           />
         );
       case "launch":
