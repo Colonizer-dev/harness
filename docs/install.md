@@ -26,7 +26,7 @@ checked by sha256, so there is nothing else to install.
 curl -fsSL https://colonizer.dev/install.sh | sh
 ```
 
-Then run `colonizer` and open <http://127.0.0.1:7878>.
+Then run `colonizer`. It prints a sign-in link and opens it in your browser; `colonizer open` prints it again. Opening <http://127.0.0.1:7878> without that link asks you to sign in.
 
 The installer picks the app for your machine from the latest
 [release](https://github.com/Colonizer-dev/harness/releases) and checks it against the release's
@@ -92,7 +92,7 @@ scripts/install.sh
 dist/bin/colonizer
 ```
 
-Then open <http://127.0.0.1:7878>.
+Then run `colonizer open` to sign in to the web UI.
 
 `scripts/install.sh` builds the whole app into `./dist`: the vendored binaries, `colonizer-agentd` and
 `rtk` (each a static musl build inside a microVM), the agent modules, the web UI and the harness.
