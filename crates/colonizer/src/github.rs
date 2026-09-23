@@ -3,6 +3,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     config::CoAuthor,
+    exec_bits::GitRun,
     orgs,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
@@ -23,6 +24,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use tokio::process::Command;
@@ -477,6 +479,19 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
     log.info("fetching origin").await;
     exec(app.git(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
     Ok(())
+}
+
+/// The sha `create_worktree` branched from: `origin/<base>` right now, before later pruned fetches
+/// delete the ref. A stacked child's boot records it (`Session::stack_fork`), so the publish-time
+/// restack knows which commits are the child's own even after the parent's branch is deleted.
+pub(crate) async fn fork_sha(app: &App, bare: &FsPath, base: &str) -> Result<String> {
+    Ok(exec(
+        app.git(bare)
+            .args(["rev-parse", "--verify", &format!("refs/remotes/origin/{base}")]),
+    )
+    .await?
+    .trim()
+    .to_string())
 }
 
 /// Creates the worktree and returns its git admin dir (inside the bare repo).
@@ -936,6 +951,120 @@ pub async fn retarget_pr(app: &App, pr_url: &str, base: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rebases a retargeted child's own commits onto `destination`, on the host, after `retarget_pr`
+/// already moved its pull request there: the same operation the publish-time restack performs
+/// before a pull request exists ([`GitPublishOps::restack`]), reused here for one that already has
+/// one open. Best-effort and never undoes the retarget above — a missing worktree, a failed fetch or
+/// push, or a conflicted rebase (`restack::rebase_onto` names the files) is said on the child's own
+/// log and left for a person, since GitHub already has the new base either way.
+/// The event-log warning for a retarget whose rebase did not finish: `reason` names what went
+/// wrong, and the standing instruction is spelled out because nothing here retries on its own — a
+/// publish's own restack (above) gets another attempt on every retry, but this best-effort rebase,
+/// fired once when a merge retargets an already-open pull request, does not. Pure and tested apart
+/// from the git and GitHub calls around it, like [`crate::exec_bits::should_restore`].
+fn unrebased_warning(destination: &str, reason: &str) -> String {
+    format!(
+        "its pull request now targets {destination}, but {reason}; the branch still carries the parent's commits \
+         and must be rebased onto {destination} by hand"
+    )
+}
+
+/// Rebases a retargeted child's own commits onto `destination`, on the host, after `retarget_pr`
+/// already moved its pull request there: the same operation the publish-time restack performs
+/// before a pull request exists ([`GitPublishOps::restack`]), reused here for one that already has
+/// one open. Returns whether it rebased *and* pushed; best-effort either way, and never undoes the
+/// retarget above — a missing worktree, a failed fetch or push, or a conflicted rebase
+/// (`restack::rebase_onto` names the files) is said on the child's own log
+/// ([`unrebased_warning`]) and left for a person, since GitHub already has the new base regardless.
+pub(crate) async fn rebase_retargeted_child(app: &App, child_id: &str, old_base: &str, destination: &str) -> bool {
+    let Some(child) = app.session(child_id).await else {
+        return false;
+    };
+    let admin = child.git_admin_dir.as_deref().map(PathBuf::from);
+    let wt = PathBuf::from(&child.worktree);
+    let Some(admin) = admin.filter(|a| a.exists()).filter(|_| wt.exists()) else {
+        app.session_log(child_id, "warn", unrebased_warning(destination, "its worktree is gone"))
+            .await;
+        return false;
+    };
+    let bare = app.bare_repo(&child.repo);
+    let lock = app.repo_lock(&child.repo).await;
+    let _guard = lock.lock().await;
+    if let Err(e) = exec(app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
+        app.session_log(
+            child_id,
+            "warn",
+            unrebased_warning(destination, &format!("the origin fetch failed: {e:#}")),
+        )
+        .await;
+        return false;
+    }
+    // The remote head before the rebase: the push below leases against exactly this sha.
+    let pattern = format!("refs/heads/{}", child.branch);
+    let expected = exec(app.git(&bare).args(["ls-remote", "--heads", "origin", &pattern]))
+        .await
+        .ok()
+        .and_then(|out| parse_ls_remote(&out, &child.branch));
+    let mut git = crate::exec_bits::WorktreeGit::new(app, &admin, &wt);
+    let outcome = async {
+        let fork = crate::restack::resolve_fork(&mut git, child.stack_fork.as_deref(), old_base).await?;
+        // Captured before the rebase moves `branch`: exactly what it is about to sit on.
+        let onto = git
+            .run_git(vec!["rev-parse".to_string(), format!("origin/{destination}")])
+            .await
+            .with_context(|| format!("could not resolve origin/{destination} after fetching it"))?
+            .trim()
+            .to_string();
+        let moved = crate::restack::rebase_onto(&mut git, &child.branch, &fork, destination).await?;
+        Ok::<_, anyhow::Error>((onto, moved))
+    }
+    .await;
+    let (onto, moved) = match outcome {
+        Ok(pair) => pair,
+        Err(e) => {
+            app.session_log(
+                child_id,
+                "warn",
+                unrebased_warning(destination, &format!("it could not be rebased: {e:#}")),
+            )
+            .await;
+            return false;
+        }
+    };
+    // Persisted right away, independent of the push below — like `GitPublishOps::restack`, and for
+    // the same reason: a later restack (a deeper stack's own merge) must find only this child's own
+    // commits between the fork and HEAD, not replay the parent's commit again, whether or not the
+    // push that follows here ever lands.
+    app.update_session(child_id, |x| x.stack_fork = Some(onto)).await;
+    let refspec = format!("refs/heads/{0}:refs/heads/{0}", child.branch);
+    let push = match expected {
+        Some(sha) => {
+            let lease = format!("--force-with-lease=refs/heads/{0}:{sha}", child.branch);
+            exec(app.git(&bare).args(["push", "--quiet", "origin", &lease]).arg(&refspec)).await
+        }
+        None => exec(app.git(&bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await,
+    };
+    if let Err(e) = push {
+        app.session_log(
+            child_id,
+            "warn",
+            unrebased_warning(
+                destination,
+                &format!("{moved} commit(s) were rebased locally but the push failed: {e:#}"),
+            ),
+        )
+        .await;
+        return false;
+    }
+    app.session_log(
+        child_id,
+        "info",
+        format!("the colony this one was stacked on was merged; rebased {moved} commit(s) onto {destination} and pushed"),
+    )
+    .await;
+    true
+}
+
 /// The commit's closing paragraph: what the work refers to, then the configured co-author's trailer
 /// unless `colonizer.toml` turns it off. Git reads trailers from the last paragraph, so the reference sits
 /// in its own.
@@ -981,6 +1110,9 @@ trait PublishOps {
     async fn stage_all(&self) -> Result<bool>;
     /// Commits what is staged, with the title and trailer.
     async fn commit(&self, title: &str, trailer: &str) -> Result<()>;
+    /// Rebases a child onto the default branch when its parent merged under it, returning the new
+    /// base (`None` = nothing to do). Runs after the commit, before anything reads the base.
+    async fn restack(&self) -> Result<Option<String>>;
     /// Whether the branch carries commits `origin/<base>` does not have.
     async fn commits_ahead(&self) -> Result<bool>;
     /// The branch head's full sha, locally.
@@ -1014,6 +1146,9 @@ async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
         ops.commit(&title, &trailer).await?;
         ops.checkpoint(PublishStage::Committed).await;
     }
+    // A child whose parent merged while it worked is rebased onto the destination now, so the
+    // commits-ahead count, the push and the pull request below all read the new base.
+    let _restacked = ops.restack().await?;
     // A genuine no-op needs both an empty index and a branch even with origin/<base>; a commit that was
     // never pushed leaves the branch ahead with nothing staged.
     if !staged && !ops.commits_ahead().await? {
@@ -1077,7 +1212,18 @@ struct GitPublishOps<'a> {
     wt: PathBuf,
     /// The bare repo whose `origin` the push and the remote queries go through.
     bare: PathBuf,
-    base: String,
+    /// The base the pull request targets. A `Mutex`, not a plain field, because the publish-time
+    /// restack moves it mid-run: a `Mutex` stays `Send` across the awaits (a `RefCell` would not,
+    /// and this whole publish runs inside a spawned task), and every read clones out before
+    /// awaiting so the lock is never held across one.
+    base: Mutex<String>,
+    /// The remote sha the branch had when this publish's own restack rebased it: the push then
+    /// carries `--force-with-lease` against exactly that sha. `None` until a restack sets it, so an
+    /// ordinary push never force-pushes.
+    lease: Mutex<Option<String>>,
+    /// A restack's `(destination, commits moved)`, held until the push it enables actually lands —
+    /// see the doc comment on `restack` for why the session record must not follow any sooner.
+    pending_base: Mutex<Option<(String, usize)>>,
     session_dir: PathBuf,
 }
 
@@ -1113,6 +1259,17 @@ impl PublishOps for GitPublishOps<'_> {
 
     async fn commit(&self, title: &str, trailer: &str) -> Result<()> {
         refuse_if_writes_blocked("commit")?;
+        // Issue #455: file tools rewrite files without their mode, so `stage_all`'s `git add -A`
+        // stages `100755` → `100644` drops the colony never asked for; restore them before the
+        // commit bakes them in. The trait is untouched, so the `FakeRepo` suite below is unaffected.
+        let task_text = format!("{}\n{}", self.s.issue_title, self.s.instructions);
+        let mut git = crate::exec_bits::WorktreeGit::new(self.app, &self.admin, &self.wt);
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        for path in crate::exec_bits::restore_dropped_exec_bits(&self.wt, &base, &task_text, &mut git).await? {
+            self.log
+                .info(format!("restored executable bit on {path} (colony commit had dropped it)"))
+                .await;
+        }
         let v = viewer(self.app).await?;
         let login = v["login"].as_str().unwrap_or("colonizer");
         let name = v["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
@@ -1135,11 +1292,11 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     async fn commits_ahead(&self) -> Result<bool> {
-        let range = format!("origin/{}..HEAD", self.base);
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        let range = format!("origin/{base}..HEAD");
         let count = exec(self.wt_git().args(["rev-list", "--count", &range]))
             .await
             .with_context(|| {
-                let base = &self.base;
                 format!(
                     "could not count the branch's commits against origin/{base}: that ref is missing from the local \
                      clone, so the base branch was probably deleted (or renamed) on GitHub and a pruned fetch dropped \
@@ -1168,7 +1325,33 @@ impl PublishOps for GitPublishOps<'_> {
             .info(format!("pushing {} to github.com/{}", self.s.branch, self.s.repo))
             .await;
         let refspec = format!("refs/heads/{0}:refs/heads/{0}", self.s.branch);
-        exec(self.app.git(&self.bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
+        // After this publish's own restack rebased the branch, a plain push is rejected: the remote
+        // still carries the pre-rebase head. The lease moves exactly that head aside — and only this
+        // path ever force-pushes, and only the colony's own branch (`check_publish_branch` guards the
+        // shape at the publish entry).
+        let expected = self.lease.lock().expect("publish lease poisoned").clone();
+        if let Some(expected) = expected {
+            let lease = format!("--force-with-lease=refs/heads/{0}:{expected}", self.s.branch);
+            exec(
+                self.app
+                    .git(&self.bare)
+                    .args(["push", "--quiet", "origin", &lease])
+                    .arg(&refspec),
+            )
+            .await?;
+        } else {
+            exec(self.app.git(&self.bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
+        }
+        // Only now — with the rebased history actually on the remote — does the recorded base
+        // follow it; see the doc comment on `restack` for why persisting it any sooner is unsafe.
+        let pending = self.pending_base.lock().expect("pending base poisoned").take();
+        if let Some((dest, moved)) = pending {
+            let id = self.s.id.clone();
+            self.app.update_session(&id, |x| x.base = Some(dest.clone())).await;
+            self.log
+                .info(format!("parent PR merged; rebased {moved} commit(s) onto {dest}"))
+                .await;
+        }
         Ok(())
     }
 
@@ -1201,9 +1384,10 @@ impl PublishOps for GitPublishOps<'_> {
         // Best effort: a fresh origin makes the behind count below current, and a fetch failure
         // leaves the pull request without its staleness note rather than failing the publish.
         let _ = exec(self.app.git(&self.bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
-        let behind = count_behind(self.app, &self.bare, &self.s.branch, &self.base).await;
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        let behind = count_behind(self.app, &self.bare, &self.s.branch, &base).await;
         let body_path = self.session_dir.join("pr-body.md");
-        let body = compose_pr_body(body, self.s.issue, behind, &self.base, self.co_author().as_ref());
+        let body = compose_pr_body(body, self.s.issue, behind, &base, self.co_author().as_ref());
         // The audit trail names the exact body that goes out (`publish_candidate_hash`, issue #98).
         let bound = crate::publish::publish_candidate_hash(body.as_bytes());
         self.log.info(format!("opening the pull request; body sha256 {bound}")).await;
@@ -1224,7 +1408,7 @@ impl PublishOps for GitPublishOps<'_> {
             "-R",
             self.s.repo.as_str(),
             "--base",
-            self.base.as_str(),
+            base.as_str(),
             "--head",
             self.s.branch.as_str(),
             "--title",
@@ -1242,6 +1426,81 @@ impl PublishOps for GitPublishOps<'_> {
             .find(|l| l.starts_with("https://"))
             .unwrap_or(pr.trim())
             .to_string())
+    }
+
+    /// Rebases a child onto the destination branch when its parent merged under it: the parent's
+    /// commit is already on the destination via squash-merge, so only the child's own commits move.
+    /// Under the repository lock like the stale-branch catch-up: the fetch and the rebase see one
+    /// origin. On conflict the rebase is aborted before anything pushes, so the branch is never left
+    /// half-rebased.
+    ///
+    /// The recorded base is deliberately *not* updated here — only `push` does that, once the
+    /// rebased history has actually landed on the remote. If it were recorded right after this local
+    /// rebase and the push below then failed, a retry would build a fresh `GitPublishOps` (with no
+    /// lease), see the base already at `dest`, skip restacking entirely, and push the previously
+    /// rewritten branch with a plain push — permanently rejected as non-fast-forward, since the
+    /// remote never received the rewrite. Not recording it here means a retry restacks again (this
+    /// method has no memory of its own across attempts) and recomputes the lease from the remote,
+    /// which still holds the pre-rebase head. `stack_fork` *is* updated right away, independent of
+    /// the push: it names the commit this branch was rebased onto, so a retry's own restack finds
+    /// only the child's own commits between fork and HEAD and re-rebases them onto the (unmoved)
+    /// destination as a no-op, rather than trying to replay the parent's commit again.
+    async fn restack(&self) -> Result<Option<String>> {
+        // Only a child still based on its parent's branch, whose parent — read fresh, since it may
+        // have merged while this colony worked — has merged, is rebased. Anything else (no parent,
+        // an unmerged parent, a retry that already moved on) has nothing to do.
+        let Some(parent_id) = self.s.parent.as_deref() else {
+            return Ok(None);
+        };
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        let Some(parent) = self.app.session(parent_id).await else {
+            return Ok(None);
+        };
+        if !crate::restack::needs_restack(Some(&base), &parent) {
+            return Ok(None);
+        }
+        let dest = match crate::stack::retarget_base(&parent) {
+            Some(dest) => dest,
+            None => {
+                let default = default_branch(self.app, &parent.repo)
+                    .await
+                    .context("the merged parent recorded no base, and the default branch could not be looked up")?;
+                crate::restack::restack_dest(&parent, &default)
+            }
+        };
+        if dest == base {
+            return Ok(None);
+        }
+        // Still the colony's own branch that moves — and only that one ever takes the lease below.
+        check_publish_branch(&self.s.branch, &dest)?;
+        let lock = self.app.repo_lock(&self.s.repo).await;
+        let _guard = lock.lock().await;
+        // Rebasing onto a stale destination would mislead, so a failed fetch fails the publish
+        // instead of rebasing blind; the retry fetches again.
+        if let Err(e) = exec(self.app.git(&self.bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
+            bail!("could not fetch origin before restacking onto {dest}: {e:#}");
+        }
+        // The remote head before the rebase: the push leases against exactly this sha.
+        let expected = self.remote_head().await?;
+        let mut git = crate::exec_bits::WorktreeGit::new(self.app, &self.admin, &self.wt);
+        let fork = crate::restack::resolve_fork(&mut git, self.s.stack_fork.as_deref(), &parent.branch).await?;
+        // Captured before the rebase moves `branch`, but `origin/<dest>` itself does not move under
+        // the repository lock — this is exactly what the branch is about to sit on.
+        let onto = git
+            .run_git(vec!["rev-parse".to_string(), format!("origin/{dest}")])
+            .await
+            .with_context(|| format!("could not resolve origin/{dest} after fetching it"))?
+            .trim()
+            .to_string();
+        let moved = crate::restack::rebase_onto(&mut git, &self.s.branch, &fork, &dest).await?;
+        let id = self.s.id.clone();
+        self.app.update_session(&id, |x| x.stack_fork = Some(onto.clone())).await;
+        // The in-memory base the commits-ahead count and the pull request below read — the recorded
+        // one follows only once `push` lands it (see the doc comment above).
+        *self.base.lock().expect("publish base poisoned") = dest.clone();
+        *self.lease.lock().expect("publish lease poisoned") = expected;
+        *self.pending_base.lock().expect("pending base poisoned") = Some((dest.clone(), moved));
+        Ok(Some(dest))
     }
 
     async fn checkpoint(&self, stage: PublishStage) {
@@ -1305,7 +1564,9 @@ pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Publ
         admin,
         wt,
         bare: app.bare_repo(&s.repo),
-        base,
+        base: Mutex::new(base),
+        lease: Mutex::new(None),
+        pending_base: Mutex::new(None),
         session_dir: app.session_dir(&s.id),
     };
     run_publish(&ops).await
@@ -2357,6 +2618,20 @@ mod tests {
         calls: Vec<&'static str>,
         checkpoints: Vec<PublishStage>,
         notes: Vec<String>,
+        /// The base the pull request would target, and the parent whose merge moves it.
+        base: String,
+        parent_branch: Option<String>,
+        parent_merged: bool,
+        /// The rebase hits a conflict: the publish must fail before any push.
+        restack_conflict: bool,
+        /// A restack's new base, held until the push that carries it actually lands — mirrors
+        /// `GitPublishOps::pending_base`, so `base` above only ever follows a successful push.
+        pending_base: Option<String>,
+        restacked: bool,
+        /// Whether a push moved a diverged remote aside under the restack's lease.
+        lease_used: bool,
+        /// The base `create_pr` saw: what the pull request actually targets.
+        pr_base: Option<String>,
     }
 
     /// A fake repository: the worktree and remote state a publish would see, every call recorded, and a
@@ -2387,9 +2662,37 @@ mod tests {
             self
         }
 
+        /// A child based on `branch`, whose parent has (or has not) merged.
+        fn stacked_on(self, branch: &str, merged: bool) -> Self {
+            let mut state = self.state.borrow_mut();
+            state.base = branch.into();
+            state.parent_branch = Some(branch.into());
+            state.parent_merged = merged;
+            drop(state);
+            self
+        }
+
+        /// The restack rebase hits a conflict.
+        fn with_conflict(self) -> Self {
+            self.state.borrow_mut().restack_conflict = true;
+            self
+        }
+
         /// Clears the injected failure, as if the outage passed.
         fn heal(&mut self) {
             self.fail_at = None;
+        }
+
+        /// Models a retry building a fresh `GitPublishOps`: the persisted `base` and the real
+        /// `remote` survive (they are the session and the actual git remote), but the per-attempt
+        /// lease/restack signal does not (a fresh instance's `lease`/`pending_base` both start
+        /// `None`) — without this, `restacked` staying stuck `true` across two `run_publish` calls
+        /// on the same `FakeRepo` would let a retry's push through on a stale lease even when its
+        /// own `restack()` call was skipped, masking the very bug this models.
+        fn retry(&self) {
+            let mut state = self.state.borrow_mut();
+            state.restacked = false;
+            state.pending_base = None;
         }
 
         fn count(&self, call: &'static str) -> usize {
@@ -2402,6 +2705,18 @@ mod tests {
 
         fn noted(&self, fragment: &str) -> bool {
             self.state.borrow().notes.iter().any(|n| n.contains(fragment))
+        }
+
+        fn base(&self) -> String {
+            self.state.borrow().base.clone()
+        }
+
+        fn lease_used(&self) -> bool {
+            self.state.borrow().lease_used
+        }
+
+        fn pr_base(&self) -> Option<String> {
+            self.state.borrow().pr_base.clone()
         }
     }
 
@@ -2430,6 +2745,37 @@ mod tests {
             Ok(())
         }
 
+        async fn restack(&self) -> Result<Option<String>> {
+            self.state.borrow_mut().calls.push("restack");
+            if self.fail_at == Some("restack") {
+                bail!("restack failed");
+            }
+            let (base, parent_branch, merged) = {
+                let state = self.state.borrow();
+                (state.base.clone(), state.parent_branch.clone(), state.parent_merged)
+            };
+            let (Some(parent_branch), true) = (parent_branch, merged) else {
+                return Ok(None);
+            };
+            if base != parent_branch {
+                return Ok(None); // a retry whose base already moved on — recorded only once a push lands
+            }
+            if self.state.borrow().restack_conflict {
+                bail!(
+                    "could not rebase colonizer/x onto origin/main: conflicts in child.txt; the rebase was \
+                     aborted, resolve them and publish again"
+                );
+            }
+            // The model keeps only the child's own commits: the branch is rebased now, but — mirroring
+            // the real restack — `base` does not follow until the push that carries it actually lands.
+            {
+                let mut state = self.state.borrow_mut();
+                state.pending_base = Some("main".into());
+                state.restacked = true;
+            }
+            Ok(Some("main".into()))
+        }
+
         async fn commits_ahead(&self) -> Result<bool> {
             self.state.borrow_mut().calls.push("commits_ahead");
             if self.fail_at == Some("commits_ahead") {
@@ -2451,16 +2797,31 @@ mod tests {
             if self.fail_at == Some("push") {
                 bail!("push failed");
             }
-            // Real git refuses to move a remote branch that the pushed head does not descend from, and
-            // the real push carries no `--force`: the modelled remote accepts only its own absence, the
-            // local head, or the commit the local head descends from.
-            if let Some(remote) = self.state.borrow().remote.as_deref()
-                && remote != LOCAL
-                && remote != PARENT
-            {
-                bail!("! [rejected]        colonizer/x -> colonizer/x (non-fast-forward)");
+            // The restack's lease: the remote still carries the pre-rebase head, so it moves aside.
+            // Otherwise real git refuses a non-fast-forward, and so does the model.
+            if self.state.borrow().restacked && self.state.borrow().remote.as_deref() != Some(LOCAL) {
+                self.state.borrow_mut().lease_used = true;
+                self.state.borrow_mut().remote = Some(LOCAL.into());
+            } else {
+                // Real git refuses to move a remote branch that the pushed head does not descend from,
+                // and the real push carries no `--force`: the modelled remote accepts only its own
+                // absence, the local head, or the commit the local head descends from.
+                if let Some(remote) = self.state.borrow().remote.as_deref()
+                    && remote != LOCAL
+                    && remote != PARENT
+                {
+                    bail!("! [rejected]        colonizer/x -> colonizer/x (non-fast-forward)");
+                }
+                self.state.borrow_mut().remote = Some(LOCAL.into());
             }
-            self.state.borrow_mut().remote = Some(LOCAL.into());
+            // Only now — with the rebased history actually on the remote — does the recorded base
+            // follow it; see `restack`'s comment for why a push that fails above must leave `base`
+            // exactly where a retry's fresh `restack()` call expects to find it.
+            let pending = self.state.borrow_mut().pending_base.take();
+            if let Some(base) = pending {
+                self.state.borrow_mut().base = base.clone();
+                self.note(format!("parent PR merged; rebased 1 commit(s) onto {base}")).await;
+            }
             Ok(())
         }
 
@@ -2474,7 +2835,10 @@ mod tests {
             if self.fail_at == Some("create_pr") {
                 bail!("gh pr create failed");
             }
-            self.state.borrow_mut().pr = Some(PR_URL.into());
+            let base = self.state.borrow().base.clone();
+            let mut state = self.state.borrow_mut();
+            state.pr = Some(PR_URL.into());
+            state.pr_base = Some(base);
             Ok(PR_URL.into())
         }
 
@@ -2617,6 +2981,96 @@ mod tests {
         assert_eq!(repo.count("commit"), 0);
         assert_eq!(repo.count("push"), 0);
         assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    // ----- issue #455: a stacked child restacks onto its parent's own base before publishing -----
+
+    /// A child still based on its merged parent's branch is rebased onto the parent's own base before
+    /// the commits-ahead count, the push and the pull request run, so all three read the destination.
+    #[tokio::test]
+    async fn a_stacked_childs_merged_parent_is_rebased_before_it_publishes() {
+        let repo = FakeRepo::new(false, true, None, None).stacked_on("colonizer/issue-9-parent", true);
+        let Published::PullRequest(url) = run_publish(&repo).await.unwrap() else {
+            panic!("expected a pull request");
+        };
+        assert_eq!(url, PR_URL);
+        assert_eq!(repo.count("restack"), 1);
+        assert_eq!(repo.base(), "main", "the restack moved the base onto the parent's own base");
+        assert_eq!(
+            repo.pr_base(),
+            Some("main".into()),
+            "the pull request targets the rebased base"
+        );
+        assert!(repo.noted("parent PR merged; rebased 1 commit(s) onto main"));
+    }
+
+    /// An unmerged (or already-restacked) parent leaves the base untouched: nothing here rebases early
+    /// or twice.
+    #[tokio::test]
+    async fn an_unmerged_parents_child_is_not_restacked() {
+        let repo = FakeRepo::new(false, true, None, None).stacked_on("colonizer/issue-9-parent", false);
+        run_publish(&repo).await.unwrap();
+        assert_eq!(
+            repo.base(),
+            "colonizer/issue-9-parent",
+            "nothing merged, so there is nothing to rebase onto"
+        );
+        assert!(!repo.noted("rebased"));
+    }
+
+    /// The restack's push carries a lease that moves the pre-rebase remote head aside — the modelled
+    /// remote otherwise rejects a rebased branch as a non-fast-forward, just like the real one.
+    #[tokio::test]
+    async fn the_restacked_push_moves_a_diverged_remote_aside_under_its_lease() {
+        let repo = FakeRepo::new(false, true, Some(DIVERGED), None).stacked_on("colonizer/issue-9-parent", true);
+        let out = run_publish(&repo).await.unwrap();
+        assert!(
+            matches!(out, Published::PullRequest(_)),
+            "the lease must let the restacked push through"
+        );
+        assert!(repo.lease_used(), "the push must have moved the pre-rebase remote head aside");
+    }
+
+    /// A conflicted rebase fails the publish before anything pushes, so the branch is never left
+    /// half-rebased.
+    #[tokio::test]
+    async fn a_restack_conflict_fails_before_any_push() {
+        let repo = FakeRepo::new(false, true, None, None)
+            .stacked_on("colonizer/issue-9-parent", true)
+            .with_conflict();
+        assert!(run_publish(&repo).await.is_err());
+        assert_eq!(repo.count("push"), 0, "a conflicted rebase must not push");
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    /// Regression for the review of issue #455: a restack's push failing must not leave the base
+    /// recorded as already moved, or a retry's fresh `restack()` call sees `base == dest`, concludes
+    /// there is nothing to do, skips restacking, and pushes rewritten history with no lease — rejected
+    /// as non-fast-forward forever. With the base deferred to the push that actually lands it, a retry
+    /// (built like a fresh `GitPublishOps`, i.e. its own lease/restack signal starts empty) restacks
+    /// again and its push succeeds under a lease.
+    #[tokio::test]
+    async fn a_push_failing_after_restack_is_retried_with_a_fresh_lease() {
+        let mut repo = FakeRepo::new(false, true, Some(DIVERGED), None)
+            .stacked_on("colonizer/issue-9-parent", true)
+            .failing_at("push");
+        assert!(run_publish(&repo).await.is_err());
+        assert_eq!(
+            repo.base(),
+            "colonizer/issue-9-parent",
+            "a failed push must not leave the base looking already restacked"
+        );
+
+        repo.heal();
+        repo.retry();
+        let out = run_publish(&repo).await.unwrap();
+        assert!(matches!(out, Published::PullRequest(_)), "the retry must restack and publish");
+        assert_eq!(repo.count("restack"), 2, "the retry must restack again, not skip it");
+        assert!(
+            repo.lease_used(),
+            "the retry's push must have gone through under a fresh lease"
+        );
+        assert_eq!(repo.base(), "main", "the base follows only the push that actually landed it");
     }
 
     /// Issue #84: with external writes blocked, the runner refuses before staging anything.

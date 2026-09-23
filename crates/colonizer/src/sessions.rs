@@ -9,7 +9,7 @@ use crate::{
     config::{ModulesConfig, setting, setting_str, setting_u64},
     diagnosis, github, memory,
     modules::{AgentModule, schema_for},
-    orgs, providers, resolve_guest_claude_bin,
+    orgs, providers, resolve_guest_claude_bin, restack,
     sandbox::{self, BootSpec, Mount, Secret},
     spend,
     stack::{self, Stacked},
@@ -251,6 +251,17 @@ pub struct Session {
     /// overwhelming majority, which branch from the repository's default branch as always.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Stack against the parent's branch instead of queueing for its merge (see `NewSession::stack`):
+    /// the colony started from that branch while it was still open, and its pull request targets it.
+    /// A child that queued for the merge starts from the default branch instead and reads false.
+    #[serde(default)]
+    pub stack: bool,
+    /// The sha this colony's worktree branched from, recorded at boot for a stacked child: the
+    /// parent's remote ref disappears once its branch is deleted, so the publish-time restack
+    /// cannot re-derive it and reads this instead. `None` for unstacked colonies.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_fork: Option<String>,
     /// Who launched the colony when the operator did not: `Some("burn_down")` marks a colony the
     /// burn-down scheduler auto-launched, so the global stop can find it and the UI can label it.
     /// `None` for anything a person started.
@@ -369,6 +380,8 @@ impl Default for Session {
             branch: String::new(),
             base: None,
             parent: None,
+            stack: false,
+            stack_fork: None,
             origin: None,
             worktree: String::new(),
             git_admin_dir: None,
@@ -832,10 +845,17 @@ pub struct NewSession {
     /// Bill this colony to a named Claude account instead of the org's override or install default.
     #[serde(default)]
     pub claude_account: Option<String>,
-    /// Stack this colony on another one: it queues until that colony has pushed its branch, then
-    /// starts from that branch instead of the default one, and its pull request is a diff against it.
+    /// How a colony created with `after` relates to its parent. By default the colony queues until
+    /// the parent's pull request merges, then starts from the fresh default branch — so a parent
+    /// that merges with delete-branch never strands the child's pull request. Only `stack: true`
+    /// branches from the parent's branch while it is still open, with the pull request targeting it.
     #[serde(default)]
     pub after: Option<String>,
+    /// Stack this colony against its parent's branch instead of queueing for the parent's merge:
+    /// the colony starts as soon as the parent has pushed its branch, and its pull request targets
+    /// that branch. Off by default: a child that only needs the parent's work merged waits for it.
+    #[serde(default)]
+    pub stack: bool,
     /// Who is asking, when the operator is not: the burn-down scheduler tags its colonies
     /// `Some("burn_down")` so `POST /api/burn-down/stop` can find them again.
     #[serde(default)]
@@ -1083,10 +1103,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             }
         },
     };
-    // Stacking: `after` names the colony whose branch this one must build on. Whitespace is refused
-    // rather than read as nothing — an operator who typed something there meant to stack. A parent
-    // that can never provide a branch is refused now, with the reason; one that has not pushed yet
-    // is allowed, and the colony queues for it — the queue, not this handler, waits for the branch.
+    // Relating to the parent (`after`): by default the colony queues until the parent's pull request
+    // merges and then starts from the fresh default branch; `stack: true` branches from the parent's
+    // branch as soon as it is pushed instead. Whitespace is refused rather than read as nothing — an
+    // operator who typed something there meant to relate. A parent that can never provide what the
+    // mode needs is refused now, with the reason; one that has not gotten there yet is allowed, and
+    // the colony queues for it — the queue, not this handler, does the waiting.
     let after = match req.after.as_deref() {
         None => None,
         Some(raw) => {
@@ -1122,7 +1144,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
                             ),
                         ));
                     }
-                    match stack::stacked_on(&parent_id, Some(source)) {
+                    match restack::queue_decision(&parent_id, Some(source), req.stack) {
                         Stacked::Refuse(reason) => return Err(client_error(StatusCode::CONFLICT, &reason)),
                         Stacked::Wait => (Some(parent_id), true),
                         Stacked::Ready(_) => (Some(parent_id), false),
@@ -1182,6 +1204,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         branch: format!("colonizer/{slug}"),
         base: None,
         parent: parent.clone(),
+        stack: req.stack,
+        stack_fork: None,
         origin: req.origin.clone(),
         worktree: app
             .cfg
@@ -1297,12 +1321,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     }
     if queued {
         if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
-            app.session_log(
-                &id,
-                "info",
-                format!("queued behind colony {parent_id}: it starts once that colony has pushed its branch"),
-            )
-            .await;
+            let why = if session.stack {
+                format!("queued behind colony {parent_id}: it starts once that colony has pushed its branch")
+            } else {
+                format!("queued behind colony {parent_id}: it starts once that colony's pull request merges")
+            };
+            app.session_log(&id, "info", why).await;
         } else {
             let ahead = if waiting == 0 {
                 String::new()
@@ -1455,7 +1479,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         None => None,
     };
     let mut stacked_on: Option<String> = None;
-    let base = match stack::boot_base(s.base.clone().filter(|_| resume), s.parent.as_deref(), parent.as_ref()) {
+    let base = match stack::boot_base(
+        s.base.clone().filter(|_| resume),
+        s.parent.as_deref(),
+        parent.as_ref(),
+        s.stack,
+    ) {
         stack::BootBase::Kept(base) => {
             // What a stacked colony kept is the parent's branch it started from; the prompt says so.
             if s.parent.is_some() {
@@ -1513,8 +1542,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         )
         .await?
     };
+    // A stacked child branched from `origin/<base>` just now; record the sha before later prunes
+    // delete the parent's ref, so the publish-time restack knows which commits are the child's own.
+    // Best effort: without it the restack falls back to the merge-base while the ref survives.
+    let stack_fork = if !resume && stacked_on.is_some() {
+        github::fork_sha(app, &bare, &base).await.ok()
+    } else {
+        None
+    };
     app.update_session(id, |x| {
         x.git_admin_dir = Some(admin.display().to_string());
+        if stack_fork.is_some() {
+            x.stack_fork = stack_fork;
+        }
         // The first durable artifact is down; the retry clock has nothing left to budget.
         x.boot_attempt_started_at = None;
     })
@@ -2878,6 +2918,8 @@ pub(crate) mod tests {
             branch: String::new(),
             base: None,
             parent: None,
+            stack: false,
+            stack_fork: None,
             origin: None,
             worktree: String::new(),
             git_admin_dir: None,
@@ -3591,6 +3633,7 @@ pub(crate) mod tests {
                 model_tier: None,
                 claude_account: None,
                 after: None,
+                stack: false,
                 origin: None,
             }),
         )
@@ -3669,6 +3712,7 @@ pub(crate) mod tests {
                 model_tier: None,
                 claude_account: None,
                 after: None,
+                stack: false,
                 origin: None,
             }),
         )
@@ -3773,7 +3817,8 @@ pub(crate) mod tests {
     }
 
     /// A `create` request with nothing but the repo and, where the test names one, the parent.
-    fn stack_request(repo: &str, after: Option<String>) -> Json<NewSession> {
+    /// Unstacked unless the test says otherwise: the default queues behind the parent's merge.
+    fn stack_request(repo: &str, after: Option<String>, stack: bool) -> Json<NewSession> {
         Json(NewSession {
             repo: repo.into(),
             issue: None,
@@ -3786,6 +3831,7 @@ pub(crate) mod tests {
             model_tier: None,
             claude_account: None,
             after,
+            stack,
             origin: None,
         })
     }
@@ -3800,7 +3846,7 @@ pub(crate) mod tests {
         parent.repo = "acme/app".into();
         app.sessions.write().await.push(parent);
 
-        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into())))
+        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), true))
             .await
             .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
         assert_eq!(
@@ -3820,6 +3866,89 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A parent colony for the queue-by-default tests below: open issue, same repository.
+    async fn parent_on(app: &Shared, status: SessionStatus) {
+        let mut parent = colony("acme", status);
+        parent.id = "parent".into();
+        parent.branch = "colonizer/issue-1-parent".into();
+        parent.repo = "acme/app".into();
+        app.sessions.write().await.push(parent);
+    }
+
+    #[tokio::test]
+    async fn by_default_a_colony_behind_an_open_pull_request_queues_for_the_merge() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        parent_on(&app, SessionStatus::PrOpened).await;
+
+        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), false))
+            .await
+            .unwrap_or_else(|e| panic!("create refused a queued colony: {:#}", e.1));
+        assert_eq!(created.parent.as_deref(), Some("parent"));
+        assert!(!created.stack, "queueing, not stacking, is the default");
+        assert_eq!(
+            created.status,
+            SessionStatus::Queued,
+            "the parent's pull request is still open, so the colony queues even though a slot is free"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_stack_starts_from_the_open_pull_request() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        parent_on(&app, SessionStatus::PrOpened).await;
+
+        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), true))
+            .await
+            .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
+        assert_eq!(created.parent.as_deref(), Some("parent"));
+        assert!(created.stack);
+        assert_eq!(
+            created.status,
+            SessionStatus::Starting,
+            "the parent's branch is pushed, so an explicit stack starts at once"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn by_default_a_colony_behind_a_merged_parent_starts_at_once() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        parent_on(&app, SessionStatus::Merged).await;
+
+        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), false))
+            .await
+            .unwrap_or_else(|e| panic!("create refused a queued colony: {:#}", e.1));
+        assert_eq!(
+            created.status,
+            SessionStatus::Starting,
+            "the parent's work is already merged, so there is nothing to wait for"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn by_default_a_colony_behind_a_closed_parent_is_refused_naming_the_stack_flag() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        parent_on(&app, SessionStatus::Closed).await;
+
+        let err = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), false))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        let message = err.1.to_string();
+        assert!(message.contains("parent"), "{message}");
+        assert!(
+            message.contains("stack: true"),
+            "the refusal says how to stack anyway: {message}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
         let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
@@ -3830,7 +3959,7 @@ pub(crate) mod tests {
         dead.repo = "acme/app".into();
         app.sessions.write().await.push(dead);
 
-        let err = create(State(app.clone()), stack_request("acme/app", Some("dead".into())))
+        let err = create(State(app.clone()), stack_request("acme/app", Some("dead".into()), true))
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT, "a refusal, like the duplicate-issue one");
@@ -3847,7 +3976,7 @@ pub(crate) mod tests {
     async fn stacking_on_a_colony_that_does_not_exist_is_refused_as_a_404_naming_it() {
         let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
         let app = app_that_can_create(&root);
-        let err = create(State(app.clone()), stack_request("acme/app", Some("ghost".into())))
+        let err = create(State(app.clone()), stack_request("acme/app", Some("ghost".into()), true))
             .await
             .unwrap_err();
         assert_eq!(
@@ -3865,7 +3994,7 @@ pub(crate) mod tests {
     async fn an_after_of_nothing_but_whitespace_is_refused_not_read_as_absent() {
         let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
         let app = app_that_can_create(&root);
-        let err = create(State(app.clone()), stack_request("acme/app", Some("   ".into())))
+        let err = create(State(app.clone()), stack_request("acme/app", Some("   ".into()), true))
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST, "the request names nothing stackable");
@@ -3887,7 +4016,7 @@ pub(crate) mod tests {
         parent.repo = "acme/app".into();
         app.sessions.write().await.push(parent);
 
-        let err = create(State(app.clone()), stack_request("acme/other", Some("parent".into())))
+        let err = create(State(app.clone()), stack_request("acme/other", Some("parent".into()), true))
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT, "a refusal at create, like the other stack ones");

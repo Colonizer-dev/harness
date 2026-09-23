@@ -4,10 +4,7 @@
 //! Whether a colony fits is a pure function (`has_room`), so the admission rule can be tested
 //! apart from the loop that applies it.
 
-use crate::{
-    Shared, orgs, provider_quota, providers, spend,
-    stack::{self, Stacked},
-};
+use crate::{Shared, orgs, provider_quota, providers, restack, spend, stack::Stacked};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -126,7 +123,7 @@ enum Claim {
 }
 
 /// What holds a queued colony back before the slot rules even apply, decided on the snapshot: the
-/// stacking rule (`stack::stacked_on`) is the decision, and this is the queue's reading of it.
+/// queueing rule (`restack::queue_decision`) is the decision, and this is the queue's reading of it.
 enum Gate {
     /// Nothing holds it back; the slot rules decide, as for any colony.
     Admit,
@@ -151,7 +148,7 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
         return Gate::Admit;
     };
     let parent = sessions.iter().find(|p| p.id == parent_id);
-    match stack::stacked_on(parent_id, parent) {
+    match restack::queue_decision(parent_id, parent, s.stack) {
         Stacked::Ready(_) => Gate::Admit,
         Stacked::Wait => Gate::Hold,
         Stacked::Refuse(reason) => Gate::Retire(reason),
@@ -662,7 +659,18 @@ mod tests {
     }
 
     /// A queued colony stacked on `parent_id`, in the queue ahead of anything created later.
+    /// Explicitly stacked: it starts from the parent's branch as soon as it is pushed.
     fn queued_child(id: &str, parent_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = colony("acme", SessionStatus::Queued);
+        s.id = id.into();
+        s.parent = Some(parent_id.into());
+        s.stack = true;
+        s.created_at = created_at;
+        s
+    }
+
+    /// A queued colony behind `parent_id` in the default mode: it waits for the parent's merge.
+    fn queued_default_child(id: &str, parent_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Session {
         let mut s = colony("acme", SessionStatus::Queued);
         s.id = id.into();
         s.parent = Some(parent_id.into());
@@ -711,6 +719,31 @@ mod tests {
         assert!(refuse.is_none());
         // But it still waits for a slot like everyone else.
         assert!(next_queued(&sessions, |_| false).is_none(), "no room, nothing moves");
+    }
+
+    #[test]
+    fn by_default_a_child_behind_an_open_pull_request_keeps_waiting() {
+        // The same parent, but the child did not ask to stack: an open pull request is still work
+        // unmerged, so the queue holds the child for the merge.
+        let sessions = vec![
+            queued_default_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::PrOpened, "colonizer/issue-1-parent"),
+        ];
+        assert!(
+            next_queued(&sessions, |_| true).is_none(),
+            "the parent's pull request has not merged yet, so the child keeps waiting"
+        );
+    }
+
+    #[test]
+    fn by_default_a_child_behind_a_merged_parent_starts_like_any_other_colony() {
+        let sessions = vec![
+            queued_default_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::Merged, "colonizer/issue-1-parent"),
+        ];
+        let (picked, refuse) = next_queued(&sessions, |_| true).expect("the parent's work is merged, so the child starts");
+        assert_eq!(picked.id, "child");
+        assert!(refuse.is_none());
     }
 
     #[test]

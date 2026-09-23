@@ -398,6 +398,12 @@ trait RetargetOps {
     async fn record_base(&self, id: &str, base: &str) -> bool;
     /// Says something in a colony's own log.
     async fn say(&self, id: &str, level: &str, message: String);
+    /// Rebases the child's own commits onto its new base, now that GitHub already has it. Best-effort
+    /// by design: a missing worktree, a failed push or a rebase conflict can never undo the retarget
+    /// above, and each such outcome is said on the child's own log rather than returned as an error.
+    /// The `bool` says only whether it fully landed, so the base is recorded either way (`gh pr edit`
+    /// already moved it on GitHub) — this is for logging and tests, not a retry decision.
+    async fn rebase_after_retarget(&self, id: &str, old_base: &str, destination: &str) -> bool;
 }
 
 /// The real retarget operations: `gh` on GitHub, the session record, and the colony's own log.
@@ -423,6 +429,10 @@ impl RetargetOps for GithubRetargetOps<'_> {
 
     async fn say(&self, id: &str, level: &str, message: String) {
         self.app.session_log(id, level, message).await
+    }
+
+    async fn rebase_after_retarget(&self, id: &str, old_base: &str, destination: &str) -> bool {
+        github::rebase_retargeted_child(self.app, id, old_base, destination).await
     }
 }
 
@@ -485,6 +495,16 @@ async fn run_retargets(ops: &impl RetargetOps, children: &[Session], destination
         };
         match edited {
             Ok(()) => {
+                // Issue #455: the pull request now targets `destination`, but its commits are still
+                // stacked on the old (now-merged or deleted) base — rebase the child's own commits
+                // onto it the same way a not-yet-published stacked colony's own restack does. Fired
+                // whether or not the base record below lands, since GitHub already has the new base
+                // either way; best-effort, so nothing here can undo the retarget just above, and the
+                // base is recorded below regardless of whether this landed — a failed rebase already
+                // said so, explicitly, on the child's own log.
+                let _rebased = ops
+                    .rebase_after_retarget(&id, child.base.as_deref().unwrap_or(destination), destination)
+                    .await;
                 // `gh pr edit` has already moved the pull request on GitHub, so the recorded base
                 // must follow or the record quietly disagrees with the real pull request — and a
                 // merged colony is never polled again, so this is the last look anything takes.
@@ -890,6 +910,8 @@ mod tests {
         edit_ok: bool,
         /// Whether the colony the new base is recorded on still exists.
         colony_exists: bool,
+        /// Whether a rebase asked for is reported as having landed.
+        rebase_ok: bool,
         /// How many times the default branch was looked up.
         default_asked: std::cell::Cell<usize>,
         /// `(pr_url, base)` of every edit asked of GitHub.
@@ -898,6 +920,8 @@ mod tests {
         recorded: RefCell<Vec<(String, String)>>,
         /// `(id, level, message)` of everything said.
         said: RefCell<Vec<(String, String, String)>>,
+        /// `(id, old_base, destination)` of every rebase asked for.
+        rebased: RefCell<Vec<(String, String, String)>>,
     }
 
     impl FakeRetarget {
@@ -937,6 +961,13 @@ mod tests {
         async fn say(&self, id: &str, level: &str, message: String) {
             self.said.borrow_mut().push((id.into(), level.into(), message));
         }
+
+        async fn rebase_after_retarget(&self, id: &str, old_base: &str, destination: &str) -> bool {
+            self.rebased
+                .borrow_mut()
+                .push((id.into(), old_base.into(), destination.into()));
+            self.rebase_ok
+        }
     }
 
     #[tokio::test]
@@ -945,10 +976,12 @@ mod tests {
             default_branch: Ok("develop".into()),
             edit_ok: true,
             colony_exists: true,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let parent = ops.merged_parent();
         assert_eq!(
@@ -971,10 +1004,12 @@ mod tests {
             default_branch: Ok("develop".into()),
             edit_ok: true,
             colony_exists: true,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let mut parent = ops.merged_parent();
         parent.base = None;
@@ -992,10 +1027,12 @@ mod tests {
             default_branch: Err("gh api failed".into()),
             edit_ok: true,
             colony_exists: true,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let mut parent = ops.merged_parent();
         parent.base = None;
@@ -1016,10 +1053,12 @@ mod tests {
             default_branch: Ok("main".into()),
             edit_ok: true,
             colony_exists: true,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
         child.id = "child".into();
@@ -1039,6 +1078,43 @@ mod tests {
         assert!(ops.said_contains("now targets main"), "the child's log says what happened");
         let (_, level, _) = ops.said.borrow()[0].clone();
         assert_eq!(level, "info");
+        assert_eq!(
+            ops.rebased.borrow().as_slice(),
+            [("child".to_string(), "main".to_string(), "main".to_string())],
+            "a successful edit is followed by a rebase onto the same destination"
+        );
+    }
+
+    /// The child's own base is what `resolve_fork` falls back to when boot recorded no fork sha —
+    /// so the rebase glue must be given the child's *old* base, not the destination it just moved to.
+    #[tokio::test]
+    async fn the_rebase_is_asked_for_off_the_childs_own_recorded_base() {
+        let ops = FakeRetarget {
+            default_branch: Ok("main".into()),
+            edit_ok: true,
+            colony_exists: true,
+            rebase_ok: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
+        };
+        let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        child.id = "child".into();
+        child.pr_url = Some("https://github.com/acme/repo/pull/10".into());
+        child.base = Some("colonizer/issue-9-parent".into());
+
+        run_retargets(&ops, &[child], "main").await;
+        assert_eq!(
+            ops.rebased.borrow().as_slice(),
+            [(
+                "child".to_string(),
+                "colonizer/issue-9-parent".to_string(),
+                "main".to_string()
+            )],
+            "the fork is resolved against the base the child was actually stacked on"
+        );
     }
 
     #[tokio::test]
@@ -1047,10 +1123,12 @@ mod tests {
             default_branch: Ok("main".into()),
             edit_ok: false,
             colony_exists: true,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
         child.id = "child".into();
@@ -1068,6 +1146,10 @@ mod tests {
         );
         let (_, level, _) = ops.said.borrow()[0].clone();
         assert_eq!(level, "warn");
+        assert!(
+            ops.rebased.borrow().is_empty(),
+            "an edit that never reached GitHub leaves nothing to rebase onto"
+        );
     }
 
     #[tokio::test]
@@ -1076,10 +1158,12 @@ mod tests {
             default_branch: Ok("main".into()),
             edit_ok: true,
             colony_exists: false,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
         child.id = "child".into();
@@ -1104,10 +1188,12 @@ mod tests {
             default_branch: Ok("main".into()),
             edit_ok: true,
             colony_exists: true,
+            rebase_ok: true,
             default_asked: std::cell::Cell::new(0),
             edits: RefCell::new(Vec::new()),
             recorded: RefCell::new(Vec::new()),
             said: RefCell::new(Vec::new()),
+            rebased: RefCell::new(Vec::new()),
         };
         let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
         child.id = "child".into();

@@ -86,15 +86,17 @@ pub(crate) enum BootBase {
 /// rule `boot_inner` applies, pulled out pure so it can be tested without git or GitHub. `kept` is
 /// the base a resume keeps (`s.base.clone().filter(|_| resume)` at the call site): the boot reuses
 /// it whatever the parent is now doing, because the branch already exists on top of it. `parent_id`
-/// and `parent` name the colony stacked on, when there is one.
-pub(crate) fn boot_base(kept: Option<String>, parent_id: Option<&str>, parent: Option<&Session>) -> BootBase {
+/// and `parent` name the colony stacked on, when there is one; `stack` is the child's launch choice
+/// — an explicit stack branches from the parent's open branch, while the default queues for its
+/// merge (see `restack::queue_decision`).
+pub(crate) fn boot_base(kept: Option<String>, parent_id: Option<&str>, parent: Option<&Session>, stack: bool) -> BootBase {
     if let Some(base) = kept {
         return BootBase::Kept(base);
     }
     let Some(parent_id) = parent_id else {
         return BootBase::Default;
     };
-    match stacked_on(parent_id, parent) {
+    match crate::restack::queue_decision(parent_id, parent, stack) {
         Stacked::Ready(Some(branch)) => BootBase::Parent {
             colony: parent_id.to_string(),
             branch,
@@ -384,7 +386,12 @@ mod tests {
             SessionStatus::Stopped,
             SessionStatus::Merged,
         ] {
-            match boot_base(Some("colonizer/issue-9-parent".into()), Some("parent"), Some(&parent(status))) {
+            match boot_base(
+                Some("colonizer/issue-9-parent".into()),
+                Some("parent"),
+                Some(&parent(status)),
+                true,
+            ) {
                 BootBase::Kept(base) => assert_eq!(base, "colonizer/issue-9-parent", "{status:?}"),
                 other => panic!("a resume never asks its parent again: {other:?} for {status:?}"),
             }
@@ -393,12 +400,12 @@ mod tests {
 
     #[test]
     fn a_boot_with_no_parent_branches_from_the_default() {
-        assert!(matches!(boot_base(None, None, None), BootBase::Default));
+        assert!(matches!(boot_base(None, None, None, true), BootBase::Default));
     }
 
     #[test]
     fn a_fresh_colony_branches_from_its_parents_branch_once_it_is_pushed() {
-        let decision = boot_base(None, Some("parent"), Some(&parent(SessionStatus::PrOpened)));
+        let decision = boot_base(None, Some("parent"), Some(&parent(SessionStatus::PrOpened)), true);
         match decision {
             BootBase::Parent { colony, branch } => {
                 assert_eq!(colony, "parent");
@@ -408,21 +415,35 @@ mod tests {
         }
         // ...and from the default once that parent's work has merged, like any unstacked colony.
         assert!(matches!(
-            boot_base(None, Some("parent"), Some(&parent(SessionStatus::Merged))),
+            boot_base(None, Some("parent"), Some(&parent(SessionStatus::Merged)), true),
             BootBase::Default
         ));
     }
 
     #[test]
     fn a_parent_that_cannot_lend_a_branch_yet_makes_a_fresh_boot_wait_or_refuse() {
-        match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Running))) {
+        match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Running)), true) {
             BootBase::Wait { colony } => assert_eq!(colony, "parent"),
             other => panic!("a running parent has not pushed yet: {other:?}"),
         }
-        let reason = match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Failed))) {
+        let reason = match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Failed)), true) {
             BootBase::Refuse(reason) => reason,
             other => panic!("a failed parent can never provide a branch: {other:?}"),
         };
         assert!(reason.contains("parent") && reason.contains("failed"), "{reason}");
+    }
+
+    #[test]
+    fn without_the_stack_flag_a_boot_waits_for_the_merge_not_the_push() {
+        // The default queues for the parent's merge: even a pushed branch is not a base.
+        match boot_base(None, Some("parent"), Some(&parent(SessionStatus::PrOpened)), false) {
+            BootBase::Wait { colony } => assert_eq!(colony, "parent"),
+            other => panic!("an open pull request is still work unmerged: {other:?}"),
+        }
+        // ...and a merged parent sends the boot to the default branch.
+        assert!(matches!(
+            boot_base(None, Some("parent"), Some(&parent(SessionStatus::Merged)), false),
+            BootBase::Default
+        ));
     }
 }
