@@ -348,6 +348,7 @@ export function Cockpit({
         return (
           <NestView
             sessions={inOrg}
+            capacity={status?.sandbox.max_parallel ?? null}
             // The inspector wins while it is open; otherwise the chamber for the colony App has
             // selected stays lit, so coming back from the colony view lands somewhere familiar.
             selectedId={inspector?.kind === "colony" ? inspector.session.id : selectedId}

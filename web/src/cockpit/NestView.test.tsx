@@ -127,6 +127,50 @@ describe("NestView", () => {
     expect(quiet).toContain('title="webshop#42 is working"');
   });
 
+  it("draws only as many chambers as the machine runs at once: 5 by default", () => {
+    const sessions = Array.from({ length: 7 }, (_, i) => session({ id: `s${i + 1}` }));
+    const markup = renderToStaticMarkup(
+      <NestView
+        sessions={sessions}
+        selectedId={null}
+        mothershipSelected={false}
+        settlers={[]}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+      />,
+    );
+    // Each chamber is a real button naming its colony; the carriers' own buttons read
+    // "webshop#42 · working" with no org, so only chambers match here.
+    expect(markup.match(/aria-label="acme\/webshop #42, Working"/g)?.length ?? 0).toBe(5);
+    // All five chambers are taken, so there is nowhere left to dig.
+    expect(markup).not.toContain("DIG");
+  });
+
+  it("opens every chamber the machine runs when capacity covers the sessions, plus a DIG slot", () => {
+    const sessions = Array.from({ length: 7 }, (_, i) => session({ id: `s${i + 1}` }));
+    const markup = renderToStaticMarkup(
+      <NestView
+        sessions={sessions}
+        capacity={8}
+        selectedId={null}
+        mothershipSelected={false}
+        settlers={[]}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+      />,
+    );
+    expect(markup.match(/aria-label="acme\/webshop #42, Working"/g)?.length ?? 0).toBe(7);
+    expect(markup).toContain("DIG");
+  });
+
   it("clips long balloon text to one truncated line keeping the full string in the title", () => {
     const long = "Cloning acme/webshop and then running the whole migration suite end to end";
     const markup = renderToStaticMarkup(
