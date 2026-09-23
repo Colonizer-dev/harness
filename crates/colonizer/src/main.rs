@@ -60,12 +60,13 @@ mod usage;
 mod util;
 mod validation;
 mod version;
+mod voice;
 mod watchdog;
 
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
-    extract::{Extension, Query, Request, State},
+    extract::{DefaultBodyLimit, Extension, Query, Request, State},
     http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -1344,6 +1345,13 @@ async fn serve() -> Result<()> {
         .route("/api/memory/mem0", get(memory::mem0_status).put(memory::put_mem0_key))
         .route("/api/memory/mem0/check", post(memory::check_mem0))
         .route("/api/notify/secret", get(notify::secret_status).put(notify::put_secret))
+        .route("/api/voice", get(voice::status))
+        .route("/api/voice/key", put(voice::put_key))
+        // A clip is larger than axum's 2 MB default body limit; the handler checks the cap itself too.
+        .route(
+            "/api/voice/transcribe",
+            post(voice::transcribe).layer(DefaultBodyLimit::max(voice::MAX_BYTES + 1)),
+        )
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/sessions", get(sessions::list).post(sessions::create))

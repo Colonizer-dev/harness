@@ -34,6 +34,7 @@ import type {
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
+  VoiceStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -185,6 +186,12 @@ export interface Api {
   saveMem0Key(apiKey: string): Promise<Mem0Status>;
   /** Tries the saved key against the configured endpoint. */
   checkMem0(): Promise<Mem0Check>;
+  /** The voice module's active speech-to-text service. */
+  voice(): Promise<VoiceStatus>;
+  /** Saves a voice service's key on the Mothership; an empty string removes it. */
+  saveVoiceKey(provider: string, apiKey: string): Promise<VoiceStatus>;
+  /** Sends a recorded clip to the connected service; the Mothership adds the key. */
+  transcribe(audio: Blob): Promise<{ text: string; provider: string }>;
   /** Red-team runs: a swarm of hunter colonies raiding one repository (issue #212). 409 without `arm` when any colony is live or a run is already active for the repo. */
   redTeamRuns(): Promise<RedTeamRun[]>;
   startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
@@ -294,6 +301,11 @@ export const httpApi: Api = {
   mem0Status: () => request("/api/memory/mem0"),
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),
+  voice: () => request("/api/voice"),
+  saveVoiceKey: (provider, apiKey) => put("/api/voice/key", { provider, api_key: apiKey }),
+  transcribe: (audio) =>
+    // The raw clip as the body, typed by what MediaRecorder produced (audio/webm;codecs=opus in Chrome).
+    request("/api/voice/transcribe", { method: "POST", body: audio, headers: { "content-type": audio.type || "audio/webm" } }),
   redTeamRuns: () => request("/api/redteam/runs"),
   startRedTeamRun: (body) => post("/api/redteam/runs", body),
   stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),

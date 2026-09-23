@@ -24,6 +24,14 @@ setting) is called out under **Take care** rather than left for you to find.
   pushed. The floor also honours
   `COLONIZER_RECLAIM_MIN_FREE`, and both ride in `/api/status`'s `storage` and
   `GET /api/storage` alongside the microsandbox home size. ([#220])
+- **Connectable voice services.** A new `voice` module picks what the composer's
+  microphone uses: the browser's own recognition (the default), or OpenAI, Groq,
+  Deepgram, ElevenLabs or any OpenAI-compatible server (a local whisper, LiteLLM).
+  With a service connected the cockpit records a clip and the mothership
+  transcribes it with a key it keeps (`voice-keys/`, 0600; an OpenAI or Groq model
+  provider's key is reused), so the key never reaches the browser. Settings →
+  Modules → Voice has the key field and a three-second microphone test. Audio goes
+  browser → mothership → service and is not stored.
 - **Realtime Cockpit dashboards.** The dashboards now update over a single authenticated `/api/stream` WebSocket (sessions including running cost/tokens, orgs, fleet hosts, storage), with a Live indicator, tweened counters, reduced-motion support, and a fallback to the existing poll schedule with reconnect/backoff when the stream drops. ([#446])
 - **Colony PRs rebase themselves when GitHub marks them DIRTY or BEHIND.** A live colony is asked to rebase onto fresh main and re-run its own gates itself, in its own microVM, and push; a colony that's gone has its branch rebased on the host instead (git only, no gates — GitHub's own CI covers that push), and if that host rebase conflicts, it's flagged needs-rebase and notified instead — once per main SHA, with SHA-aware backoff. A newly launched colony can opt in to queueing behind a live colony already touching the same repository (off by default; pass `serialize` to ask for it), starting from fresh main once that colony publishes, merges or finishes; the cockpit shows `queued behind <colony>` and a needs-rebase indicator. ([#453])
 - **Skill-pack validation at every gate.** The vendored-plugin updater validates a pin's new archive with the skill-pack validator and skips the pin instead of pinning a pack that breaks a rule — the errors land in the proposal when another pin is adopted, otherwise the run fails with them in its log; CI and the updater's workflow stage the pinned packs and run the validator over them; and colony boot now enforces the `mcp.json` rules too (every server needs a stdio command or a remote url, and a remote one its declared hosts), with the declared hosts readable for the future egress gate. ([#370])

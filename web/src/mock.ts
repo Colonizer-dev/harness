@@ -16,6 +16,7 @@ import type {
   LogLevel,
   LoginView,
   Mem0Status,
+  VoiceStatus,
   MemoryNote,
   MemoryProposal,
   ModelOption,
@@ -1248,6 +1249,7 @@ export function createMockApi(): Api {
   }
 
   const mem0: Mem0Status = { has_key: false, source: null, active: false };
+  const voiceKeys = new Set<string>();
 
   // Shared memory: two proposals waiting for review and a few notes per scope.
   const proposals: MemoryProposal[] = [
@@ -1746,6 +1748,27 @@ export function createMockApi(): Api {
       },
     },
     {
+      kind: "voice",
+      provider: "browser",
+      providers: [
+        { id: "browser", name: "Browser", description: "The browser's own speech recognition. Nothing to connect; Chrome sends the audio to Google, Safari can recognise on the device" },
+        { id: "openai", name: "OpenAI", description: "OpenAI's transcription API. Reuses an OpenAI model provider's key when you have one" },
+        { id: "groq", name: "Groq", description: "Groq's hosted Whisper, fast and inexpensive. Reuses a Groq model provider's key when you have one" },
+        { id: "deepgram", name: "Deepgram", description: "Deepgram's speech-to-text API" },
+        { id: "elevenlabs", name: "ElevenLabs", description: "ElevenLabs Scribe speech-to-text" },
+        { id: "openai_compatible", name: "OpenAI-compatible", description: "Any server speaking OpenAI's /audio/transcriptions: a local whisper server, LiteLLM, vLLM" },
+      ],
+      enabled: true,
+      settings: {},
+      schema: {
+        type: "object",
+        properties: {
+          model: { type: "string", title: "Model", description: "gpt-4o-mini-transcribe (default), gpt-4o-transcribe or whisper-1", default: "gpt-4o-mini-transcribe" },
+          language: { type: "string", title: "Language", description: "An ISO-639-1 code such as en or nl. Blank lets the service detect it", default: "" },
+        },
+      },
+    },
+    {
       kind: "autonomy",
       provider: "off",
       providers: [
@@ -1894,50 +1917,70 @@ export function createMockApi(): Api {
   const redActive = (repo: string) =>
     redRuns.some((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped");
 
+  const voiceStatus = (): VoiceStatus => {
+    const mod = modules.find((m) => m.kind === "voice");
+    const provider = mod && mod.enabled ? mod.provider : "browser";
+    const name = mod?.providers.find((p) => p.id === provider)?.name ?? "Browser";
+    const browser = provider === "browser";
+    const hasKey = voiceKeys.has(provider);
+    return {
+      provider,
+      name,
+      model: browser ? "" : String(mod?.settings?.model ?? "gpt-4o-mini-transcribe"),
+      language: String(mod?.settings?.language ?? ""),
+      configured: browser || hasKey || provider === "openai_compatible",
+      has_key: hasKey,
+      source: hasKey ? "saved" : null,
+      key_optional: provider === "openai_compatible",
+      max_seconds: 120,
+      max_bytes: 25 * 1024 * 1024,
+    };
+  };
+
   return {
     mock: true,
     status: () =>
       later(() => {
-        const live = [...sessions.values()].filter((s) => isLive(s.session.status)).length;
-        return {
-          github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
-          claude,
-          sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
-          mesh: mockMesh(live + 1),
-          // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
-          // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
-          // runtime at all, as a mothership from before the probe did not.
-          runtime: mockRuntime(),
-          // The host strip's numbers (issue #205); ?runtime=kvm shows a host whose KVM the
-          // user cannot use, so the strip reads "no KVM".
-          host: mockHost(live),
-          // Reclamation counts for the sidebar's Storage dot (issue #223).
-          reclaim: { reclaimable: 2, unpushed: 1 },
-          // Disk health for the sidebar's Storage dot (issue #220): plenty free, so neither
-          // low_disk nor admission_paused. ?runtime=old omits storage with the rest, as a
-          // mothership from before the probe did not.
-          storage: {
-            ok: true,
-            free_bytes: 12_884_901_888,
-            warn_free_bytes: 5_368_709_120,
-            min_free_bytes: 1_073_741_824,
-            low_disk: false,
-            admission_paused: false,
-          },
-          // The same verdict the providers list serves, read off its own seeds: strix is the
-          // degraded one (issue #184's report), deepseek and lab have never been used.
-          model_providers: providers.map((p) => ({
-            id: p.id,
-            name: p.name,
-            requests: p.usage?.requests ?? 0,
-            failure_pct: p.health?.failure_pct ?? 0,
-            avg_latency_ms: p.health?.avg_latency_ms ?? 0,
-            degraded: p.health?.degraded ?? false,
-          })),
-          // The cockpit's global session-limit banner (issue #404); null by default, paused
-          // behind a Claude session limit under `?quota=paused`.
-          quota: mockQuota(),
-        };
+    const live = [...sessions.values()].filter((s) => isLive(s.session.status)).length;
+    return {
+      github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: githubSource },
+      claude,
+      sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+      mesh: mockMesh(live + 1),
+      // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
+      // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
+      // runtime at all, as a mothership from before the probe did not.
+      runtime: mockRuntime(),
+      // The host strip's numbers (issue #205); ?runtime=kvm shows a host whose KVM the
+      // user cannot use, so the strip reads "no KVM".
+      host: mockHost(live),
+      // Reclamation counts for the sidebar's Storage dot (issue #223).
+      reclaim: { reclaimable: 2, unpushed: 1 },
+      // Disk health for the sidebar's Storage dot (issue #220): plenty free, so neither
+      // low_disk nor admission_paused. ?runtime=old omits storage with the rest, as a
+      // mothership from before the probe did not.
+      storage: {
+        ok: true,
+        free_bytes: 12_884_901_888,
+        warn_free_bytes: 5_368_709_120,
+        min_free_bytes: 1_073_741_824,
+        low_disk: false,
+        admission_paused: false,
+      },
+      // The same verdict the providers list serves, read off its own seeds: strix is the
+      // degraded one (issue #184's report), deepseek and lab have never been used.
+      model_providers: providers.map((p) => ({
+        id: p.id,
+        name: p.name,
+        requests: p.usage?.requests ?? 0,
+        failure_pct: p.health?.failure_pct ?? 0,
+        avg_latency_ms: p.health?.avg_latency_ms ?? 0,
+        degraded: p.health?.degraded ?? false,
+      })),
+      // The cockpit's global session-limit banner (issue #404); null by default, paused
+      // behind a Claude session limit under `?quota=paused`.
+      quota: mockQuota(),
+    };
       }),
     hosts: () => later(() => mockFleet([...sessions.values()].filter((s) => isLive(s.session.status)).length)),
     modules: () => later(() => modules),
@@ -1963,17 +2006,17 @@ export function createMockApi(): Api {
       const preset = String(sandbox?.settings?.preset ?? "auto");
       const image = String(sandbox?.settings?.image ?? MOCK_PRESET_IMAGES[preset] ?? "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0");
       if (mockPulled.has(image)) {
-        mockPull = { image, state: "cached", started_at: null, finished_at: null, error: null };
-        return clone(mockPull);
+    mockPull = { image, state: "cached", started_at: null, finished_at: null, error: null };
+    return clone(mockPull);
       }
       if (mockPull.state !== "pulling" || mockPull.image !== image) {
-        mockPull = { image, state: "pulling", started_at: new Date().toISOString(), finished_at: null, error: null };
-        const started = mockPull.started_at;
-        setTimeout(() => {
-          if (mockPull.image !== image || mockPull.started_at !== started) return;
-          mockPulled.add(image);
-          mockPull = { ...mockPull, state: "done", finished_at: new Date().toISOString() };
-        }, 4000);
+    mockPull = { image, state: "pulling", started_at: new Date().toISOString(), finished_at: null, error: null };
+    const started = mockPull.started_at;
+    setTimeout(() => {
+      if (mockPull.image !== image || mockPull.started_at !== started) return;
+      mockPulled.add(image);
+      mockPull = { ...mockPull, state: "done", finished_at: new Date().toISOString() };
+    }, 4000);
       }
       return clone(mockPull);
     },
@@ -1983,34 +2026,34 @@ export function createMockApi(): Api {
       const live = [...sessions.values()].map((s) => s.session).filter((s) => isLive(s.status));
       if (live.some((s) => s.status === "publishing")) throw new ApiError("a colony is publishing", 409);
       mockUpdate = {
-        ...mockUpdate,
-        apply: {
-          phase: "installing",
-          version: mockUpdate.latest?.version ?? null,
-          started_at: new Date().toISOString(),
-          error: null,
-          log: "",
-          colonies: live.map((s) => ({ id: s.id, repo: s.repo, outcome: "reconnected after the restart" })),
-          backup: null,
-        },
+    ...mockUpdate,
+    apply: {
+      phase: "installing",
+      version: mockUpdate.latest?.version ?? null,
+      started_at: new Date().toISOString(),
+      error: null,
+      log: "",
+      colonies: live.map((s) => ({ id: s.id, repo: s.repo, outcome: "reconnected after the restart" })),
+      backup: null,
+    },
       };
       // The real one replaces the process here; the mock just reports it did.
       setTimeout(() => {
-        mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "restarting", log: "==> installed Colonizer" } };
+    mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "restarting", log: "==> installed Colonizer" } };
       }, 2500);
       return { started: true };
     },
     headroom: async () => {
       if (mockHeadroom.state === "downloading" && mockHeadroom.started_at) {
-        const total = 231_330_241;
-        const bytes = Math.min(total, Math.round(((Date.now() - Date.parse(mockHeadroom.started_at)) / 5000) * total));
-        mockHeadroom = bytes >= total ? { ...mockHeadroom, state: "installed", bytes, total, finished_at: new Date().toISOString() } : { ...mockHeadroom, bytes, total };
+    const total = 231_330_241;
+    const bytes = Math.min(total, Math.round(((Date.now() - Date.parse(mockHeadroom.started_at)) / 5000) * total));
+    mockHeadroom = bytes >= total ? { ...mockHeadroom, state: "installed", bytes, total, finished_at: new Date().toISOString() } : { ...mockHeadroom, bytes, total };
       }
       return clone(mockHeadroom);
     },
     headroomDownload: async () => {
       if (mockHeadroom.state === "idle" || mockHeadroom.state === "failed") {
-        mockHeadroom = { ...mockHeadroom, state: "downloading", bytes: 0, total: 231_330_241, started_at: new Date().toISOString(), finished_at: null, error: null };
+    mockHeadroom = { ...mockHeadroom, state: "downloading", bytes: 0, total: 231_330_241, started_at: new Date().toISOString(), finished_at: null, error: null };
       }
       return clone(mockHeadroom);
     },
@@ -2020,8 +2063,8 @@ export function createMockApi(): Api {
       // Matches the backend: switching off forgets the last answer, so no banner
       // lingers for a check that is no longer running.
       mockUpdate = enabled
-        ? { ...mockUpdate, enabled, latest: MOCK_LATEST, available: true, last_checked: new Date().toISOString() }
-        : { ...mockUpdate, enabled, latest: null, available: false, last_checked: null, error: null };
+    ? { ...mockUpdate, enabled, latest: MOCK_LATEST, available: true, last_checked: new Date().toISOString() }
+    : { ...mockUpdate, enabled, latest: null, available: false, last_checked: null, error: null };
       return clone(mockUpdate);
     },
     telemetry: async () => clone(mockTelemetry),
@@ -2029,10 +2072,10 @@ export function createMockApi(): Api {
       await sleep(250);
       const install_id = enabled ? (mockTelemetry.heartbeat.install_id ?? crypto.randomUUID()) : null;
       mockTelemetry = {
-        ...mockTelemetry,
-        enabled,
-        last_sent_at: enabled ? new Date().toISOString() : mockTelemetry.last_sent_at,
-        heartbeat: { ...mockTelemetry.heartbeat, install_id },
+    ...mockTelemetry,
+    enabled,
+    last_sent_at: enabled ? new Date().toISOString() : mockTelemetry.last_sent_at,
+    heartbeat: { ...mockTelemetry.heartbeat, install_id },
       };
       return clone(mockTelemetry);
     },
@@ -2041,10 +2084,10 @@ export function createMockApi(): Api {
       await sleep(250);
       if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);
       mockUsage = {
-        ...mockUsage,
-        enabled,
-        // Switching on creates the id; switching off forgets it, so the next period cannot be joined to this one.
-        batch: { ...mockUsage.batch, usage_id: enabled ? (mockUsage.batch.usage_id ?? crypto.randomUUID()) : null },
+    ...mockUsage,
+    enabled,
+    // Switching on creates the id; switching off forgets it, so the next period cannot be joined to this one.
+    batch: { ...mockUsage.batch, usage_id: enabled ? (mockUsage.batch.usage_id ?? crypto.randomUUID()) : null },
       };
       return clone(mockUsage);
     },
@@ -2055,17 +2098,17 @@ export function createMockApi(): Api {
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
     session: async (id) =>
       later(() => {
-        const s = clone(find(id).session);
-        // The single-session route alone carries the stuck-colony readout (issue #230).
-        if (id === "demo1234") {
-          const quota = "API Error: quota has been exhausted. The quota will reset at 09-23 07:54:00 UTC.";
-          s.diagnosis ??= { state: "waiting_on_provider", text: `waiting on provider: quota exhausted, resets 09-23 07:54:00 UTC`, resets_at: "2026-09-23T07:54:00Z" };
-          s.recent_events ??= [
-            { seq: 41, ts: ago(65), type: "status", summary: "working" },
-            { seq: 42, ts: ago(22), type: "assistant_text", summary: quota },
-          ];
-        }
-        return s;
+    const s = clone(find(id).session);
+    // The single-session route alone carries the stuck-colony readout (issue #230).
+    if (id === "demo1234") {
+      const quota = "API Error: quota has been exhausted. The quota will reset at 09-23 07:54:00 UTC.";
+      s.diagnosis ??= { state: "waiting_on_provider", text: `waiting on provider: quota exhausted, resets 09-23 07:54:00 UTC`, resets_at: "2026-09-23T07:54:00Z" };
+      s.recent_events ??= [
+        { seq: 41, ts: ago(65), type: "status", summary: "working" },
+        { seq: 42, ts: ago(22), type: "assistant_text", summary: quota },
+      ];
+    }
+    return s;
       }),
     createSession: async (body) => {
       await sleep(450);
@@ -2077,18 +2120,18 @@ export function createMockApi(): Api {
       // the parent's branch, which is what the mothership does. Creating a stack is API-only.
       const after = body.after ? sessions.get(body.after)?.session ?? null : null;
       const session = new MockSession(
-        {
-          ...baseSession(id, body.repo, issueNumber, title),
-          autopilot: body.autopilot ?? true,
-          // A launch choice carries through to the session record, as on the mothership; omitted
-          // means the session fell back to the publish module's setting and reports none of its own.
-          autofix: body.autofix,
-          automerge: body.automerge,
-          parent: after?.id ?? null,
-          base: after?.branch ?? "main",
-        },
-        false,
-        body.instructions ?? null,
+    {
+      ...baseSession(id, body.repo, issueNumber, title),
+      autopilot: body.autopilot ?? true,
+      // A launch choice carries through to the session record, as on the mothership; omitted
+      // means the session fell back to the publish module's setting and reports none of its own.
+      autofix: body.autofix,
+      automerge: body.automerge,
+      parent: after?.id ?? null,
+      base: after?.branch ?? "main",
+    },
+    false,
+    body.instructions ?? null,
       );
       sessions.set(id, session);
       return clone(session.session);
@@ -2097,7 +2140,7 @@ export function createMockApi(): Api {
       await sleep(250);
       const s = find(id);
       if (s.session.status !== "stopped" && s.session.status !== "failed") {
-        throw new ApiError("this colony can't be resumed", 409);
+    throw new ApiError("this colony can't be resumed", 409);
       }
       s.patch({ status: "starting", error: null });
       return clone(s.session);
@@ -2110,14 +2153,14 @@ export function createMockApi(): Api {
       s.patch({ status: "publishing", error: null });
       s.log(live ? "Stopping the agent and removing the microVM" : "Finishing the last publish on the existing worktree");
       setTimeout(() => {
-        s.log(`Committed 3 files on ${s.session.branch} and pushed`);
-        s.patch({
-          status: "pr_opened",
-          mesh: null,
-          pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}`,
-          publish_stage: "pr_opened",
-        });
-        s.log("Opened pull request");
+    s.log(`Committed 3 files on ${s.session.branch} and pushed`);
+    s.patch({
+      status: "pr_opened",
+      mesh: null,
+      pr_url: `https://github.com/${s.session.repo}/pull/${60 + Math.floor(Math.random() * 40)}`,
+      publish_stage: "pr_opened",
+    });
+    s.log("Opened pull request");
       }, 1800);
       return clone(s.session);
     },
@@ -2127,9 +2170,9 @@ export function createMockApi(): Api {
       // leaves the queue, and only a publishing one is refused.
       if (isTerminal(s.session.status)) return { ...clone(s.session), result: "already_stopped" };
       if (s.session.status === "queued") {
-        s.patch({ status: "stopped" });
-        s.log("Left the queue before it started");
-        return { ...clone(s.session), result: "stopped" };
+    s.patch({ status: "stopped" });
+    s.log("Left the queue before it started");
+    return { ...clone(s.session), result: "stopped" };
       }
       if (!isLive(s.session.status)) throw new ApiError("session is not running", 409);
       s.halt();
@@ -2153,25 +2196,25 @@ export function createMockApi(): Api {
     },
     storageSummary: () =>
       later(() => ({
-        enabled: true,
-        retention_secs: 43200,
-        min_free_bytes: 1_073_741_824,
-        warn_free_bytes: 5_368_709_120,
-        free_bytes: 12_884_901_888,
-        admission_paused: false,
-        totals: {
-          worktrees_bytes: 3_221_225_472,
-          repos_bytes: 1_073_741_824,
-          sessions_bytes: 268_435_456,
-          // Microsandbox's home directory, holding the shared image cache: listed, never offered for cleanup.
-          microsandbox_bytes: 2_147_483_648,
-        },
-        reclaimable: [
-          { id: "old98765", status: "pr_opened", pr_url: "https://github.com/acme/webshop/pull/61", bytes: 214_748_364, updated_at: ago(1560), due: true },
-          { id: "merge5678", status: "merged", pr_url: "https://github.com/acme/design-system/pull/18", bytes: 96_468_992, updated_at: ago(238), due: false },
-        ],
-        unpushed: [{ id: "fail4321", status: "stopped", bytes: 41_943_040, updated_at: ago(93) }],
-        orphans: [{ path: "worktrees/acme/webshop/issue-9-orphan", bytes: 12_582_912, action: "reclaim at retention" }],
+    enabled: true,
+    retention_secs: 43200,
+    min_free_bytes: 1_073_741_824,
+    warn_free_bytes: 5_368_709_120,
+    free_bytes: 12_884_901_888,
+    admission_paused: false,
+    totals: {
+      worktrees_bytes: 3_221_225_472,
+      repos_bytes: 1_073_741_824,
+      sessions_bytes: 268_435_456,
+      // Microsandbox's home directory, holding the shared image cache: listed, never offered for cleanup.
+      microsandbox_bytes: 2_147_483_648,
+    },
+    reclaimable: [
+      { id: "old98765", status: "pr_opened", pr_url: "https://github.com/acme/webshop/pull/61", bytes: 214_748_364, updated_at: ago(1560), due: true },
+      { id: "merge5678", status: "merged", pr_url: "https://github.com/acme/design-system/pull/18", bytes: 96_468_992, updated_at: ago(238), due: false },
+    ],
+    unpushed: [{ id: "fail4321", status: "stopped", bytes: 41_943_040, updated_at: ago(93) }],
+    orphans: [{ path: "worktrees/acme/webshop/issue-9-orphan", bytes: 12_582_912, action: "reclaim at retention" }],
       })),
     setKeep: async (id, keep) => {
       const s = find(id);
@@ -2201,20 +2244,20 @@ export function createMockApi(): Api {
     },
     setClaudeToken: async (token) => {
       if (!token.trim().startsWith("sk-ant-")) {
-        throw new ApiError("expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)", 400);
+    throw new ApiError("expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)", 400);
       }
       const apiKey = token.trim().startsWith("sk-ant-api");
       claude = {
-        configured: true,
-        source: apiKey ? "saved API key" : "Claude subscription",
-        kind: apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN",
-        account: null,
-        account_note: apiKey
-          ? "an API key does not identify an account"
-          : "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
-        saved_at: now(),
-        expires_at: apiKey ? null : ahead(365),
-        expires_estimated: !apiKey,
+    configured: true,
+    source: apiKey ? "saved API key" : "Claude subscription",
+    kind: apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN",
+    account: null,
+    account_note: apiKey
+      ? "an API key does not identify an account"
+      : "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+    saved_at: now(),
+    expires_at: apiKey ? null : ahead(365),
+    expires_estimated: !apiKey,
       };
       return { ok: true };
     },
@@ -2226,9 +2269,9 @@ export function createMockApi(): Api {
     claudeLoginStart: async () => {
       login = { state: "starting", url: null, message: null };
       setTimeout(() => {
-        if (login.state === "starting") {
-          login = { state: "awaiting_code", url: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock", message: null };
-        }
+    if (login.state === "starting") {
+      login = { state: "awaiting_code", url: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock", message: null };
+    }
       }, 800);
       return clone(login);
     },
@@ -2237,17 +2280,17 @@ export function createMockApi(): Api {
       if (login.state !== "awaiting_code") throw new ApiError("no Claude sign-in is waiting for a code", 409);
       login = { ...login, state: "verifying" };
       setTimeout(() => {
-        login = { state: "done", url: null, message: "Connected your Claude subscription" };
-        claude = {
-          configured: true,
-          source: "Claude subscription",
-          kind: "CLAUDE_CODE_OAUTH_TOKEN",
-          account: null,
-          account_note: "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
-          saved_at: now(),
-          expires_at: ahead(365),
-          expires_estimated: true,
-        };
+    login = { state: "done", url: null, message: "Connected your Claude subscription" };
+    claude = {
+      configured: true,
+      source: "Claude subscription",
+      kind: "CLAUDE_CODE_OAUTH_TOKEN",
+      account: null,
+      account_note: "Anthropic does not resolve a `claude setup-token` to an account, so the account behind this token cannot be shown.",
+      saved_at: now(),
+      expires_at: ahead(365),
+      expires_estimated: true,
+    };
       }, 1200);
       return clone(login);
     },
@@ -2258,15 +2301,15 @@ export function createMockApi(): Api {
     openEvents: (id, since) => {
       const session = sessions.get(id);
       const socket = new MockSocket({
-        open: (s) => {
-          if (!session) {
-            s.close();
-            return;
-          }
-          session.attach(s, since);
-        },
-        message: (_s, data) => session?.command(data),
-        close: (s) => session?.detach(s),
+    open: (s) => {
+      if (!session) {
+        s.close();
+        return;
+      }
+      session.attach(s, since);
+    },
+    message: (_s, data) => session?.command(data),
+    close: (s) => session?.detach(s),
       });
       return socket as unknown as SocketLike;
     },
@@ -2274,88 +2317,88 @@ export function createMockApi(): Api {
     // No realtime feed in mock mode: a socket that never opens, so the dashboard keeps polling.
     openStream: () =>
       ({
-        binaryType: "blob",
-        readyState: 0,
-        onopen: null,
-        onmessage: null,
-        onclose: null,
-        onerror: null,
-        send: () => {},
-        close: () => {},
+    binaryType: "blob",
+    readyState: 0,
+    onopen: null,
+    onmessage: null,
+    onclose: null,
+    onerror: null,
+    send: () => {},
+    close: () => {},
       }) as unknown as SocketLike,
 
     plugins: () =>
       later(() => ({
-        local_root: "/home/you/.local/share/colonizer/plugins",
-        plugins: [
-          {
-            name: "ecc",
-            description: "Harness-native ECC plugin for engineering teams - 68 agents, 286 skills, 94 legacy command shims",
-            version: "2.2.1",
-            source: "vendored" as const,
-            shadows_vendored: false,
-            skills: 286,
-            agents: 68,
-            commands: 94,
-          },
-          {
-            name: "team-skills",
-            description: "House style, release checklist and the incident runbook",
-            version: "0.3.0",
-            source: "local" as const,
-            shadows_vendored: false,
-            skills: 4,
-            agents: 0,
-            commands: 1,
-          },
-        ],
+    local_root: "/home/you/.local/share/colonizer/plugins",
+    plugins: [
+      {
+        name: "ecc",
+        description: "Harness-native ECC plugin for engineering teams - 68 agents, 286 skills, 94 legacy command shims",
+        version: "2.2.1",
+        source: "vendored" as const,
+        shadows_vendored: false,
+        skills: 286,
+        agents: 68,
+        commands: 94,
+      },
+      {
+        name: "team-skills",
+        description: "House style, release checklist and the incident runbook",
+        version: "0.3.0",
+        source: "local" as const,
+        shadows_vendored: false,
+        skills: 4,
+        agents: 0,
+        commands: 1,
+      },
+    ],
       })),
     providers: () => later(() => providers),
     saveProvider: async (id, body) => {
       await sleep(250);
       if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(id) || id === "anthropic") {
-        throw new ApiError('provider ids are lowercase letters, digits and dashes, and can\'t be "anthropic"', 400);
+    throw new ApiError('provider ids are lowercase letters, digits and dashes, and can\'t be "anthropic"', 400);
       }
       if (!body.name.trim()) throw new ApiError("provider name must be 1-60 characters", 400);
       if (!/^https?:\/\/[^\s/]+/.test(body.base_url.trim())) throw new ApiError("base URL must be an http(s) URL like https://api.deepseek.com/anthropic", 400);
       for (const [key, min, max] of LIMIT_RANGES) {
-        const value = body[key];
-        if (value != null && (!Number.isInteger(value) || (value as number) < min || (value as number) > max)) {
-          throw new ApiError(`${key} must be between ${min} and ${max}`, 400);
-        }
+    const value = body[key];
+    if (value != null && (!Number.isInteger(value) || (value as number) < min || (value as number) > max)) {
+      throw new ApiError(`${key} must be between ${min} and ${max}`, 400);
+    }
       }
       const fallback = body.fallback_model?.trim() || null;
       if (fallback && (fallback.includes("/") || !/^[a-z0-9][a-z0-9.-]*$/.test(fallback))) {
-        throw new ApiError("fallback_model must be an Anthropic model id or alias like sonnet", 400);
+    throw new ApiError("fallback_model must be an Anthropic model id or alias like sonnet", 400);
       }
       for (const rate of Object.values(body.pricing ?? {})) {
-        if (!Number.isFinite(rate) || rate < 0) {
-          throw new ApiError("pricing rates must be dollar amounts per million tokens, zero or more", 400);
-        }
+    if (!Number.isFinite(rate) || rate < 0) {
+      throw new ApiError("pricing rates must be dollar amounts per million tokens, zero or more", 400);
+    }
       }
       const existing = providers.find((p) => p.id === id);
       const has_key = body.api_key === undefined ? (existing?.has_key ?? false) : body.api_key.trim() !== "";
       const provider: ModelProvider = {
-        id,
-        name: body.name.trim(),
-        base_url: body.base_url.trim().replace(/\/+$/, ""),
-        auth: body.auth,
-        wire: body.wire ?? existing?.wire ?? "anthropic",
-        has_key,
-        models: body.models.map((m) => m.trim()).filter(Boolean),
-        preset: body.preset ?? existing?.preset ?? "custom",
-        timeout_secs: body.timeout_secs ?? DEFAULT_LIMITS.timeout_secs,
-        max_concurrent: body.max_concurrent ?? null,
-        queue_timeout_secs: body.queue_timeout_secs ?? null,
-        context_tokens: body.context_tokens ?? null,
-        fallback_model: fallback,
-        // Omitted keeps the saved rates, like the key; the Mothership treats an all-0 object the same as none.
-        pricing: body.pricing ?? existing?.pricing ?? null,
-        in_flight: existing?.in_flight ?? 0,
-        queued: existing?.queued ?? 0,
-        usage: existing?.usage ?? zeroUsage(),
-        health: existing?.health ?? zeroHealth(),
-        used_by: existing?.used_by ?? [],
+    id,
+    name: body.name.trim(),
+    base_url: body.base_url.trim().replace(/\/+$/, ""),
+    auth: body.auth,
+    wire: body.wire ?? existing?.wire ?? "anthropic",
+    has_key,
+    models: body.models.map((m) => m.trim()).filter(Boolean),
+    preset: body.preset ?? existing?.preset ?? "custom",
+    timeout_secs: body.timeout_secs ?? DEFAULT_LIMITS.timeout_secs,
+    max_concurrent: body.max_concurrent ?? null,
+    queue_timeout_secs: body.queue_timeout_secs ?? null,
+    context_tokens: body.context_tokens ?? null,
+    fallback_model: fallback,
+    // Omitted keeps the saved rates, like the key; the Mothership treats an all-0 object the same as none.
+    pricing: body.pricing ?? existing?.pricing ?? null,
+    in_flight: existing?.in_flight ?? 0,
+    queued: existing?.queued ?? 0,
+    usage: existing?.usage ?? zeroUsage(),
+    health: existing?.health ?? zeroHealth(),
+    used_by: existing?.used_by ?? [],
       };
       if (existing) Object.assign(existing, provider);
       else providers.push(provider);
@@ -2375,80 +2418,80 @@ export function createMockApi(): Api {
       await sleep(provider.id === "strix" ? 2200 : 700);
       const checked_at = now();
       if (provider.id === "strix") {
-        return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", note: null, checked_at };
+    return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", note: null, checked_at };
       }
       if (provider.preset === "custom") {
-        return provider.wire === "anthropic"
-          ? { reachable: true, status: 404, latency_ms: 38, models: [], error: null, note: "no model list", checked_at }
-          : { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", note: null, checked_at };
+    return provider.wire === "anthropic"
+      ? { reachable: true, status: 404, latency_ms: 38, models: [], error: null, note: "no model list", checked_at }
+      : { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", note: null, checked_at };
       }
       return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, note: null, checked_at };
     },
     models: () =>
       later((): ModelOption[] => [
-        ...ANTHROPIC_MODELS.map(([id, label]) => ({ id, label, provider: "anthropic" })),
-        ...providers.flatMap((p) => p.models.map((model) => ({ id: `${p.id}/${model}`, label: `${model} · ${p.name}`, provider: p.id }))),
+    ...ANTHROPIC_MODELS.map(([id, label]) => ({ id, label, provider: "anthropic" })),
+    ...providers.flatMap((p) => p.models.map((model) => ({ id: `${p.id}/${model}`, label: `${model} · ${p.name}`, provider: p.id }))),
       ]),
 
     orgs: () =>
       later((): OrgInfo[] => {
-        const names = new Set([
-          ...REPOS.map((r) => r.full_name.split("/")[0]),
-          ...[...sessions.values()].map((s) => s.session.repo.split("/")[0]),
-          ...Object.keys(orgSettings),
-        ]);
-        return [...names].sort().map((org) => {
-          const colonies = [...sessions.values()].filter((s) => s.session.repo.split("/")[0] === org);
-          return {
-            org,
-            colonies: { live: colonies.filter((s) => isLive(s.session.status)).length, total: colonies.length },
-            pending_memory: proposals.filter((p) => orgOfKey(p) === org).length,
-            settings: orgSettings[org] ?? {},
-            avatar_url: orgAvatars[org],
-            ...(awaitingDecision.has(org.toLowerCase()) ? { awaiting_decision: true } : null),
-            ...(mockOrgSpend[org] ? { spend: mockOrgSpend[org] } : null),
-          };
-        });
+    const names = new Set([
+      ...REPOS.map((r) => r.full_name.split("/")[0]),
+      ...[...sessions.values()].map((s) => s.session.repo.split("/")[0]),
+      ...Object.keys(orgSettings),
+    ]);
+    return [...names].sort().map((org) => {
+      const colonies = [...sessions.values()].filter((s) => s.session.repo.split("/")[0] === org);
+      return {
+        org,
+        colonies: { live: colonies.filter((s) => isLive(s.session.status)).length, total: colonies.length },
+        pending_memory: proposals.filter((p) => orgOfKey(p) === org).length,
+        settings: orgSettings[org] ?? {},
+        avatar_url: orgAvatars[org],
+        ...(awaitingDecision.has(org.toLowerCase()) ? { awaiting_decision: true } : null),
+        ...(mockOrgSpend[org] ? { spend: mockOrgSpend[org] } : null),
+      };
+    });
       }),
     spendHistory: (days = 8) =>
       later((): SpendHistory => {
-        // Deterministic days, oldest first. acme is measured and roars some days; octocat is
-        // measured-but-never-priced so its costs stay null. Every fourth day only octocat appears,
-        // so acme's sparkline has zero-height (gap) slots. The default eight days keep the
-        // long-standing shape; an explicit window (the overview asks for twice its range) extends
-        // the same pattern further back.
-        const dayCount = Math.max(0, Math.floor(days));
-        const acmeCosts = [0.35, 1.1, 0.8, 2.3, 0.6, 1.7, 0.4, 0.9];
-        const result: SpendDay[] = Array.from({ length: dayCount }, (_, i) => {
-          const orgs: SpendOrgDay[] = [];
-          if (i % 4 !== 1) {
-            const cost = acmeCosts[i % acmeCosts.length];
-            const input = 40_000 * (cost + 1);
-            const output = 8_000 * (cost + 1);
-            orgs.push({
-              org: "acme",
-              cost_usd: cost,
-              routed_cost_usd: 0,
-              tokens: { input, output, cache_read: 0, cache_write: 0 },
-              models: splitDayModels(cost, input, output),
-              launched: i % 2 === 0 ? 1 : 0,
-              returned: i % 3 === 0 ? 1 : 0,
-            });
-          }
-          if (i % 2 === 1) {
-            orgs.push({
-              org: "octocat",
-              cost_usd: null,
-              routed_cost_usd: null,
-              tokens: { input: 12_000, output: 2_000, cache_read: 0, cache_write: 0 },
-              models: [{ model: "claude-sonnet-5", tokens: 14_000, cost_usd: null }],
-              launched: 0,
-              returned: 1,
-            });
-          }
-          return { day: isoDay(dayCount - 1 - i), orgs };
+    // Deterministic days, oldest first. acme is measured and roars some days; octocat is
+    // measured-but-never-priced so its costs stay null. Every fourth day only octocat appears,
+    // so acme's sparkline has zero-height (gap) slots. The default eight days keep the
+    // long-standing shape; an explicit window (the overview asks for twice its range) extends
+    // the same pattern further back.
+    const dayCount = Math.max(0, Math.floor(days));
+    const acmeCosts = [0.35, 1.1, 0.8, 2.3, 0.6, 1.7, 0.4, 0.9];
+    const result: SpendDay[] = Array.from({ length: dayCount }, (_, i) => {
+      const orgs: SpendOrgDay[] = [];
+      if (i % 4 !== 1) {
+        const cost = acmeCosts[i % acmeCosts.length];
+        const input = 40_000 * (cost + 1);
+        const output = 8_000 * (cost + 1);
+        orgs.push({
+          org: "acme",
+          cost_usd: cost,
+          routed_cost_usd: 0,
+          tokens: { input, output, cache_read: 0, cache_write: 0 },
+          models: splitDayModels(cost, input, output),
+          launched: i % 2 === 0 ? 1 : 0,
+          returned: i % 3 === 0 ? 1 : 0,
         });
-        return { days: result };
+      }
+      if (i % 2 === 1) {
+        orgs.push({
+          org: "octocat",
+          cost_usd: null,
+          routed_cost_usd: null,
+          tokens: { input: 12_000, output: 2_000, cache_read: 0, cache_write: 0 },
+          models: [{ model: "claude-sonnet-5", tokens: 14_000, cost_usd: null }],
+          launched: 0,
+          returned: 1,
+        });
+      }
+      return { day: isoDay(dayCount - 1 - i), orgs };
+    });
+    return { days: result };
       }),
     saveOrg: async (org, settings) => {
       await sleep(250);
@@ -2463,11 +2506,11 @@ export function createMockApi(): Api {
 
     memory: (scope, key) =>
       later(() => ({
-        scope,
-        key,
-        provider: "files",
-        notes: notes.filter((n) => n.scope === scope && n.key === key).sort((a, b) => b.created_at.localeCompare(a.created_at)),
-        proposals: proposals.filter((p) => p.scope === scope && p.key === key),
+    scope,
+    key,
+    provider: "files",
+    notes: notes.filter((n) => n.scope === scope && n.key === key).sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    proposals: proposals.filter((p) => p.scope === scope && p.key === key),
       })),
     memoryProposals: () => later(() => [...proposals].sort((a, b) => b.created_at.localeCompare(a.created_at))),
     approveProposal: async (id, edits) => {
@@ -2477,11 +2520,11 @@ export function createMockApi(): Api {
       const [proposal] = proposals.splice(index, 1);
       const { status: _status, ...rest } = proposal;
       const note: MemoryNote = {
-        ...rest,
-        id: `note-${Math.random().toString(16).slice(2, 8)}`,
-        title: edits?.title?.trim() || proposal.title,
-        content: edits?.content?.trim() || proposal.content,
-        created_at: now(),
+    ...rest,
+    id: `note-${Math.random().toString(16).slice(2, 8)}`,
+    title: edits?.title?.trim() || proposal.title,
+    content: edits?.content?.trim() || proposal.content,
+    created_at: now(),
       };
       notes.push(note);
       return clone(note);
@@ -2498,14 +2541,14 @@ export function createMockApi(): Api {
       if (!body.title.trim() || !body.content.trim()) throw new ApiError("a note needs a title and content", 400);
       if (body.scope !== "global" && !body.key) throw new ApiError("org and repo notes need a key", 400);
       const note: MemoryNote = {
-        id: `note-${Math.random().toString(16).slice(2, 8)}`,
-        scope: body.scope,
-        key: body.scope === "global" ? "" : body.key,
-        title: body.title.trim(),
-        content: body.content.trim(),
-        tags: [],
-        created_at: now(),
-        source: { user: true },
+    id: `note-${Math.random().toString(16).slice(2, 8)}`,
+    scope: body.scope,
+    key: body.scope === "global" ? "" : body.key,
+    title: body.title.trim(),
+    content: body.content.trim(),
+    tags: [],
+    created_at: now(),
+    source: { user: true },
       };
       notes.push(note);
       return clone(note);
@@ -2524,6 +2567,20 @@ export function createMockApi(): Api {
       mem0.source = mem0.has_key ? "saved" : null;
       return { ...mem0 };
     },
+    voice: () => later(voiceStatus),
+    saveVoiceKey: async (provider, apiKey) => {
+      await sleep(250);
+      if (apiKey.trim()) voiceKeys.add(provider);
+      else voiceKeys.delete(provider);
+      return voiceStatus();
+    },
+    transcribe: async (audio) => {
+      await sleep(900);
+      const mod = modules.find((m) => m.kind === "voice");
+      if (!mod || mod.provider === "browser") throw new ApiError("voice is set to the browser's own recognition; connect a service in Settings → Modules → Voice", 409);
+      if (!voiceKeys.has(mod.provider) && mod.provider !== "openai_compatible") throw new ApiError("add the API key in Settings → Modules → Voice", 409);
+      return { text: audio.size > 0 ? "Add rate limiting to the webhook endpoint and cover it with a test" : "", provider: mod.provider };
+    },
     checkMem0: async () => {
       await sleep(600);
       return mem0.has_key ? { ok: true } : { ok: false, error: "add a mem0 API key in Settings → Modules → Memory" };
@@ -2541,41 +2598,41 @@ export function createMockApi(): Api {
       // The server's refusals, in its order (issue #212): the nest gate applies to a start-now
       // create only, while another run still active on the repo rejects the create however it arms.
       if (!body.arm && live > 0) {
-        throw new ApiError(
-          `the nest is busy: ${live} colony${live === 1 ? "" : "ies"} live`,
-          409,
-        );
+    throw new ApiError(
+      `the nest is busy: ${live} colony${live === 1 ? "" : "ies"} live`,
+      409,
+    );
       }
       if (redActive(repo)) {
-        throw new ApiError("a red-team run is already active on this repo", 409);
+    throw new ApiError("a red-team run is already active on this repo", 409);
       }
       const run: RedTeamRun = {
-        id: `rt-${Math.random().toString(16).slice(2, 8)}`,
-        repo,
-        org: repo.split("/")[0] ?? repo,
-        state: body.arm ? "armed" : "running",
-        swarm_size: swarm,
-        modules: [...(body.modules ?? [])],
-        autofix: body.autofix ?? false,
-        // Hunters are the repo's own sessions wearing red: a fresh raid rides the work the
-        // nest already cleared, and each hunter keeps its colony, so the card can join them.
-        hunters: [...sessions.values()]
-          .filter((s) => s.session.repo === repo)
-          .sort((a, b) => b.session.updated_at.localeCompare(a.session.updated_at))
-          .slice(0, swarm)
-          .map((s) => ({
-            session_id: s.session.id,
-            title: s.session.issue_title || repo,
-            module: (body.modules ?? [])[0] ?? "harness",
-            version: null,
-            focus: "adversarial pass",
-          })),
-        counts: { found: 0, validated: 0, rejected: 0, filed: 0 },
-        created_at: now(),
-        started_at: body.arm ? null : now(),
-        ended_at: null,
-        gate_reason:
-          body.arm && live > 0 ? `${live} colony${live === 1 ? "" : "ies"} live — the nest must empty first` : null,
+    id: `rt-${Math.random().toString(16).slice(2, 8)}`,
+    repo,
+    org: repo.split("/")[0] ?? repo,
+    state: body.arm ? "armed" : "running",
+    swarm_size: swarm,
+    modules: [...(body.modules ?? [])],
+    autofix: body.autofix ?? false,
+    // Hunters are the repo's own sessions wearing red: a fresh raid rides the work the
+    // nest already cleared, and each hunter keeps its colony, so the card can join them.
+    hunters: [...sessions.values()]
+      .filter((s) => s.session.repo === repo)
+      .sort((a, b) => b.session.updated_at.localeCompare(a.session.updated_at))
+      .slice(0, swarm)
+      .map((s) => ({
+        session_id: s.session.id,
+        title: s.session.issue_title || repo,
+        module: (body.modules ?? [])[0] ?? "harness",
+        version: null,
+        focus: "adversarial pass",
+      })),
+    counts: { found: 0, validated: 0, rejected: 0, filed: 0 },
+    created_at: now(),
+    started_at: body.arm ? null : now(),
+    ended_at: null,
+    gate_reason:
+      body.arm && live > 0 ? `${live} colony${live === 1 ? "" : "ies"} live — the nest must empty first` : null,
       };
       redRuns.unshift(run);
       return clone(run);
@@ -2590,11 +2647,11 @@ export function createMockApi(): Api {
       // Send the hunters home too, when there is a chapel to close: a live mock colony just
       // halts and reports stopped, the same way stopSession would.
       for (const hunter of run.hunters) {
-        const s = sessions.get(hunter.session_id);
-        if (s && isLive(s.session.status)) {
-          s.halt();
-          s.patch({ status: "stopped", mesh: null });
-        }
+    const s = sessions.get(hunter.session_id);
+    if (s && isLive(s.session.status)) {
+      s.halt();
+      s.patch({ status: "stopped", mesh: null });
+    }
       }
       return clone(run);
     },

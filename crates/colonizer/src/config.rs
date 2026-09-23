@@ -191,6 +191,10 @@ pub struct ModulesConfig {
     /// burner colonies is a decision, not a default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burn_down: Option<ModuleChoice>,
+    /// Speech-to-text for the composer. Absent reads as the browser's own recognition: sending audio
+    /// to a service is something to connect, not a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<ModuleChoice>,
 }
 
 fn default_memory() -> ModuleChoice {
@@ -218,6 +222,7 @@ impl Default for ModulesConfig {
             notify: None,
             // Off until it is configured: burning a plan is a decision, not a default.
             burn_down: None,
+            voice: None,
         }
     }
 }
@@ -283,6 +288,7 @@ impl ModulesConfig {
             "autonomy" => self.autonomy.as_ref(),
             "notify" => self.notify.as_ref(),
             "burn_down" => self.burn_down.as_ref(),
+            "voice" => self.voice.as_ref(),
             _ => None,
         }
     }
@@ -302,6 +308,7 @@ impl ModulesConfig {
             "autonomy" => Some(self.autonomy.get_or_insert_with(|| ModuleChoice::new("off"))),
             "notify" => Some(self.notify.get_or_insert_with(|| ModuleChoice::new("default"))),
             "burn_down" => Some(self.burn_down.get_or_insert_with(|| ModuleChoice::new("default"))),
+            "voice" => Some(self.voice.get_or_insert_with(|| ModuleChoice::new(crate::voice::BROWSER))),
             _ => None,
         }
     }

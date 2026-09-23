@@ -1,14 +1,17 @@
 // The composer: one place to tell Colonizer what to do next, typed or spoken. It floats at the foot of
 // the cockpit as a quiet pill ("Describe a task…", ⌘K), opens into a prompt with a repository chip, and
 // sends the words as a new colony's instructions — the same open-session launch the Launch view makes,
-// nothing invented on top. Voice is the browser's own speech recognition: words land in the prompt as
-// they are heard, and nothing is sent until you press send.
+// nothing invented on top. Voice is whichever service the voice module connects: the browser's own
+// recognition by default (words land as they are heard), or a clip recorded here and transcribed by the
+// Mothership through OpenAI, Groq, Deepgram, ElevenLabs or a local server. Nothing is sent to a colony
+// until you press send.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import { sameOrg, store, stored } from "../components/ui";
 import { isLive } from "../components/ui";
-import type { Issue, Repo, Session } from "../types";
+import type { Issue, Repo, Session, VoiceStatus } from "../types";
+import { canRecord, countdown, startRecording, type Recording } from "../voiceRecorder";
 
 const REPO_KEY = "colonizer.repo";
 /** How many bars the listening waveform draws. */
@@ -81,63 +84,77 @@ export function appendHeard(text: string, heard: string): string {
 }
 
 /**
- * Dictation into a text field. `interim` is what is being heard right now (shown, not yet committed);
- * each final phrase goes to `onFinal`. Stops itself when recognition ends.
+ * The microphone's loudness, 0–1, sampled for the waveform (Web Audio, local only). It listens either
+ * to a stream it opens itself (browser recognition keeps its own) or to the recorder's.
  */
-function useDictation(onFinal: (phrase: string) => void) {
+function useLevelMeter() {
+  const [levels, setLevels] = useState<number[]>([]);
+  const meter = useRef<{ stream: MediaStream | null; ctx: AudioContext; raf: number } | null>(null);
+
+  const stop = useCallback(() => {
+    const m = meter.current;
+    meter.current = null;
+    if (!m) return;
+    cancelAnimationFrame(m.raf);
+    m.stream?.getTracks().forEach((t) => t.stop());
+    void m.ctx.close();
+    setLevels([]);
+  }, []);
+
+  /** Listens to `stream`; `own` streams are closed on stop, a borrowed one is left to its owner. */
+  const attach = useCallback((stream: MediaStream, own: boolean) => {
+    if (meter.current || typeof AudioContext === "undefined") return;
+    const ctx = new AudioContext();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    let last = 0;
+    const tick = (now: number) => {
+      if (!meter.current) return;
+      meter.current.raf = requestAnimationFrame(tick);
+      if (now - last < 45) return;
+      last = now;
+      analyser.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += ((v - 128) / 128) ** 2;
+      const level = Math.min(1, Math.sqrt(sum / buf.length) * 4.5);
+      setLevels((prev) => [...prev.slice(-(WAVE_BARS - 1)), level]);
+    };
+    meter.current = { stream: own ? stream : null, ctx, raf: requestAnimationFrame(tick) };
+  }, []);
+
+  const openOwn = useCallback(async () => {
+    if (meter.current || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      attach(await navigator.mediaDevices.getUserMedia({ audio: true }), true);
+    } catch {
+      /* no meter: the waveform falls back to its idle animation */
+    }
+  }, [attach]);
+
+  useEffect(() => stop, [stop]);
+  return { levels, attach, openOwn, stop };
+}
+
+/**
+ * Dictation through the browser's own recogniser. `interim` is what is being heard right now (shown,
+ * not yet committed); each final phrase goes to `onFinal`. Stops itself when recognition ends.
+ */
+function useBrowserDictation(onFinal: (phrase: string) => void) {
   const ctor = useMemo(recognizerCtor, []);
   const rec = useRef<Recognizer | null>(null);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // The microphone's loudness, 0–1, sampled while listening: what the waveform draws. A second,
-  // local-only read of the mic (Web Audio); recognition keeps its own stream.
-  const [levels, setLevels] = useState<number[]>([]);
-  const meter = useRef<{ stream: MediaStream; ctx: AudioContext; raf: number } | null>(null);
+  const meter = useLevelMeter();
   const final = useRef(onFinal);
   final.current = onFinal;
 
-  const stopMeter = useCallback(() => {
-    const m = meter.current;
-    meter.current = null;
-    if (!m) return;
-    cancelAnimationFrame(m.raf);
-    m.stream.getTracks().forEach((t) => t.stop());
-    void m.ctx.close();
-    setLevels([]);
-  }, []);
-
-  const startMeter = useCallback(async () => {
-    if (meter.current || !navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") return;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const ctx = new AudioContext();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 512;
-      ctx.createMediaStreamSource(stream).connect(analyser);
-      const buf = new Uint8Array(analyser.fftSize);
-      let last = 0;
-      const tick = (now: number) => {
-        if (!meter.current) return;
-        meter.current.raf = requestAnimationFrame(tick);
-        if (now - last < 45) return;
-        last = now;
-        analyser.getByteTimeDomainData(buf);
-        let sum = 0;
-        for (const v of buf) sum += ((v - 128) / 128) ** 2;
-        const level = Math.min(1, Math.sqrt(sum / buf.length) * 4.5);
-        setLevels((prev) => [...prev.slice(-(WAVE_BARS - 1)), level]);
-      };
-      meter.current = { stream, ctx, raf: requestAnimationFrame(tick) };
-    } catch {
-      /* no meter: the waveform falls back to its idle animation */
-    }
-  }, []);
-
   const stop = useCallback(() => {
     rec.current?.stop();
-    stopMeter();
-  }, [stopMeter]);
+    meter.stop();
+  }, [meter]);
 
   const start = useCallback(() => {
     if (!ctor || rec.current) return;
@@ -161,29 +178,97 @@ function useDictation(onFinal: (phrase: string) => void) {
       rec.current = null;
       setListening(false);
       setInterim("");
-      stopMeter();
+      meter.stop();
     };
     rec.current = r;
     setError(null);
     setListening(true);
     try {
       r.start();
-      void startMeter();
+      void meter.openOwn();
     } catch {
       rec.current = null;
       setListening(false);
     }
-  }, [ctor, startMeter, stopMeter]);
+  }, [ctor, meter]);
 
-  useEffect(
-    () => () => {
-      rec.current?.stop();
-      stopMeter();
-    },
-    [stopMeter],
-  );
+  useEffect(() => () => rec.current?.stop(), []);
 
-  return { supported: ctor !== null, listening, interim, error, levels, start, stop };
+  return { supported: ctor !== null, listening, interim, error, levels: meter.levels, start, stop };
+}
+
+/**
+ * Dictation through a connected service: records a clip, and on stop (or at `maxSeconds`) sends it to
+ * the Mothership, which transcribes it with the key it keeps. `onText` gets the transcript;
+ * `onFailed` the reason when the service could not be used.
+ */
+function useServiceDictation({
+  maxSeconds,
+  transcribe,
+  onText,
+  onFailed,
+}: {
+  maxSeconds: number;
+  transcribe: (clip: Blob) => Promise<{ text: string }>;
+  onText: (text: string) => void;
+  onFailed: (reason: string, blocked: boolean) => void;
+}) {
+  const recording = useRef<Recording | null>(null);
+  const [listening, setListening] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const meter = useLevelMeter();
+  const handlers = useRef({ transcribe, onText, onFailed });
+  handlers.current = { transcribe, onText, onFailed };
+
+  const stop = useCallback(async () => {
+    const r = recording.current;
+    recording.current = null;
+    meter.stop();
+    setListening(false);
+    if (!r) return;
+    const clip = await r.stop();
+    if (clip.size === 0) return;
+    setTranscribing(true);
+    try {
+      const { text } = await handlers.current.transcribe(clip);
+      handlers.current.onText(text);
+    } catch (error) {
+      handlers.current.onFailed(errorMessage(error), false);
+    } finally {
+      setTranscribing(false);
+    }
+  }, [meter]);
+
+  const start = useCallback(async () => {
+    if (recording.current) return;
+    try {
+      const r = await startRecording();
+      recording.current = r;
+      meter.attach(r.stream, false);
+      setElapsed(0);
+      setListening(true);
+    } catch (error) {
+      const blocked = error instanceof DOMException && error.name === "NotAllowedError";
+      handlers.current.onFailed(blocked ? "Microphone access was blocked" : errorMessage(error), blocked);
+    }
+  }, [meter]);
+
+  // The clock behind the countdown, and the cap: at `maxSeconds` the clip is sent as it is.
+  useEffect(() => {
+    if (!listening) return;
+    const began = Date.now();
+    const timer = setInterval(() => {
+      const ms = Date.now() - began;
+      setElapsed(ms);
+      if (ms >= maxSeconds * 1000) void stop();
+    }, 250);
+    return () => clearInterval(timer);
+  }, [listening, maxSeconds, stop]);
+
+  useEffect(() => () => recording.current?.cancel(), []);
+
+  return { listening, transcribing, elapsed, levels: meter.levels, start, stop };
 }
 
 // --- The composer -------------------------------------------------------------------------------
@@ -248,7 +333,48 @@ export function Composer({
   // A chip or a #123 in the prompt links an issue; the chip wins, and switching repository drops it.
   useEffect(() => setPicked(null), [repo]);
 
-  const voice = useDictation((phrase) => setText((current) => appendHeard(current, phrase)));
+  // Which voice service the mic uses: the module's, read when the composer opens, unless a service
+  // failed this visit, in which case the browser's recogniser stands in until the next reload.
+  const [service, setService] = useState<VoiceStatus | null>(null);
+  const [fallback, setFallback] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api.voice().then(
+      (status) => !cancelled && setService(status),
+      () => !cancelled && setService(null),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api, open]);
+
+  const heard = (phrase: string) => setText((current) => appendHeard(current, phrase));
+  const browserVoice = useBrowserDictation(heard);
+  const useService = !fallback && service !== null && service.provider !== "browser" && service.configured && canRecord();
+  const serviceVoice = useServiceDictation({
+    maxSeconds: service?.max_seconds ?? 120,
+    transcribe: (clip) => api.transcribe(clip),
+    onText: heard,
+    onFailed: (reason, blocked) => {
+      if (!blocked && browserVoice.supported) {
+        setFallback(true);
+        toast(`${service?.name ?? "Voice service"}: ${reason} — using the browser's recognition for now`, "error");
+      } else toast(reason, "error");
+    },
+  });
+  const voice = {
+    supported: useService || browserVoice.supported,
+    listening: useService ? serviceVoice.listening : browserVoice.listening,
+    transcribing: useService && serviceVoice.transcribing,
+    levels: useService ? serviceVoice.levels : browserVoice.levels,
+    error: useService ? null : browserVoice.error,
+    interim: useService ? "" : browserVoice.interim,
+    left: useService && serviceVoice.listening ? countdown(serviceVoice.elapsed, service?.max_seconds ?? 120) : null,
+    label: useService && service ? `${service.name}${service.model ? ` · ${service.model}` : ""}` : "the browser's recognition",
+    start: () => (useService ? void serviceVoice.start() : browserVoice.start()),
+    stop: () => (useService ? void serviceVoice.stop() : browserVoice.stop()),
+  };
   const shown = voice.interim ? appendHeard(text, voice.interim) : text;
   const linked = picked ?? mentionedIssue(shown, issues);
   const suggestions = repo && !linked && !shown.trim() ? suggestedIssues(issues, sessions, repo) : [];
@@ -298,7 +424,7 @@ export function Composer({
     else voice.start();
   };
 
-  const canSend = !sending && githubConnected && repo !== null && (shown.trim().length > 0 || linked !== null);
+  const canSend = !sending && !voice.transcribing && githubConnected && repo !== null && (shown.trim().length > 0 || linked !== null);
 
   const send = async () => {
     if (!canSend || !repo) return;
@@ -325,7 +451,7 @@ export function Composer({
   };
 
   const filtered = query.trim() ? choices.filter((r) => r.full_name.toLowerCase().includes(query.trim().toLowerCase())) : choices;
-  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.listening ? "Listening…" : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, or pick an issue below…";
+  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, or pick an issue below…";
 
   return (
     <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6">
@@ -346,7 +472,7 @@ export function Composer({
               <span className="truncate">Describe a task for a new colony…</span>
               <kbd className="ml-auto hidden shrink-0 rounded-md border border-border px-1.5 py-0.5 font-mono text-[11px] text-faint sm:inline">⌘K</kbd>
             </button>
-            {voice.supported && <MicButton listening={false} onClick={toggleVoice} />}
+            {voice.supported && <MicButton listening={false} label={voice.label} onClick={toggleVoice} />}
           </div>
         ) : (
           <div className="p-2">
@@ -376,7 +502,22 @@ export function Composer({
               />
             </div>
 
-            {voice.listening && <Waveform levels={voice.levels} />}
+            {voice.listening && (
+              <div className="relative">
+                <Waveform levels={voice.levels} />
+                {voice.left && (
+                  <span aria-live="polite" className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-warn-soft px-2 py-0.5 font-mono text-[11.5px] tabular-nums text-warn">
+                    {voice.left} left
+                  </span>
+                )}
+              </div>
+            )}
+            {voice.transcribing && (
+              <div role="status" className="flex items-center gap-2 px-3 pt-2 text-[12.5px] text-muted">
+                <span aria-hidden="true" className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                <span className="composer-shimmer">Transcribing with {voice.label}…</span>
+              </div>
+            )}
 
             {linked && (
               <div className="px-2.5 pt-2">
@@ -480,7 +621,7 @@ export function Composer({
                 {autopilotDefault ? "autopilot on" : "you review the PR"} · <kbd className="font-sans">↵</kbd> launch · <kbd className="font-sans">⇧↵</kbd> new line
               </span>
               <div className="flex-1" />
-              {voice.supported && <MicButton listening={voice.listening} onClick={toggleVoice} />}
+              {voice.supported && <MicButton listening={voice.listening} busy={voice.transcribing} label={voice.label} onClick={toggleVoice} />}
               <button
                 type="button"
                 aria-label="launch colony"
@@ -514,15 +655,17 @@ function Sparkle(): ReactElement {
   );
 }
 
-function MicButton({ listening, onClick }: { listening: boolean; onClick: () => void }): ReactElement {
+export function MicButton({ listening, busy = false, label, onClick }: { listening: boolean; busy?: boolean; label: string; onClick: () => void }): ReactElement {
+  const title = busy ? "Transcribing…" : listening ? "Stop" : `Speak — ${label}`;
   return (
     <button
       type="button"
-      aria-label={listening ? "stop listening" : "speak a task"}
+      aria-label={listening ? "stop listening" : `speak a task (${label})`}
       aria-pressed={listening}
-      title={listening ? "Stop listening" : "Speak"}
+      title={title}
+      disabled={busy}
       onClick={onClick}
-      className={`composer-mic relative grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-full border-0 transition-colors ${listening ? "bg-accent text-on-accent" : "bg-transparent text-muted hover:bg-panel-2 hover:text-text"}`}
+      className={`composer-mic relative grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-full border-0 transition-colors disabled:cursor-default disabled:opacity-50 ${listening ? "bg-accent text-on-accent" : "bg-transparent text-muted hover:bg-panel-2 hover:text-text"}`}
     >
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <rect x="9" y="3" width="6" height="11" rx="3" />
@@ -531,7 +674,6 @@ function MicButton({ listening, onClick }: { listening: boolean; onClick: () => 
     </button>
   );
 }
-
 
 /** The waveform while the microphone is open: the voice's real loudness, newest on the right; an
  *  idle ripple until (or unless) the level meter is running. */

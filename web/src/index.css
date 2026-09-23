@@ -1555,3 +1555,23 @@ body {
     animation: none;
   }
 }
+/* "Transcribing…" while a connected voice service works on the clip: a soft sheen across the words. */
+.composer-shimmer {
+  background: linear-gradient(90deg, var(--muted) 0%, var(--text) 45%, var(--muted) 90%) 0 0 / 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: composer-shimmer 1.6s linear infinite;
+}
+@keyframes composer-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-shimmer {
+    animation: none;
+    color: var(--muted);
+    background: none;
+  }
+}

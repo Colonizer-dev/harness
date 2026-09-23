@@ -5,7 +5,7 @@ import type { Api } from "../api";
 import { ApiContext } from "../context";
 import type { Issue, Repo } from "../types";
 import { session } from "./testFixtures";
-import { Composer, appendHeard, composerRepos, defaultRepo, mentionedIssue, suggestedIssues } from "./Composer";
+import { Composer, MicButton, appendHeard, composerRepos, defaultRepo, mentionedIssue, suggestedIssues } from "./Composer";
 
 const repo = (full_name: string, pushed_at: string | null, archived = false): Repo => ({
   full_name,
@@ -76,5 +76,17 @@ describe("Composer", () => {
     expect(html).toContain("Describe a task for a new colony…");
     expect(html).toContain("⌘K");
     expect(html).toContain('data-open="false"');
+  });
+});
+
+describe("MicButton", () => {
+  it("names the service it will use, and says when it is busy", () => {
+    const idle = renderToStaticMarkup(<MicButton listening={false} label="Groq · whisper-large-v3-turbo" onClick={() => {}} />);
+    expect(idle).toContain('aria-label="speak a task (Groq · whisper-large-v3-turbo)"');
+    expect(idle).toContain('title="Speak — Groq · whisper-large-v3-turbo"');
+    const busy = renderToStaticMarkup(<MicButton listening={false} busy label="Groq" onClick={() => {}} />);
+    expect(busy).toContain('title="Transcribing…"');
+    expect(busy).toContain("disabled");
+    expect(renderToStaticMarkup(<MicButton listening label="x" onClick={() => {}} />)).toContain('aria-pressed="true"');
   });
 });

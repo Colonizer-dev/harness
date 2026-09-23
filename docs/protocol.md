@@ -1354,6 +1354,9 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
 | `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
+| `GET /api/voice` | `{provider, name, model, language, configured, has_key, source, key_optional, max_seconds, max_bytes}`: the voice module's active speech-to-text service. `provider` is `browser` when the module is unset or off; `source` is `saved`, the provider's env var (`OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY`) or `provider:<id>` when a model provider's key on the same host is reused. Never the key |
+| `PUT /api/voice/key` | `{provider, api_key}`: save a voice service's key on the mothership (`config/voice-keys/<provider>`, mode 0600, encrypted under `COLONIZER_MASTER_KEY` when set); an empty string removes it. Answers like `GET /api/voice` |
+| `POST /api/voice/transcribe` | Body: the raw clip, `Content-Type` `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg` or `audio/wav`, at most 25 MB. Answers `{text, provider}`. `409` when the module is `browser` or the service lacks its key/base URL, `413` too large, `415` another type, `502` when the service fails (its 401/429 said plainly; the key is never echoed). The clip is forwarded once and not stored |
 
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
 (`pending`). `source` = `{session_id, repo}` or `{user: true}`; a colony's note gains `reviewed: true`

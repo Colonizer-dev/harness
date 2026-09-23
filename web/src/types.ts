@@ -865,6 +865,24 @@ export interface Mem0Status {
   active: boolean;
 }
 
+/** The voice module's active speech-to-text service (GET /api/voice). Never the key. */
+export interface VoiceStatus {
+  /** `browser` is the browser's own recogniser; anything else is a service the Mothership calls. */
+  provider: string;
+  name: string;
+  model: string;
+  /** ISO-639-1, or empty for auto-detect. */
+  language: string;
+  /** The service can be used now: a key is set (or not needed) and a base URL is known. Always true for `browser`. */
+  configured: boolean;
+  has_key: boolean;
+  /** `saved`, the env var's name, or `provider:<id>` when a model provider's key is reused. */
+  source: string | null;
+  key_optional: boolean;
+  max_seconds: number;
+  max_bytes: number;
+}
+
 export interface Mem0Check {
   ok: boolean;
   error?: string;

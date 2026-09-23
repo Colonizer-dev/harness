@@ -33,12 +33,14 @@ import type {
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
+  VoiceStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
 import { useModels } from "../useModels";
 import { type ImagePull } from "../useImagePull";
 import { setupTone, type SetupView } from "../setup";
+import { canRecord, keySourceLabel, startRecording } from "../voiceRecorder";
 import {
   BrandAlibabaCloud,
   BrandClaude,
@@ -87,6 +89,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   watchdog: { title: "Watchdog", description: "Notices stalled colonies and nudges them" },
   autonomy: { title: "Autonomy", description: "Who answers a colony's questions when you are not there" },
   burn_down: { title: "Burn-down", description: "Spend the weekly token plan down to a reserve before it resets" },
+  voice: { title: "Voice", description: "Speech-to-text for the composer's microphone" },
 };
 
 const kindInfo = (kind: string) => KIND_INFO[kind] ?? { title: kind, description: "" };
@@ -1744,6 +1747,9 @@ function ModulePane({
 
         {module.kind === "memory" && draft.provider === "mem0" && <Mem0KeyRow />}
 
+        {module.kind === "voice" && draft.provider !== "browser" && <VoiceKeyRow provider={draft.provider} name={providerInfo?.name ?? draft.provider} />}
+        {module.kind === "voice" && <VoiceTestRow unsaved={dirty} />}
+
         {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
       </div>
     </Pane>
@@ -1838,6 +1844,140 @@ function Mem0KeyRow() {
       {check && (
         <p role="status" className={cx("text-[12.5px]", check.ok ? "text-ok" : "text-err")}>
           {check.ok ? "mem0 accepted the key." : check.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A voice service's key, beside the module like mem0's: write-only, saved on the Mothership, never
+ * in modules.json and never shown again. The status line says where the active key comes from — a
+ * key already set on a matching model provider (OpenAI, Groq) is reused, so there may be nothing to add.
+ */
+export function VoiceKeyRow({ provider, name }: { provider: string; name: string }) {
+  const api = useApi();
+  const toast = useToast();
+  const id = useId();
+  const [status, setStatus] = useState<VoiceStatus | null>(null);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<"save" | "remove" | null>(null);
+
+  useEffect(() => {
+    api.voice().then(setStatus, () => setStatus(null));
+  }, [api, provider]);
+
+  const saveKey = async (value: string, kind: "save" | "remove") => {
+    setBusy(kind);
+    try {
+      setStatus(await api.saveVoiceKey(provider, value));
+      setKey("");
+      toast(kind === "save" ? `${name} key saved` : `${name} key removed`);
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // The status describes the saved (active) provider; while another one is picked but unsaved,
+  // its key state is unknown until the module is saved.
+  const same = status?.provider === provider;
+  const state = !status ? "Checking…" : !same ? "Save the module to see this service's key." : keySourceLabel(status.source, status.key_optional);
+
+  return (
+    <div className="space-y-2 py-2.5">
+      <label htmlFor={id} className="block text-[13px] font-medium">
+        {name} API key
+      </label>
+      <p className="text-[12.5px] text-muted">{state} It stays on the Mothership: the browser sends audio there, never the key.</p>
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (key.trim()) void saveKey(key.trim(), "save");
+        }}
+      >
+        <input
+          id={id}
+          type="password"
+          autoComplete="off"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder={same && status?.has_key ? "Replace the key" : "Paste the key"}
+          className={cx(inputClass, "min-w-48 flex-1")}
+        />
+        <Button type="submit" variant="primary" disabled={!key.trim() || busy !== null}>
+          {busy === "save" && <Spinner />} Save
+        </Button>
+        {same && status?.source === "saved" && (
+          <Button disabled={busy !== null} onClick={() => void saveKey("", "remove")}>
+            {busy === "remove" && <Spinner />} Remove
+          </Button>
+        )}
+      </form>
+    </div>
+  );
+}
+
+/** Records three seconds and runs them through the saved voice service, so a key and a microphone
+ *  are proven together before the composer relies on them. */
+export function VoiceTestRow({ unsaved }: { unsaved: boolean }) {
+  const api = useApi();
+  const [state, setState] = useState<{ phase: "idle" | "recording" | "transcribing" } | { phase: "done"; text: string } | { phase: "failed"; error: string }>({
+    phase: "idle",
+  });
+
+  const run = async () => {
+    try {
+      const status = await api.voice();
+      if (status.provider === "browser") {
+        setState({ phase: "failed", error: "The browser recognises speech itself; there is no service to test. Pick one and save first." });
+        return;
+      }
+      if (!status.configured) {
+        setState({ phase: "failed", error: `${status.name} is not ready: add its key${status.key_optional ? " or base URL" : ""} first.` });
+        return;
+      }
+      setState({ phase: "recording" });
+      const recording = await startRecording();
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const clip = await recording.stop();
+      setState({ phase: "transcribing" });
+      const { text } = await api.transcribe(clip);
+      setState({ phase: "done", text });
+    } catch (error) {
+      setState({ phase: "failed", error: error instanceof DOMException && error.name === "NotAllowedError" ? "Microphone access was blocked" : errorMessage(error) });
+    }
+  };
+
+  const busy = state.phase === "recording" || state.phase === "transcribing";
+  return (
+    <div className="space-y-2 py-2.5">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button disabled={busy || unsaved || !canRecord()} onClick={() => void run()}>
+          {busy && <Spinner />} Test microphone
+        </Button>
+        <span className="text-[12.5px] text-muted">
+          {unsaved
+            ? "Save first: the test uses the saved service."
+            : state.phase === "recording"
+              ? "Recording 3 seconds — say something…"
+              : state.phase === "transcribing"
+                ? "Transcribing…"
+                : !canRecord()
+                  ? "This browser can't record audio."
+                  : "Records 3 seconds and transcribes them with the saved service."}
+        </span>
+      </div>
+      {state.phase === "done" && (
+        <p role="status" className="text-[13px] text-ok">
+          {state.text ? `Heard: “${state.text}”` : "The service answered, but heard nothing."}
+        </p>
+      )}
+      {state.phase === "failed" && (
+        <p role="status" className="text-[12.5px] text-err">
+          {state.error}
         </p>
       )}
     </div>
