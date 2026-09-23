@@ -494,6 +494,31 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
   }
 });
 
+test('a migrated skill pack (root plugin.json beside the legacy manifest) loads and bootstraps', () => {
+  const root = mkdtempSync(join(tmpdir(), 'colonizer-pack-'));
+  try {
+    const pack = join(root, 'superpowers');
+    mkdirSync(join(pack, 'skills/using-superpowers'), { recursive: true });
+    mkdirSync(join(pack, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(pack, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'superpowers', version: '6.4.1' }));
+    writeFileSync(join(pack, 'plugin.json'), JSON.stringify({
+      name: 'superpowers',
+      version: '6.4.1',
+      description: 'Core skills library',
+      skills: ['using-superpowers'],
+    }));
+    writeFileSync(join(pack, SUPERPOWERS_SKILL), '---\nname: using-superpowers\n---\n\nCheck for a skill before any response.\n\n');
+
+    // The migrated layout boots exactly like the legacy one: one local plugin
+    // entry, and the bootstrap text in the system prompt.
+    const { options } = buildOptions({ COLONIZER_PLUGIN_DIRS: pack });
+    assert.deepEqual(options.plugins, [{ type: 'local', path: pack }]);
+    assert.ok(options.systemPrompt.append.includes('Check for a skill before any response.'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('caveman puts its ruleset in the system prompt at the chosen level, with what stays plain', () => {
   const root = mkdtempSync(join(tmpdir(), 'colonizer-caveman-'));
   try {

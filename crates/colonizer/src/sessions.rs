@@ -1687,10 +1687,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     );
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
+        let mut resolved = Vec::new();
         for name in &plugin_names {
             // The operator's data directory first, then what shipped with the app; the same resolution the
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
+            resolved.push((name.as_str(), source.clone()));
             if let Some(vendored) = crate::plugins::shadowed_vendored(&app.cfg, name) {
                 log.info(format!(
                     "skillset {name:?}: the local copy at {} shadows the vendored one at {}",
@@ -1707,6 +1709,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             });
             targets.push(target);
         }
+        // Two packs answering to the same skill name are ambiguous by
+        // construction (docs/skill-packs.md): bail naming both packs.
+        crate::plugins::check_skill_uniqueness(&resolved)?;
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its
