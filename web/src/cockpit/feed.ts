@@ -7,7 +7,7 @@
 // would put words in the mothership's mouth.
 import { needsYou } from "../notifications";
 import { colonyLabel } from "../notifications";
-import { isLive, orgOf, sameOrg } from "../components/ui";
+import { isLive, occupiesSlot, orgOf, sameOrg } from "../components/ui";
 import type { Session, SessionStatus } from "../types";
 
 export type FeedKind = "question" | "returned" | "failed" | "launched" | "queued" | "stopped";
@@ -138,6 +138,49 @@ export function matchesOverviewFilter(session: Session, filter: OverviewFilter):
     case "queued":
       return session.status === "queued";
   }
+}
+
+/** A colony holding a parallel slot without doing work: idle while autopilot holds its pull request. */
+export function isHeld(session: Session): boolean {
+  return session.status === "idle" && session.attention?.reason === "autopilot_held";
+}
+
+export interface HeldSlots {
+  count: number;
+  /** The earliest `attention.since` among the held colonies, or null when none is held. */
+  oldestSince: string | null;
+  /** `now` minus `oldestSince`, or null when none is held. */
+  oldestAgeMs: number | null;
+}
+
+/**
+ * How many parallel slots idle-but-held colonies occupy, and how long the longest has waited.
+ * `now` is a parameter so the tests can pin the age.
+ */
+export function heldSlots(sessions: Session[], now: number | Date = Date.now()): HeldSlots {
+  let count = 0;
+  let oldest: string | null = null;
+  for (const session of sessions) {
+    const attention = session.attention;
+    if (session.status !== "idle" || attention?.reason !== "autopilot_held") continue;
+    count += 1;
+    if (attention.since && (oldest === null || Date.parse(attention.since) < Date.parse(oldest))) oldest = attention.since;
+  }
+  const at = typeof now === "number" ? now : now.getTime();
+  const oldestAgeMs = oldest === null || Number.isNaN(Date.parse(oldest)) ? null : Math.max(0, at - Date.parse(oldest));
+  return { count, oldestSince: oldest, oldestAgeMs };
+}
+
+/**
+ * Whether the queue cannot drain: something waits for a slot, at least one colony occupies a
+ * slot, and every slot-occupying colony is held — so no slot is doing work and nothing will free
+ * one until a hold times out and parks its colony. Reads `occupiesSlot`, not `isLive`: a colony
+ * mid-publish holds its slot though its microVM is gone, and an active publish will free one.
+ */
+export function queueStalled(sessions: Session[]): boolean {
+  if (!sessions.some((session) => session.status === "queued")) return false;
+  const occupying = sessions.filter((session) => occupiesSlot(session.status));
+  return occupying.length > 0 && occupying.every(isHeld);
 }
 
 /** The overview's counts over the whole list — a filter narrows the page, never these, so they keep updating on the 4s poll while one is active. */

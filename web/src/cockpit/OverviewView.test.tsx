@@ -290,3 +290,32 @@ describe("OverviewView counters vs list", () => {
     expect(html).toContain("clear filter ×");
   });
 });
+
+// Held slots and the stalled queue (issue #217): idle colonies whose PR autopilot holds occupy
+// parallel slots without doing work. When every live colony is held and something queues, the
+// queued chip must read as stalled — warn-bordered with the word itself — never as a healthy
+// busy queue; and the header names how many slots are held.
+describe("OverviewView held slots and stalled queue", () => {
+  const idleHeld = (id: string): Session =>
+    session({ id, status: "idle", attention: { reason: "autopilot_held", since: "2026-09-18T09:00:00Z", nudges: 0 } });
+
+  const renderOverview = (list: Session[]) =>
+    renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <OverviewView sessions={list} orgs={[ACME]} cost={null} onOpenOrg={noop} onOpenColony={noop} onSelect={noop} />
+      </ApiContext.Provider>,
+    );
+
+  it("marks the queued counter stalled when every live colony is held", () => {
+    const html = renderOverview([idleHeld("h1"), idleHeld("h2"), session({ id: "q1", status: "queued" })]);
+    expect(html).toContain("queued · stalled");
+    expect(html).toContain("border-warn");
+    expect(html).toContain("2 held");
+  });
+
+  it("renders the queued counter normally while a colony is still working", () => {
+    const html = renderOverview([idleHeld("h1"), session({ id: "r1", status: "running" }), session({ id: "q1", status: "queued" })]);
+    expect(html).not.toContain("stalled");
+    expect(html).toContain("1 held");
+  });
+});

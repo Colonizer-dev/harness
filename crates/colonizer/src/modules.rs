@@ -161,6 +161,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
                 "repo_max_parallel": {"type": "integer", "title": "Parallel sessions per repository", "minimum": 1, "maximum": 32, "default": 3,
                     "description": "Live colonies one repository may run at once, on top of the overall limit above and any org's own. An org can set its own figure in its settings."},
+                "hold_timeout_minutes": {"type": "integer", "title": "Held colony timeout (minutes)", "minimum": 1, "maximum": 1440, "default": 30,
+                    "description": "How long a colony waiting on a human (an autopilot hold) keeps its microVM slot before the queue parks it to free the slot: the microVM is removed and the worktree kept, so the colony resumes where it left off. Within the timeout a held colony still counts against the parallel limits."},
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
                     "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
                 "host_disk": {"type": "string", "title": "Host disk per colony", "default": "0", "format": "disk-size",
@@ -640,6 +642,31 @@ mod tests {
             assert!(
                 validate_settings(&schema, &input).is_err(),
                 "{bad:?} must be refused while the operator is looking"
+            );
+        }
+    }
+
+    #[test]
+    fn the_held_colony_timeout_defaults_to_30_minutes_and_rejects_out_of_range() {
+        let schema = providers("sandbox", &[]).remove(0).schema;
+        assert_eq!(
+            schema["properties"]["hold_timeout_minutes"]["default"],
+            json!(30),
+            "a held colony keeps its slot for half an hour unless the operator says otherwise"
+        );
+        let mut input = Map::new();
+        for bad in [json!(0), json!(1441)] {
+            input.insert("hold_timeout_minutes".into(), bad);
+            assert!(
+                validate_settings(&schema, &input).is_err(),
+                "the timeout is 1 to 1440 minutes"
+            );
+        }
+        for ok in [1, 30, 1440] {
+            input.insert("hold_timeout_minutes".into(), json!(ok));
+            assert_eq!(
+                validate_settings(&schema, &input).unwrap().get("hold_timeout_minutes"),
+                Some(&json!(ok))
             );
         }
     }
