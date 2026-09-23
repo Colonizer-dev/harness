@@ -87,6 +87,10 @@ pub struct OrgSettings {
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
     pub max_parallel: Option<u64>,
+    /// How many live colonies one repository of this org may run at once. `None` inherits the sandbox
+    /// module's `repo_max_parallel`; the global and org limits apply as well.
+    #[serde(default)]
+    pub repo_max_parallel: Option<u64>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -326,6 +330,13 @@ pub fn global_max_parallel(modules: &ModulesConfig) -> u64 {
     setting_u64(&modules.sandbox, &schema, "max_parallel").max(1)
 }
 
+/// The mothership-wide per-repository colony limit from the sandbox module. A module config written
+/// before the setting existed reads the schema default.
+pub fn global_repo_max_parallel(modules: &ModulesConfig) -> u64 {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting_u64(&modules.sandbox, &schema, "repo_max_parallel").max(1)
+}
+
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
 pub fn org_enabled(org: &OrgSettings) -> bool {
@@ -335,6 +346,11 @@ pub fn org_enabled(org: &OrgSettings) -> bool {
 /// An org's own colony limit, if it sets one. The global limit always applies as well.
 pub fn org_max_parallel(org: &OrgSettings) -> Option<u64> {
     org.max_parallel.map(|n| n.max(1))
+}
+
+/// An org's own per-repository colony limit, if it sets one; `None` inherits [`global_repo_max_parallel`].
+pub fn repo_max_parallel(org: &OrgSettings) -> Option<u64> {
+    org.repo_max_parallel.map(|n| n.max(1))
 }
 
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
@@ -499,6 +515,9 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
     if settings.max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("parallel limit must be between 1 and 32".into());
     }
+    if settings.repo_max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
+        return Err("per-repository parallel limit must be between 1 and 32".into());
+    }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
         return Err("budget must be 0 or more dollars (0 means no budget)".into());
     }
@@ -623,6 +642,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("max_parallel") {
         incoming.max_parallel = saved.max_parallel;
+    }
+    if !named("repo_max_parallel") {
+        incoming.repo_max_parallel = saved.repo_max_parallel;
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -895,6 +917,23 @@ mod tests {
     }
 
     #[test]
+    fn the_per_repository_limit_is_validated_and_inherits_the_global_one() {
+        let limit = |n| OrgSettings {
+            repo_max_parallel: n,
+            ..Default::default()
+        };
+        assert!(validate(&limit(Some(0))).is_err(), "0 would never start anything");
+        assert!(validate(&limit(Some(33))).is_err());
+        for n in [1, 32] {
+            assert!(validate(&limit(Some(n))).is_ok());
+            assert_eq!(repo_max_parallel(&limit(Some(n))), Some(n));
+        }
+        assert_eq!(repo_max_parallel(&limit(None)), None);
+        let modules = ModulesConfig::default();
+        assert_eq!(global_repo_max_parallel(&modules), 3, "the schema default");
+    }
+
+    #[test]
     fn org_settings_are_validated() {
         assert!(
             validate(&OrgSettings {
@@ -1067,6 +1106,7 @@ mod tests {
                 ..Default::default()
             }),
             max_parallel: Some(4),
+            repo_max_parallel: Some(2),
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
@@ -1115,6 +1155,15 @@ mod tests {
             incoming.max_parallel, None,
             "a field the client names as null is a real request to inherit"
         );
+        assert_eq!(
+            incoming.repo_max_parallel,
+            Some(2),
+            "a per-repository limit the client never heard of survives the save"
+        );
+        let clears = json!({"repo_max_parallel": null});
+        let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared, &saved, Some(&clears));
+        assert_eq!(cleared.repo_max_parallel, None, "a named null clears it back to inherit");
         assert_eq!(
             incoming.agent.map(|a| (a.model, a.skillsets)),
             Some((None, None)),
@@ -1199,6 +1248,7 @@ mod tests {
         let all: BTreeMap<String, OrgSettings> = serde_json::from_str(saved).unwrap();
         let org = all.get("acme").unwrap();
         assert_eq!(org.max_parallel, Some(2));
+        assert_eq!(org.repo_max_parallel, None, "no per-repository limit inherits the global one");
         assert_eq!(org.budget_usd, Some(5.5));
         assert_eq!(org.enabled, None);
         assert!(org_enabled(org), "an org the switch has never heard of stays on");
