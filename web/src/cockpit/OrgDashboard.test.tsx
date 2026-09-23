@@ -41,6 +41,14 @@ describe("OrgDashboard", () => {
   const render = (h: SpendHistory | null = history, extra: { providers?: ProviderErrorSnapshot[]; initialRepo?: string | null } = {}) =>
     renderToStaticMarkup(<OrgDashboard org={ACME} sessions={orgSessions()} history={h} range={30} compare onBack={noop} {...extra} />);
 
+  it("shows the org's GitHub description under its name, and nothing when it has none", () => {
+    const withText = renderToStaticMarkup(
+      <OrgDashboard org={{ ...ACME, description: "Tools for makers" }} sessions={orgSessions()} history={history} range={30} compare onBack={noop} />,
+    );
+    expect(withText).toContain(">Tools for makers</p>");
+    expect(render()).not.toContain("data-org-description");
+  });
+
   it("renders the measured KPIs and names the unmeasured ones once", () => {
     const html = render();
     for (const kpi of ["Merged PRs", "Change failure rate", "Cost per merged PR", "Spend"]) {

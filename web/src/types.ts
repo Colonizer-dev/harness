@@ -762,6 +762,8 @@ export interface OrgInfo {
   settings: OrgSettings;
   /** The org's GitHub avatar. Absent when unknown — an org that only appears in the colony list has none. */
   avatar_url?: string;
+  /** The org's GitHub description. Absent when it has none, or on a mothership that does not send it. */
+  description?: string;
   /**
    * True for a newly-appeared org the operator has not decided about yet; it is not a workspace
    * until then. Optional so an older mothership that never sends it simply has no pending orgs.

@@ -301,6 +301,7 @@ export function OrgDashboard({
             <OrgTile org={org.org} avatar={org.avatar} size={28} />
             <span className="truncate">{org.org}</span>
           </h1>
+          {org.description && <p data-org-description className="m-0 mt-2 max-w-[640px] text-[14px] leading-snug text-text/80 [text-wrap:pretty]">{org.description}</p>}
           <div className="mt-2 text-[14px] text-muted">
             {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
             {repo ? ` · filtered to ${shortRepo(repo)}` : ""}
