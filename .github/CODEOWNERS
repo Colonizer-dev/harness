@@ -1,0 +1,16 @@
+# Files on a trust boundary: the host API, the sandbox and its network, credentials, publishing,
+# and CI itself. A change here is asked of the code owner for review.
+#
+# Reviews are requested, not yet required: every pull request here is opened by the same account
+# that would approve it, and GitHub does not let an author approve their own pull request.
+
+/crates/colonizer/src/main.rs        @ParallelEntrepreneur
+/crates/colonizer/src/sandbox.rs     @ParallelEntrepreneur
+/crates/colonizer/src/sessions.rs    @ParallelEntrepreneur
+/crates/colonizer/src/github.rs      @ParallelEntrepreneur
+/crates/colonizer/src/gateway.rs     @ParallelEntrepreneur
+/crates/colonizer/src/publish.rs     @ParallelEntrepreneur
+/crates/colonizer/src/providers.rs   @ParallelEntrepreneur
+/crates/colonizer-agentd/            @ParallelEntrepreneur
+/.github/                            @ParallelEntrepreneur
+/SECURITY.md                         @ParallelEntrepreneur
