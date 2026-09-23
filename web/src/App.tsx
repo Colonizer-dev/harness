@@ -596,6 +596,7 @@ export function App() {
               onSelectSession={setSelectedId}
               onOpenColony={openColony}
               status={status}
+              statusError={statusError}
               fleet={fleet}
               update={updateStatus}
               autopilotDefault={autopilotDefault}
