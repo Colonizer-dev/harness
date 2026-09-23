@@ -413,7 +413,20 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
         .await;
     }
 
-    if verdict.vote == "pass" && automerge_enabled(app, &fix).await {
+    // Issue #84: the kill-switch keeps the verdict local — no merge, no comment on GitHub.
+    let blocked = crate::authority::external_writes_blocked();
+    if blocked {
+        app.session_log(
+            fix_id,
+            "warn",
+            format!(
+                "the independent review of {pr_url} voted {}, but external writes are blocked \
+                 (COLONIZER_NO_EXTERNAL_EFFECTS); nothing was merged or posted",
+                verdict.vote
+            ),
+        )
+        .await;
+    } else if verdict.vote == "pass" && automerge_enabled(app, &fix).await {
         let mut polls = 1;
         let (mut mergeable, mut status) = mergeability(app, &pr_url).await?;
         // GitHub computes mergeability lazily and this runs as the PR opens, so UNKNOWN is usually just "not yet".
