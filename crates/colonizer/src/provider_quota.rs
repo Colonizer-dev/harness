@@ -15,10 +15,13 @@ pub const QUOTA_FALLBACK: &str = "provider_quota_exhausted";
 /// instead of parking forever.
 pub const QUOTA_DEFAULT_TTL_SECS: i64 = 15 * 60;
 
-/// What the classifier found: when the plan refills, as the provider worded it and as a timestamp.
+/// What the classifier found: when the plan refills, as the provider worded it and as a timestamp,
+/// and whether the cap is the Claude account's own (a session/usage limit names no provider id, so
+/// the colony-side park marks every provider instead of none).
 pub struct QuotaExhaustion {
     pub reset_at: Option<String>,
     pub reset_unix: Option<i64>,
+    pub account_wide: bool,
 }
 
 /// Whether `message` says the provider's plan ran out — never a bare rate limit, a refused model
@@ -54,12 +57,25 @@ fn classify_quota_at(status: u16, kind: &str, message: &str, now: DateTime<Utc>)
         || ((has("token-plan") || has("token plan")) && (has("limit") || has("reset")))
         || has("weekly limit")
         || ((has("billing") || has("plan")) && has("quota") && exhaustion_verb)
-        || (has("usage limit") && reset_words);
+        || (has("usage limit") && reset_words)
+        // "session limit" is the Claude account's own cap (`You've hit your session limit · resets
+        // 7am`), not one routed provider's plan: the phrase itself is rarely advisory, but a bare
+        // mention with neither reset phrasing nor an exhaustion verb ("Session limit: 10 concurrent
+        // runs") still reads as a dashboard line, so it takes the same reset guard as "usage limit" —
+        // widened with the verb, since "reached your session limit" names exhaustion without naming a
+        // reset. A bare "hit your session limit" with no reset stays out: "hit" alone is too common
+        // to promote on.
+        || ((has("session limit") || has("session_limit")) && (reset_words || exhaustion_verb));
     if !exhausted {
         return None;
     }
+    let account_wide = has("session limit") || has("session_limit");
     let (reset_at, reset_unix) = extract_reset(message, now);
-    Some(QuotaExhaustion { reset_at, reset_unix })
+    Some(QuotaExhaustion {
+        reset_at,
+        reset_unix,
+        account_wide,
+    })
 }
 
 /// `reached ... limit` in order: "you have reached your weekly limit", "reached the plan's limit".
@@ -68,9 +84,9 @@ fn reached_limit(text: &str) -> bool {
 }
 
 /// A reset instant out of provider prose, as raw words and unix time: ISO8601, then `Mon DD
-/// [HH:MM[am]]`, then `MM-DD HH:MM[:SS]`, all UTC. A month and day land on this year, or next when
-/// only just passed; more than ~24h stale, or unrepresentable (Feb 29), reads as reset-less.
-/// `None` when the message names no reset.
+/// [HH:MM[am]]`, then `MM-DD HH:MM[:SS]`, then a dateless clock time, all UTC. A month and day land
+/// on this year, or next when only just passed; more than ~24h stale, or unrepresentable (Feb 29),
+/// reads as reset-less. `None` when the message names no reset.
 fn extract_reset(message: &str, now: DateTime<Utc>) -> (Option<String>, Option<i64>) {
     if let Some(hit) = iso_reset(message) {
         return hit;
@@ -79,6 +95,9 @@ fn extract_reset(message: &str, now: DateTime<Utc>) -> (Option<String>, Option<i
         return hit;
     }
     if let Some(hit) = numeric_reset(message, now) {
+        return hit;
+    }
+    if let Some(hit) = time_only_reset(message, now) {
         return hit;
     }
     (None, None)
@@ -188,6 +207,99 @@ fn numeric_reset(message: &str, now: DateTime<Utc>) -> Option<(Option<String>, O
     None
 }
 
+/// `resets 7am` style: a clock time with no date — the session-limit class names only an hour. The
+/// next future occurrence in UTC (later today when still ahead, else tomorrow), so a `7am` refill
+/// parks until morning instead of lapsing on the 15-minute TTL and re-hitting all night. Only a
+/// time that carries its own clock evidence counts: an am/pm marker, or an `HH:MM` pinned to UTC.
+/// A bare hour or a zoneless `HH:MM` stays reset-less — counts, durations and stray stamps ("retry
+/// in 30 minutes", "backoff 07:54") are not refills.
+fn time_only_reset(message: &str, now: DateTime<Utc>) -> Option<(Option<String>, Option<i64>)> {
+    let bytes = message.as_bytes();
+    let digit = |at: usize| bytes.get(at).is_some_and(|b| b.is_ascii_digit());
+    let mut i = 0;
+    while i < bytes.len() {
+        // A clock starts its own token: a digit the prose before it did not start.
+        if !bytes[i].is_ascii_digit() || (i > 0 && bytes[i - 1].is_ascii_alphanumeric()) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i - start > 2 {
+            continue; // a longer run is a count or a year, not an hour
+        }
+        let mut hour: u32 = std::str::from_utf8(&bytes[start..i]).ok()?.parse().ok()?;
+        let mut min = 0;
+        let clock = bytes.get(i) == Some(&b':') && digit(i + 1) && digit(i + 2);
+        if clock {
+            min = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?.parse().ok()?;
+            if min > 59 {
+                continue;
+            }
+            i += 3;
+            if bytes.get(i) == Some(&b':') && digit(i + 1) && digit(i + 2) {
+                i += 3; // seconds ride along, as in the numeric arm
+            }
+        }
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        let mut meridiem: Option<bool> = None; // Some(is_pm)
+        if i + 2 <= bytes.len() {
+            meridiem = match &bytes[i..i + 2] {
+                [b'a', b'm'] | [b'A', b'M'] => Some(false),
+                [b'p', b'm'] | [b'P', b'M'] => Some(true),
+                _ => None,
+            };
+            if meridiem.is_some() {
+                // `7amazing` is prose, not a clock: the marker needs a word edge after it.
+                if bytes.get(i + 2).is_some_and(|b| b.is_ascii_alphanumeric()) {
+                    continue;
+                }
+                i += 2;
+            }
+        }
+        match meridiem {
+            Some(pm) => {
+                if hour == 0 || hour > 12 {
+                    continue;
+                }
+                hour = hour % 12 + u32::from(pm) * 12;
+                // A trailing zone belongs to the raw reset words, as in the other arms.
+                take_utc(bytes, &mut i);
+            }
+            None => {
+                if !clock || hour > 23 {
+                    continue;
+                }
+                if !take_utc(bytes, &mut i) {
+                    continue; // a zoneless `HH:MM` is a stray stamp, not a refill
+                }
+            }
+        }
+        let raw = message[start..i].trim().to_string();
+        return Some((Some(raw), Some(place_time(hour, min, now))));
+    }
+    None
+}
+
+/// Today at `hour:min` UTC when still ahead, else tomorrow: a dateless clock time always names a
+/// future refill, and every `HH:MM` exists every day, so unlike [`place`] this never reads reset-less.
+fn place_time(hour: u32, min: u32, now: DateTime<Utc>) -> i64 {
+    let today = now
+        .date_naive()
+        .and_hms_opt(hour, min, 0)
+        .expect("the time-only arm validates its clock");
+    let noon = Utc.from_utc_datetime(&today);
+    if noon > now {
+        noon.timestamp()
+    } else {
+        (noon + chrono::Duration::days(1)).timestamp()
+    }
+}
+
 /// Skips spaces, commas and brackets, then reads a 1-2 digit number.
 fn skip_to_number(bytes: &[u8], j: &mut usize) -> Option<u32> {
     while *j < bytes.len() && (bytes[*j] == b' ' || bytes[*j] == b',' || bytes[*j] == b'(') {
@@ -241,6 +353,29 @@ fn read_time(bytes: &[u8], j: &mut usize) -> Option<(u32, u32)> {
         }
     }
     (hour < 24).then_some((hour, min))
+}
+
+/// Consumes a trailing `UTC` or `(UTC)` when one is really there; otherwise leaves `j` alone, so
+/// a parenthetical that is not a zone ("07:54 (see dashboard)") neither parses nor pollutes the raw
+/// words. Stricter than [`skip_utc`], which the date-bearing arms use.
+fn take_utc(bytes: &[u8], j: &mut usize) -> bool {
+    let mut k = *j;
+    while k < bytes.len() && bytes[k] == b' ' {
+        k += 1;
+    }
+    let paren = bytes.get(k) == Some(&b'(');
+    if paren {
+        k += 1;
+    }
+    if k + 3 > bytes.len() || !bytes[k..k + 3].eq_ignore_ascii_case(b"utc") {
+        return false;
+    }
+    k += 3;
+    if paren && bytes.get(k) == Some(&b')') {
+        k += 1;
+    }
+    *j = k;
+    true
 }
 
 /// A trailing `UTC` or `(UTC)` belongs to the raw reset words.
@@ -606,5 +741,77 @@ mod tests {
             quota_pause(&[state("bailian", false, None, true)], 1).is_none(),
             "nothing exhausted, no pause"
         );
+    }
+
+    #[test]
+    fn the_claude_session_limit_text_parks_account_wide_with_its_hour() {
+        let message = "You've hit your session limit · resets 7am (UTC)";
+        let hit = classify_quota_at(0, "", message, now()).expect("session limit is a hit");
+        assert!(hit.account_wide, "no provider id can own the account cap");
+        assert_eq!(hit.reset_at.as_deref(), Some("7am (UTC)"));
+        assert_eq!(
+            hit.reset_unix,
+            Some(Utc.with_ymd_and_hms(2026, 9, 21, 7, 0, 0).unwrap().timestamp()),
+            "later today, still ahead of midnight"
+        );
+    }
+
+    #[test]
+    fn session_limit_times_parse_to_the_next_future_hour() {
+        // An evening now rolls a morning reset to tomorrow.
+        let evening = Utc.with_ymd_and_hms(2026, 9, 21, 20, 0, 0).unwrap();
+        let hit = classify_quota_at(0, "", "session limit reached, resets 7am", evening).expect("hit");
+        assert_eq!(
+            hit.reset_unix,
+            Some(Utc.with_ymd_and_hms(2026, 9, 22, 7, 0, 0).unwrap().timestamp())
+        );
+        assert!(hit.account_wide);
+        // `HH:MM UTC` and `H:MMpm` shapes parse too.
+        let hit = classify_quota_at(0, "", "session limit exceeded; resets 07:00 UTC", now()).expect("hit");
+        assert_eq!(hit.reset_at.as_deref(), Some("07:00 UTC"));
+        assert_eq!(
+            hit.reset_unix,
+            Some(Utc.with_ymd_and_hms(2026, 9, 21, 7, 0, 0).unwrap().timestamp())
+        );
+        let hit = classify_quota_at(0, "", "session limit exceeded; resets 7:30pm", now()).expect("hit");
+        assert_eq!(hit.reset_at.as_deref(), Some("7:30pm"));
+        assert_eq!(
+            hit.reset_unix,
+            Some(Utc.with_ymd_and_hms(2026, 9, 21, 19, 30, 0).unwrap().timestamp())
+        );
+        // A reached form with no clock still parks, reset-less on TTL.
+        let hit = classify_quota_at(0, "", "You have reached your session limit.", now()).expect("hit");
+        assert!(hit.reset_unix.is_none() && hit.account_wide);
+    }
+
+    #[test]
+    fn a_bare_session_limit_mention_is_not_exhaustion() {
+        assert!(
+            classify_quota_at(429, "", "Session limit: 10 concurrent runs per account.", now()).is_none(),
+            "a dashboard line with no reset and no exhaustion verb"
+        );
+        assert!(
+            classify_quota_at(0, "", "You've hit your session limit", now()).is_none(),
+            "bare 'hit' with no reset stays out — too common to promote on"
+        );
+        assert!(
+            classify_quota_at(500, "", "You've hit your session limit · resets 7am (UTC)", now()).is_none(),
+            "status still gates the account class"
+        );
+    }
+
+    #[test]
+    fn durations_and_zoneless_stamps_are_not_resets() {
+        let hit = classify_quota_at(429, "", "quota exhausted, retry in 30 seconds", now()).expect("hit");
+        assert!(
+            hit.reset_at.is_none() && hit.reset_unix.is_none(),
+            "a duration is not a refill"
+        );
+        let hit = classify_quota_at(429, "", "quota exhausted; backoff until 07:54 then retry", now()).expect("hit");
+        assert!(hit.reset_unix.is_none(), "a zoneless stamp stays reset-less");
+        assert!(!hit.account_wide, "the provider class is not account-wide");
+        let bailian = "Your quota has been exhausted. Your quota will reset on 09-23 07:54:00 UTC.";
+        let hit = classify_quota_at(429, "rate_limit_error", bailian, now()).expect("hit");
+        assert!(!hit.account_wide, "a named plan stays provider-scoped");
     }
 }

@@ -401,6 +401,15 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     let provider = provider_quota::mentioned_provider(text, &ids, &names);
     if let Some(pid) = &provider {
         app.gateway.mark_quota_exhausted(pid, hit.reset_at.clone(), hit.reset_unix);
+    } else if hit.account_wide {
+        // The Claude account's session cap names no provider — the colony side never learns one —
+        // so mark every provider: with no record the queue would not pause and the parked colony
+        // would rejoin on the next tick, only to hit the same cap again. The colony has no stored
+        // provider to attribute instead (its routing lives in the runner env, not the session), and
+        // every record lapses together, so the unnamed resume rule lifts the whole pause at once.
+        for p in &providers {
+            app.gateway.mark_quota_exhausted(&p.id, hit.reset_at.clone(), hit.reset_unix);
+        }
     }
     let Some(s) = app.session(id).await else { return };
     if !s.status.is_live() {
@@ -733,6 +742,61 @@ mod tests {
         memory_proposal(&app, "abc", Some("repo"), "Commit style", "Keep commits small.", &[]).await;
         assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
         assert_eq!(app.memory.proposals().await.len(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An account-level session-limit hit names no provider, so the park marks every provider: the
+    /// queue pauses globally and the colony waits for the refill instead of rejoining on the next
+    /// tick, only to hit the same cap again.
+    #[tokio::test]
+    async fn an_unattributed_session_limit_hit_parks_every_provider() {
+        let root = std::env::temp_dir().join(format!("colonizer-session-limit-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let providers: Vec<Value> = ["bailian", "zai"]
+            .iter()
+            .map(|id| json!({"id": id, "name": id, "base_url": "http://127.0.0.1:1", "auth": "none"}))
+            .collect();
+        std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&providers).unwrap()).unwrap();
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+        s.id = "parked".into();
+        s.git_admin_dir = Some("git".into());
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir("parked")).await.unwrap();
+
+        let text = "You've hit your session limit · resets 7am (UTC)";
+        let hit = provider_quota::classify_quota_exhaustion(0, "", text).expect("session limit classifies");
+        park_quota_colony(&app, "parked", text, &hit).await;
+
+        let sessions = app.sessions.read().await;
+        let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
+        assert_eq!(parked.status, SessionStatus::Stopped, "the turn failure parks the colony");
+        assert_eq!(
+            parked.attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(provider_quota::QUOTA_EXHAUSTED_REASON)
+        );
+        assert!(
+            parked.error.as_deref().unwrap_or_default().contains("resets 7am (UTC)"),
+            "{}",
+            parked.error.as_deref().unwrap_or_default()
+        );
+        drop(sessions);
+        assert!(
+            app.gateway.is_quota_exhausted("bailian") && app.gateway.is_quota_exhausted("zai"),
+            "with no provider named, every provider reads exhausted"
+        );
+        assert!(
+            crate::providers::quota_status(&app).await.paused,
+            "an account-wide hit pauses the queue"
+        );
+        crate::queue::resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "parked").unwrap().status,
+            SessionStatus::Stopped,
+            "the unnamed colony stays parked while any record holds"
+        );
+        drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
 }
