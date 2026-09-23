@@ -28,21 +28,9 @@ import { OverviewView } from "./OverviewView";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
-import { useLiveEvents } from "./liveEvents";
 
 const VIEW_KEY = "colonizer.cockpitView";
 
-/** The status bar's name for each view, after the workspace scope. */
-const CRUMB: Record<CockpitView, string> = {
-  overview: "Overview",
-  home: "Nest",
-  colony: "Colony",
-  launch: "New colony",
-  inbox: "Inbox",
-  history: "History",
-  settings: "Settings",
-  memory: "Memory",
-};
 const THEME_KEY = "colonizer.theme";
 
 const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory"];
@@ -210,8 +198,6 @@ export function Cockpit({
   );
 
   const needByOrg = useMemo(() => needCountByOrg(sessions), [sessions]);
-  // What moved since the last push, across every colony: the header's ticker line.
-  const liveEvents = useLiveEvents(sessions);
   // Two different counts, and mixing them up is what makes a header say "1 need you" over a
   // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
   // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
@@ -427,21 +413,19 @@ export function Cockpit({
         pendingMemory={memoryBadge(selectedOrg, workspaces, pendingMemory)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        update={update}
+        onOpenUpdates={() => onOpenSettings("updates")}
       />
       <div className="relative isolate grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)]">
       {/* The v3 halo: a faint radial glow behind the top of the page, under the glass bar. */}
       <div aria-hidden="true" className="v3-halo" />
       <Header
-        scope={selectedOrg}
-        crumb={CRUMB[view]}
-        liveCount={liveCount}
-        needCount={needHere}
-        cost={spend != null && spend > 0 ? spend : null}
-        update={update}
-        onOpenUpdates={() => onOpenSettings("updates")}
+        orgs={workspaces}
+        selectedOrg={selectedOrg}
+        onSelectOrg={switchOrg}
+        needByOrg={needByOrg}
         statusError={statusError}
         connection={liveConnection}
-        latest={liveEvents.latest}
       />
       <div className="relative z-[1] flex min-h-0 min-w-0">
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">

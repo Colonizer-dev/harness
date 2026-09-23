@@ -6,14 +6,20 @@ import { describe, expect, it } from "vitest";
 
 import type { OrgEntry } from "../orgs";
 import { actionError } from "./Cockpit";
-import { Header } from "./Header";
+import { Header, runningOrgs } from "./Header";
 import { NavRail, navTabs, type CockpitView } from "./NavRail";
 
 const entry = (org: string): OrgEntry => ({ org, live: 0, queued: 0, total: 1, pending: 0, avatar: null });
 
-const header = ({ statusError = false, scope = null as string | null, latest = null as { id: string; kind: "asked"; text: string; at: number } | null } = {}) =>
+const header = ({
+  statusError = false,
+  orgs = [] as OrgEntry[],
+  selectedOrg = null as string | null,
+  needByOrg = {} as Record<string, number>,
+  connection = "open" as "open" | "connecting" | "closed",
+} = {}) =>
   renderToStaticMarkup(
-    <Header scope={scope} crumb="Nest" liveCount={0} needCount={0} cost={null} update={null} onOpenUpdates={() => {}} statusError={statusError} latest={latest} />,
+    <Header orgs={orgs} selectedOrg={selectedOrg} onSelectOrg={() => {}} needByOrg={needByOrg} statusError={statusError} connection={connection as never} />,
   );
 
 const rail = ({
@@ -64,15 +70,28 @@ describe("Header status error", () => {
   });
 });
 
-describe("Header", () => {
-  it("names the scope and the view", () => {
-    expect(header()).toContain("All workspaces");
-    expect(header({ scope: "acme" })).toContain("acme");
-    expect(header()).toContain("Nest");
+describe("Header running workspaces", () => {
+  const live = (org: string, n: number): OrgEntry => ({ ...entry(org), live: n });
+
+  it("shows only workspaces with colonies running, busiest first", () => {
+    expect(runningOrgs([live("a", 1), live("b", 0), live("c", 3)], null).map((o) => o.org)).toEqual(["c", "a"]);
   });
 
-  it("shows the latest change in the ticker", () => {
-    expect(header({ latest: { id: "a", kind: "asked", text: "web #4 asked a question", at: 1 } })).toContain("web #4 asked a question");
+  it("keeps the filtered workspace in the row after it goes quiet, so the filter can be cleared", () => {
+    expect(runningOrgs([live("a", 0), live("b", 2)], "A").map((o) => o.org)).toEqual(["b", "a"]);
+  });
+
+  it("marks the filter and names what runs and what waits", () => {
+    const html = header({ orgs: [live("Acme", 2), live("octo", 1)], selectedOrg: "acme", needByOrg: { acme: 1 } });
+    expect(html).toContain('aria-label="Acme · 2 running · 1 need you · filtered, click to show all" aria-pressed="true"');
+    expect(html).toContain('aria-label="octo · 1 running" aria-pressed="false"');
+  });
+
+  it("carries no crumb, ticker, counts or spend — only trouble speaks up", () => {
+    const quiet = header({ orgs: [live("acme", 1)] });
+    expect(quiet).not.toContain("All workspaces");
+    expect(quiet).not.toContain("reconnecting");
+    expect(header({ connection: "connecting" })).toContain("reconnecting…");
   });
 });
 

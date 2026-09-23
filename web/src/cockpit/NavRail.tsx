@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement, typ
 import { Avatar } from "../components/Avatar";
 import { sameOrg, store, stored } from "../components/ui";
 import type { OrgEntry } from "../orgs";
+import type { UpdateStatus } from "../types";
 import { needFor } from "./feed";
 
 export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory";
@@ -192,10 +193,13 @@ export function NavRail(props: {
   pendingMemory: number;
   theme: "light" | "dark" | null;
   onToggleTheme: () => void;
+  /** The installed version and whether a newer one is out; an available update shows in the foot. */
+  update?: UpdateStatus | null;
+  onOpenUpdates?: () => void;
   /** Start expanded regardless of the remembered choice; the tests pin both states through it. */
   initialExpanded?: boolean;
 }): ReactElement {
-  const { orgs, hiddenOrgs, onOpenOrgSettings, selectedOrg, onSelectOrg, needByOrg, view, onNavigate, inboxCount, liveCount, pendingMemory, theme, onToggleTheme } = props;
+  const { orgs, hiddenOrgs, onOpenOrgSettings, selectedOrg, onSelectOrg, needByOrg, view, onNavigate, inboxCount, liveCount, pendingMemory, theme, onToggleTheme, update = null, onOpenUpdates } = props;
   const [expanded, setExpanded] = useState<boolean>(() => props.initialExpanded ?? stored(EXPANDED_KEY) !== "0");
   const toggle = () =>
     setExpanded((open) => {
@@ -328,6 +332,24 @@ export function NavRail(props: {
 
       <div className="min-h-2 flex-1" />
 
+      {update?.available && onOpenUpdates && (
+        <Tip label={`Update available${update.latest ? ` · ${update.latest.version}` : ""}`} show={tip}>
+          <button
+            type="button"
+            aria-label={`update available${update.latest ? ` · ${update.installed.version} → ${update.latest.version}` : ""}`}
+            onClick={onOpenUpdates}
+            className={`${ITEM} ${pad} text-accent hover:bg-panel-2`}
+          >
+            <span className="relative grid place-items-center">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+              </svg>
+              <span aria-hidden="true" className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-accent" />
+            </span>
+            {expanded && <span className="truncate">Update{update.latest ? ` · ${update.latest.version}` : ""}</span>}
+          </button>
+        </Tip>
+      )}
       <Tip label="Settings" show={tip}>
         <button
           type="button"

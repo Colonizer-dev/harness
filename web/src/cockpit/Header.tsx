@@ -1,102 +1,89 @@
-// The cockpit's status bar (Cockpit Dashboards v3). Navigation and the workspace scope live in the
-// sidebar (NavRail); this slim glass bar only says where you are and what is happening: the scope and
-// view, the realtime ticker, the Live indicator, the live and need counts, spend, and the version.
+// The cockpit's top bar: nothing but the workspaces that have colonies running right now, as avatars
+// at the right, each a filter. Navigation and the rest of the state live in the sidebar and the views;
+// the bar only speaks up otherwise when something is wrong (the mothership unreachable, the live feed
+// down).
 import type { ReactElement } from "react";
 
-import { formatCost } from "../spend";
-import type { UpdateStatus } from "../types";
+import { Avatar } from "../components/Avatar";
+import { sameOrg } from "../components/ui";
+import { toggledOrg, type OrgEntry } from "../orgs";
 import type { LiveConnection } from "../liveStream";
-import type { LiveEvent } from "./liveEvents";
-import { LiveIndicator } from "./Live";
+import { needFor } from "./feed";
 
 export type { CockpitView } from "./NavRail";
 
-// Chip text and its tooltip are derived together so they can never disagree.
-function versionChip(update: UpdateStatus): string {
-  return update.available && update.latest
-    ? `${update.installed.version} → ${update.latest.version}`
-    : update.installed.version;
-}
-
-function updateTitle(update: UpdateStatus): string {
-  if (update.available && update.latest) {
-    return `update available: ${update.installed.version} → ${update.latest.version}`;
-  }
-  if (update.available) return `update available: ${update.installed.version}`;
-  return `up to date · ${update.installed.version}`;
+/** The workspaces with colonies running, busiest first — the avatars the bar shows. The chosen
+ *  workspace stays in the row even when it goes quiet, so its filter can always be cleared. */
+export function runningOrgs(orgs: readonly OrgEntry[], selectedOrg: string | null): OrgEntry[] {
+  return orgs
+    .filter((o) => o.live > 0 || sameOrg(o.org, selectedOrg))
+    .sort((a, b) => b.live - a.live || a.org.localeCompare(b.org));
 }
 
 export function Header(props: {
-  /** The workspace in scope; null is every workspace. */
-  scope: string | null;
-  /** The view's name, after the scope. */
-  crumb: string;
-  liveCount: number;
-  needCount: number;
-  /**
-   * What this workspace's colonies have spent in total. Not a daily figure: the API reports a
-   * running total per colony and no history, so there is nothing to slice a day out of.
-   */
-  cost: number | null;
-  update: UpdateStatus | null;
-  onOpenUpdates: () => void;
-  /** The status poll is failing: the counts beside it are stale, and the header says so. */
+  /** Workspaces only: orgEntries() has already dropped the undecided and the switched-off. */
+  orgs: OrgEntry[];
+  selectedOrg: string | null;
+  /** null is every workspace; a second click on the chosen avatar clears the filter. */
+  onSelectOrg: (org: string | null) => void;
+  /** Keyed lowercase (needCountByOrg). */
+  needByOrg: Record<string, number>;
+  /** The status poll is failing: said aloud, since nothing else on the bar would show it. */
   statusError: boolean;
-  /** The realtime feed's connection; absent reads as reconnecting. */
+  /** The realtime feed's connection; only a dropped feed is shown. */
   connection?: LiveConnection;
-  /** The newest thing that changed, for the ticker; null says nothing. */
-  latest?: LiveEvent | null;
 }): ReactElement {
-  const { scope, crumb, liveCount, needCount, cost, update, onOpenUpdates, statusError, connection, latest = null } = props;
+  const { orgs, selectedOrg, onSelectOrg, needByOrg, statusError, connection } = props;
+  const running = runningOrgs(orgs, selectedOrg);
 
   return (
-    <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-4 px-6 shadow-[inset_0_-1px_0_var(--border)]">
-      <div className="flex min-w-0 shrink-0 items-center gap-2 text-[13px]">
-        <span className="max-w-[220px] truncate text-muted">{scope ?? "All workspaces"}</span>
-        <span aria-hidden="true" className="text-border-strong">/</span>
-        <span className="text-text">{crumb}</span>
-      </div>
-
-      <div className="min-w-0 flex-1 overflow-hidden">
-        {latest && (
-          <span aria-live="polite" className="hidden min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[13px] text-faint md:block">
-            {/* Re-keyed on the event so every new one eases in. */}
-            <span key={`${latest.id}-${latest.at}`} className="v3-evin">
-              › {latest.text}
-            </span>
-          </span>
-        )}
-      </div>
-
+    <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)]">
       {statusError && (
-        <span role="status" title="Mothership unreachable" className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-err">
+        <span role="status" className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-err">
           <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-err" />
           Mothership unreachable
         </span>
       )}
-      <span className="shrink-0">
-        <LiveIndicator connection={connection} />
-      </span>
-      <span className="hidden shrink-0 whitespace-nowrap text-[13px] tabular-nums text-muted sm:inline">
-        {liveCount} live · <span className={needCount > 0 ? "text-warn" : "text-faint"}>{needCount} need you</span>
-      </span>
-      {cost !== null && (
-        <span className="shrink-0 whitespace-nowrap font-mono text-[12.5px] tabular-nums text-muted" title="what this workspace's colonies have spent in total">
-          {formatCost(cost)}
+      {!statusError && connection !== undefined && connection !== "open" && (
+        <span role="status" title="the live feed dropped — polls cover until it reconnects" className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-faint">
+          <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-faint" />
+          reconnecting…
         </span>
       )}
-      {update !== null && (
-        <button
-          type="button"
-          title={updateTitle(update)}
-          aria-label={`updates · ${updateTitle(update)}`}
-          onClick={onOpenUpdates}
-          className={`inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border bg-transparent px-2.5 py-1 font-mono text-[11.5px] tabular-nums transition-colors hover:border-accent ${update.available ? "border-accent text-accent" : "border-border text-muted"}`}
-        >
-          {update.available && <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
-          {versionChip(update)}
-        </button>
-      )}
+
+      <div className="min-w-0 flex-1" />
+
+      <div role="group" aria-label="running workspaces" className="flex min-w-0 items-center gap-1.5 overflow-x-auto py-1 [scrollbar-width:none]">
+        {running.map((o) => {
+          const active = sameOrg(o.org, selectedOrg);
+          const need = needFor(needByOrg, o.org);
+          const label = `${o.org} · ${o.live} running${need > 0 ? ` · ${need} need you` : ""}${active ? " · filtered, click to show all" : ""}`;
+          return (
+            <button
+              key={o.org}
+              type="button"
+              title={label}
+              aria-label={label}
+              aria-pressed={active}
+              onClick={() => onSelectOrg(toggledOrg(selectedOrg, o.org))}
+              className={`relative grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-full border-0 bg-transparent transition-[box-shadow,opacity] duration-150 ${
+                active ? "shadow-[0_0_0_2px_var(--bg),0_0_0_3.5px_var(--accent)]" : selectedOrg ? "opacity-45 hover:opacity-100" : "hover:shadow-[0_0_0_2px_var(--bg),0_0_0_3.5px_var(--border-strong)]"
+              }`}
+            >
+              <Avatar name={o.org} src={o.avatar ?? undefined} size={28} rounded="full" />
+              {o.live > 0 && (
+                <span
+                  aria-hidden="true"
+                  className="absolute -bottom-0.5 -right-0.5 grid h-4 min-w-4 place-items-center rounded-full border-2 border-bg bg-ok px-0.5 font-mono text-[9px] font-semibold leading-none text-bg tabular-nums"
+                >
+                  {o.live}
+                </span>
+              )}
+              {need > 0 && <span aria-hidden="true" className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-bg bg-warn" />}
+            </button>
+          );
+        })}
+      </div>
     </header>
   );
 }
