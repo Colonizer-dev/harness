@@ -63,6 +63,19 @@ that is already running:
 colonizer update
 ```
 
+Two builds are refused, and the refusal names both versions: a development
+build, which holds work no release contains, and a release newer than the
+latest one, which would be a downgrade rather than an update. Either refusal
+takes `--force`:
+
+```sh
+colonizer update --force
+```
+
+That installs the latest release anyway: it warns how many sessions are at
+risk, backs `sessions.json` up first and prints where, and still waits while a
+colony is publishing. Forcing needs a known latest release, like any update.
+
 Both do the same thing, because the command is a client of the same two routes
 the pane uses — `GET /api/update` and `POST /api/update/apply`. Neither
 downloads anything itself: the mothership runs `scripts/install-release.sh`,
@@ -79,7 +92,11 @@ What happens, in order:
    As the install starts, `sessions.json` is copied to
    `sessions.json.pre-update-<unix-timestamp>` beside it; if that copy fails,
    the update is marked failed and nothing is installed. The copies are not
-   pruned, and are safe to delete.
+   pruned, and are safe to delete. The copy's path is reported on the update
+   progress (`GET /api/update` answers it as `apply.backup`), and `colonizer
+   update` prints it as `sessions.json backed up to <path>` while it waits. The mothership also logs it
+   to its own output, so the path survives the restart for an update started from Settings, whose
+   progress is in memory.
 2. **The release is unpacked beside the running app**, into whichever of the two
    slots — `app-a`, `app-b` — the running version is not using. A failure
    part-way leaves the running version exactly as it was.
@@ -115,10 +132,11 @@ the same reason:
 
 | Reason | What to do |
 | :--- | :--- |
-| This install has no `scripts/install-release.sh` — it did not come from a release | Update the way you installed: `git pull && scripts/install.sh` for a checkout |
+| This install has no `scripts/install-release.sh` — it did not come from a release | Update the way you installed: `git pull && scripts/install.sh --install` for a checkout |
 | The app path is not the symlink the installer maintains | Install once from a release, or set `COLONIZER_APP` to the symlink |
 | Running without an installed app directory | Same |
 | This is a development build (`v0.1.5-60-gd62bfb2`, a modified tree, or no tag): a release would replace work it does not contain | Update it from its checkout: `git pull && scripts/install.sh --install` |
+| Running `v0.1.6`, newer than the latest release `v0.1.5`: installing it would be a downgrade | Wait for a newer release, or pass `--force` to install `v0.1.5` anyway |
 
 A source checkout is meant to be updated with git. Saying so is better than
 half-applying something.
@@ -131,7 +149,7 @@ For a release, run the install command again:
 curl -fsSL https://colonizer.dev/install.sh | sh
 ```
 
-For a checkout, `git pull && scripts/install.sh`. Either way, restart
+For a checkout, `git pull && scripts/install.sh --install`. Either way, restart
 `colonizer` afterwards. Settings, credentials and colonies live outside the app
 directory, so a rebuild leaves them alone and the colony list is read back at
 start — see [Where things live](install.md#where-things-live).
@@ -143,7 +161,7 @@ start — see [Where things live](install.md#where-things-live).
 | `GET /api/version` | The build: version, commit, dirty, built at, the release it descends from, whether it is a development build |
 | `GET /api/update` | The above, plus the latest release, whether one is available, when it was last checked, whether it can be applied here, and how an update in flight is getting on |
 | `PUT /api/update` | `{"enabled": true\|false}` — the check |
-| `POST /api/update/apply` | Install the newer release and restart into it |
+| `POST /api/update/apply` | Install the newer release and restart into it; an optional `{"force": true}` body installs the latest release over a development build or a newer release instead (no body means no force, anything else that is not JSON is a 400) |
 
 Designed in [#45](https://github.com/Colonizer-dev/harness/issues/45); the
 version stamp is [#110](https://github.com/Colonizer-dev/harness/pull/110), the
