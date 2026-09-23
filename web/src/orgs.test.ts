@@ -3,7 +3,7 @@
 // counts, and the prompt asks for pending orgs one at a time in a stable order.
 import { describe, expect, it } from "vitest";
 
-import { memoryBadge, orgEnabled, orgEntries, pendingOrgPrompt, reconcileSelectedOrg, toggledOrg, viewAfterOrgSwitch } from "./orgs";
+import { hideEmptyOrgEntries, memoryBadge, orgEnabled, orgEntries, parseHideEmptyOrgs, pendingOrgPrompt, reconcileSelectedOrg, serializeHideEmptyOrgs, toggledOrg, viewAfterOrgSwitch } from "./orgs";
 import type { OrgInfo, Session } from "./types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -144,6 +144,34 @@ describe("orgEnabled", () => {
     expect(orgEnabled({ enabled: null })).toBe(true);
     expect(orgEnabled({ enabled: true })).toBe(true);
     expect(orgEnabled({ enabled: false })).toBe(false);
+  });
+});
+
+// The Workspace settings "hide orgs with no colonies" toggle (issue #398): a client-side
+// preference, on by default like the design, and a pure filter over the workspace list.
+describe("parseHideEmptyOrgs", () => {
+  it("is on for an absent or unknown stored value, off only for an explicit off", () => {
+    expect(parseHideEmptyOrgs(null)).toBe(true);
+    expect(parseHideEmptyOrgs("1")).toBe(true);
+    expect(parseHideEmptyOrgs("yes")).toBe(true);
+    expect(parseHideEmptyOrgs("0")).toBe(false);
+  });
+
+  it("round-trips through the serializer", () => {
+    expect(parseHideEmptyOrgs(serializeHideEmptyOrgs(true))).toBe(true);
+    expect(parseHideEmptyOrgs(serializeHideEmptyOrgs(false))).toBe(false);
+  });
+});
+
+describe("hideEmptyOrgEntries", () => {
+  const entries = orgEntries([org("acme"), org("octo")], [session()]).visible;
+
+  it("keeps every entry while the toggle is off", () => {
+    expect(hideEmptyOrgEntries(entries, false).map((e) => e.org)).toEqual(["acme", "octo"]);
+  });
+
+  it("hides entries with no colonies in the live list while the toggle is on", () => {
+    expect(hideEmptyOrgEntries(entries, true).map((e) => e.org)).toEqual(["acme"]);
   });
 });
 
