@@ -348,6 +348,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             model_tier: None,
             claude_account: None,
             after: None,
+            stack: false,
             origin: None,
         }),
     )

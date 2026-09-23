@@ -107,6 +107,15 @@ jobs:
       - name: Test the build scripts
         run: sh scripts/test/build-scripts.test.sh
 
+      # scripts/ci/check-exec-bits.sh scans the index (not the worktree) for shebang scripts that
+      # lost their +x bit — the colony-commit failure of issue #455 — and its own test drives it
+      # against throwaway repos, so neither needs cargo nor the network.
+      - name: Check executable bits
+        run: sh scripts/ci/check-exec-bits.sh
+
+      - name: Test the exec-bit check
+        run: sh scripts/test/check-exec-bits.test.sh
+
   # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
   # so there is nothing to install and `npm test` is plain `node --test`.
   telemetry:
