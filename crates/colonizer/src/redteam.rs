@@ -324,10 +324,12 @@ async fn launch_hunter(app: Shared, brief: Value) -> Result<Session, String> {
     session.autopilot = brief["autopilot"].as_bool().unwrap_or(false);
     let modules = app.modules.read().await.clone();
     let max_parallel = crate::orgs::global_max_parallel(&modules) as usize;
-    let org_limit = crate::orgs::org_max_parallel(&app.org_settings(&owner));
+    let org_settings = app.org_settings(&owner);
+    let org_limit = crate::orgs::org_max_parallel(&org_settings);
+    let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
     {
         let mut sessions = app.sessions.write().await;
-        if !crate::queue::has_room(&sessions, &owner, max_parallel, org_limit) {
+        if !crate::queue::has_room(&sessions, &owner, &session.repo, max_parallel, org_limit, repo_limit) {
             session.status = SessionStatus::Queued;
         }
         sessions.push(session.clone());
