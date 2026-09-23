@@ -1596,7 +1596,7 @@ runner never emits them, and the runner-event schema in `docs/agent-events.schem
 the runner events stay the §2 set plus `finding`. Every transition is also one line of the ledger,
 `sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records
 `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?,
-verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|error`. A
+verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|blocked|error`. A
 good run is `validated → filed → fix_colony → review → merged`; rejections and failures stay too —
 append-only, one line per stage transition, folded by title in the UI.
 
