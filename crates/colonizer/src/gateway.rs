@@ -39,6 +39,11 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Large contexts with images can exceed axum's 2 MB default.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a boot-time provider probe result is reused. A dead provider costs each uncached probe
+/// up to [`HEALTH_TIMEOUT`], and every boot would pay that again; a minute keeps the `providers`
+/// boot warning honest without re-probing an endpoint that was just checked. The manual health
+/// check always probes and writes through, so an operator's check also warms the next boot.
+pub const PROVIDER_PROBE_TTL: Duration = Duration::from_secs(60);
 const FORWARD_HEADERS: [&str; 3] = ["content-type", "accept", "anthropic-version"];
 const DROP_RESPONSE_HEADERS: [&str; 6] = [
     "connection",
@@ -1379,6 +1384,52 @@ async fn openai_response(
     response
 }
 
+/// Cache key for a probe result: the provider id plus its endpoint, so repointing a provider at
+/// a new URL never serves the old endpoint's answer.
+pub fn probe_cache_key(provider: &Provider) -> String {
+    format!("{}\n{}", provider.id, provider.base_url)
+}
+
+/// The boot-time probe with a short read-through cache ([`PROVIDER_PROBE_TTL`]). Both reachable
+/// and unreachable answers are cached — the probe only feeds a warning — and the caller still logs
+/// that warning on every boot, from the cached value when that is what was used. The lock is not
+/// held across the probe, so one slow (or dead) provider does not hold up the others sharing this
+/// map; concurrent boots racing a cold entry may each probe once, which the TTL then coalesces.
+pub async fn probe_cached(app: &App, provider: &Provider) -> Value {
+    let key = probe_cache_key(provider);
+    {
+        let cache = app.provider_probe_cache.lock().await;
+        if let Some((probed_at, value)) = cache.get(&key)
+            && probed_at.elapsed() < PROVIDER_PROBE_TTL
+        {
+            return value.clone();
+        }
+    }
+    let health = probe(app, provider).await;
+    store_probe(app, provider, &health).await;
+    health
+}
+
+/// Records a probe result under [`probe_cache_key`], stamped now.
+async fn store_probe(app: &App, provider: &Provider, health: &Value) {
+    app.provider_probe_cache
+        .lock()
+        .await
+        .insert(probe_cache_key(provider), (Instant::now(), health.clone()));
+}
+
+/// Drops every cached probe for a provider id, whatever endpoint it was probed at. The cache key
+/// carries the base URL but not the credential, so rotating a key or changing the auth mode would
+/// otherwise keep serving the old answer for up to [`PROVIDER_PROBE_TTL`]. Callers mutate providers
+/// in providers.rs (`put`, `delete`); the health handler needs no call, it always probes fresh.
+pub async fn forget_probe(app: &App, id: &str) {
+    let prefix = format!("{id}\n");
+    app.provider_probe_cache
+        .lock()
+        .await
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
 /// Probes `GET {base_url}/v1/models` with the provider's credential.
 pub async fn probe(app: &App, provider: &Provider) -> Value {
     let started = Instant::now();
@@ -1431,7 +1482,10 @@ pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) 
         .into_iter()
         .find(|p| p.id == id)
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such provider"))?;
-    Ok(Json(probe(&app, &provider).await))
+    // Always a fresh probe, but written through to the cache so the next boot reuses it.
+    let health = probe(&app, &provider).await;
+    store_probe(&app, &provider, &health).await;
+    Ok(Json(health))
 }
 
 #[cfg(test)]
@@ -1587,6 +1641,186 @@ mod tests {
         let health = probe(&app, &provider).await;
         let _ = std::fs::remove_dir_all(root);
         health
+    }
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// A fake provider answering `/v1/models` after `delay`, counting every hit. Shared by the
+    /// probe-cache tests below.
+    async fn counting_server(delay: Duration) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let router = Router::new().route(
+            "/v1/models",
+            axum::routing::get(move || {
+                let counter = counter.clone();
+                async move {
+                    tokio::time::sleep(delay).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (addr, hits)
+    }
+
+    fn cache_root() -> PathBuf {
+        std::env::temp_dir().join(format!("colonizer-probe-cache-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// The second lookup within the TTL serves the cache: one network hit for two lookups, and the
+    /// cached one does no I/O, so it comes back faster than the ~300 ms upstream delay the first
+    /// paid. Both durations print for the report (`--nocapture` reproduces the measurement).
+    #[tokio::test]
+    async fn second_probe_within_ttl_does_not_hit_the_network() {
+        let (addr, hits) = counting_server(Duration::from_millis(300)).await;
+        let root = cache_root();
+        let app = crate::tests::test_app(&root);
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            ..provider("x", None)
+        };
+        let start = Instant::now();
+        let first = probe_cached(&app, &provider).await;
+        let uncached = start.elapsed();
+        let start = Instant::now();
+        let second = probe_cached(&app, &provider).await;
+        let cached = start.elapsed();
+        eprintln!("provider probe: uncached {uncached:?}, cached {cached:?}");
+        assert_eq!(first["reachable"], true);
+        assert_eq!(first, second);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the second lookup must come from the cache");
+        assert!(
+            uncached >= Duration::from_millis(200),
+            "the fake delay must be real: {uncached:?}"
+        );
+        assert!(
+            cached < Duration::from_millis(300),
+            "a cached lookup does no I/O, so it must beat the server delay: {cached:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stale entry re-probes instead of serving: expiry is by timestamp, not by waiting out the TTL.
+    #[tokio::test]
+    async fn stale_probe_entry_reprobes() {
+        let (addr, hits) = counting_server(Duration::ZERO).await;
+        let root = cache_root();
+        let app = crate::tests::test_app(&root);
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            ..provider("x", None)
+        };
+        // `Instant::now() - TTL` underflows when the host's monotonic clock is younger than the
+        // TTL (fresh CI containers); there is then no way to be stale, so say so and skip.
+        let Some(stale_at) = Instant::now().checked_sub(PROVIDER_PROBE_TTL + Duration::from_secs(1)) else {
+            eprintln!(
+                "skipping stale_probe_entry_reprobes: host uptime is under {:?}, so a stale timestamp cannot be constructed",
+                PROVIDER_PROBE_TTL + Duration::from_secs(1)
+            );
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        };
+        app.provider_probe_cache
+            .lock()
+            .await
+            .insert(probe_cache_key(&provider), (stale_at, json!({"reachable": "stale"})));
+        let health = probe_cached(&app, &provider).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a stale entry must re-probe");
+        assert_eq!(health["reachable"], true, "the fresh answer replaces the stale marker");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Same id, new endpoint: the key carries the base URL, so a repointed provider re-probes.
+    #[tokio::test]
+    async fn repointed_provider_misses_the_cache() {
+        let (addr_a, hits_a) = counting_server(Duration::ZERO).await;
+        let (addr_b, hits_b) = counting_server(Duration::ZERO).await;
+        let root = cache_root();
+        let app = crate::tests::test_app(&root);
+        let old = Provider {
+            base_url: format!("http://{addr_a}"),
+            ..provider("up", None)
+        };
+        let new = Provider {
+            base_url: format!("http://{addr_b}"),
+            ..old.clone()
+        };
+        probe_cached(&app, &old).await;
+        probe_cached(&app, &new).await;
+        assert_eq!(hits_a.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hits_b.load(Ordering::SeqCst),
+            1,
+            "the new endpoint must be probed, not served the old answer"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The on-demand health check always probes, and its answer warms the next boot lookup.
+    #[tokio::test]
+    async fn health_handler_probes_fresh_and_warms_the_cache() {
+        let (addr, hits) = counting_server(Duration::ZERO).await;
+        let root = cache_root();
+        let app = crate::tests::test_app(&root);
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            format!(r#"[{{"id":"up","name":"Up","base_url":"http://{addr}","auth":"none"}}]"#),
+        )
+        .unwrap();
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            ..provider("up", None)
+        };
+        // A warm entry must not satisfy the handler: it probes regardless.
+        app.provider_probe_cache
+            .lock()
+            .await
+            .insert(probe_cache_key(&provider), (Instant::now(), json!({"reachable": "stale"})));
+        let fresh = provider_health(State(app.clone()), Path("up".into())).await.unwrap().0;
+        assert_eq!(fresh["reachable"], true);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the handler always probes");
+        assert_eq!(probe_cached(&app, &provider).await, fresh);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the handler's answer warms the cache");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Forgetting an id drops its entries at every endpoint and leaves other ids alone: rotating a
+    /// key or changing auth/base_url never serves the old answer again.
+    #[tokio::test]
+    async fn forget_probe_drops_every_entry_for_the_id() {
+        let root = cache_root();
+        let app = crate::tests::test_app(&root);
+        let here = Provider {
+            base_url: "http://127.0.0.1:9".into(),
+            ..provider("x", None)
+        };
+        let moved = Provider {
+            base_url: "http://127.0.0.1:10".into(),
+            ..here.clone()
+        };
+        let other = Provider {
+            base_url: "http://127.0.0.1:9".into(),
+            ..provider("y", None)
+        };
+        {
+            let mut cache = app.provider_probe_cache.lock().await;
+            let now = Instant::now();
+            cache.insert(probe_cache_key(&here), (now, json!({"reachable": true})));
+            cache.insert(probe_cache_key(&moved), (now, json!({"reachable": true})));
+            cache.insert(probe_cache_key(&other), (now, json!({"reachable": true})));
+        }
+        forget_probe(&app, "x").await;
+        let cache = app.provider_probe_cache.lock().await;
+        assert!(cache.get(&probe_cache_key(&here)).is_none());
+        assert!(cache.get(&probe_cache_key(&moved)).is_none());
+        assert!(cache.get(&probe_cache_key(&other)).is_some(), "other ids must survive");
+        drop(cache);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// An Anthropic-compatible endpoint that does not serve `/v1/models` still routes, so its 404
