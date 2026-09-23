@@ -16,7 +16,8 @@ import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
-import { Header, type CockpitView } from "./Header";
+import { Header } from "./Header";
+import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
@@ -29,6 +30,18 @@ import { providerSnapshots } from "./dash";
 import { useLiveEvents } from "./liveEvents";
 
 const VIEW_KEY = "colonizer.cockpitView";
+
+/** The status bar's name for each view, after the workspace scope. */
+const CRUMB: Record<CockpitView, string> = {
+  overview: "Overview",
+  home: "Nest",
+  colony: "Colony",
+  launch: "New colony",
+  inbox: "Inbox",
+  history: "History",
+  settings: "Settings",
+  memory: "Memory",
+};
 const THEME_KEY = "colonizer.theme";
 
 const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory"];
@@ -316,6 +329,10 @@ export function Cockpit({
       case "overview":
         return (
           <OverviewView
+            // One control: the sidebar's workspace switcher is the overview's scope, and the page's
+            // own "open workspace" / "← All workspaces" move that same scope.
+            scopeOrg={selectedOrg}
+            onScopeOrg={switchOrg}
             sessions={sessions}
             orgs={workspaces}
             cost={sumCosts(sessions.map(sessionCost))}
@@ -388,17 +405,14 @@ export function Cockpit({
             onOpen={openColonyById}
             onSelectMothership={() => setInspector({ kind: "mothership" })}
             onLaunch={() => setView("launch")}
-            connection={liveConnection}
           />
         );
     }
   };
 
   return (
-    <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] bg-bg text-text">
-      {/* The v3 halo: a faint radial glow behind the top of the page, under the glass header. */}
-      <div aria-hidden="true" className="v3-halo" />
-      <Header
+    <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] bg-bg text-text">
+      <NavRail
         orgs={workspaces}
         hiddenOrgs={entries.hidden}
         selectedOrg={selectedOrg}
@@ -408,7 +422,17 @@ export function Cockpit({
         view={view}
         onNavigate={navigate}
         inboxCount={needAnywhere}
+        liveCount={liveCount}
         pendingMemory={memoryBadge(selectedOrg, workspaces, pendingMemory)}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+      <div className="relative isolate grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)]">
+      {/* The v3 halo: a faint radial glow behind the top of the page, under the glass bar. */}
+      <div aria-hidden="true" className="v3-halo" />
+      <Header
+        scope={selectedOrg}
+        crumb={CRUMB[view]}
         liveCount={liveCount}
         needCount={needHere}
         cost={spend != null && spend > 0 ? spend : null}
@@ -417,8 +441,6 @@ export function Cockpit({
         statusError={statusError}
         connection={liveConnection}
         latest={liveEvents.latest}
-        theme={theme}
-        onToggleTheme={toggleTheme}
       />
       <div className="relative z-[1] flex min-h-0 min-w-0">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -456,6 +478,7 @@ export function Cockpit({
             onOpenSettings={(section) => onOpenSettings(section)}
           />
         )}
+      </div>
       </div>
     </div>
   );

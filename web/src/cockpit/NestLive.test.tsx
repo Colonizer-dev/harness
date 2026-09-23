@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { LiveEvents } from "./liveEvents";
-import { NestLiveDot, NestLiveStrip, NestView, STRIP_LIMIT } from "./NestView";
+import { NestLiveStrip, NestView, STRIP_LIMIT } from "./NestView";
 import { session } from "./testFixtures";
 
 const noop = () => {};
@@ -38,12 +38,6 @@ describe("nest live chrome", () => {
     const markup = nest();
     expect(markup).toContain(">Nest</h1>");
     expect(markup).toContain("1 need you · 2 live · 1 queued · capacity 2/5");
-  });
-
-  it("says Live only while the stream is open", () => {
-    expect(renderToStaticMarkup(<NestLiveDot connection="open" />)).toContain("Live");
-    expect(renderToStaticMarkup(<NestLiveDot connection="open" />)).toContain("nest-live-dot");
-    expect(renderToStaticMarkup(<NestLiveDot />)).toContain("Reconnecting…");
   });
 
   it("stays quiet until something actually moves", () => {

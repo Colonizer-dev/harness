@@ -107,6 +107,8 @@ export function OverviewView({
   onStop,
   onOpenColony,
   onOpenSettings,
+  scopeOrg,
+  onScopeOrg,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -138,13 +140,20 @@ export function OverviewView({
   onOpenColony: (id: string) => void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
+  /** The cockpit's workspace scope: set, it opens that org's dashboard in place; null is the
+   *  overview. Omitted (tests), the page keeps the choice itself. */
+  scopeOrg?: string | null;
+  /** Changes the cockpit's scope — the sidebar's switcher and this page stay one control. */
+  onScopeOrg?: (org: string | null) => void;
 }): ReactElement {
   // Dashboard toolbar state (issue #398): the range scopes the history-backed KPIs and charts;
   // the compare toggle adds previous-period deltas and the ghost line. Client state, per visit.
   const [range, setRange] = useState<RangeDays>(30);
   const [compare, setCompare] = useState(true);
   // The org whose dashboard replaces the overview body in place; null is the overview itself.
-  const [dashOrg, setDashOrg] = useState<string | null>(null);
+  const [localDashOrg, setLocalDashOrg] = useState<string | null>(null);
+  const dashOrg = scopeOrg !== undefined ? scopeOrg : localDashOrg;
+  const setDashOrg = onScopeOrg ?? setLocalDashOrg;
   // The colonies table's own filters: one status bucket plus one org. Null is unfiltered.
   const [colonyFilter, setColonyFilter] = useState<OverviewFilter | null>(initialFilter ?? null);
   const [orgFilter, setOrgFilter] = useState<string | null>(null);

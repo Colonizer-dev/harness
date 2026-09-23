@@ -1,113 +1,121 @@
-// The cockpit header (v3 shell): the unreachable indicator (issue #411), the view tabs that
-// replaced the rail, and the workspace avatars that carry the rail's org list. Rendered to static
-// markup, as the cockpit's tests do.
+// The cockpit's status bar (the unreachable indicator, issue #411, and the ticker) and its sidebar
+// (the views, the workspace switcher that is the cockpit's scope, the theme and collapse controls).
+// Rendered to static markup, as the cockpit's tests do.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { OrgEntry } from "../orgs";
 import { actionError } from "./Cockpit";
-import { Header, navTabs, type CockpitView } from "./Header";
+import { Header } from "./Header";
+import { NavRail, navTabs, type CockpitView } from "./NavRail";
 
 const entry = (org: string): OrgEntry => ({ org, live: 0, queued: 0, total: 1, pending: 0, avatar: null });
 
-const render = ({
-  statusError = false,
+const header = ({ statusError = false, scope = null as string | null, latest = null as { id: string; kind: "asked"; text: string; at: number } | null } = {}) =>
+  renderToStaticMarkup(
+    <Header scope={scope} crumb="Nest" liveCount={0} needCount={0} cost={null} update={null} onOpenUpdates={() => {}} statusError={statusError} latest={latest} />,
+  );
+
+const rail = ({
   view = "home",
   orgs = [],
   selectedOrg = null,
   needByOrg = {},
   pendingMemory = 0,
   inboxCount = 0,
-  latest = null,
+  expanded = true,
 }: {
-  statusError?: boolean;
   view?: CockpitView;
   orgs?: OrgEntry[];
   selectedOrg?: string | null;
   needByOrg?: Record<string, number>;
   pendingMemory?: number;
   inboxCount?: number;
-  latest?: { id: string; kind: "asked"; text: string; at: number } | null;
+  expanded?: boolean;
 } = {}) =>
   renderToStaticMarkup(
-    <Header
+    <NavRail
       orgs={orgs}
       hiddenOrgs={[]}
+      onOpenOrgSettings={() => {}}
       selectedOrg={selectedOrg}
       onSelectOrg={() => {}}
-      onOpenOrgSettings={() => {}}
       needByOrg={needByOrg}
       view={view}
       onNavigate={() => {}}
       inboxCount={inboxCount}
-      pendingMemory={pendingMemory}
       liveCount={0}
-      needCount={0}
-      cost={null}
-      update={null}
-      onOpenUpdates={() => {}}
-      statusError={statusError}
-      latest={latest}
+      pendingMemory={pendingMemory}
       theme="light"
       onToggleTheme={() => {}}
+      initialExpanded={expanded}
     />,
   );
 
 describe("Header status error", () => {
   it("stays quiet while the status poll succeeds", () => {
-    expect(render()).not.toContain("Mothership unreachable");
+    expect(header()).not.toContain("Mothership unreachable");
   });
 
   it("names the outage, as a live region, while the poll fails", () => {
-    const html = render({ statusError: true });
+    const html = header({ statusError: true });
     expect(html).toContain("Mothership unreachable");
     expect(html).toContain('role="status"');
   });
 });
 
-describe("Header view tabs", () => {
-  it("reaches every view the rail did, in order", () => {
-    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual([
-      "overview",
-      "home",
-      "inbox",
-      "history",
-      "launch",
-      "memory",
-      "settings",
-    ]);
+describe("Header", () => {
+  it("names the scope and the view", () => {
+    expect(header()).toContain("All workspaces");
+    expect(header({ scope: "acme" })).toContain("acme");
+    expect(header()).toContain("Nest");
+  });
+
+  it("shows the latest change in the ticker", () => {
+    expect(header({ latest: { id: "a", kind: "asked", text: "web #4 asked a question", at: 1 } })).toContain("web #4 asked a question");
+  });
+});
+
+describe("NavRail views", () => {
+  it("lists the views in order; launch and settings have their own buttons", () => {
+    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "inbox", "history", "memory"]);
+    const html = rail();
+    expect(html).toContain('aria-label="launch a colony"');
+    expect(html).toContain('aria-label="settings"');
   });
 
   it("marks the current view and counts the inbox and memory", () => {
-    const html = render({ view: "memory", pendingMemory: 3, inboxCount: 2 });
+    const html = rail({ view: "memory", pendingMemory: 3, inboxCount: 2 });
     expect(html).toMatch(/aria-label="Memory · 3" aria-current="page"/);
     expect(html).toContain('aria-label="Inbox · 2"');
   });
 
-  it("keeps the theme toggle", () => {
-    expect(render()).toContain('aria-label="toggle theme"');
+  it("keeps the theme toggle and the collapse control", () => {
+    expect(rail()).toContain('aria-label="toggle theme"');
+    expect(rail()).toContain('aria-label="collapse sidebar"');
+    expect(rail({ expanded: false })).toContain('aria-label="expand sidebar"');
   });
 
-  it("shows the latest change in the ticker", () => {
-    expect(render({ latest: { id: "a", kind: "asked", text: "web #4 asked a question", at: 1 } })).toContain("web #4 asked a question");
+  it("labels items when expanded, and names them in tooltips when collapsed", () => {
+    expect(rail()).toContain(">Overview</span>");
+    expect(rail({ expanded: false })).toContain('role="tooltip"');
   });
 });
 
-describe("Header workspaces", () => {
+describe("NavRail workspace switcher", () => {
   const orgs = [entry("Acme"), entry("octo")];
 
-  it("marks the chosen org whatever its case, and says a second click clears it", () => {
-    const html = render({ orgs, selectedOrg: "acme" });
-    expect(html).toMatch(/aria-label="Acme · selected, click for all workspaces" aria-pressed="true"/);
-    expect(html).toMatch(/aria-label="octo" aria-pressed="false"/);
+  it("shows every workspace as the scope when none is chosen", () => {
+    expect(rail({ orgs })).toContain("All workspaces");
   });
 
-  it("reads the need count keyed lowercase by needCountByOrg", () => {
-    expect(render({ orgs, needByOrg: { acme: 2 } })).toContain('aria-label="Acme · 2 need you"');
+  it("shows the chosen org whatever its case", () => {
+    expect(rail({ orgs, selectedOrg: "acme" })).toContain(">Acme</span>");
   });
 
-  it("names every workspace in the switcher when none is chosen", () => {
-    expect(render({ orgs })).toContain("All workspaces");
+  it("says what waits in the scope, keyed lowercase by needCountByOrg", () => {
+    expect(rail({ orgs, selectedOrg: "Acme", needByOrg: { acme: 2 } })).toContain("2 need you");
+    expect(rail({ orgs, needByOrg: { acme: 2, octo: 1 } })).toContain("3 need you");
   });
 });
 

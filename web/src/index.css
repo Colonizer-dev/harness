@@ -1308,6 +1308,25 @@ body {
   backdrop-filter: blur(20px) saturate(160%);
   -webkit-backdrop-filter: blur(20px) saturate(160%);
 }
+/* The sidebar (NavRail): a surface a step off the page, the outpost mark on a soft tile, and the
+   one solid accent in the chrome — the launch button. */
+.v3-rail {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel-2) 70%, transparent), transparent 320px), var(--bg);
+}
+.v3-brand {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.v3-launch {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.18) inset, 0 6px 18px -6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .v3-rail {
+    transition: none;
+  }
+}
 .v3-live-dot {
   display: inline-block;
   width: 7px;

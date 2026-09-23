@@ -11,7 +11,6 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, 
 import { AntAvatar, type AntState } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
 import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg } from "../components/ui";
-import type { LiveConnection } from "../liveStream";
 import { formatCost, sessionCost } from "../spend";
 import { needsYou } from "../notifications";
 import { isActive, isRaiding } from "../redTeam";
@@ -208,21 +207,6 @@ export function NestLiveStrip({
   );
 }
 
-/** Pulsing green dot + "Live" while the stream is open, a still dot + "Reconnecting…" otherwise. */
-export function NestLiveDot({ connection = "connecting" }: { connection?: LiveConnection }): ReactElement {
-  const live = connection === "open";
-  return (
-    <span
-      role="status"
-      title={live ? "realtime updates from /api/stream" : "the stream dropped — polls cover until it reconnects"}
-      className="inline-flex items-center gap-2 whitespace-nowrap text-[13px] text-muted"
-    >
-      <span aria-hidden="true" className={live ? "nest-live-dot" : "h-[7px] w-[7px] rounded-full bg-faint"} />
-      {live ? "Live" : "Reconnecting…"}
-    </span>
-  );
-}
-
 /**
  * How much each colony's measured cost rose on its last move, and when — the "+$0.04" that floats
  * off a chamber. Only a rise actually observed between two lists counts; the first list is silent.
@@ -266,7 +250,6 @@ export function NestView({
   onOpen,
   onSelectMothership,
   onLaunch,
-  connection,
   liveEvents,
 }: {
   /** Already filtered to the chosen org and sorted; the view takes the first chambers. */
@@ -293,8 +276,6 @@ export function NestView({
   onOpen: (id: string) => void;
   onSelectMothership: () => void;
   onLaunch: () => void;
-  /** The realtime feed's connection (issue #446); absent reads as reconnecting. */
-  connection?: LiveConnection;
   /** What moved, for the strip and the flashes. Derived from `sessions` in production; the tests
    *  pin it here because static markup never runs the effect that derives it. */
   liveEvents?: LiveEvents;
@@ -420,16 +401,6 @@ export function NestView({
         <div className="min-w-0">
           <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em] text-text">Nest</h1>
           <div className="mt-2 text-[14px] text-muted tabular-nums">{meta}</div>
-        </div>
-        <div className="flex items-center gap-4">
-          <NestLiveDot connection={connection} />
-          <button
-            type="button"
-            onClick={onLaunch}
-            className="cursor-pointer rounded-md bg-text px-3 py-1.5 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
-          >
-            Launch a colony
-          </button>
         </div>
       </div>
       <NestLiveStrip events={events.recent} known={known} onSelect={onSelect} />

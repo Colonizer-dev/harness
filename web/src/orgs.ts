@@ -142,11 +142,12 @@ export function memoryBadge(selected: string | null, workspaces: OrgEntry[], tot
 }
 
 /**
- * The cockpit view to land on after switching org. The views that read the chosen org — the nest,
- * history, launch and memory — stay put, so switching org from history shows the new org's
- * history; the others are not about any one org (the overview, the cross-workspace inbox,
- * settings) or not about this one (an open colony), so they fall back to the nest.
+ * The cockpit view to land on after switching org. The views that read the chosen org — the
+ * overview (which shows that org's dashboard), the nest, history, launch and memory — stay put, so
+ * switching org from history shows the new org's history; the others are not about any one org
+ * (the cross-workspace inbox, settings) or not about this one (an open colony), so they fall back
+ * to the nest.
  */
 export function viewAfterOrgSwitch(view: CockpitView): CockpitView {
-  return view === "home" || view === "history" || view === "launch" || view === "memory" ? view : "home";
+  return view === "overview" || view === "home" || view === "history" || view === "launch" || view === "memory" ? view : "home";
 }
