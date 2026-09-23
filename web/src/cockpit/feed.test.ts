@@ -10,12 +10,14 @@ import {
   feedEntries,
   feedKind,
   headlineFor,
+  heldSlots,
   historyRows,
   matchesFilter,
   matchesOverviewFilter,
   needCountByOrg,
   overviewCounts,
   overviewSessions,
+  queueStalled,
 } from "./feed";
 import type { Session, SessionStatus } from "../types";
 
@@ -258,5 +260,59 @@ describe("overview buckets, counts and filters", () => {
   it("restores the whole list when the filter is cleared — a second click or the counts", () => {
     expect(overviewSessions(list, null).map((s) => s.id)).toEqual(list.map((s) => s.id));
     expect(overviewSessions([], "returned")).toEqual([]);
+  });
+});
+
+// Held slots and the stalled queue (issue #217): idle colonies whose PR autopilot holds occupy
+// parallel slots without doing work. When every live colony is held, the queue cannot drain.
+describe("heldSlots", () => {
+  const NOW = Date.parse("2026-09-18T11:48:00Z");
+  const held = (id: string, since: string): Session =>
+    session({ id, status: "idle", attention: { reason: "autopilot_held", since, nudges: 0 } });
+
+  it("counts only idle colonies held by autopilot, with the oldest wait", () => {
+    // A running colony carries no hold; a running colony *with* the flag is doing work, not holding.
+    const list = [
+      held("h1", "2026-09-18T10:00:00Z"),
+      held("h2", "2026-09-18T09:00:00Z"),
+      session({ id: "r1", status: "running" }),
+      session({ id: "r2", status: "running", attention: { reason: "autopilot_held", since: "2026-09-18T09:00:00Z", nudges: 0 } }),
+      session({ id: "q1", status: "queued" }),
+    ];
+    expect(heldSlots(list, NOW)).toEqual({
+      count: 2,
+      oldestSince: "2026-09-18T09:00:00Z",
+      oldestAgeMs: NOW - Date.parse("2026-09-18T09:00:00Z"),
+    });
+  });
+
+  it("is empty when nothing is held", () => {
+    expect(heldSlots([session({ status: "running" })], NOW)).toEqual({ count: 0, oldestSince: null, oldestAgeMs: null });
+  });
+});
+
+describe("queueStalled", () => {
+  const held = (id: string): Session =>
+    session({ id, status: "idle", attention: { reason: "autopilot_held", since: "2026-09-18T09:00:00Z", nudges: 0 } });
+  const queued = (id: string): Session => session({ id, status: "queued" });
+
+  it("queued plus one running plus one held is a healthy busy queue", () => {
+    expect(queueStalled([held("h1"), session({ id: "r1", status: "running" }), queued("q1")])).toBe(false);
+  });
+
+  it("queued with every live colony held is stalled", () => {
+    expect(queueStalled([held("h1"), held("h2"), queued("q1"), queued("q2")])).toBe(true);
+  });
+
+  it("no queued colonies is never stalled, even when everything is held", () => {
+    expect(queueStalled([held("h1"), held("h2")])).toBe(false);
+  });
+
+  it("a colony mid-publish holds its slot and is still working, so the queue is not stalled", () => {
+    expect(queueStalled([held("h1"), held("h2"), session({ id: "p1", status: "publishing" }), queued("q1")])).toBe(false);
+  });
+
+  it("queued with no live colonies is waiting on slots, not stalled by holds", () => {
+    expect(queueStalled([queued("q1"), session({ id: "s1", status: "stopped" })])).toBe(false);
   });
 });
