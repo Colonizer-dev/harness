@@ -7,7 +7,7 @@
 use crate::{
     ApiResult, App, CLAUDE_API_HOST, Shared, client_error,
     config::{ModulesConfig, setting, setting_str, setting_u64},
-    github, memory,
+    diagnosis, github, memory,
     modules::{AgentModule, schema_for},
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
@@ -2195,12 +2195,12 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Session>> {
     Json(out)
 }
 
-pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<diagnosis::SessionDetail> {
     let session = app
         .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    Ok(Json(with_activity(&app, session).await))
+    Ok(Json(diagnosis::for_session(&app, with_activity(&app, session).await).await))
 }
 
 #[derive(Deserialize)]

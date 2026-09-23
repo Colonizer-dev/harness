@@ -14,6 +14,7 @@ mod burn_down;
 mod claude_accounts;
 mod claude_login;
 mod config;
+mod diagnosis;
 mod events;
 mod execution;
 mod findings;
@@ -683,9 +684,13 @@ async fn status(
     // Whether every routable provider's plan is out, and the earliest reset: the queue holder's
     // own words, so the overview banner and the queue gate never disagree.
     let quota = providers::quota_status(&app).await;
+    // The host-wide stall (§diagnosis): live colonies, a waiting queue, and no colony producing
+    // an event for ten minutes. Cheap — runtime stamps, else file mtimes, never file contents.
+    let stall = diagnosis::status_stall(&app).await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
+        "stall": stall,
         "reclaim": {"reclaimable": reclaimable, "unpushed": unpushed},
         "github": match user {
             Ok(u) => json!({"connected": true, "login": u["login"], "name": u["name"], "avatar_url": u["avatar_url"], "source": github::token_source(&app)}),
