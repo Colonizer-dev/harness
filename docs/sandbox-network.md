@@ -38,24 +38,29 @@ commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/
 
 ## Which colonies get which profile
 
-Every colony starts with `public` (`crates/colonizer/src/sessions.rs:1826`).
+Every colony runs with the `public` profile and nothing more. Host loopback is reached through
+explicit, port-scoped `--net-rule` allows, never the broad `host` profile. Handing a colony the
+`host` profile would open **every** host-loopback port to the untrusted agent — including the
+cockpit control API on `127.0.0.1:7878` — so the harness no longer does
+([#375](https://github.com/Colonizer-dev/harness/issues/375)); it opens only the two ports a colony
+is meant to reach.
 
 - **Mesh on** is `modules.mesh_enabled()` and the vendored `headscale`, `tailscale` and `tailscaled`
-  binaries present (`crates/colonizer/src/sessions.rs:1599`, `crates/colonizer/src/mesh.rs:74-82`).
-  The mesh module is on by default (`crates/colonizer/src/config.rs:141-148,189,259-261`). It adds
-  `host` and the WireGuard rules (`crates/colonizer/src/sessions.rs:1847-1848`).
-- **Any provider** adds `host` if it is not already there
-  (`crates/colonizer/src/sessions.rs:1862-1865`). There is one route per provider in
-  `providers.json`, whether or not the colony uses it (`crates/colonizer/src/providers.rs:225-238`,
-  `crates/colonizer/src/providers.rs:342-367`).
+  binaries present. It adds an `allow@host:tcp:<control>` rule for the headscale control port and
+  the WireGuard rules (`crates/colonizer/src/sessions.rs`).
+- **Any provider** adds an `allow@host:tcp:<gateway>` rule for the provider gateway port. There is
+  one route per provider in `providers.json`, whether or not the colony uses it
+  (`crates/colonizer/src/providers.rs`).
 
 | Mesh | Providers configured | `--net` | `--net-rule` |
 | :--- | :--- | :--- | :--- |
-| On | Any | `public,host` | One WireGuard rule per host IPv4 |
-| Off | One or more | `public,host` | None |
+| On | Any | `public` | `allow@host:tcp:<control>`, one WireGuard rule per host IPv4, `allow@host:tcp:<gateway>` |
+| Off | One or more | `public` | `allow@host:tcp:<gateway>` |
 | Off | None | `public` | None |
 
-`host` exists because both services a colony is meant to reach listen on host loopback:
+Explicit rules are matched before the profile rules, and the profile rules allow nothing on the
+Host group, so the default deny closes every other host-loopback port (cockpit API, headscale
+metrics/gRPC, and any other service on loopback). The two ports that are opened:
 
 - **Provider gateway.** It binds `127.0.0.1:41750` by default (`crates/colonizer/src/config.rs:62`).
   The guest gets `http://host.microsandbox.internal:<gateway port>/providers/<id>`
@@ -134,6 +139,12 @@ match no group at all.
 
 ### `host`
 
+The harness no longer passes this profile (see [Which colonies get which
+profile](#which-colonies-get-which-profile) and
+[#375](https://github.com/Colonizer-dev/harness/issues/375)); it is documented here because the
+`Host` destination group is still used by the scoped `allow@host:tcp:<port>` rules the harness does
+pass, which reach the same gateway addresses on the two allowed ports only.
+
 - **Allows** the Host group on every protocol and port ([`types.rs:316-323`][profile-groups]). It
   adds to `public`. Host is classified before Private, so the gateway is Host even though the
   default IPv4 pool is `172.16.0.0/12` ([`destination.rs:40-60`][classify]).
@@ -194,11 +205,15 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 
 ## Open risks
 
-1. **`host` reaches every host-loopback port.** Any harness or host service bound to loopback is
-   reachable at the network level by a colony that has `host`. In the default configuration
-   effectively every colony has it: mesh is on by default, and any configured provider adds it.
-   Which services listen on host loopback is not assessed on this page; the harness's security
-   review is in [audit.md](audit.md).
+1. **`host` reaches every host-loopback port — closed for colonies.** The `host` profile opens
+   every host-loopback port at the network level. The harness used to hand it to effectively every
+   colony (mesh is on by default, and any configured provider added it), which let the untrusted
+   agent drive the cockpit control API and any other loopback service
+   ([#375](https://github.com/Colonizer-dev/harness/issues/375)). The harness now passes `public`
+   plus port-scoped `allow@host:tcp:<control>` / `allow@host:tcp:<gateway>` rules instead, so only
+   those two ports are reachable and the default deny closes the rest. The profile itself is
+   unchanged upstream; the risk applies to any caller that still passes `host`. The harness's
+   security review is in [audit.md](audit.md).
 2. **Classifier gaps (inferred).** These fall through to Public and so are allowed under `public`
    ([`destination.rs:40-130`][classify-all]):
    - IPv4: `255.255.255.255` and the rest of `240/4`, `0.0.0.0/8` other than `0.0.0.0`, `198.18/15`,

@@ -164,7 +164,9 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 ## Mesh design
 
 - Headscale listens on `127.0.0.1`; VMs reach it as `http://host.microsandbox.internal:<port>`
-  (microsandbox `host` network profile).
+  through a single scoped `allow@host:tcp:<control-port>` rule, not the broad `host` profile
+  (which would open every host-loopback port to the untrusted colony; see
+  [sandbox-network.md](sandbox-network.md)).
 - The harness node is a separate userspace `tailscaled` (own state dir, socket under
   `/run/user/<uid>/colonizer/`, fixed UDP port, `--no-logs-no-support`). It never touches the
   system tailscaled or the user's tailnet. Tailscale publishes no macOS `tailscaled`, so on a Mac the
