@@ -1854,7 +1854,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             hosts: vec![CLAUDE_API_HOST.into()],
         });
     }
-    let mut net_profiles = vec!["public".to_string()];
+    let net_profiles = vec!["public".to_string()];
     let mut net_rules = Vec::new();
     let mut publish = None;
     if mesh_on {
@@ -1875,8 +1875,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         });
         env.push(("COLONIZER_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
         env.push(("COLONIZER_MESH_HOSTNAME".into(), s.sandbox.clone()));
-        net_profiles.push("host".into());
+        // Reach the host only where the colony must — the headscale control port — not every
+        // loopback service. The untrusted colony agent must not be able to drive the cockpit API
+        // (127.0.0.1:7878) or other host-loopback services, so we no longer hand it the broad
+        // `host` profile (which allows every host-loopback port). See #375. The WireGuard rules
+        // keep the direct UDP path to the harness node; explicit `--net-rule` entries are matched
+        // before the profile rules, so this allow stands and the default deny closes the rest.
         net_rules = mesh.direct_path_rules().await;
+        net_rules.push(format!("allow@host:tcp:{}", mesh.ports().control));
         app.update_session(id, |x| {
             x.mesh = Some(MeshInfo {
                 name: s.sandbox.clone(),
@@ -1890,9 +1896,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
 
-    // Model providers are reached through the gateway on the mothership.
-    if !routing.routes.is_empty() && !net_profiles.iter().any(|p| p == "host") {
-        net_profiles.push("host".into());
+    // Model providers are reached through the gateway on the mothership. Allow only the gateway
+    // port on the host, never the broad `host` profile: general host-loopback reach would expose
+    // the cockpit API and every other loopback service to the untrusted colony agent (#375).
+    if !routing.routes.is_empty() {
+        let gateway_port = app
+            .cfg
+            .gateway_bind
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(41750);
+        net_rules.push(format!("allow@host:tcp:{gateway_port}"));
     }
 
     // The chosen stack fills in image and machine size — detected from the
