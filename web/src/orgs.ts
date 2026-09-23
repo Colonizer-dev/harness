@@ -1,7 +1,8 @@
 // The org workspace list's pure half (issue #176): which orgs are workspaces, which are switched
 // off, and which newly-appeared one the UI should be asking about. The components render; this
 // module decides what is in the list and in what order. Nothing here touches the browser.
-import { orgOf, occupiesSlot } from "./components/ui";
+import type { CockpitView } from "./cockpit/Rail";
+import { orgOf, occupiesSlot, sameOrg } from "./components/ui";
 import type { OrgInfo, OrgSettings, OrgSpend, Session } from "./types";
 
 /** Absent, null and true all mean on — nothing changes for an existing install; only an explicit false is off. */
@@ -75,4 +76,52 @@ export function pendingOrgPrompt(orgs: OrgInfo[], answered: ReadonlySet<string>)
       .filter((info) => info.awaiting_decision === true && !done.has(info.org.toLowerCase()))
       .sort((a, b) => a.org.localeCompare(b.org))[0] ?? null
   );
+}
+
+// The cockpit's org selection (the rail and the header switcher). The components hold no rules of
+// their own about it; what a click means, what survives a reload and which view survives a switch
+// are decided here.
+
+/** Clicking the org already selected clears the filter back to every workspace; any other click selects it. */
+export function toggledOrg(selected: string | null, clicked: string | null): string | null {
+  return clicked === null || sameOrg(selected, clicked) ? null : clicked;
+}
+
+/**
+ * The selection to keep once the org list is known. The stored "colonizer.org" can name an org
+ * that has since gone (its colonies forgotten) or been switched off; left alone it filters the nest
+ * to nothing while the rail highlights nothing and the header reads "colonizer". A selection that
+ * is not a workspace is cleared. `keepHidden` is for the narrow sidebar, whose switcher shows a
+ * switched-off selection as the current org and reaches its settings from there; the cockpit has
+ * no such row, so it passes false. The entry's own spelling is returned, so later strict
+ * comparisons against the list cannot miss on case.
+ */
+export function reconcileSelectedOrg(
+  selected: string | null,
+  entries: { visible: OrgEntry[]; hidden: OrgEntry[] },
+  keepHidden: boolean,
+): string | null {
+  if (!selected) return null;
+  const pool = keepHidden ? [...entries.visible, ...entries.hidden] : entries.visible;
+  return pool.find((e) => sameOrg(e.org, selected))?.org ?? null;
+}
+
+/**
+ * The memory item's badge: proposals waiting for review. With an org chosen it is that org's
+ * count from /api/orgs; across every workspace it is the global count, which also carries the
+ * proposals that belong to no org.
+ */
+export function memoryBadge(selected: string | null, workspaces: OrgEntry[], total: number): number {
+  if (!selected) return total;
+  return workspaces.find((e) => sameOrg(e.org, selected))?.pending ?? 0;
+}
+
+/**
+ * The cockpit view to land on after switching org. The views that read the chosen org — the nest,
+ * history, launch and memory — stay put, so switching org from history shows the new org's
+ * history; the others are not about any one org (the overview, the cross-workspace inbox,
+ * settings) or not about this one (an open colony), so they fall back to the nest.
+ */
+export function viewAfterOrgSwitch(view: CockpitView): CockpitView {
+  return view === "home" || view === "history" || view === "launch" || view === "memory" ? view : "home";
 }

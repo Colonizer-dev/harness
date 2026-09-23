@@ -26,7 +26,7 @@ import {
   type SessionSnapshot,
 } from "./notifications";
 import { floatingColumnClass } from "./floatingColumn";
-import { pendingOrgPrompt } from "./orgs";
+import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { useImagePull } from "./useImagePull";
 import { usePollTick } from "./usePollTick";
@@ -65,6 +65,8 @@ export function App() {
   const [usage, setUsage] = useState<UsageStatus | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
+  // Whether the first /api/orgs answer (or its failure) is in: until then an empty list says nothing.
+  const [orgsLoaded, setOrgsLoaded] = useState(false);
   const [selectedOrg, setSelectedOrg] = useState<string | null>(() => stored("colonizer.org") || null);
   const [view, setView] = useState<MainView>(() => (stored("colonizer.view") === "memory" ? "memory" : "colonies"));
   const [pendingMemory, setPendingMemory] = useState(0);
@@ -86,6 +88,7 @@ export function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [launchRequests, setLaunchRequests] = useState(0);
   const [settingsRequests, setSettingsRequests] = useState(0);
+  const [memoryRequests, setMemoryRequests] = useState(0);
   // Whether the cockpit is showing its inspector; the fixed card column steps left of it.
   const [inspectorShown, setInspectorShown] = useState(false);
   // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
@@ -134,6 +137,8 @@ export function App() {
       setOrgs(await api.orgs());
     } catch {
       /* older mothership, or offline: the switcher falls back to orgs seen in colonies */
+    } finally {
+      setOrgsLoaded(true);
     }
   }, [api]);
 
@@ -224,6 +229,17 @@ export function App() {
     document.addEventListener("visibilitychange", refresh);
     return () => document.removeEventListener("visibilitychange", refresh);
   }, [loadSessions, loadRedRuns]);
+
+  // Keep a valid org filter: the stored one can name an org that has gone or been switched off
+  // since, which would filter everything to an empty nest under a rail that highlights nothing.
+  // Only once both lists are in, so a slow first poll never clears a good choice.
+  useEffect(() => {
+    if (!sessionsLoaded || !orgsLoaded || !selectedOrg) return;
+    const kept = reconcileSelectedOrg(selectedOrg, orgEntries(orgs, sessions), narrow);
+    if (kept === selectedOrg) return;
+    setSelectedOrg(kept);
+    store("colonizer.org", kept);
+  }, [sessionsLoaded, orgsLoaded, orgs, sessions, selectedOrg, narrow]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -411,10 +427,12 @@ export function App() {
     };
   });
 
+  // Like settings, memory has two frames: the narrow layout's main view, and a cockpit view.
   const openMemory = useCallback(() => {
-    setView("memory");
     setSidebarOpen(false);
-  }, []);
+    if (narrow) setView("memory");
+    else setMemoryRequests((n) => n + 1);
+  }, [narrow]);
 
   // The one newly-appeared org to ask about now, if any; several pending are asked one at a time.
   const pendingOrg = useMemo(() => pendingOrgPrompt(orgs, answeredOrgs), [orgs, answeredOrgs]);
@@ -583,6 +601,8 @@ export function App() {
               autopilotDefault={autopilotDefault}
               launchRequests={launchRequests}
               settingsRequests={settingsRequests}
+              memoryRequests={memoryRequests}
+              pendingMemory={pendingMemory}
               settings={settingsPane}
               onSessionChanged={upsertSession}
               onRedStart={startRedRun}
@@ -593,6 +613,7 @@ export function App() {
                 void loadOrgs();
               }}
               onOpenSettings={openSettings}
+              onOpenOrgSettings={setOrgSettingsFor}
               onInspectorShown={setInspectorShown}
               colony={colonyPane}
               memory={memoryPane}

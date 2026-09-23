@@ -203,15 +203,24 @@ export function historyRows(sessions: Session[], filter: HistoryFilter, now: Dat
     });
 }
 
-/** How many colonies of each org are waiting on a person; the rail's and header's dots read this. */
+/**
+ * How many colonies of each org are waiting on a person; the rail's and header's dots read this.
+ * Keyed by the lowercased org, as sameOrg compares: a colony's org and the /api/orgs spelling of
+ * the same org need not agree on case. Read it through needFor.
+ */
 export function needCountByOrg(sessions: Session[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const session of sessions) {
     if (!needsYou(session)) continue;
-    const org = orgOf(session);
+    const org = orgOf(session).toLowerCase();
     counts[org] = (counts[org] ?? 0) + 1;
   }
   return counts;
+}
+
+/** One org's count from needCountByOrg, whatever the case of the name it is asked with. */
+export function needFor(counts: Record<string, number>, org: string): number {
+  return counts[org.toLowerCase()] ?? 0;
 }
 
 /**
