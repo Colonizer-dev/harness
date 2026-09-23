@@ -73,6 +73,10 @@ What happens, in order:
    update: its microVM is already gone and the host is committing and pushing,
    and interrupting that leaves a colony `failed` with its pull request
    unopened. The pane says which colony, and you try again when it is done.
+   As the install starts, `sessions.json` is copied to
+   `sessions.json.pre-update-<unix-timestamp>` beside it; if that copy fails,
+   the update is marked failed and nothing is installed. The copies are not
+   pruned, and are safe to delete.
 2. **The release is unpacked beside the running app**, into whichever of the two
    slots — `app-a`, `app-b` — the running version is not using. A failure
    part-way leaves the running version exactly as it was.
@@ -111,6 +115,7 @@ the same reason:
 | This install has no `scripts/install-release.sh` — it did not come from a release | Update the way you installed: `git pull && scripts/install.sh` for a checkout |
 | The app path is not the symlink the installer maintains | Install once from a release, or set `COLONIZER_APP` to the symlink |
 | Running without an installed app directory | Same |
+| This is a development build (`v0.1.5-60-gd62bfb2`, a modified tree, or no tag): a release would replace work it does not contain | Update it from its checkout: `git pull && scripts/install.sh --install` |
 
 A source checkout is meant to be updated with git. Saying so is better than
 half-applying something.
