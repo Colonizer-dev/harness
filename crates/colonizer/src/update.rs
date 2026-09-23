@@ -39,6 +39,7 @@ use crate::{
     Shared,
     sessions::{Session, SessionStatus},
     util,
+    version::{self, Build},
 };
 
 /// How long the installer gets before it is given up on. A slow connection
@@ -128,6 +129,29 @@ fn installer(assets: &Path) -> PathBuf {
     assets.join("scripts/install-release.sh")
 }
 
+/// Why a release must not replace this build, if it must not.
+///
+/// A development build — commits after a tag, a modified tree, or no tag at all — carries changes a
+/// release may not have. `scripts/install.sh --install` ships the installer and maintains the same
+/// symlink a release does, so [`blocker`] cannot tell such a build apart; the build stamp can.
+pub fn development_blocker(build: &Build) -> Option<String> {
+    build.development.then(|| development_refusal(&build.version))
+}
+
+/// Both refusals, the build's first: the one verdict `POST /api/update/apply` enforces and the
+/// Settings pane shows, so the button is never offered for an update the route would refuse.
+pub fn apply_blocker(build: &Build, assets: Option<&Path>) -> Option<String> {
+    development_blocker(build).or_else(|| blocker(assets))
+}
+
+/// The one refusal, shared by the route and `colonizer update`, so both name the same way forward.
+fn development_refusal(version: &str) -> String {
+    format!(
+        "{version} is a development build, and a release would replace it with code that may not have its changes; \
+         update it from source with `git pull && scripts/install.sh --install`"
+    )
+}
+
 /// Whether a colony in this state must finish before an update is applied.
 ///
 /// Only publishing. A colony that is merely working is detached, and reconnects
@@ -205,6 +229,51 @@ pub fn sweep_slots(assets: Option<&Path>, live_slots: &[PathBuf]) -> Vec<PathBuf
 }
 
 /* ---------------------------------------------------------------- applying */
+
+/// Copies the session list aside, next to it, as `sessions.json.pre-update-<unix-timestamp>`.
+///
+/// The new version reads the list back at start. If it cannot make sense of it, the copy is the list
+/// as it was when the update started. With no list yet (a first run) there is nothing to keep. The
+/// copy goes through the fault seam as a `Write`, like the startup salvage copy in main.rs.
+fn backup_sessions(path: &Path) -> Result<Option<PathBuf>> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sessions.json".into());
+    let saved = path.with_file_name(format!("{name}.pre-update-{stamp}"));
+    let aside = || {
+        format!(
+            "could not copy {} to {} before updating, so nothing was installed",
+            path.display(),
+            saved.display()
+        )
+    };
+    util::faults::check(path, util::faults::Op::Write).with_context(aside)?;
+    match std::fs::copy(path, &saved) {
+        Ok(_) => Ok(Some(saved)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            // A copy cut short would look like a good one; best effort, as the error is what matters.
+            let _ = std::fs::remove_file(&saved);
+            Err(e).with_context(aside)
+        }
+    }
+}
+
+/// Runs `swap` once the session list is copied aside, and never if it could not be.
+///
+/// A failed copy fails the update the way a failed install does: before the installer has touched
+/// anything, so the running version is left as it was.
+async fn after_backup<T>(sessions: &Path, swap: impl Future<Output = Result<T>>) -> Result<T> {
+    if let Some(saved) = backup_sessions(sessions)? {
+        eprintln!("update: copied the session list to {} before installing", saved.display());
+    }
+    swap.await
+}
 
 async fn install(app: &Shared, version: &str) -> Result<String> {
     let assets = app.cfg.assets.clone().context("no app assets")?;
@@ -301,6 +370,12 @@ pub async fn command() -> Result<()> {
         .await?;
 
     let installed = status["installed"]["version"].as_str().unwrap_or("this build").to_string();
+    // The mothership's build, not this binary's: it is the install a release would replace, and the
+    // one `POST /api/update/apply` refuses. `installed` is in every answer, check on or off, so this
+    // comes first: no release, whether known or not, is the way forward for a development build.
+    if status["installed"]["development"].as_bool().unwrap_or(false) {
+        bail!("{}", development_refusal(&installed));
+    }
     let Some(latest) = status["latest"]["version"].as_str().map(str::to_string) else {
         // No answer is not the same as no update, and must never be reported as
         // one: the check may be off, or simply not have run yet.
@@ -356,7 +431,7 @@ pub async fn command() -> Result<()> {
 ///
 /// Answers as soon as the work starts; `GET /api/update` carries the progress.
 pub async fn apply(State(app): State<Shared>) -> crate::ApiResult<Value> {
-    if let Some(reason) = blocker(app.cfg.assets.as_deref()) {
+    if let Some(reason) = apply_blocker(version::build(), app.cfg.assets.as_deref()) {
         return Err(crate::client_error(StatusCode::CONFLICT, &reason));
     }
 
@@ -401,7 +476,7 @@ pub async fn apply(State(app): State<Shared>) -> crate::ApiResult<Value> {
 
     let background = app.clone();
     tokio::spawn(async move {
-        match install(&background, &version).await {
+        match after_backup(&background.sessions_file(), install(&background, &version)).await {
             Ok(log) => {
                 {
                     let mut progress = background.updater.progress.lock().await;
@@ -467,6 +542,118 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let reason = blocker(Some(&dir)).expect("should refuse");
         assert!(reason.contains("install-release.sh"), "{reason}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A build stamp with every field set. The test binary is itself whatever `git describe` made it,
+    /// so the gate is tested on builds made here rather than on `version::build()`.
+    fn stamped(version: &str, development: bool) -> Build {
+        Build {
+            version: version.into(),
+            commit: Some("10a8054f".into()),
+            dirty: false,
+            built_at: Utc::now(),
+            release: Some("v0.1.7".into()),
+            development,
+        }
+    }
+
+    #[test]
+    fn a_development_build_is_refused_and_pointed_at_the_source_install() {
+        let reason = development_blocker(&stamped("v0.1.7-46-g10a8054", true)).expect("should refuse");
+        assert!(reason.contains("git pull && scripts/install.sh --install"), "{reason}");
+        assert!(
+            reason.contains("v0.1.7-46-g10a8054"),
+            "the refusal should name the build: {reason}"
+        );
+        // Asked before the install checks: the build is the reason, whatever else is missing.
+        let verdict = apply_blocker(&stamped("v0.1.7-46-g10a8054", true), None);
+        assert_eq!(verdict.as_deref(), Some(reason.as_str()));
+    }
+
+    #[test]
+    fn a_release_build_proceeds() {
+        assert_eq!(development_blocker(&stamped("v0.1.7", false)), None);
+        // Past the build gate, the install checks still apply.
+        let reason = apply_blocker(&stamped("v0.1.7", false), None).expect("no app directory should still refuse");
+        assert!(reason.contains("installed app directory"), "{reason}");
+    }
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("colonizer-backup-{}", util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The `sessions.json.pre-update-<unix-timestamp>` copies in `dir`.
+    fn pre_update_copies(dir: &Path) -> Vec<PathBuf> {
+        let is_copy = |name: &str| {
+            name.strip_prefix("sessions.json.pre-update-")
+                .is_some_and(|stamp| !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()))
+        };
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(is_copy))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_session_list_is_copied_aside_before_the_swap() {
+        let dir = scratch();
+        let sessions = dir.join("sessions.json");
+        let list = br#"[{"id":"abc12345","repo":"o/r"}]"#;
+        std::fs::write(&sessions, list).unwrap();
+
+        // The stand-in for the installer looks for the copy when it runs, so a backup written after
+        // the swap, or not at all, fails here.
+        let swapped = after_backup(&sessions, async {
+            let copies = pre_update_copies(&dir);
+            assert_eq!(copies.len(), 1, "one copy should exist before the swap: {copies:?}");
+            assert_eq!(
+                std::fs::read(&copies[0]).unwrap(),
+                list,
+                "the copy should be the list as it was"
+            );
+            Ok("swapped")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(swapped, "swapped", "the swap should run once the copy is made");
+        assert_eq!(std::fs::read(&sessions).unwrap(), list, "the original stays in place");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_backup_that_cannot_be_written_stops_the_swap() {
+        let dir = scratch();
+        let sessions = dir.join("sessions.json");
+        std::fs::write(&sessions, b"[]").unwrap();
+        let _guard = util::faults::inject("sessions.json", util::faults::Op::Write, || {
+            std::io::ErrorKind::StorageFull.into()
+        });
+
+        let ran = std::cell::Cell::new(false);
+        let err = after_backup(&sessions, async {
+            ran.set(true);
+            Ok(())
+        })
+        .await
+        .expect_err("a failed copy should fail the update");
+
+        assert!(!ran.get(), "the installer must not run without a copy of the session list");
+        assert!(format!("{err:#}").contains("nothing was installed"), "{err:#}");
+        assert!(pre_update_copies(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_first_run_has_no_list_to_copy_and_still_updates() {
+        let dir = scratch();
+        let swapped = after_backup(&dir.join("sessions.json"), async { Ok(7) }).await.unwrap();
+        assert_eq!(swapped, 7, "no session list is not a reason to refuse");
+        assert!(pre_update_copies(&dir).is_empty(), "there was nothing to copy");
         std::fs::remove_dir_all(&dir).ok();
     }
 
