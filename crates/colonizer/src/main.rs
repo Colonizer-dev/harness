@@ -1000,7 +1000,7 @@ usage: colonizer
 
   (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
   version         print what this build is, and whether it is a release (also --version, -V)
-  update          install the newest release against a running mothership and restart into it
+  update [--force]  install the newest release against a running mothership and restart into it (refuses a development build, or one newer than the latest release, unless --force)
   open            print the cockpit sign-in link and open it in a browser
   telemetry show  print the exact anonymous usage batch that would be sent
   telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
@@ -1018,7 +1018,7 @@ COLONIZER_HOME and the rest are in docs/install.md.";
 enum Args {
     Serve,
     Version,
-    Update,
+    Update { force: bool },
     Open,
     TelemetryShow,
     TelemetrySet(bool),
@@ -1037,7 +1037,11 @@ impl Args {
                 return Ok(None);
             }
             "version" | "--version" | "-V" => Self::Version,
-            "update" => Self::Update,
+            "update" => match iter.next().as_deref() {
+                None => Self::Update { force: false },
+                Some("--force") => Self::Update { force: true },
+                Some(other) => return Err(format!("unknown argument: {other}")),
+            },
             "open" => Self::Open,
             "telemetry" => {
                 let sub = iter
@@ -1067,7 +1071,7 @@ impl Args {
                 println!("{}", version::build().line());
                 Ok(())
             }
-            Self::Update => update::command().await,
+            Self::Update { force } => update::command(force).await,
             // Reprints the sign-in link (startup prints it too) and opens it the same way.
             Self::Open => {
                 let cfg = Settings::from_env()?;
@@ -1441,6 +1445,24 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("colonizer-load-{}", util::short_id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
         dir
+    }
+
+    #[test]
+    fn update_takes_an_optional_force_flag_and_nothing_else() {
+        let parse = |args: &[&str]| Args::parse(args.iter().map(ToString::to_string).collect());
+        assert!(matches!(parse(&["update"]), Ok(Some(Args::Update { force: false }))));
+        assert!(matches!(
+            parse(&["update", "--force"]),
+            Ok(Some(Args::Update { force: true }))
+        ));
+        // An argument nobody planned for is an error, including trailing ones.
+        for args in [
+            &["update", "extra"][..],
+            &["update", "--bogus"][..],
+            &["update", "--force", "extra"][..],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should error");
+        }
     }
 
     /// A session list with exactly the fields the format requires; everything else defaults.

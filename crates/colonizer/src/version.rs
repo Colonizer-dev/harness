@@ -292,15 +292,11 @@ impl Updates {
         }
     }
 
-    /// The latest release tag, when it is newer than what is installed.
-    pub async fn latest_release(&self) -> Option<String> {
-        let state = self.state.lock().await;
-        let build = build();
-        state
-            .latest
-            .as_ref()
-            .filter(|l| is_newer(build.release.as_deref(), &l.version))
-            .map(|l| l.version.clone())
+    /// The latest release tag the check has seen, whether or not it is newer
+    /// than what is installed. Applying needs it even when it is not newer:
+    /// `--force` installs it anyway, and the refusal names it either way.
+    pub async fn latest_known(&self) -> Option<String> {
+        self.state.lock().await.latest.as_ref().map(|l| l.version.clone())
     }
 
     async fn view(&self) -> Value {
@@ -343,8 +339,13 @@ pub async fn status(State(app): State<Shared>) -> Json<Value> {
 /// until a refresh re-fetched the full shape.
 pub async fn full_status(app: &Shared) -> Value {
     let mut view = app.updates.view().await;
+    // The refusal names the latest release when there is one; read it
+    // regardless of newer-ness, so a development build hears both versions.
+    let latest = app.updates.latest_known().await;
     view["apply"] = serde_json::to_value(app.updater.progress().await).unwrap_or(Value::Null);
-    view["can_apply"] = match crate::update::blocker(app.cfg.assets.as_deref()).or_else(|| crate::update::dev_refusal(build())) {
+    view["can_apply"] = match crate::update::blocker(app.cfg.assets.as_deref())
+        .or_else(|| crate::update::refusal(build(), latest.as_deref(), false))
+    {
         Some(reason) => json!({ "ok": false, "reason": reason }),
         None => json!({ "ok": true, "reason": Value::Null }),
     };
