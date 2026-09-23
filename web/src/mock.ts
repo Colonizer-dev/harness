@@ -2269,6 +2269,18 @@ export function createMockApi(): Api {
       return socket as unknown as SocketLike;
     },
     openTerminal: (id) => mockTerminal(sessions.get(id)),
+    // No realtime feed in mock mode: a socket that never opens, so the dashboard keeps polling.
+    openStream: () =>
+      ({
+        binaryType: "blob",
+        readyState: 0,
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: () => {},
+        close: () => {},
+      }) as unknown as SocketLike,
 
     plugins: () =>
       later(() => ({

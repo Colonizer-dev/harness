@@ -11,7 +11,9 @@ import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, formatTokens, modelMix, orgCost, sessionCost } from "../spend";
 import type { Session, SpendHistory } from "../types";
+import type { LiveConnection } from "../liveStream";
 import { DashBars, DashLegend, DashLine, DashPanel, FilterChip, KpiTile, ShareBar, type KpiDef } from "./DashChart";
+import { LiveCost, LiveIndicator } from "./Live";
 import {
   changeFailRate,
   costPerMerged,
@@ -89,6 +91,7 @@ export function OrgDashboard({
   onBack,
   providers = [],
   initialRepo = null,
+  connection,
 }: {
   org: OrgEntry;
   /** This org's visible sessions (already filtered by the caller). */
@@ -103,6 +106,8 @@ export function OrgDashboard({
   /** The repo filter to start on. Null in production — the tests pin the filtered state through
    *  it because static markup cannot click. */
   initialRepo?: string | null;
+  /** The realtime feed's connection (issue #446); absent renders the indicator as reconnecting. */
+  connection?: LiveConnection;
 }): ReactElement {
   // The repository filter scopes the whole dashboard below the header: every session-backed
   // figure reads `scoped`. Spend history is per org per day, so it — and the ghost line drawn
@@ -285,7 +290,10 @@ export function OrgDashboard({
             </span>
           )}
           <div className="min-w-0">
-            <div className="mb-1 font-mono text-[10.5px] tracking-[0.12em] text-faint">ORG DASHBOARD</div>
+            <div className="mb-1 flex items-center gap-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">
+              <span>ORG DASHBOARD</span>
+              <LiveIndicator connection={connection} />
+            </div>
             <div className="truncate text-[22px] font-semibold tracking-tight">{org.org}</div>
             <div className="font-mono text-[11.5px] text-muted">
               {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
@@ -543,7 +551,9 @@ export function OrgDashboard({
                       {meta.label}
                     </span>
                     <span className="text-right font-mono text-[11px] text-faint">{timeAgo(s.last_activity_at ?? s.updated_at)}</span>
-                    <span className="text-right font-mono text-[11px] tabular-nums">{formatCost(sessionCost(s))}</span>
+                    <span className="text-right font-mono text-[11px] tabular-nums">
+                      <LiveCost value={sessionCost(s)} />
+                    </span>
                   </div>
                 );
               })}

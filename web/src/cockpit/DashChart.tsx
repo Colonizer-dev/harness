@@ -6,6 +6,7 @@
 import type { ReactElement, ReactNode } from "react";
 
 import { RANGES, type RangeDays } from "./dash";
+import { TweenedValue } from "./Live";
 
 export interface BarSeries {
   label: string;
@@ -65,6 +66,11 @@ export function DashPanel({
 export interface KpiDef {
   label: string;
   value: string;
+  /** Numeric twin of `value`: when present the tile tweens between pushes (issue #446) instead
+   *  of snapping. Static markup shows `value`, so keep the two in agreement. */
+  valueNum?: number;
+  /** Formats the tweened number; defaults to rounding. */
+  formatNum?: (n: number) => string;
   /** Absent while the compare toggle is off or a snapshot has no previous period. */
   delta?: string;
   /** Colours the delta (good → ok, bad → err, flat/absent → faint); pair with deltaTone(). */
@@ -83,7 +89,7 @@ export interface KpiDef {
 
 const DELTA_CLASS = { good: "text-ok", bad: "text-err", flat: "text-faint" } as const;
 
-export function KpiTile({ label, value, delta, deltaTone, deltaDir, spark, sparkColor, sub, emptyNote, hint }: KpiDef): ReactElement {
+export function KpiTile({ label, value, valueNum, formatNum, delta, deltaTone, deltaDir, spark, sparkColor, sub, emptyNote, hint }: KpiDef): ReactElement {
   if (emptyNote != null) {
     return (
       <div title={hint} className="flex min-w-0 flex-col gap-1.5 rounded-[14px] border border-border bg-panel px-3.5 py-3">
@@ -98,7 +104,9 @@ export function KpiTile({ label, value, delta, deltaTone, deltaDir, spark, spark
     <div title={hint} className="flex min-w-0 flex-col gap-1.5 rounded-[14px] border border-border bg-panel px-3.5 py-3">
       <div className="truncate font-mono text-[10.5px] tracking-[0.12em] text-faint">{label}</div>
       <div className="flex flex-wrap items-baseline gap-2">
-        <span className="text-2xl font-semibold tabular-nums tracking-tight">{value}</span>
+        <span className="text-2xl font-semibold tabular-nums tracking-tight">
+          {valueNum != null ? <TweenedValue value={valueNum} format={formatNum} /> : value}
+        </span>
         {delta && (
           <span className={`font-mono text-[11px] ${DELTA_CLASS[deltaTone ?? "flat"]}`}>
             {deltaDir === "up" ? "▲ " : deltaDir === "down" ? "▼ " : ""}
@@ -160,7 +168,7 @@ function ChartFrame({
           </div>
         )}
         <div className="min-w-0 flex-1">
-          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={labelledBy} className="block h-28 w-full">
+          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={labelledBy} className="dash-chart block h-28 w-full">
             {children}
           </svg>
           {xLabels && (

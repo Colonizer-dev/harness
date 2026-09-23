@@ -271,6 +271,50 @@ body {
   animation: pulse-soft 1.4s ease-in-out infinite;
 }
 
+/* The dashboard's realtime dot (issue #446): ok-green, breathing while the stream is open. */
+.live-dot {
+  height: 7px;
+  width: 7px;
+  border-radius: 9999px;
+  background: var(--ok);
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+
+/* Dashboard charts (issue #446): bars and lines slide in on mount, and bar geometry eases
+   between pushes instead of snapping. SVG geometry properties transition as CSS in modern browsers. */
+@keyframes dash-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.dash-chart {
+  animation: dash-in 300ms ease-out both;
+}
+.dash-chart rect {
+  transition:
+    y 0.45s ease,
+    height 0.45s ease,
+    opacity 0.45s ease;
+}
+.dash-chart polyline,
+.dash-chart polygon,
+.dash-chart circle {
+  transition: opacity 0.45s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .dash-chart {
+    animation: none;
+  }
+  .dash-chart rect,
+  .dash-chart polyline,
+  .dash-chart polygon,
+  .dash-chart circle {
+    transition: none;
+  }
+}
+
 /* An image download with no progress to report: msb prints none when it is not
    on a terminal, so this says "working" rather than inventing a percentage. */
 @keyframes pull-slide {

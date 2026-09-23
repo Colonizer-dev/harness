@@ -191,6 +191,8 @@ export interface Api {
   stopRedTeamRun(id: string): Promise<RedTeamRun>;
   openEvents(sessionId: string, since: number, epoch?: number): SocketLike;
   openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
+  /** GET /api/stream: the dashboard's realtime feed (issue #446); same-origin cookie auth, like openEvents. */
+  openStream(): SocketLike;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -298,6 +300,7 @@ export const httpApi: Api = {
   openEvents: (id, since, epoch = 0) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}&epoch=${epoch}`)),
   openTerminal: (id, cols, rows) =>
     new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),
+  openStream: () => new WebSocket(wsUrl("/api/stream")),
 };
 
 /** `?mock=1` swaps in an in-browser backend so the UI can be exercised without a harness. */
