@@ -22,6 +22,7 @@ mod fleet;
 mod gateway;
 mod github;
 mod headroom;
+mod hunters;
 mod jev;
 mod lifecycle;
 mod mem0;
@@ -1199,6 +1200,8 @@ async fn serve() -> Result<()> {
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
+        .route("/api/hunters/{id}/install", post(hunters::install_handler))
+        .route("/api/hunters/{id}/probe", get(hunters::probe_handler))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
         .route("/api/version", get(version::version))
         .route("/api/update", get(version::status).put(version::put))
