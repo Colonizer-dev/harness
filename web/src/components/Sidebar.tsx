@@ -5,9 +5,10 @@ import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, sessionCost } from "../spend";
-import type { HarnessStatus, Issue, OrgInfo, Repo, Session } from "../types";
+import type { HarnessStatus, Issue, OrgInfo, Repo, Session, StorageHealth } from "../types";
 import { type ImagePull } from "../useImagePull";
 import { Avatar } from "./Avatar";
+import { diskSize } from "./SessionView";
 import {
   IconCheck,
   IconChevron,
@@ -433,6 +434,23 @@ function OrgOption({
   );
 }
 
+/** The sidebar's Storage dot (issue #220): red while writes fail or the queue is paused for lack of disk, amber on low disk, carrying the free-space reading in the label. Pure, so the tests can pin it without rendering the sidebar. */
+export function storageDot(
+  storage: StorageHealth,
+  reclaim?: { reclaimable: number; unpushed: number } | null,
+): { label: string; state: "ok" | "warn" | "bad" } {
+  // The reclaim counts ride the same poll: "N reclaimable · M unpushed" points at per-colony cleanup.
+  const pending =
+    reclaim && (reclaim.reclaimable > 0 || reclaim.unpushed > 0)
+      ? ` · ${reclaim.reclaimable} reclaimable · ${reclaim.unpushed} unpushed`
+      : "";
+  if (storage.admission_paused) return { label: `Storage${pending} · queue paused (low disk)`, state: "bad" };
+  const space = storage.free_bytes != null ? ` · ${diskSize(storage.free_bytes)} free` : "";
+  if (storage.ok === false) return { label: `Storage${pending}${space}`, state: "bad" };
+  if (storage.low_disk) return { label: `Storage${pending}${space}`, state: "warn" };
+  return { label: `Storage${pending}${space}`, state: "ok" };
+}
+
 function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | null; error: boolean; onOpenSettings: () => void }) {
   if (!status) {
     return (
@@ -450,7 +468,7 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
     );
   }
   const mesh = status.mesh;
-  const items: { label: string; state: "ok" | "bad" | "off" }[] = [
+  const items: { label: string; state: "ok" | "warn" | "bad" | "off" }[] = [
     { label: status.github.connected ? `@${status.github.login}` : "GitHub", state: status.github.connected ? "ok" : "bad" },
     { label: "Claude", state: status.claude.configured ? "ok" : "bad" },
     { label: "microVMs", state: status.sandbox.msb_version ? "ok" : "bad" },
@@ -460,14 +478,8 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
     },
   ];
   // Only a mothership that reports storage health gets the dot; older ones (no `storage`) show nothing new.
-  // The reclaim counts ride the same poll: "N reclaimable · M unpushed" points at per-colony cleanup.
   if (status.storage) {
-    const reclaim = status.reclaim;
-    const pending =
-      reclaim && (reclaim.reclaimable > 0 || reclaim.unpushed > 0)
-        ? ` · ${reclaim.reclaimable} reclaimable · ${reclaim.unpushed} unpushed`
-        : "";
-    items.push({ label: `Storage${pending}`, state: status.storage.ok === false ? "bad" : "ok" });
+    items.push(storageDot(status.storage, status.reclaim ?? null));
   }
   return (
     <button
@@ -478,7 +490,7 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
     >
       {items.map((item) => (
         <span key={item.label} className="inline-flex items-center gap-1.5">
-          <span className={cx("size-1.5 rounded-full", item.state === "ok" ? "bg-ok" : item.state === "bad" ? "bg-err" : "bg-faint")} />
+          <span className={cx("size-1.5 rounded-full", item.state === "ok" ? "bg-ok" : item.state === "bad" ? "bg-err" : item.state === "warn" ? "bg-warn" : "bg-faint")} />
           {item.label}
         </span>
       ))}

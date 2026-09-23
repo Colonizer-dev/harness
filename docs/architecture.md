@@ -155,6 +155,15 @@ Four sandbox module settings bound colonies, each with a per-org override:
   every five minutes. It does not cover the microVM's root filesystem, which `root_disk` bounds. A colony
   past the quota is stopped and its worktree kept: removing a colony's work is the operator's call.
 
+Two more sandbox settings watch the host's own disk rather than any one colony. `warn_free_disk`
+(default 10G) warns in the cockpit when free space on the data dir's volume drops below it, and
+`min_free_disk` (default 5G, or `COLONIZER_RECLAIM_MIN_FREE` when no explicit setting is saved) pauses
+queue admission below it: queued colonies wait and running ones keep running — the pause
+itself deletes nothing — and admission resumes by itself when space returns. Below the floor
+the reclaim sweep (unless off with `COLONIZER_RECLAIM=0`) also reclaims finished colonies whose
+work is already pushed without waiting for the retention window; unpushed work is never deleted.
+0 turns either off.
+
 A fifth sandbox setting carries a per-org override without bounding anything: the org's `stack` pins the
 sandbox stack for its colonies, shadowing what the global `preset` would otherwise choose — `auto` by
 default, which reads each repository's marker files at boot. `null` inherits.

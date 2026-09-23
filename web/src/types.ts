@@ -198,7 +198,7 @@ export interface HarnessStatus {
     detail?: string | null;
     error?: string | null;
   } | null;
-  /** `{ ok: true }` alone until there is a storage alert: a failed disk write, which can recover, or colony records lost at startup, which cannot (see `StorageHealth.kind`). Sticky server-side; older mothership builds omit it. */
+  /** `{ ok: true }` alone until there is a storage alert: a failed disk write, which can recover, or colony records lost at startup, which cannot (see `StorageHealth.kind`). `ok` is the current write verdict, not a latch: a failure sets it false and the next write through sets it true again with `recovered_at`. The disk-space readings below ride every poll regardless (issue #220); older mothership builds omit the whole object. */
   storage?: StorageHealth;
   /** Aggregate reclamation counts from the same poll (issue #223); older mothership builds omit it. */
   reclaim?: { reclaimable: number; unpushed: number };
@@ -329,23 +329,41 @@ export interface StorageHealth {
   failures?: number | null;
   /** When a write first succeeded after the latest failure; null while writes are still failing. Absent from older motherships, whose alert stays until a restart. */
   recovered_at?: string | null;
+  /** Free bytes on the data dir's volume at the queue's last check (issue #220); null when there is no reading yet or df failed. Absent on older motherships. */
+  free_bytes?: number | null;
+  /** Warn threshold in free bytes; 0 means the warning is off. Absent on older motherships. */
+  warn_free_bytes?: number;
+  /** Floor in free bytes; 0 means the floor is off. Below it the queue stops starting new colonies (`admission_paused`). Absent on older motherships. */
+  min_free_bytes?: number;
+  /** Free space is below the warn threshold (or the floor). Absent on older motherships. */
+  low_disk?: boolean;
+  /**
+   * Free space is below the floor: the queue is not starting new colonies. Running colonies keep
+   * running and admission resumes on its own when space returns; the pause itself deletes nothing.
+   * Below the floor the reclaim sweep still reclaims finished colonies whose work is already pushed;
+   * unpushed work is never deleted. Absent on older motherships.
+   */
+  admission_paused?: boolean;
 }
 
-/** GET /api/storage: disk usage and what automatic reclamation can (and pointedly will not) take (issue #223). */
+/** GET /api/storage: disk usage and what automatic reclamation can (and pointedly will not) take (issues #223, #220). */
 export interface StorageSummary {
-  worktrees_bytes: number;
-  repos_bytes: number;
-  sessions_bytes: number;
-  /** Terminal colonies with a PR, past retention: what the sweeper takes next. */
-  reclaimable: Array<{ id: string; status: string; pr_url: string | null; bytes: number; due: boolean; updated_at: string }>;
+  enabled: boolean;
+  retention_secs: number;
+  min_free_bytes: number;
+  warn_free_bytes: number;
+  /** Free bytes on the data dir's volume; null when there is no reading yet or df failed. */
+  free_bytes: number | null;
+  /** Free space is below the floor: the queue is not starting new colonies (running ones keep running). */
+  admission_paused: boolean;
+  /** Data-dir usage by category. `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
+  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; microsandbox_bytes: number | null };
+  /** Finished colonies whose work is pushed (a PR, or no_changes) and not yet cleaned up; `due` means past the auto-reclaim retention window. */
+  reclaimable: Array<{ id: string; status: SessionStatus; pr_url: string | null; bytes: number; updated_at: string; due: boolean }>;
   /** Terminal colonies with no PR: listed for a person, never auto-deleted. */
-  unpushed: Array<{ id: string; status: string; bytes: number; updated_at: string }>;
+  unpushed: Array<{ id: string; status: SessionStatus; bytes: number; updated_at: string }>;
   /** Worktree directories with no colony behind them, and what the sweep will do. */
   orphans: Array<{ path: string; bytes: number; action: string }>;
-  free_bytes: number | null;
-  min_free_bytes: number;
-  retention_secs: number;
-  enabled: boolean;
 }
 
 /** GET /api/status `model_providers`: each configured model provider's cumulative requests and the health rule's verdict on it (§6.5) — the one rule the providers screen, the status poll and the notify module all share. */

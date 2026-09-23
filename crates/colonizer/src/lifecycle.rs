@@ -423,26 +423,21 @@ async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
 }
 
 /// The host-disk check and its consequence, in one place, called from [`watch_host_disks`] — the only
-/// observer, so the measurement is fresh whenever it matters. With no quota for the colony — neither the
-/// org's own nor the sandbox module's default — it does nothing at all: the measurement is a full walk of
-/// trees a `cargo build` can make gigabytes deep, and without a quota it would run every five minutes
-/// purely to fill in a UI number, so `host_disk_bytes` stays `None` until the operator names a size.
-/// Under a quota it records what the colony leaves on the host, whatever the verdict, and stops a colony
-/// past it through the same [`stop_colony`] the budget uses: microVM removed, status `stopped`, a clear
-/// error naming the quota and the measured size, the worktree kept, because deleting a colony's work is
-/// the operator's call.
+/// observer, so the measurement is fresh whenever it matters. It always records what the colony
+/// leaves on the host, whatever the verdict, so the cockpit reports a measured footprint even with
+/// no quota; only a positive quota stops a colony, through the same [`stop_colony`] the budget
+/// uses: microVM removed, status `stopped`, a clear error naming the quota and the measured size,
+/// the worktree kept, because deleting a colony's work is the operator's call. A quota of 0 is no
+/// quota, so with one the walk only fills in the UI number.
 async fn enforce_host_disk(app: &Shared, s: &Session) {
     let org = app.org_settings(&s.org);
     let modules = app.modules.read().await.clone();
     let quota = orgs::host_disk(&modules, &org);
-    // A quota of 0 is no quota, so there is no verdict to reach and the walk would be real IO for
-    // nothing; skipping it keeps stock deployments from re-reading every colony's tree every tick.
-    if quota == 0 {
-        return;
-    }
     let measured = host_footprint_bytes(app, s).await;
     if s.host_disk_bytes != Some(measured) {
-        app.update_session(&s.id, |x| x.host_disk_bytes = Some(measured)).await;
+        // A measurement, not activity: `record_measurement` leaves `updated_at`
+        // alone, which the stall readout reads as liveness for quiet colonies.
+        app.record_measurement(&s.id, |x| x.host_disk_bytes = Some(measured)).await;
     }
     if !over_host_disk(measured, quota) {
         return;
@@ -467,17 +462,18 @@ async fn enforce_host_disk(app: &Shared, s: &Session) {
 }
 
 /// The host-disk check runs every five minutes — far slower than the 60-second loops on purpose: unlike
-/// them it walks the worktree and session directory of every live colony under a quota, real IO over
+/// them it walks the worktree and session directory of every live colony, real IO over
 /// trees a `cargo build` can make gigabytes deep, and growth past a quota is a matter of minutes and
-/// hours, not seconds. A colony still booting is skipped, like the other loops skip it. Missed ticks are
-/// skipped, so a busy machine never piles up walks.
+/// hours, not seconds. The walk records each colony's footprint without counting as activity; only a
+/// colony past its quota is stopped. A colony still booting is skipped, like the other loops skip it.
+/// Missed ticks are skipped, so a busy machine never piles up walks.
 pub async fn watch_host_disks(app: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(300));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
         // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
-        // deadlock against update_session's write lock.
+        // deadlock against the session write lock the footprint write takes.
         let sessions = app.sessions.read().await.clone();
         for s in sessions
             .into_iter()

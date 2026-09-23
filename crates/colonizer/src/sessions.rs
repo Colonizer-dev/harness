@@ -683,6 +683,27 @@ impl App {
         Some((session, result))
     }
 
+    /// Records a background measurement (e.g. `host_disk_bytes`) without
+    /// bumping `updated_at`: a measurement is not activity, and the stall
+    /// readout falls back to `updated_at` for colonies with no events yet, so
+    /// stamping every watch tick would pin them at "just now" forever.
+    /// Persists and broadcasts only when the value actually changed.
+    pub async fn record_measurement(&self, id: &str, f: impl FnOnce(&mut Session)) {
+        let session = {
+            let mut sessions = self.sessions.write().await;
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return;
+            };
+            let before = session.clone();
+            f(session);
+            if session_contents_equal(&before, session) {
+                return;
+            }
+            session.clone()
+        };
+        self.persist_and_broadcast(&session).await;
+    }
+
     /// Everything `update_session` does after letting go of the write lock: persist the list to disk and
     /// tell every open browser the session changed. Claims made directly under `with_slot` (the queue, a
     /// queued resume) call this too, or the web UI would stop updating.
@@ -2999,6 +3020,36 @@ pub(crate) mod tests {
         let disk: Value = serde_json::from_str(&std::fs::read_to_string(app.sessions_file()).unwrap()).unwrap();
         let saved = disk.as_array().unwrap().iter().find(|v| v["id"] == "abc").unwrap();
         assert_eq!(saved["status"], "idle", "a real change must reach sessions.json");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn record_measurement_stores_the_number_without_bumping_updated_at() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let before = app.session("abc").await.unwrap();
+        assert_eq!(before.host_disk_bytes, None);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        app.record_measurement("abc", |s| s.host_disk_bytes = Some(1024)).await;
+        let after = app.session("abc").await.unwrap();
+        assert_eq!(after.host_disk_bytes, Some(1024));
+        assert_eq!(
+            after.updated_at, before.updated_at,
+            "a measurement is not activity and must not read as liveness"
+        );
+        let disk: Value = serde_json::from_str(&std::fs::read_to_string(app.sessions_file()).unwrap()).unwrap();
+        let saved = disk.as_array().unwrap().iter().find(|v| v["id"] == "abc").unwrap();
+        assert_eq!(
+            saved["host_disk_bytes"], 1024,
+            "the measurement must still reach sessions.json"
+        );
+        // A second identical measurement writes nothing.
+        let disk_before = std::fs::read_to_string(app.sessions_file()).unwrap();
+        app.record_measurement("abc", |s| s.host_disk_bytes = Some(1024)).await;
+        assert_eq!(
+            std::fs::read_to_string(app.sessions_file()).unwrap(),
+            disk_before,
+            "an unchanged measurement must not rewrite sessions.json"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

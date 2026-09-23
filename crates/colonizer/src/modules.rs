@@ -166,7 +166,11 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
                     "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
                 "host_disk": {"type": "string", "title": "Host disk per colony", "default": "0", "format": "disk-size",
-                    "description": "How much disk one colony may leave on the host: its worktree, where everything built inside the colony lands, plus its session files and logs. The microVM's own root disk is the Root disk setting above and is not counted here. 0, the default, means unlimited: there is no size that suits every deployment. Measured every few minutes. When a colony passes the quota it is stopped on the host and its worktree is kept; clean up or raise the quota and press Resume to continue."}
+                    "description": "How much disk one colony may leave on the host: its worktree, where everything built inside the colony lands, plus its session files and logs. The microVM's own root disk is the Root disk setting above and is not counted here. 0, the default, means unlimited: there is no size that suits every deployment. Measured every few minutes. When a colony passes the quota it is stopped on the host and its worktree is kept; clean up or raise the quota and press Resume to continue."},
+                "warn_free_disk": {"type": "string", "title": "Warn below free disk", "default": "10G", "format": "disk-size",
+                    "description": "The cockpit warns when the volume holding the data dir has less free space than this. 0 turns the warning off."},
+                "min_free_disk": {"type": "string", "title": "Pause the queue below free disk", "default": "5G", "format": "disk-size",
+                    "description": "Queued colonies are not started while free space on the data dir's volume is below this; the pause itself deletes nothing and never stops running colonies, and admission resumes by itself when space returns. Below the floor the reclaim sweep (unless off with COLONIZER_RECLAIM=0) also reclaims finished colonies whose work is already pushed without waiting for the retention window; unpushed work is never deleted. 0 turns the floor off."}
             }}),
         )],
         "mesh" => vec![
@@ -639,6 +643,40 @@ mod tests {
         );
         for bad in ["eight", "1.5G", "16 GB"] {
             input.insert("host_disk".into(), json!(bad));
+            assert!(
+                validate_settings(&schema, &input).is_err(),
+                "{bad:?} must be refused while the operator is looking"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sandbox_free_disk_thresholds_are_sizes_validated_like_host_disk() {
+        let schema = providers("sandbox", &[]).remove(0).schema;
+        assert_eq!(
+            schema["properties"]["warn_free_disk"]["default"],
+            json!("10G"),
+            "the cockpit warns below 10G unless the operator says otherwise"
+        );
+        assert_eq!(
+            schema["properties"]["min_free_disk"]["default"],
+            json!("5G"),
+            "the queue holds below 5G unless the operator says otherwise"
+        );
+        let mut input = Map::new();
+        input.insert("warn_free_disk".into(), json!("8G"));
+        input.insert("min_free_disk".into(), json!("5G"));
+        let out = validate_settings(&schema, &input).unwrap();
+        assert_eq!(out.get("warn_free_disk"), Some(&json!("8G")));
+        assert_eq!(out.get("min_free_disk"), Some(&json!("5G")));
+        input.insert("min_free_disk".into(), json!("0"));
+        assert_eq!(
+            validate_settings(&schema, &input).unwrap().get("min_free_disk"),
+            Some(&json!("0")),
+            "0 turns the floor off"
+        );
+        for bad in ["eight", "1.5G", "16 GB"] {
+            input.insert("warn_free_disk".into(), json!(bad));
             assert!(
                 validate_settings(&schema, &input).is_err(),
                 "{bad:?} must be refused while the operator is looking"

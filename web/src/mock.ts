@@ -1806,7 +1806,18 @@ export function createMockApi(): Api {
           // user cannot use, so the strip reads "no KVM".
           host: mockHost(live),
           // Reclamation counts for the sidebar's Storage dot (issue #223).
-          reclaim: { reclaimable: 1, unpushed: 1 },
+          reclaim: { reclaimable: 2, unpushed: 1 },
+          // Disk health for the sidebar's Storage dot (issue #220): plenty free, so neither
+          // low_disk nor admission_paused. ?runtime=old omits storage with the rest, as a
+          // mothership from before the probe did not.
+          storage: {
+            ok: true,
+            free_bytes: 12_884_901_888,
+            warn_free_bytes: 5_368_709_120,
+            min_free_bytes: 1_073_741_824,
+            low_disk: false,
+            admission_paused: false,
+          },
           // The same verdict the providers list serves, read off its own seeds: strix is the
           // degraded one (issue #184's report), deepseek and lab have never been used.
           model_providers: providers.map((p) => ({
@@ -2036,16 +2047,25 @@ export function createMockApi(): Api {
     },
     storageSummary: () =>
       later(() => ({
-        worktrees_bytes: 0,
-        repos_bytes: 0,
-        sessions_bytes: 0,
-        reclaimable: [],
-        unpushed: [],
-        orphans: [],
-        free_bytes: null,
-        min_free_bytes: 0,
-        retention_secs: 43200,
         enabled: true,
+        retention_secs: 43200,
+        min_free_bytes: 1_073_741_824,
+        warn_free_bytes: 5_368_709_120,
+        free_bytes: 12_884_901_888,
+        admission_paused: false,
+        totals: {
+          worktrees_bytes: 3_221_225_472,
+          repos_bytes: 1_073_741_824,
+          sessions_bytes: 268_435_456,
+          // Microsandbox's home directory, holding the shared image cache: listed, never offered for cleanup.
+          microsandbox_bytes: 2_147_483_648,
+        },
+        reclaimable: [
+          { id: "old98765", status: "pr_opened", pr_url: "https://github.com/acme/webshop/pull/61", bytes: 214_748_364, updated_at: ago(1560), due: true },
+          { id: "merge5678", status: "merged", pr_url: "https://github.com/acme/design-system/pull/18", bytes: 96_468_992, updated_at: ago(238), due: false },
+        ],
+        unpushed: [{ id: "fail4321", status: "stopped", bytes: 41_943_040, updated_at: ago(93) }],
+        orphans: [{ path: "worktrees/acme/webshop/issue-9-orphan", bytes: 12_582_912, action: "reclaim at retention" }],
       })),
     setKeep: async (id, keep) => {
       const s = find(id);

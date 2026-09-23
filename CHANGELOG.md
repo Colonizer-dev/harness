@@ -14,6 +14,17 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+### Added
+
+- **Configurable free-disk thresholds.** The sandbox module's `warn_free_disk`
+  (default 10G) warns in the cockpit when the data dir's volume runs low, and
+  `min_free_disk` (default 5G) pauses queue admission until space returns —
+  running colonies keep running and the pause itself deletes nothing, though below
+  the floor the reclaim sweep still reclaims finished colonies whose work is already
+  pushed. The floor also honours
+  `COLONIZER_RECLAIM_MIN_FREE`, and both ride in `/api/status`'s `storage` and
+  `GET /api/storage` alongside the microsandbox home size. ([#220])
+
 ## [v0.1.8] - 2026-09-23
 
 ### Added
@@ -382,6 +393,7 @@ Macs. ([#74])
 [#215]: https://github.com/Colonizer-dev/harness/issues/215
 [#226]: https://github.com/Colonizer-dev/harness/issues/226
 [#240]: https://github.com/Colonizer-dev/harness/issues/240
+[#220]: https://github.com/Colonizer-dev/harness/issues/220
 [#276]: https://github.com/Colonizer-dev/harness/pull/276
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
 [#358]: https://github.com/Colonizer-dev/harness/issues/358
