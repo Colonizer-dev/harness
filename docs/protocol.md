@@ -292,9 +292,12 @@ commits something, kept in place when a publish fails part-way, and cleared when
 changes; the publish re-derives the truth from git and origin, so the field is the record, not the
 authority.
 
-`boot_timing` is where the last launch's time went, filled in when the colony finishes booting and
-replaced on resume. The phases are consecutive spans in boot order and partition the launch, so they
-sum to at most `total_ms`:
+`boot_timing` is where the last launch's time went. It is cleared when a colony is claimed for a
+boot or a resume. While the colony is `starting` it is `{"phases": [...]}` with the phases done so
+far, one added as each completes. `total_ms` appears only once the boot finishes, so its absence
+marks a boot still under way or, on a colony that is no longer starting, one that stopped part way;
+such a boot keeps the phases it got through. The phases are consecutive spans in boot order and
+partition the launch, so they sum to at most `total_ms`:
 
 | Phase | Covers |
 | :--- | :--- |
