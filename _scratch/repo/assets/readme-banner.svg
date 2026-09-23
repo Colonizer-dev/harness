@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-label="Colonizer Harness. The open-source core. One microVM per task, a private mesh home, and a pull request at the end.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0A0D14"/>
+      <stop offset="1" stop-color="#05070B"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="78%" cy="52%" r="48%">
+      <stop offset="0" stop-color="#FF6B35" stop-opacity="0.20"/>
+      <stop offset="0.55" stop-color="#FF6B35" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#FF6B35" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="360" fill="url(#bg)"/>
+  <rect width="1280" height="360" fill="url(#glow)"/>
+
+  <g fill="#EDEBE6">
+    <circle cx="612" cy="38" r="1.2" opacity="0.35"/>
+    <circle cx="716" cy="122" r="1" opacity="0.25"/>
+    <circle cx="760" cy="46" r="1.4" opacity="0.4"/>
+    <circle cx="930" cy="40" r="1" opacity="0.3"/>
+    <circle cx="1238" cy="150" r="1.3" opacity="0.35"/>
+    <circle cx="1106" cy="176" r="1" opacity="0.25"/>
+    <circle cx="742" cy="318" r="1.2" opacity="0.3"/>
+    <circle cx="960" cy="340" r="1" opacity="0.25"/>
+    <circle cx="1236" cy="322" r="1.4" opacity="0.35"/>
+    <circle cx="560" cy="330" r="1" opacity="0.2"/>
+    <circle cx="1080" cy="24" r="1.2" opacity="0.3"/>
+    <circle cx="690" cy="210" r="1" opacity="0.2"/>
+  </g>
+
+  <!-- mesh links: mothership to colonies -->
+  <g stroke="#FF6B35" stroke-width="1.5" stroke-dasharray="5 6" opacity="0.5">
+    <line x1="1000" y1="180" x2="850" y2="95"/>
+    <line x1="1000" y1="180" x2="1150" y2="90"/>
+    <line x1="1000" y1="180" x2="1185" y2="245"/>
+    <line x1="1000" y1="180" x2="865" y2="280"/>
+    <line x1="1000" y1="180" x2="1045" y2="318"/>
+  </g>
+
+  <!-- colonies -->
+  <g fill="#0E121A" stroke="#EDEBE6" stroke-width="1.5" stroke-opacity="0.7">
+    <polygon points="850,79 863.9,87 863.9,103 850,111 836.1,103 836.1,87"/>
+    <polygon points="1150,74 1163.9,82 1163.9,98 1150,106 1136.1,98 1136.1,82"/>
+    <polygon points="1185,229 1198.9,237 1198.9,253 1185,261 1171.1,253 1171.1,237"/>
+    <polygon points="865,264 878.9,272 878.9,288 865,296 851.1,288 851.1,272"/>
+    <polygon points="1045,306 1055.4,312 1055.4,324 1045,330 1034.6,324 1034.6,312"/>
+  </g>
+  <g fill="#EDEBE6" opacity="0.8">
+    <circle cx="850" cy="95" r="3"/>
+    <circle cx="1150" cy="90" r="3"/>
+    <circle cx="1185" cy="245" r="3"/>
+    <circle cx="865" cy="280" r="3"/>
+    <circle cx="1045" cy="318" r="2.5"/>
+  </g>
+
+  <!-- mothership -->
+  <polygon points="1000,146 1029.4,163 1029.4,197 1000,214 970.6,197 970.6,163" fill="#141821" stroke="#FF6B35" stroke-width="3"/>
+  <circle cx="1000" cy="180" r="7" fill="#FF6B35"/>
+
+  <!-- wordmark -->
+  <polygon points="94,74 113.1,85 113.1,107 94,118 74.9,107 74.9,85" fill="none" stroke="#FF6B35" stroke-width="3"/>
+  <circle cx="94" cy="96" r="5" fill="#FF6B35"/>
+  <text x="132" y="106" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="700" letter-spacing="4" fill="#EDEBE6">COLONIZER</text>
+
+  <text x="72" y="170" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" letter-spacing="3" fill="#8A8A8E">HARNESS · THE OPEN-SOURCE CORE</text>
+  <text x="72" y="232" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="52" font-weight="700" fill="#EDEBE6">Colonize your backlog.</text>
+  <text x="72" y="278" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" fill="#A9A8A5">One microVM per task. A private mesh home. A pull request at the end.</text>
+</svg>

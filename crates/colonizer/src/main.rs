@@ -41,6 +41,7 @@ mod provider_quota;
 mod providers;
 mod publish;
 mod queue;
+mod rebase;
 mod reclaim;
 mod redteam;
 mod restack;

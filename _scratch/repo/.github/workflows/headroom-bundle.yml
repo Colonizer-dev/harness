@@ -1,0 +1,105 @@
+# Builds and publishes the Headroom bundles that colonies download when Headroom is switched on
+# (docs/protocol.md, "Token savings"): one per architecture, each a standalone CPython with
+# headroom-ai[proxy] installed from vendor/headroom/requirements.txt, hash-checked.
+#
+# Each architecture builds on its own runner inside Debian bookworm, the colony image's glibc, so pip picks
+# wheels a colony can load, and must pass scripts/headroom-bundle/smoke.py before anything is published.
+# The release it creates is what crates/colonizer/headroom.lock pins by sha256; publishing changes nothing for an
+# install until a pull request pins the new archives.
+name: Headroom bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Bundle release, <headroom version>-<build>, e.g. 0.37.0-1"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: headroom-bundle-${{ inputs.release }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    # The image is pinned by digest, because the tag alone would move under us between builds — and
+    # these archives are pinned by sha256 downstream, so the build must stay reproducible. The tag
+    # stays in the reference so a human can still read it; the digest is what pins it.
+    container: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+    env:
+      RELEASE: ${{ inputs.release }}
+    steps:
+      - name: Tools
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl git >/dev/null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the release name
+        run: |
+          case "$RELEASE" in
+            [0-9]*.[0-9]*.[0-9]*-[0-9]*) ;;
+            *) echo "release must look like 0.37.0-1, got $RELEASE" >&2; exit 1 ;;
+          esac
+          locked=$(sed -n 's/^headroom-ai==\([^ ;]*\).*/\1/p' vendor/headroom/requirements.txt)
+          [ "${RELEASE%-*}" = "$locked" ] || { echo "release $RELEASE does not match the locked headroom-ai $locked" >&2; exit 1; }
+
+      - name: Build
+        run: TMPDIR=/var/tmp sh scripts/headroom-bundle/build.sh "${{ matrix.arch }}" "$RELEASE" dist/headroom
+
+      - name: Smoke test
+        run: |
+          mkdir -p /var/tmp/smoke
+          tar -xzf "dist/headroom/headroom-$RELEASE-linux-${{ matrix.arch }}.tar.gz" -C /var/tmp/smoke
+          TMPDIR=/var/tmp /var/tmp/smoke/headroom/python/bin/python3 scripts/headroom-bundle/smoke.py /var/tmp/smoke/headroom
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: headroom-${{ inputs.release }}-linux-${{ matrix.arch }}
+          path: dist/headroom/headroom-${{ inputs.release }}-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE: ${{ inputs.release }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: bundles
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          cd bundles
+          sha256sum headroom-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "Headroom bundles for colonies that switch Headroom on: a standalone CPython with headroom-ai[proxy] and its dependencies, installed from \`vendor/headroom/requirements.txt\` at ${{ github.sha }} with hashes checked, built inside Debian bookworm and smoke-tested."
+            echo
+            echo "They take effect only once \`crates/colonizer/headroom.lock\` pins them by sha256:"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "headroom-$RELEASE" headroom-*.tar.gz SHA256SUMS \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "Headroom bundle $RELEASE" --notes-file notes.md

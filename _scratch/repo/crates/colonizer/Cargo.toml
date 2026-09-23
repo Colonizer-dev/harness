@@ -1,0 +1,38 @@
+[package]
+# Published as colonizer-harness: `colonizer` on crates.io is another project. The command is still `colonizer`.
+name = "colonizer-harness"
+version = "0.1.8"
+edition = "2024"
+description = "The Colonizer harness: coding agents in private microVMs, linked by a private mesh, returning pull requests"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
+homepage = "https://colonizer.dev"
+readme = "README.md"
+
+[[bin]]
+name = "colonizer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10"
+futures-util = "0.3.34"
+# Already built for rustls; used directly to check the Headroom bundle's sha256 while it downloads.
+ring = "0.17.14"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-socks = "0.5.3"
+tokio-stream = "0.1.19"
+tokio-tungstenite = "0.30.0"
+toml = "1.1.6"
+tower-http = { version = "0.7.1", features = ["fs"] }
+uuid = { version = "1.26.1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+# `ServiceExt::oneshot` for the auth tests, which drive a router through the real `host_guard`.
+tower = { version = "0.5.3", features = ["util"] }

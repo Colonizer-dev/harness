@@ -1,0 +1,38 @@
+# Version updates. Security updates are already on in the repository settings; this adds the
+# routine bumps, grouped so they arrive as one pull request per ecosystem per week.
+#
+# modules/agents/claude-code is left out on purpose: its version is pinned by
+# runtime-pin-updates.yml, which keeps the pin and the lock in step.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /services/telemetry
+    schedule:
+      interval: weekly
+    groups:
+      telemetry:
+        patterns: ["*"]

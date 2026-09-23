@@ -1,0 +1,26 @@
+# The live map's telemetry service (docs/telemetry.md). Deploy from this directory:
+#   npx --no-install wrangler d1 migrations apply colonizer-telemetry --remote
+#   npx --no-install wrangler deploy
+# Wrangler is pinned via devDependencies + package-lock.json in this directory.
+name = "colonizer-telemetry"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "colonizer-telemetry"
+database_id = "c30a2202-7e76-495e-a3aa-4bcb48e05ae7"
+migrations_dir = "migrations"
+
+# Heartbeats come every 5 minutes; this only stops a flood. Keyed on the connecting IP, in memory, never stored.
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "7301"
+simple = { limit = 30, period = 60 }
+
+[[routes]]
+pattern = "telemetry.colonizer.dev"
+custom_domain = true

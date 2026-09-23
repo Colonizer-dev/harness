@@ -1,0 +1,13 @@
+{
+  "name": "colonizer-telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The live map's receiver on telemetry.colonizer.dev (docs/telemetry.md)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "4.135.0"
+  }
+}

@@ -25,6 +25,7 @@ setting) is called out under **Take care** rather than left for you to find.
   `COLONIZER_RECLAIM_MIN_FREE`, and both ride in `/api/status`'s `storage` and
   `GET /api/storage` alongside the microsandbox home size. ([#220])
 - **Realtime Cockpit dashboards.** The dashboards now update over a single authenticated `/api/stream` WebSocket (sessions including running cost/tokens, orgs, fleet hosts, storage), with a Live indicator, tweened counters, reduced-motion support, and a fallback to the existing poll schedule with reconnect/backoff when the stream drops. ([#446])
+- **Colony PRs rebase themselves when GitHub marks them DIRTY or BEHIND.** A live colony is asked to rebase onto fresh main and re-run its own gates itself, in its own microVM, and push; a colony that's gone has its branch rebased on the host instead (git only, no gates — GitHub's own CI covers that push), and if that host rebase conflicts, it's flagged needs-rebase and notified instead — once per main SHA, with SHA-aware backoff. A newly launched colony can opt in to queueing behind a live colony already touching the same repository (off by default; pass `serialize` to ask for it), starting from fresh main once that colony publishes, merges or finishes; the cockpit shows `queued behind <colony>` and a needs-rebase indicator. ([#453])
 
 ## [v0.1.8] - 2026-09-23
 
@@ -408,6 +409,7 @@ Macs. ([#74])
 [#405]: https://github.com/Colonizer-dev/harness/issues/405
 [#417]: https://github.com/Colonizer-dev/harness/pull/417
 [#446]: https://github.com/Colonizer-dev/harness/issues/446
+[#453]: https://github.com/Colonizer-dev/harness/issues/453
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

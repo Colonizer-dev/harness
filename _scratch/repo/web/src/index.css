@@ -1,0 +1,1260 @@
+@import "tailwindcss";
+
+/* Colonizer: deep-space neutrals with one beacon-orange accent. Light values first; dark overrides below. */
+:root {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --panel-3: #e3e8ef;
+  --border: #dde2ea;
+  --border-strong: #c3cbd7;
+  --text: #121722;
+  --muted: #5b6577;
+  --faint: #8a93a3;
+  --accent: #c8440f;
+  --accent-hover: #ad3a0c;
+  --accent-soft: #fdece4;
+  --accent-ring: rgb(200 68 15 / 0.35);
+  --on-accent: #ffffff;
+  --ok: #15803d;
+  --ok-soft: #e3f4e8;
+  --warn: #a15c07;
+  --warn-soft: #fdf2dc;
+  --err: #b91c1c;
+  --err-soft: #fce8e7;
+  --info: #1d4ed8;
+  --info-soft: #e5ecfd;
+  --term-bg: #0b0e14;
+  --term-fg: #dfe5ee;
+  --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 4px 16px rgb(18 23 34 / 0.07);
+  /* Dashboard series (issue #398, from the Cockpit Dashboards design): outcome stacks, model
+     stacks and p50/p95 lines. The oklch fills are theme-independent on purpose — the design pins
+     the same hues in both renders — while --out-stopped tracks the border, which adapts. */
+  --out-merged: oklch(0.76 0.17 158);
+  --out-pr: oklch(0.7 0.16 258);
+  --out-nochg: oklch(0.82 0.15 85);
+  --out-failed: oklch(0.66 0.21 20);
+  --out-stopped: #c3cbd7;
+  --model-deepseek: oklch(0.74 0.14 205);
+  --model-opus: oklch(0.72 0.17 48);
+  --model-spark: oklch(0.68 0.18 295);
+  --lat-p50: oklch(0.74 0.14 210);
+  --lat-p95: oklch(0.7 0.19 340);
+  /* Multi-series chart ramp (issue #445): alternating deep/bright orange-amber steps, each
+     clearly lighter or darker than its neighbours and every step dark enough to read as a
+     line on the white panel. The dark theme carries brighter counterparts below. */
+  --chart-1: #9a3412;
+  --chart-2: #c2410c;
+  --chart-3: #92400e;
+  --chart-4: #b45309;
+  --chart-5: #7c2d12;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #07090e;
+    --panel: #0e121a;
+    --panel-2: #151a24;
+    --panel-3: #1c2330;
+    --border: #212938;
+    --border-strong: #323c4f;
+    --text: #e6ebf3;
+    --muted: #97a1b3;
+    --faint: #677185;
+    --accent: #ff6b35;
+    --accent-hover: #ff8455;
+    --accent-soft: #2e1a12;
+    --accent-ring: rgb(255 107 53 / 0.4);
+    --on-accent: #1a0903;
+    --ok: #4ade80;
+    --ok-soft: #10251a;
+    --warn: #fbbf24;
+    --warn-soft: #2a2110;
+    --err: #f87171;
+    --err-soft: #2e1618;
+    --info: #93c5fd;
+    --info-soft: #132036;
+    --term-bg: #05070b;
+    --term-fg: #dfe5ee;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.35);
+    --out-merged: oklch(0.76 0.17 158);
+    --out-pr: oklch(0.7 0.16 258);
+    --out-nochg: oklch(0.82 0.15 85);
+    --out-failed: oklch(0.66 0.21 20);
+    --out-stopped: #323c4f;
+    --model-deepseek: oklch(0.74 0.14 205);
+    --model-opus: oklch(0.72 0.17 48);
+    --model-spark: oklch(0.68 0.18 295);
+    --lat-p50: oklch(0.74 0.14 210);
+    --lat-p95: oklch(0.7 0.19 340);
+    --chart-1: #ff6b35;
+    --chart-2: #ffa63d;
+    --chart-3: #ff7a1a;
+    --chart-4: #ffd08a;
+    --chart-5: #f76707;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-panel-3: var(--panel-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-err: var(--err);
+  --color-err-soft: var(--err-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-out-merged: var(--out-merged);
+  --color-out-pr: var(--out-pr);
+  --color-out-nochg: var(--out-nochg);
+  --color-out-failed: var(--out-failed);
+  --color-out-stopped: var(--out-stopped);
+  --color-model-deepseek: var(--model-deepseek);
+  --color-model-opus: var(--model-opus);
+  --color-model-spark: var(--model-spark);
+  --color-lat-p50: var(--lat-p50);
+  --color-lat-p95: var(--lat-p95);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  /* clip (not hidden): focus and scrollIntoView must never scroll the app shell itself. */
+  overflow: clip;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Markdown inside chat messages */
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  margin: 0.5em 0;
+}
+.md ul,
+.md ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md li {
+  margin: 0.15em 0;
+}
+.md h1,
+.md h2,
+.md h3 {
+  font-weight: 650;
+  margin: 0.9em 0 0.4em;
+  line-height: 1.3;
+}
+.md h1 {
+  font-size: 1.25em;
+}
+.md h2 {
+  font-size: 1.12em;
+}
+.md h3 {
+  font-size: 1em;
+}
+.md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.05em 0.35em;
+}
+.md pre {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.md pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+.md blockquote {
+  border-left: 3px solid var(--border-strong);
+  padding-left: 0.8em;
+  color: var(--muted);
+  margin: 0.6em 0;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  display: block;
+  overflow-x: auto;
+}
+.md th,
+.md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+
+/* What arrives in a colony's chat after it has loaded (components/motion.ts). A short fade and rise, so a new card or
+   message settles into place instead of appearing in one frame. */
+@keyframes chat-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.chat-enter {
+  animation: chat-enter 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-enter {
+    animation: none;
+  }
+}
+
+@keyframes pulse-soft {
+  50% {
+    opacity: 0.45;
+  }
+}
+.pulse-soft {
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+
+/* The dashboard's realtime dot (issue #446): ok-green, breathing while the stream is open. */
+.live-dot {
+  height: 7px;
+  width: 7px;
+  border-radius: 9999px;
+  background: var(--ok);
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+
+/* Dashboard charts (issue #446): bars and lines slide in on mount, and bar geometry eases
+   between pushes instead of snapping. SVG geometry properties transition as CSS in modern browsers. */
+@keyframes dash-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.dash-chart {
+  animation: dash-in 300ms ease-out both;
+}
+.dash-chart rect {
+  transition:
+    y 0.45s ease,
+    height 0.45s ease,
+    opacity 0.45s ease;
+}
+.dash-chart polyline,
+.dash-chart polygon,
+.dash-chart circle {
+  transition: opacity 0.45s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .dash-chart {
+    animation: none;
+  }
+  .dash-chart rect,
+  .dash-chart polyline,
+  .dash-chart polygon,
+  .dash-chart circle {
+    transition: none;
+  }
+}
+
+/* An image download with no progress to report: msb prints none when it is not
+   on a terminal, so this says "working" rather than inventing a percentage. */
+@keyframes pull-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.pull-slide {
+  animation: pull-slide 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pull-slide {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
+@keyframes blink-caret {
+  50% {
+    opacity: 0;
+  }
+}
+.caret::after {
+  content: "▍";
+  margin-left: 1px;
+  color: var(--accent);
+  animation: blink-caret 1s steps(1) infinite;
+}
+
+.xterm {
+  height: 100%;
+  padding: 8px 0 0 10px;
+}
+.xterm .xterm-viewport {
+  scrollbar-width: thin;
+  /* xterm.css paints the viewport black, which shows through the padding. */
+  background-color: var(--term-bg) !important;
+}
+
+/* ---------------------------------------------------------------------------
+   The settler ant (components/AntAvatar.tsx). Pixel art in side profile, facing
+   right: viewBox 0 0 52 40, 2 units per pixel, crisp edges. Every pivot below
+   is in viewBox units (transform-box: view-box), at the limb's own joint, so the
+   pose holds at any render size. Loops touch transform, opacity and
+   stroke-dashoffset only; the ground, thought pixels, scribble and lens move a
+   pixel at a time with steps().
+   State:     .ant[data-s="working|thinking|writing|done|continued|paused"]
+   Activity:  .ant[data-activity="search|read|edit|build|test|run"] (working)
+   Error:     .ant[data-error="true"] for ~1.2s, then removed
+   Role:      .ant[data-role="scout|builder|…"] shows one accessory
+   Stagger:   --ant-phase (negative seconds) offsets every loop
+   --------------------------------------------------------------------------- */
+.ant {
+  display: block;
+  overflow: visible;
+  shape-rendering: crispEdges;
+  color: var(--accent);
+  --ant-ink: var(--text);
+  --ant-phase: 0s;
+}
+.ant * {
+  transform-box: view-box;
+}
+.ant-fill {
+  fill: currentColor;
+}
+/* pixel grid: 2 viewBox units per pixel, all parts are rects */
+.ant-leg {
+  fill: currentColor;
+}
+.ant-legs-far {
+  opacity: 0.45;
+}
+.ant-seam {
+  fill: var(--panel);
+  opacity: 0.35;
+}
+.ant-scribble {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: butt;
+}
+.ant-ground {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-dasharray: 2 2;
+  opacity: 0.35;
+}
+.ant[data-ground="false"] .ant-ground {
+  opacity: 0;
+}
+
+/* pivots */
+.ant-body {
+  transform-origin: 26px 22px;
+}
+.ant-head {
+  transform-origin: 30px 20px;
+}
+.ant-eye {
+  transform-origin: 37px 19px;
+}
+.ant-antennae {
+  transform-origin: 34px 16px;
+}
+.ant-leg-front {
+  transform-origin: 30px 25px;
+}
+.ant-leg-mid {
+  transform-origin: 27px 25px;
+}
+.ant-leg-back {
+  transform-origin: 23px 25px;
+}
+.ant-leg-front-far {
+  transform-origin: 28px 25px;
+}
+.ant-leg-mid-far {
+  transform-origin: 25px 25px;
+}
+.ant-leg-back-far {
+  transform-origin: 21px 25px;
+}
+.ant-carry {
+  transform-origin: 42px 20px;
+}
+.ant-carry-flag {
+  transform-origin: 43px 22px;
+}
+.ant-done {
+  transform-origin: 46px 8px;
+}
+.ant-pebble {
+  transform-origin: 41px 33px;
+}
+
+/* hidden until a state or activity asks for them */
+.ant-thought rect,
+.ant-scribble,
+.ant-done,
+.ant-pebble,
+.ant-carry > g,
+.ant-role > g {
+  opacity: 0;
+}
+.ant-scribble {
+  stroke-width: 2;
+  stroke-dasharray: 10;
+  stroke-dashoffset: 10;
+}
+
+/* Parts ease between rest poses so a state change reads as the ant stopping, not a cut. */
+.ant-body,
+.ant-head,
+.ant-antennae,
+.ant-leg,
+.ant-carry > g,
+.ant-done,
+.ant-ground,
+.ant-role > g {
+  transition:
+    transform 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.35s ease;
+}
+.ant {
+  transition: opacity 0.4s ease;
+}
+
+/* role accessory, tinted within the palette */
+.ant[data-role="scout"] .ant-role-scout,
+.ant[data-role="builder"] .ant-role-builder,
+.ant[data-role="surveyor"] .ant-role-surveyor,
+.ant[data-role="inspector"] .ant-role-inspector,
+.ant[data-role="warden"] .ant-role-warden,
+.ant[data-role="tester"] .ant-role-tester,
+.ant[data-role="tracker"] .ant-role-tracker,
+.ant[data-role="scribe"] .ant-role-scribe,
+.ant[data-role="mender"] .ant-role-mender,
+.ant[data-role="mason"] .ant-role-mason,
+.ant[data-role="cartographer"] .ant-role-cartographer,
+.ant[data-role="pioneer"] .ant-role-pioneer {
+  opacity: 1;
+}
+.ant[data-role="scout"],
+.ant[data-role="surveyor"],
+.ant[data-role="cartographer"],
+.ant[data-role="scribe"] {
+  --ant-ink: var(--info);
+}
+.ant[data-role="builder"],
+.ant[data-role="tracker"],
+.ant[data-role="mender"] {
+  --ant-ink: var(--warn);
+}
+.ant[data-role="tester"],
+.ant[data-role="warden"] {
+  --ant-ink: var(--ok);
+}
+.ant .ink {
+  fill: var(--ant-ink);
+}
+
+/* working: tripod gait over scrolling ground */
+.ant[data-s="working"] .ant-leg-front,
+.ant[data-s="working"] .ant-leg-back,
+.ant[data-s="working"] .ant-leg-mid-far {
+  animation: ant-step 0.32s steps(2, jump-none) var(--ant-phase) infinite alternate;
+}
+.ant[data-s="working"] .ant-leg-mid,
+.ant[data-s="working"] .ant-leg-front-far,
+.ant[data-s="working"] .ant-leg-back-far {
+  animation: ant-step 0.32s steps(2, jump-none) var(--ant-phase) infinite alternate-reverse;
+}
+.ant[data-s="working"] .ant-body {
+  animation: ant-bob 0.32s steps(1, jump-end) var(--ant-phase) infinite alternate;
+}
+.ant[data-s="working"] .ant-ground {
+  animation: ant-ground 0.32s steps(2, jump-none) var(--ant-phase) infinite;
+}
+.ant[data-s="working"] .ant-antennae {
+  animation: ant-sway 0.64s ease-in-out var(--ant-phase) infinite;
+}
+@keyframes ant-step {
+  from {
+    transform: rotate(-12deg);
+  }
+  to {
+    transform: rotate(12deg);
+  }
+}
+@keyframes ant-bob {
+  to {
+    transform: translateY(-1px);
+  }
+}
+@keyframes ant-ground {
+  to {
+    stroke-dashoffset: 4;
+  }
+}
+@keyframes ant-sway {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-5deg);
+  }
+}
+
+/* what the tool is: search/read → lens, edit → leaf, build → block, test → flag */
+.ant[data-s="working"][data-activity="search"] .ant-carry-lens,
+.ant[data-s="working"][data-activity="read"] .ant-carry-lens,
+.ant[data-s="working"][data-activity="edit"] .ant-carry-leaf,
+.ant[data-s="working"][data-activity="build"] .ant-carry-block,
+.ant[data-s="working"][data-activity="test"] .ant-carry-flag {
+  opacity: 1;
+}
+.ant[data-s="working"][data-activity="edit"] .ant-head,
+.ant[data-s="working"][data-activity="build"] .ant-head {
+  transform: rotate(-6deg);
+}
+.ant[data-s="working"][data-activity="search"] .ant-head,
+.ant[data-s="working"][data-activity="read"] .ant-head {
+  transform: rotate(5deg);
+}
+.ant[data-s="working"] .ant-carry-lens {
+  animation: ant-sweep 1.3s steps(2, jump-none) var(--ant-phase) infinite;
+}
+.ant[data-s="working"] .ant-carry-leaf,
+.ant[data-s="working"] .ant-carry-block {
+  animation: ant-hold 0.64s ease-in-out var(--ant-phase) infinite alternate;
+}
+.ant[data-s="working"] .ant-carry-flag {
+  animation: ant-wave 0.9s ease-in-out var(--ant-phase) infinite alternate;
+}
+@keyframes ant-sweep {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(2px);
+  }
+}
+@keyframes ant-hold {
+  from {
+    transform: rotate(-3deg);
+  }
+  to {
+    transform: rotate(3deg);
+  }
+}
+@keyframes ant-wave {
+  from {
+    transform: rotate(-5deg);
+  }
+  to {
+    transform: rotate(5deg);
+  }
+}
+
+/* eye: a slow blink whenever the settler is awake */
+.ant[data-s="working"] .ant-eye,
+.ant[data-s="thinking"] .ant-eye,
+.ant[data-s="writing"] .ant-eye {
+  animation: ant-blink 4.6s linear var(--ant-phase) infinite;
+}
+@keyframes ant-blink {
+  0%,
+  93%,
+  100% {
+    transform: scaleY(1);
+  }
+  94%,
+  97% {
+    transform: scaleY(0.5);
+  }
+}
+
+/* thinking: stops, looks up, antennae probe, a thought fills dot by dot */
+.ant[data-s="thinking"] .ant-head {
+  animation:
+    ant-look-up 0.5s ease-out both,
+    ant-ponder 3.6s ease-in-out 0.5s infinite;
+}
+.ant[data-s="thinking"] .ant-antennae {
+  animation: ant-sense 1.6s ease-in-out var(--ant-phase) infinite;
+}
+.ant[data-s="thinking"] .ant-thought rect {
+  animation: ant-thought 2.1s steps(1, jump-none) var(--ant-phase) infinite;
+}
+.ant[data-s="thinking"] .ant-thought rect:nth-child(2) {
+  animation-delay: calc(var(--ant-phase) + 0.28s);
+}
+.ant[data-s="thinking"] .ant-thought rect:nth-child(3) {
+  animation-delay: calc(var(--ant-phase) + 0.56s);
+}
+@keyframes ant-look-up {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-9deg);
+  }
+}
+@keyframes ant-ponder {
+  0%,
+  100% {
+    transform: rotate(-9deg);
+  }
+  50% {
+    transform: rotate(-6deg);
+  }
+}
+@keyframes ant-sense {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  30% {
+    transform: rotate(-12deg);
+  }
+  65% {
+    transform: rotate(8deg);
+  }
+}
+@keyframes ant-thought {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  30%,
+  70% {
+    opacity: 1;
+  }
+}
+
+/* writing: head down, a line is written and rewritten */
+.ant[data-s="writing"] .ant-head {
+  animation: ant-nod 0.7s ease-in-out var(--ant-phase) infinite alternate;
+}
+.ant[data-s="writing"] .ant-antennae {
+  transform: rotate(6deg);
+}
+.ant[data-s="writing"] .ant-scribble {
+  animation: ant-scribble 1.5s steps(6, jump-none) var(--ant-phase) infinite;
+}
+@keyframes ant-nod {
+  from {
+    transform: rotate(6deg);
+  }
+  to {
+    transform: rotate(11deg);
+  }
+}
+@keyframes ant-scribble {
+  0% {
+    stroke-dashoffset: 10;
+    opacity: 1;
+  }
+  80% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+/* done: a small hop and antennae up, then rests with the check */
+.ant[data-s="done"] .ant-body {
+  transform: translateY(0.5px);
+  animation: ant-hop 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+}
+.ant[data-s="done"] .ant-antennae {
+  transform: rotate(-16deg);
+  animation: ant-cheer 0.7s ease-out both;
+}
+.ant[data-s="done"] .ant-head {
+  transform: rotate(-4deg);
+}
+.ant[data-s="done"] .ant-done {
+  opacity: 1;
+  animation: ant-pop 0.36s cubic-bezier(0.34, 1.56, 0.64, 1) 0.15s both;
+}
+.ant[data-s="done"] .ant-ground {
+  opacity: 0.18;
+}
+@keyframes ant-hop {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-1.8px);
+  }
+  100% {
+    transform: translateY(0.5px);
+  }
+}
+@keyframes ant-cheer {
+  0% {
+    transform: rotate(0deg);
+  }
+  35% {
+    transform: rotate(-26deg);
+  }
+  70% {
+    transform: rotate(-12deg);
+  }
+  100% {
+    transform: rotate(-16deg);
+  }
+}
+@keyframes ant-pop {
+  from {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* continued: has walked on; a trail is left behind */
+.ant[data-s="continued"] {
+  opacity: 0.5;
+}
+.ant[data-s="continued"] .ant-body {
+  transform: translateX(6px);
+}
+.ant[data-s="continued"] .ant-ground {
+  stroke-dasharray: 2 4;
+  opacity: 0.6;
+}
+
+/* paused: sits, antennae drooped */
+.ant[data-s="paused"] {
+  opacity: 0.55;
+}
+.ant[data-s="paused"] .ant-body {
+  transform: translateY(0.8px);
+}
+.ant[data-s="paused"] .ant-head {
+  transform: rotate(9deg);
+}
+.ant[data-s="paused"] .ant-antennae {
+  transform: rotate(24deg);
+}
+.ant[data-s="paused"] .ant-ground {
+  opacity: 0.15;
+}
+
+/* error: a stumble over a pebble, then carries on */
+.ant[data-s][data-error="true"] .ant-body {
+  animation: ant-stumble 1s cubic-bezier(0.3, 0.7, 0.3, 1) both;
+}
+.ant[data-s][data-error="true"] .ant-antennae {
+  animation: ant-droop 1s ease-in-out both;
+}
+.ant[data-s][data-error="true"] .ant-pebble {
+  animation: ant-pebble 1.2s ease-out both;
+}
+@keyframes ant-stumble {
+  0% {
+    transform: rotate(0deg);
+  }
+  22% {
+    transform: rotate(7deg) translateY(0.7px);
+  }
+  55% {
+    transform: rotate(-3deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+@keyframes ant-droop {
+  0% {
+    transform: rotate(0deg);
+  }
+  30% {
+    transform: rotate(20deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+@keyframes ant-pebble {
+  0% {
+    opacity: 0;
+    transform: translateX(2px);
+  }
+  15%,
+  55% {
+    opacity: 0.7;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The settler card (components/SettlerCard.tsx) and a crew of settlers working
+   in parallel. The ant performs; the card only eases its status line in, runs
+   a trail along its foot while the settler works, and settles its frame to ok.
+   --------------------------------------------------------------------------- */
+/* A new status line eases in rather than snapping (the span is re-keyed on its text). */
+@keyframes status-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+.status-in {
+  animation: status-in 0.28s ease-out both;
+}
+
+/* Footsteps along the card's foot: they move while a tool runs, breathe while it thinks or writes, and fade once done. */
+.settler-trail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  display: block;
+  color: var(--accent);
+  opacity: 0.4;
+  pointer-events: none;
+  transition: opacity 1.2s ease;
+}
+.settler-trail line {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-dasharray: 3 5;
+}
+.settler-trail[data-s="working"] line {
+  animation: trail-scroll 0.8s linear var(--ant-phase, 0s) infinite;
+}
+.settler-trail[data-s="thinking"],
+.settler-trail[data-s="writing"] {
+  animation: trail-breathe 2.6s ease-in-out var(--ant-phase, 0s) infinite;
+}
+.settler-trail[data-s="done"],
+.settler-trail[data-s="continued"],
+.settler-trail[data-s="paused"] {
+  opacity: 0;
+}
+@keyframes trail-scroll {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+@keyframes trail-breathe {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+/* The avatar frame settles from accent to ok once the report is in. */
+.settler-frame {
+  transition: background-color 0.8s ease;
+}
+.settler-frame[data-s="done"] {
+  background-color: var(--ok-soft);
+}
+
+/* A crew's shared ground line, under its ants. */
+.settler-crew-ground {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  width: 100%;
+  height: 2px;
+  display: block;
+  color: var(--accent);
+  opacity: 0.35;
+}
+.settler-crew-ground line {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-dasharray: 3 5;
+}
+
+/* Reduced motion: loops stop, every state keeps a readable pose. */
+@media (prefers-reduced-motion: reduce) {
+  .ant *,
+  .ant,
+  .status-in,
+  .settler-trail,
+  .settler-trail line,
+  .settler-frame {
+    animation: none !important;
+    transition: none !important;
+  }
+  .ant[data-s="working"] .ant-leg-front,
+  .ant[data-s="working"] .ant-leg-back,
+  .ant[data-s="working"] .ant-leg-mid-far {
+    transform: rotate(10deg);
+  }
+  .ant[data-s="working"] .ant-leg-mid,
+  .ant[data-s="working"] .ant-leg-front-far,
+  .ant[data-s="working"] .ant-leg-back-far {
+    transform: rotate(-10deg);
+  }
+  .ant[data-s="thinking"] .ant-head {
+    transform: rotate(-9deg);
+  }
+  .ant[data-s="thinking"] .ant-thought rect {
+    opacity: 1;
+  }
+  .ant[data-s="writing"] .ant-head {
+    transform: rotate(9deg);
+  }
+  .ant[data-s="writing"] .ant-scribble {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+  .ant[data-s="done"] .ant-done {
+    opacity: 1;
+    transform: none;
+  }
+  .ant[data-s][data-error="true"] .ant-body {
+    transform: rotate(6deg);
+  }
+  .ant[data-s][data-error="true"] .ant-pebble {
+    opacity: 0.7;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The nest (cockpit home): the plot the colonies are dug into, and its motion.
+   Only four tokens are new; everything else reuses the palette above.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --ground: #e8ecf2;
+  --plot: #ffffff;
+  --plot-edge: #c3cbd7;
+  --dots: rgb(18 23 34 / 0.08);
+  --tunnel-wall: #b89a78;
+  --tunnel-floor: #dcc3a2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0c0f15;
+    --plot: #12151d;
+    --plot-edge: rgb(255 255 255 / 0.12);
+    --dots: rgb(255 255 255 / 0.07);
+    --tunnel-wall: #241a12;
+    --tunnel-floor: #3a2b1c;
+  }
+}
+
+/* An explicit choice beats the OS setting; unset follows it. */
+:root[data-theme="light"] {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --panel-3: #e3e8ef;
+  --border: #dde2ea;
+  --border-strong: #c3cbd7;
+  --text: #121722;
+  --muted: #5b6577;
+  --faint: #8a93a3;
+  --accent: #c8440f;
+  --accent-hover: #ad3a0c;
+  --accent-soft: #fdece4;
+  --accent-ring: rgb(200 68 15 / 0.35);
+  --on-accent: #ffffff;
+  --ok: #15803d;
+  --ok-soft: #e3f4e8;
+  --warn: #a15c07;
+  --warn-soft: #fdf2dc;
+  --err: #b91c1c;
+  --err-soft: #fce8e7;
+  --info: #1d4ed8;
+  --info-soft: #e5ecfd;
+  --term-bg: #0b0e14;
+  --term-fg: #dfe5ee;
+  --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 4px 16px rgb(18 23 34 / 0.07);
+  --ground: #e8ecf2;
+  --plot: #ffffff;
+  --plot-edge: #c3cbd7;
+  --dots: rgb(18 23 34 / 0.08);
+  --tunnel-wall: #b89a78;
+  --tunnel-floor: #dcc3a2;
+  --out-merged: oklch(0.76 0.17 158);
+  --out-pr: oklch(0.7 0.16 258);
+  --out-nochg: oklch(0.82 0.15 85);
+  --out-failed: oklch(0.66 0.21 20);
+  --out-stopped: #c3cbd7;
+  --model-deepseek: oklch(0.74 0.14 205);
+  --model-opus: oklch(0.72 0.17 48);
+  --model-spark: oklch(0.68 0.18 295);
+  --lat-p50: oklch(0.74 0.14 210);
+  --lat-p95: oklch(0.7 0.19 340);
+  /* Multi-series chart ramp (issue #445): alternating deep/bright orange-amber steps, each
+     clearly lighter or darker than its neighbours and every step dark enough to read as a
+     line on the white panel. The dark theme carries brighter counterparts below. */
+  --chart-1: #9a3412;
+  --chart-2: #c2410c;
+  --chart-3: #92400e;
+  --chart-4: #b45309;
+  --chart-5: #7c2d12;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #07090e;
+  --panel: #0e121a;
+  --panel-2: #151a24;
+  --panel-3: #1c2330;
+  --border: #212938;
+  --border-strong: #323c4f;
+  --text: #e6ebf3;
+  --muted: #97a1b3;
+  --faint: #677185;
+  --accent: #ff6b35;
+  --accent-hover: #ff8455;
+  --accent-soft: #2e1a12;
+  --accent-ring: rgb(255 107 53 / 0.4);
+  --on-accent: #1a0903;
+  --ok: #4ade80;
+  --ok-soft: #10251a;
+  --warn: #fbbf24;
+  --warn-soft: #2a2110;
+  --err: #f87171;
+  --err-soft: #2e1618;
+  --info: #93c5fd;
+  --info-soft: #132036;
+  --term-bg: #05070b;
+  --term-fg: #dfe5ee;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.35);
+  --ground: #0c0f15;
+  --plot: #12151d;
+  --plot-edge: rgb(255 255 255 / 0.12);
+  --dots: rgb(255 255 255 / 0.07);
+  --tunnel-wall: #241a12;
+  --tunnel-floor: #3a2b1c;
+  --out-merged: oklch(0.76 0.17 158);
+  --out-pr: oklch(0.7 0.16 258);
+  --out-nochg: oklch(0.82 0.15 85);
+  --out-failed: oklch(0.66 0.21 20);
+  --out-stopped: #323c4f;
+  --model-deepseek: oklch(0.74 0.14 205);
+  --model-opus: oklch(0.72 0.17 48);
+  --model-spark: oklch(0.68 0.18 295);
+  --lat-p50: oklch(0.74 0.14 210);
+  --lat-p95: oklch(0.7 0.19 340);
+  --chart-1: #ff6b35;
+  --chart-2: #ffa63d;
+  --chart-3: #ff7a1a;
+  --chart-4: #ffd08a;
+  --chart-5: #f76707;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-plot: var(--plot);
+  --color-plot-edge: var(--plot-edge);
+  --color-dots: var(--dots);
+  --color-tunnel-wall: var(--tunnel-wall);
+  --color-tunnel-floor: var(--tunnel-floor);
+}
+
+@keyframes ck-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes ck-pulse { 50% { opacity: 0.35; } }
+@keyframes ck-beacon { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); } 50% { box-shadow: 0 0 0 14px transparent; } }
+@keyframes ck-walk { from { transform: translateX(0); } to { transform: translateX(140px); } }
+@keyframes ck-caret { 50% { opacity: 0; } }
+@keyframes ck-carry {
+  0%, 6% { offset-distance: 100%; }
+  44%, 56% { offset-distance: 0%; }
+  94%, 100% { offset-distance: 100%; }
+}
+@keyframes ck-dig { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes ck-flow { to { stroke-dashoffset: -20; } }
+@keyframes ck-grow { from { opacity: 0; transform: scale(0.2); } }
+@keyframes ck-zoom { from { opacity: 0; transform: scale(0.15); } to { opacity: 1; transform: scale(1); } }
+@keyframes ck-wander { 0%, 100% { transform: translate(0, 0); } 25% { transform: translate(24px, -14px); } 50% { transform: translate(44px, 6px); } 75% { transform: translate(18px, 14px); } }
+@keyframes ck-slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Red-team raids (issue #212): the red ant column that marches onto a nest under attack.
+   The travel is `left` in %, so the same keyframes scale from an overview card to the whole
+   plot; the ants are positioned at the edge inline, which is exactly where a frozen
+   animation (reduced motion) leaves them. */
+@keyframes rt-march { 0% { left: -4%; opacity: 0; transform: translateY(0); } 8% { opacity: 0.9; } 25% { transform: translateY(-4px) rotate(2deg); } 50% { transform: translateY(3px) rotate(-2deg); } 75% { transform: translateY(-2px) rotate(2deg); } 92% { opacity: 0.9; } 100% { left: 58%; opacity: 0.9; transform: translateY(0); } }
+@keyframes rt-twitch { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes rt-pulse { 0%, 100% { opacity: 0.9; transform: scale(0.88); } 50% { opacity: 0.3; transform: scale(1.12); } }
+
+/* Dashboard charts (issue #445): a draw-in for smoothed lines, grow-ins for bars and share
+   strips, and a soft ring pulse for the leading dot. Data changes re-key the animated element
+   so the motion replays; identical data keeps its key and stays put. The .cockpit guard below
+   already freezes these under reduced motion wherever they render in the cockpit; the extra
+   global rule covers any chart rendered outside it. */
+.dash-draw {
+  stroke-dasharray: 1;
+  animation: dash-draw 0.9s ease-out both;
+}
+@keyframes dash-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.dash-grow-y {
+  transform-origin: bottom;
+  animation: dash-grow-y 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes dash-grow-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+.dash-grow-x {
+  transform-origin: left center;
+  animation: dash-grow-x 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes dash-grow-x {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.dash-pulse {
+  animation: dash-pulse 2.2s ease-out infinite;
+}
+@keyframes dash-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-ring);
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-draw,
+  .dash-grow-y,
+  .dash-grow-x,
+  .dash-pulse {
+    animation: none !important;
+  }
+  /* Tooltip/crosshair fades and bar height glides freeze too — values stay readable. */
+  .dash-overlay,
+  .dash-overlay * {
+    transition: none !important;
+  }
+}
+
+/* The ck-* animations are applied inline or as arbitrary utilities (durations and offsets are computed
+   per colony), so there is no per-animation class to switch off. The guard works off the cockpit root
+   instead, which covers the nest's ants and tunnels as well as the panels that slide and fade. */
+@media (prefers-reduced-motion: reduce) {
+  .cockpit,
+  .cockpit * {
+    animation: none !important;
+    transition: none !important;
+    offset-distance: 0 !important;
+  }
+  /* Belt and braces for the red-team columns: their travel is `left`, so a frozen march must
+     keep the ants at the edge the inline position already puts them at. This also covers a
+     RedAnts layer rendered outside a .cockpit subtree, where the guard above cannot reach. */
+  .rt-march,
+  .rt-twitch,
+  .rt-pulse {
+    animation: none !important;
+  }
+}

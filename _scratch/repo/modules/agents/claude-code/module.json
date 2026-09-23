@@ -1,0 +1,208 @@
+{
+  "kind": "agent",
+  "id": "claude-code",
+  "name": "Claude Code",
+  "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
+  "protocol": "colonizer-runner/1",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "claude"
+    ],
+    "image": "glibc + node >= 20"
+  },
+  "secrets": [
+    {
+      "env": [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY"
+      ],
+      "hosts": [
+        "api.anthropic.com"
+      ]
+    },
+    {
+      "env": [
+        "JEV_API_KEY",
+        "TYPESAFE_API_KEY"
+      ],
+      "hosts": [
+        "api.typesafe.ai"
+      ]
+    }
+  ],
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "Model for the main agent: a Claude alias or ID (opus, claude-opus-5-5) or <provider>/<model> for another provider. Empty uses Claude Code's default.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "subagent_model": {
+        "type": "string",
+        "title": "Subagent model",
+        "description": "Default model for subagents: a Claude alias or ID, or <provider>/<model> such as deepseek/deepseek-flash. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_MODEL"
+      },
+      "background_model": {
+        "type": "string",
+        "title": "Background model",
+        "description": "Model for background work such as titles and summaries: a Claude alias or ID, or <provider>/<model>. Empty uses Claude Code's default.",
+        "default": "",
+        "env": "COLONIZER_BACKGROUND_MODEL"
+      },
+      "route_per_task": {
+        "type": "boolean",
+        "title": "Route the model per task",
+        "description": "The orchestrator model is picked from the issue in front of the colony — its labels, length, checklist and the paths it names — instead of every colony running on the same one. With neither tier model set below, this changes nothing.",
+        "default": true
+      },
+      "model_low": {
+        "type": "string",
+        "title": "Model for small tasks",
+        "description": "Model for small tasks such as a typo fix, copy and one-line config changes: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_MODEL_LOW"
+      },
+      "model_high": {
+        "type": "string",
+        "title": "Model for large tasks",
+        "description": "Model for large tasks such as cross-cutting changes, migrations and new subsystems: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_MODEL_HIGH"
+      },
+      "jev_shadow_mode": {
+        "type": "boolean",
+        "title": "Jev shadow mode (experimental)",
+        "description": "Ask an optional external classifier for a second opinion on model-tier routing and record it for comparison — never applied to the actual decision. Off by default; requires a JEV_API_KEY secret. Vendor unverified as of this writing — enable only if you have a real account with the provider.",
+        "default": false
+      },
+      "delegate": {
+        "type": "string",
+        "title": "Delegation",
+        "description": "Enforce (the default): the orchestrator may only plan, ask and delegate — reading, editing and running commands are refused, so the work happens in subagents on the subagent model. Encourage: it is asked to hand implementation to subagents. Off: the orchestrator does the work itself.",
+        "enum": ["off", "encourage", "enforce"],
+        "default": "enforce",
+        "env": "COLONIZER_DELEGATE"
+      },
+      "effort": {
+        "type": "string",
+        "title": "Orchestrator effort",
+        "description": "Reasoning effort for the main agent. Empty uses the model default.",
+        "enum": [
+          "",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default": "",
+        "env": "COLONIZER_EFFORT"
+      },
+      "subagent_effort": {
+        "type": "string",
+        "title": "Subagent effort",
+        "description": "Reasoning effort for the general-purpose and Explore subagents, e.g. medium under an xhigh orchestrator. Empty keeps Claude Code's rule: a subagent reasons at the orchestrator's effort. Plugin agents keep that rule either way.",
+        "enum": ["", "low", "medium", "high", "xhigh", "max"],
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_EFFORT"
+      },
+      "enforce_choices": {
+        "type": "boolean",
+        "title": "Enforce choice cards",
+        "description": "If the agent ends a turn with a plain-text question, ask it once to re-ask with choices.",
+        "default": true,
+        "env": "COLONIZER_ENFORCE_CHOICES"
+      },
+      "plugins": {
+        "type": "string",
+        "format": "plugin-dirs",
+        "title": "Skillsets",
+        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. All off by default. Stored as a comma-separated list of names.",
+        "default": "",
+        "env": "COLONIZER_PLUGIN_DIRS"
+      },
+      "caveman": {
+        "type": "boolean",
+        "title": "Terse replies (caveman)",
+        "description": "Token savings: the agent answers in caveman's compressed style, keeping code, commands and exact errors intact. Pull request descriptions and questions to you stay in plain sentences. Off by default.",
+        "default": false,
+        "env": "COLONIZER_CAVEMAN"
+      },
+      "caveman_level": {
+        "type": "string",
+        "enum": ["lite", "full", "ultra"],
+        "title": "Caveman level",
+        "description": "How terse, when terse replies are on: lite drops filler but keeps full sentences, full drops articles too, ultra is the shortest.",
+        "default": "full",
+        "env": "COLONIZER_CAVEMAN_LEVEL"
+      },
+      "headroom": {
+        "type": "boolean",
+        "title": "Compress what the agent reads (Headroom)",
+        "description": "Token savings: model requests pass through Headroom inside the colony, which compacts large tool output such as JSON before it reaches the model, and leaves earlier turns alone so prompt caching keeps working. The first time it is switched on, the mothership downloads Headroom (220–245 MB, depending on the architecture). It takes 300–370 MB of each colony’s memory. Off by default.",
+        "default": false,
+        "env": "COLONIZER_HEADROOM"
+      },
+      "rtk": {
+        "type": "boolean",
+        "title": "Compact command output (rtk)",
+        "description": "Token savings: shell commands the agent runs, such as git status or a test run, go through rtk, which shortens their output before the agent reads it. Commands rtk has no rule for run unchanged. Off by default.",
+        "default": false,
+        "env": "COLONIZER_RTK"
+      },
+      "jev_compaction": {
+        "type": "boolean",
+        "title": "Prune stale tool calls at compaction (fast-jev-compaction)",
+        "description": "Token savings: when the context fills, stale tool calls are pruned by their Jev score instead of Claude Code's lossy summary, and everything kept stays word for word. Off by default. Each compaction sends this colony's conversation and tool-call history — file paths, command output — to TypeSafe at api.typesafe.ai, so read TypeSafe's data-handling terms before using it on private repos; TypeSafe bills that use directly and it is not tracked in model usage or colony cost, and it needs the mothership's TypeSafe key (JEV_API_KEY). It is separate from the Jev routing second opinion (jev_shadow_mode), and it composes with Headroom and rtk.",
+        "default": false,
+        "env": "COLONIZER_JEV_COMPACTION"
+      },
+      "jev_keep_threshold": {
+        "type": "number",
+        "title": "Jev compaction keep threshold",
+        "description": "Minimum Jev score a message needs to survive compaction; lower keeps more. Only used when Jev compaction is on.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.5,
+        "env": "COLONIZER_JEV_KEEP_THRESHOLD"
+      },
+      "jev_preserve_recent": {
+        "type": "integer",
+        "title": "Jev compaction recent messages",
+        "description": "How many of the most recent messages compaction always keeps verbatim, whatever their score; the first message is always kept too. Only used when Jev compaction is on.",
+        "minimum": 0,
+        "maximum": 100,
+        "default": 6,
+        "env": "COLONIZER_JEV_PRESERVE_RECENT"
+      },
+      "scan": {
+        "type": "string",
+        "title": "Pre-flight scan",
+        "description": "Scan the repository inside the colony before the agent starts. 'warn' reports findings and carries on; 'block' ends the colony when the scanner exits non-zero. Advisory, not a security boundary: the boundary is the microVM, the publish step and your review of the pull request.",
+        "enum": [
+          "off",
+          "warn",
+          "block"
+        ],
+        "default": "off",
+        "env": "COLONIZER_SCAN"
+      },
+      "scan_command": {
+        "type": "string",
+        "title": "Scanner command",
+        "description": "Command to run for the pre-flight scan, resolved inside the colony \u2014 for example a scanner mounted through 'Plugin directories'. Split on whitespace and run without a shell. Empty means no scan runs.",
+        "default": "",
+        "env": "COLONIZER_SCAN_COMMAND"
+      }
+    }
+  }
+}

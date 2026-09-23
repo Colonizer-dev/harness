@@ -1,0 +1,357 @@
+# Builds the prebuilt Colonizer apps and, for a version tag, publishes them as a GitHub release together
+# with the one-command installer (scripts/install-release.sh, published as install.sh). docs/install.md
+# tells people how to use them.
+#
+# - linux-binaries: colonizer-agentd and rtk for each colony architecture, and the harness for Linux, as
+#   static musl binaries built inside rust:1-alpine. That is `docker run` from an ordinary job, because
+#   GitHub's JavaScript actions don't run inside Alpine containers.
+# - bundle: scripts/install.sh --bundle for each platform, then a smoke test: the app starts from the
+#   unpacked archive, finds its assets there, and serves its API and web UI.
+# - release: tags only. The tag has to match the version of both crates. Every published artifact — the
+#   tarballs, install.sh and SHA256SUMS — is attested with build provenance, and the release is created
+#   as a draft, given all its assets, and only then published. The draft step is what makes the release
+#   safe for GitHub's immutable releases, which freeze the assets and the tag the moment a release is
+#   published, so nothing can be added or replaced afterwards. Immutability itself is a repository
+#   setting (Settings → Releases → "Enable release immutability"), not anything a workflow can commit:
+#   this workflow is ready for it, and flipping that toggle is the missing half.
+# - crates: tags only, after the release. Publishes colonizer-agentd and colonizer-harness to crates.io
+#   through Trusted Publishing (no stored token), skipping a version crates.io already has. The crates are
+#   the source, not an install: the site and docs send people to the release installer.
+#
+# A release contains no Anthropic code: the Claude Agent SDK and Claude Code are fetched where the app
+# is installed (scripts/install.sh --bundle and scripts/install-release.sh say how).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/install.sh
+      - scripts/install-release.sh
+      - scripts/test/install-release.test.sh
+      - scripts/record-fetch-at-install.mjs
+      - scripts/build-agentd.sh
+      - scripts/build-rtk.sh
+      - scripts/build-tailscaled.sh
+      - scripts/fetch-vendor.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux-binaries:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch rtk's pinned source
+        run: VENDOR_KINDS=source scripts/fetch-vendor.sh
+
+      - name: Build inside rust:1-alpine
+        env:
+          ARCH: ${{ matrix.arch }}
+          # The container has no git, so the harness is told which release it is (crates/colonizer/build.rs).
+          # Empty off a tag, and build.rs then asks git as usual.
+          COLONIZER_DESCRIBE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          COLONIZER_COMMIT: ${{ github.sha }}
+        run: |
+          # The image is pinned by digest, because the tag alone would move under us between builds.
+          # The tag stays in the reference so a human can still read it; the digest is what pins it.
+          docker run --rm -e ARCH -e COLONIZER_BUILD_HERE=1 -e COLONIZER_DESCRIBE -e COLONIZER_COMMIT -e OWNER="$(id -u):$(id -g)" \
+            -v "$PWD:/src" -w /src rust:1-alpine@sha256:1716b3aa042d735f4566d14dc54e8037de9d69556e2d5dd58131d93a613d173d sh -euc '
+              apk add --no-cache musl-dev file >/dev/null
+              scripts/build-agentd.sh
+              scripts/build-rtk.sh
+              # The harness runs on the host, so only the Linux app needs a Linux build of it.
+              if [ "$ARCH" = x86_64 ]; then
+                cargo build --release --locked -p colonizer-harness
+                install -m 755 target/release/colonizer dist/bin/colonizer
+              fi
+              chown -R "$OWNER" dist target
+            '
+          mkdir -p prebuilt
+          cp dist/bin/colonizer-agentd dist/bin/rtk prebuilt/
+          [ "$ARCH" != x86_64 ] || cp dist/bin/colonizer prebuilt/
+          file prebuilt/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-binaries-${{ matrix.arch }}
+          path: prebuilt/
+          if-no-files-found: error
+          retention-days: 7
+
+  bundle:
+    needs: linux-binaries
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            guest: x86_64
+          - platform: darwin-arm64
+            runner: macos-15
+            guest: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Rust
+        if: matrix.platform == 'darwin-arm64'
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      # macos-15 ships Go only in the hosted toolcache, not on PATH, so the Mac leg has to put one there for scripts/build-tailscaled.sh.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.platform == 'darwin-arm64'
+        with:
+          # The newest Go 1.x, like the golang:1-alpine the microVM path builds in: no pin to go stale.
+          go-version: '1.x'
+          cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-binaries-${{ matrix.guest }}
+          path: prebuilt
+
+      - name: Build the app
+        env:
+          # The macos-15 runner has never run a microVM and its nested virtualisation is unreliable, so
+          # the Mac leg builds tailscaled with the runner's own Go. That is safe for the other build
+          # scripts: on this job their Linux binaries come from prebuilt_bin, so build-tailscaled.sh is
+          # the only one that sees COLONIZER_BUILD_HERE.
+          COLONIZER_BUILD_HERE: ${{ matrix.platform == 'darwin-arm64' && '1' || '' }}
+          # The Mac leg builds the harness here; stamped the same way as the Linux one above.
+          COLONIZER_DESCRIBE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          COLONIZER_COMMIT: ${{ github.sha }}
+        run: |
+          chmod 755 prebuilt/*
+          COLONIZER_PREBUILT="$PWD/prebuilt" scripts/install.sh --bundle
+
+      - name: Package
+        run: |
+          printf '%s\n' "$VERSION" > dist/VERSION
+          cp LICENSE NOTICE dist/
+          # Anthropic's code stays out: install-release.sh fetches it where the app is installed.
+          if find dist -path '*/node_modules/@anthropic-ai/claude-agent-sdk*' | grep -q .; then
+            echo "the Claude Agent SDK is in the bundle" >&2
+            exit 1
+          fi
+          mkdir -p stage out
+          cp -R dist stage/colonizer
+          tar -C stage -czf "out/colonizer-$PLATFORM.tar.gz" colonizer
+          ls -lh out
+
+      - name: Smoke test
+        run: |
+          set -o pipefail
+          mkdir -p smoke/home
+          tar -xzf "out/colonizer-$PLATFORM.tar.gz" -C smoke
+          # A release must know it is one: a build that reads as a development build refuses to update itself.
+          smoke/colonizer/bin/colonizer version | tee smoke/version
+          if [ "${VERSION#dev-}" = "$VERSION" ]; then
+            read -r stamped _ < smoke/version
+            [ "$stamped" = "$VERSION" ] || { echo "the app reports $stamped, not $VERSION" >&2; exit 1; }
+            if grep -q "development build" smoke/version; then
+              echo "the app reports itself as a development build" >&2
+              exit 1
+            fi
+          fi
+          # COLONIZER_NO_BROWSER: the app opens its sign-in link at startup, and a runner has no one to see it.
+          HOME="$PWD/smoke/home" COLONIZER_BIND=127.0.0.1:17878 COLONIZER_GATEWAY_BIND=127.0.0.1:17879 \
+            COLONIZER_NO_BROWSER=1 smoke/colonizer/bin/colonizer > smoke/log 2>&1 &
+          pid=$!
+          for _ in $(seq 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:17878/api/status && break
+            sleep 1
+          done
+          cat smoke/log
+          grep -q "^assets: .*/smoke/colonizer$" smoke/log
+          # Since #405 the full status and the UI need the per-install API token; without it
+          # /api/status answers only counts and health, and / answers 401.
+          token=$(cat smoke/home/.config/colonizer/api-token)
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:17878/api/status | tee smoke/status.json
+          echo
+          # The app found its own parts: the in-VM daemon, the web UI and the Claude Code module.
+          grep -q '"agentd":true' smoke/status.json
+          grep -q '"web":true' smoke/status.json
+          grep -q '"claude-code"' smoke/status.json
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:17878/ | grep -qi '<html'
+          kill "$pid"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colonizer-${{ matrix.platform }}
+          path: out/colonizer-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The installer refuses to install where colonies cannot run, and hosted runners have /dev/kvm
+      # but keep it from the runner user. Missing device should fail loudly, not skip the test.
+      - name: Let the runner user use /dev/kvm
+        run: sudo chmod 0666 /dev/kvm
+
+      - name: Test the installer
+        run: sh scripts/test/install-release.test.sh
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # id-token: write mints the Sigstore signing certificate for the attestations through OIDC;
+    # attestations: write stores the attestations on the repository; artifact-metadata: write is the
+    # storage record the attestation action requires; contents: write publishes the release itself.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the tag against the crate versions
+        run: |
+          for manifest in crates/colonizer/Cargo.toml crates/colonizer-agentd/Cargo.toml; do
+            crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
+            [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match $manifest version $crate" >&2; exit 1; }
+          done
+
+      - name: Check the changelog covers the tag
+        run: |
+          grep -qF "## [$TAG] " CHANGELOG.md || { echo "CHANGELOG.md has no section for $TAG" >&2; exit 1; }
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: colonizer-*
+          path: release
+          merge-multiple: true
+
+      - name: Checksum the artifacts and write the release notes
+        run: |
+          cp scripts/install-release.sh release/install.sh
+          cd release
+          sha256sum colonizer-*.tar.gz install.sh > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "Prebuilt Colonizer for Linux x86_64 (with KVM) and Apple Silicon Macs, built from ${{ github.sha }}."
+            echo
+            echo '```sh'
+            echo 'curl -fsSL https://colonizer.dev/install.sh | sh'
+            echo '```'
+            echo
+            echo "The installer checks the archive against SHA256SUMS. It fetches the Claude Agent SDK from the npm registry, and on a Mac the Linux build of Claude Code, from Anthropic's own channels: neither is in the release. Guide: https://colonizer.dev/docs/install"
+            echo
+            echo "Each artifact, SHA256SUMS included, also carries a build-provenance attestation recording the commit that built it. Verify one with:"
+            echo
+            echo '```sh'
+            echo 'gh attestation verify colonizer-<platform>.tar.gz --repo Colonizer-dev/harness'
+            echo '```'
+            echo
+            echo 'Here <platform> is linux-x86_64 or darwin-arm64.'
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+
+      # Attests build provenance for the tarballs, the installer and SHA256SUMS itself: an installer
+      # that has verified the checksums file can then trust every digest it lists. Artifact
+      # attestations are free for public repositories. The paths carry the release/ prefix because
+      # uses steps ignore working-directory and resolve paths against the workspace root.
+      - name: Attest the release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/colonizer-*.tar.gz, release/install.sh, release/SHA256SUMS
+
+      - name: Publish
+        run: |
+          cd release
+          # The release is created as a draft with every asset attached, and published only once
+          # everything is up. That is not gratuitous: GitHub's immutable releases freeze the assets
+          # and the tag the moment a release is published, so an asset attached afterwards would be
+          # rejected — attaching everything to the draft first is the only order that works. It is
+          # also good practice without immutability: a half-uploaded release is never visible.
+          gh release create "$TAG" colonizer-*.tar.gz install.sh SHA256SUMS \
+            --draft --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "Colonizer $TAG" --notes-file notes.md
+          gh release edit "$TAG" --draft=false --repo "${{ github.repository }}"
+
+  crates:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Versions crates.io doesn't have yet
+        id: pending
+        run: |
+          pending=""
+          for crate in colonizer-agentd colonizer-harness; do
+            version=$(cargo metadata --no-deps --format-version 1 |
+              jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
+            status=$(curl -s -o /dev/null -w '%{http_code}' -A "Colonizer-dev/harness release (contact@colonizer.dev)" \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            if [ "$status" = 200 ]; then
+              echo "$crate $version is already on crates.io"
+            else
+              pending="$pending $crate"
+            fi
+          done
+          echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
+
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.pending.outputs.crates != ''
+        id: auth
+
+      - name: Publish
+        if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATES: ${{ steps.pending.outputs.crates }}
+        run: |
+          # colonizer-agentd first: nothing depends on it, but the harness README links to it.
+          for crate in $CRATES; do
+            cargo publish --locked -p "$crate"
+          done
