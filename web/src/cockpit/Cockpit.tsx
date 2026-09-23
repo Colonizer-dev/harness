@@ -395,7 +395,7 @@ export function Cockpit({
   };
 
   return (
-    <div className="cockpit relative isolate grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-bg text-text">
+    <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] bg-bg text-text">
       {/* The v3 halo: a faint radial glow behind the top of the page, under the glass header. */}
       <div aria-hidden="true" className="v3-halo" />
       <Header

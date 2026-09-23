@@ -186,7 +186,7 @@ export function Header(props: {
   const tabs = navTabs({ needCount: inboxCount, liveCount, pendingMemory });
 
   return (
-    <header className="v3-glass sticky top-0 z-20 shrink-0">
+    <header className="v3-glass sticky top-0 z-20 min-w-0 shrink-0">
       <div className="flex h-14 items-center gap-3 px-6">
         <button
           type="button"
@@ -290,8 +290,10 @@ export function Header(props: {
         </div>
 
         {orgs.length > 1 && (
-          // The workspaces the rail used to list, as a row of avatars beside the switcher.
-          <div aria-label="workspaces" role="group" className="hidden items-center gap-1 pl-1 md:flex">
+          // The workspaces the rail used to list, as a row of avatars beside the switcher. It is the
+          // one part of the bar that gives way: with many workspaces it shrinks and scrolls sideways
+          // rather than pushing the live state, spend and buttons off the right edge.
+          <div aria-label="workspaces" role="group" className="hidden min-w-0 shrink items-center gap-1 overflow-x-auto py-0.5 pl-1 [scrollbar-width:none] md:flex">
             {orgs.map((o) => {
               const need = needFor(needByOrg, o.org);
               const active = sameOrg(o.org, selectedOrg);
@@ -316,7 +318,7 @@ export function Header(props: {
           </div>
         )}
 
-        <div className="flex-1" />
+        <div className="min-w-4 flex-1" />
 
         {latest && (
           <span aria-live="polite" className="hidden min-w-0 max-w-[300px] overflow-hidden text-ellipsis whitespace-nowrap text-[13px] text-faint lg:inline">

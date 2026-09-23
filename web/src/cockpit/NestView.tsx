@@ -415,8 +415,8 @@ export function NestView({
   const zoomPlaced = zoomSession ? placed.find((p) => p.session.id === zoomSession.id) : null;
 
   return (
-    <div className="cockpit nest nest-v3 relative grid min-h-0 flex-1 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden">
-      <div className="relative z-[5] flex flex-wrap items-end justify-between gap-x-6 gap-y-3 px-6 pb-5 pt-7">
+    <div className="cockpit nest nest-v3 scroll-thin relative grid min-h-0 flex-1 grid-rows-[auto_auto_minmax(340px,1fr)_auto] overflow-y-auto overflow-x-hidden">
+      <div className="relative z-[5] flex flex-wrap items-end justify-between gap-x-6 gap-y-3 px-6 pb-4 pt-5">
         <div className="min-w-0">
           <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em] text-text">Nest</h1>
           <div className="mt-2 text-[14px] text-muted tabular-nums">{meta}</div>
@@ -845,7 +845,7 @@ export function NestView({
             <h2 className="m-0 text-[14px] font-medium text-text">Needs you</h2>
             <span className="text-[13px] text-faint">{waiting.length} waiting</span>
           </div>
-          <div className="max-h-[168px] overflow-y-auto border-y border-border scroll-thin">
+          <div className="max-h-[168px] overflow-y-auto border-y border-border scroll-thin [@media(max-height:820px)]:max-h-[96px]">
             {waiting.map((session) => (
               <button
                 key={session.id}
