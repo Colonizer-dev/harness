@@ -1162,7 +1162,9 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 `max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
 (`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
 layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's
-`max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The two
+`max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The sandbox
+module's `hold_timeout_minutes` (default 30, 1 to 1440) bounds how long an autopilot-held colony keeps
+counting: past it the queue parks the colony and frees its slot (see the Watchdog section). The two
 per-colony limits override the global ones: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
 host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
 `host_disk`); `0` (or `"0"`) means unlimited, which is how an org opts out of a global limit. The same
@@ -1240,7 +1242,7 @@ settings `enabled` = true, `require_review` = true; off lets only `repo` notes s
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout", "since": "…", "nudges": 2}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -1252,7 +1254,11 @@ autopilot colony whose turn ends with an error (not an interrupt) is not publish
 it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
-announce here either.
+announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
+(default 30) parks the same way: an `idle` colony with `attention.reason` `autopilot_held` past the
+timeout is stopped with its worktree kept and `attention.reason` `hold_timeout`, so its microVM slot
+frees for queued colonies (one org's held colonies cannot block every other org past the timeout)
+while staying resumable. Within the timeout a held colony still counts against the parallel limits.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,

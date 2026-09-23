@@ -8,7 +8,8 @@ use crate::{
     Shared, orgs, provider_quota, providers, spend,
     stack::{self, Stacked},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -40,6 +41,41 @@ pub(crate) fn has_room(
 /// The per-repository limit for a colony of an org whose settings are `org`: its own, else the global.
 pub(crate) fn repo_limit(modules: &crate::config::ModulesConfig, org: &orgs::OrgSettings) -> u64 {
     orgs::repo_max_parallel(org).unwrap_or_else(|| orgs::global_repo_max_parallel(modules))
+}
+
+/// The attention reason an autopilot hold carries, set where the hold is taken (events) and read here.
+pub(crate) const AUTOPILOT_HELD_REASON: &str = "autopilot_held";
+
+/// The attention reason a colony parked for outlasting its hold carries. `Stopped` stands in until
+/// #213 adds `Parked`, the same stand-in quota parking uses — and the reason string is what keeps
+/// [`resume_quota_parked`] from requeueing these: it only matches its own reason.
+pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
+
+/// Whether this colony's autopilot hold has outlasted its slot (issue #217).
+///
+/// Slot policy: a colony waiting on a human is not using the CPU, so within the timeout it keeps its
+/// slot — it may still be answered and resume in seconds. Past the timeout the queue parks it: the
+/// slot is released, the worktree and branch kept, and the colony is resumable. A missing or
+/// unparseable `since` never expires: parking on an ambiguous timestamp could park a colony that was
+/// only just held, so those keep their slots.
+pub(crate) fn hold_expired(session: &Session, now: DateTime<Utc>, timeout: chrono::Duration) -> bool {
+    if session.status != SessionStatus::Idle {
+        return false;
+    }
+    let Some(attention) = session.attention.as_ref() else {
+        return false;
+    };
+    if attention.get("reason").and_then(Value::as_str) != Some(AUTOPILOT_HELD_REASON) {
+        return false;
+    }
+    let Some(since) = attention
+        .get("since")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+    else {
+        return false;
+    };
+    now - since >= timeout
 }
 
 /// How a queued colony's log line names the limits it is waiting on.
@@ -201,6 +237,9 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Quota-parked colonies whose provider recovered rejoin the queue on this same 5 s tick, ahead
     // of admission; a colony that only just parked keeps its terminal state until its reset passes.
     resume_quota_parked(app).await;
+    // Holds past their timeout park on this same tick, ahead of admission, so the slots they release
+    // are visible to the loop below. Read per tick, so a settings save applies at once.
+    park_expired_holds(app, orgs::hold_timeout(&app.modules.read().await.clone())).await;
     // Every routable provider's plan out: the queue holds, and `/api/status` says why. Checked per
     // tick rather than per colony, so a recovered provider unpauses the whole queue at once.
     if providers::quota_status(app).await.paused {
@@ -274,6 +313,50 @@ pub(crate) async fn start_queued(app: &Shared) {
 // agentd transport
 // ---------------------------------------------------------------------------
 
+/// Parks every autopilot hold past its timeout: the same stop quota parking takes — microVM removed,
+/// worktree kept, slot released — with the hold-timeout attention reason instead of a hold. The stop
+/// is claimed under the colony's lifecycle lock with the expiry re-checked under the admission lock,
+/// so a colony answered in the meantime is not parked. Parked-as-`Stopped` is resumable
+/// (`can_resume`), and [`resume_quota_parked`] leaves these alone — it only matches its own reason.
+pub(crate) async fn park_expired_holds(app: &Shared, timeout: chrono::Duration) {
+    let now = Utc::now();
+    let ids: Vec<String> = {
+        app.sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| hold_expired(s, now, timeout))
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    let minutes = timeout.num_minutes();
+    for id in ids {
+        let Some(s) = app.session(&id).await else { continue };
+        let parked = stop_colony(
+            app,
+            &s,
+            |x| hold_expired(x, Utc::now(), timeout),
+            format!(
+                "autopilot hold exceeded {minutes} min with no answer; parked to release its slot — the worktree is kept, so press Resume to continue"
+            ),
+            format!("autopilot hold exceeded {minutes} min; parked to release its slot — worktree kept, resume to continue"),
+        )
+        .await;
+        if parked {
+            app.update_session(&id, stamp_hold_timeout).await;
+        }
+    }
+}
+
+/// Stamps the hold-timeout attention onto a parked colony. Conditional on purpose: a resume may have
+/// claimed the colony (Stopped→Starting) between the stop's claim and this write, now that the
+/// lifecycle lock is released — stamping unconditionally would mislabel a live colony as parked.
+fn stamp_hold_timeout(x: &mut Session) {
+    if x.status == SessionStatus::Stopped && !x.cleaned_up {
+        x.attention = Some(json!({"reason": HOLD_TIMEOUT_REASON, "since": Utc::now(), "nudges": 0}));
+    }
+}
+
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
 /// worktree never left, so the normal admission loop resumes them like any operator resume. A
 /// named provider recovers when its record lapses (reset passed) or is gone (provider deleted); an
@@ -341,6 +424,92 @@ mod tests {
             .collect();
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    /// An idle colony held on an autopilot wait, with a worktree like a live one has.
+    fn held_colony(id: &str, org: &str, since: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = colony(org, SessionStatus::Idle);
+        s.id = id.into();
+        s.git_admin_dir = Some("git".into());
+        s.attention = Some(json!({"reason": "autopilot_held", "since": since, "nudges": 0}));
+        s
+    }
+
+    #[test]
+    fn a_hold_expires_at_the_timeout_and_not_before() {
+        let timeout = chrono::Duration::minutes(30);
+        let now = Utc::now();
+        let held_since = |ago: chrono::Duration| {
+            let mut s = colony("acme", SessionStatus::Idle);
+            s.attention = Some(json!({"reason": "autopilot_held", "since": now - ago, "nudges": 0}));
+            s
+        };
+        assert!(
+            !hold_expired(&held_since(timeout - chrono::Duration::seconds(1)), now, timeout),
+            "a hold a second inside the timeout still keeps its slot"
+        );
+        assert!(
+            hold_expired(&held_since(timeout), now, timeout),
+            "at the timeout the slot is released"
+        );
+        assert!(
+            hold_expired(&held_since(timeout + chrono::Duration::hours(2)), now, timeout),
+            "past the timeout it stays expired"
+        );
+    }
+
+    #[test]
+    fn the_hold_timeout_stamp_leaves_a_colony_a_resume_claimed_in_between_alone() {
+        // The ordinary case: still parked, so the stamp lands.
+        let mut parked = stopped_colony_with_worktree("acme", "parked".into());
+        stamp_hold_timeout(&mut parked);
+        assert_eq!(
+            parked.attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(HOLD_TIMEOUT_REASON)
+        );
+        // A resume that flipped the colony back to Starting between the stop and the stamp wins:
+        // stamping hold_timeout onto a live colony would mislabel it as parked.
+        let mut resumed = stopped_colony_with_worktree("acme", "resumed".into());
+        resumed.status = SessionStatus::Starting;
+        stamp_hold_timeout(&mut resumed);
+        assert!(resumed.attention.is_none(), "a resumed colony keeps no park reason");
+        // Cleaned up in between: the worktree the reason promises is gone, so no stamp either.
+        let mut cleaned = stopped_colony_with_worktree("acme", "cleaned".into());
+        cleaned.cleaned_up = true;
+        stamp_hold_timeout(&mut cleaned);
+        assert!(cleaned.attention.is_none());
+    }
+
+    #[test]
+    fn only_an_autopilot_held_idle_colony_can_expire() {
+        let timeout = chrono::Duration::minutes(30);
+        let now = Utc::now();
+        let old = now - chrono::Duration::hours(3);
+        assert!(
+            !hold_expired(&colony("acme", SessionStatus::Idle), now, timeout),
+            "an idle colony nobody is waiting on never expires"
+        );
+        let mut other = colony("acme", SessionStatus::Idle);
+        other.attention = Some(json!({"reason": "stalled", "since": old, "nudges": 3}));
+        assert!(!hold_expired(&other, now, timeout), "another reason never expires");
+        for status in [
+            SessionStatus::Running,
+            SessionStatus::WaitingForAnswer,
+            SessionStatus::Stopped,
+        ] {
+            let mut s = colony("acme", status);
+            s.attention = Some(json!({"reason": "autopilot_held", "since": old, "nudges": 0}));
+            assert!(!hold_expired(&s, now, timeout), "{status:?} never expires");
+        }
+        // A hold with no readable start keeps its slot rather than parking on a guess.
+        for attention in [
+            json!({"reason": "autopilot_held", "nudges": 0}),
+            json!({"reason": "autopilot_held", "since": "not a timestamp", "nudges": 0}),
+        ] {
+            let mut s = colony("acme", SessionStatus::Idle);
+            s.attention = Some(attention);
+            assert!(!hold_expired(&s, now, timeout), "an ambiguous hold keeps its slot");
+        }
     }
 
     #[test]
@@ -691,6 +860,90 @@ mod tests {
         assert_eq!(parked.status, SessionStatus::Stopped, "the saved record still holds");
         assert!(parked.attention.is_some(), "the attention stays until recovery");
         drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn parking_expired_holds_releases_slots_for_another_org() {
+        let root = std::env::temp_dir().join(format!("colonizer-hold-timeout-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let timeout = chrono::Duration::minutes(30);
+        // One org fills all 3 slots with held colonies while another org waits in the queue.
+        let mut sessions = vec![
+            held_colony("a-1", "org-a", Utc::now()),
+            held_colony("a-2", "org-a", Utc::now()),
+            held_colony("a-3", "org-a", Utc::now()),
+        ];
+        let mut waiting = colony("org-b", SessionStatus::Queued);
+        waiting.id = "b-1".into();
+        sessions.push(waiting);
+        *app.sessions.write().await = sessions;
+        for id in ["a-1", "a-2", "a-3"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        // Fresh holds keep their slots: nothing parks and org-b still has no room.
+        park_expired_holds(&app, timeout).await;
+        {
+            let sessions = app.sessions.read().await;
+            assert!(
+                sessions
+                    .iter()
+                    .filter(|s| s.org == "org-a")
+                    .all(|s| s.status == SessionStatus::Idle),
+                "holds within the timeout still count"
+            );
+            assert!(
+                !has_room(&sessions, "org-b", "org-b/repo", 3, None, 32),
+                "org-a's fresh holds fill every slot"
+            );
+        }
+        // Three hours later the same holds are past the timeout.
+        let old = Utc::now() - chrono::Duration::hours(3);
+        for s in app.sessions.write().await.iter_mut().filter(|s| s.org == "org-a") {
+            s.attention = Some(json!({"reason": "autopilot_held", "since": old, "nudges": 0}));
+        }
+        park_expired_holds(&app, timeout).await;
+        let sessions = app.sessions.read().await;
+        for s in sessions.iter().filter(|s| s.org == "org-a") {
+            assert_eq!(s.status, SessionStatus::Stopped, "an expired hold parks");
+            assert_eq!(
+                s.attention.as_ref().and_then(|a| a["reason"].as_str()),
+                Some(HOLD_TIMEOUT_REASON),
+                "parked-as-stopped under the hold-timeout reason"
+            );
+            assert_eq!(s.attention.as_ref().and_then(|a| a["nudges"].as_u64()), Some(0));
+            assert!(s.attention.as_ref().and_then(|a| a["since"].as_str()).is_some());
+            assert!(
+                !s.cleaned_up && s.git_admin_dir.is_some(),
+                "the worktree is kept, never cleaned up"
+            );
+            assert!(
+                can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()),
+                "a parked hold resumes like any stopped colony"
+            );
+            assert!(!s.holds_slot(), "a parked hold releases its slot");
+        }
+        assert!(
+            has_room(&sessions, "org-b", "org-b/repo", 3, None, 32),
+            "org-a's expired holds no longer block org-b"
+        );
+        drop(sessions);
+        // Quota recovery must not requeue these: that path only matches its own reason.
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        assert!(
+            sessions
+                .iter()
+                .filter(|s| s.org == "org-a")
+                .all(|s| s.status == SessionStatus::Stopped),
+            "hold-timeout parks stay parked until resumed"
+        );
+        drop(sessions);
+        let log = std::fs::read_to_string(app.session_dir("a-1").join("harness.jsonl")).unwrap();
+        assert!(
+            log.contains("autopilot hold exceeded 30 min; parked to release its slot"),
+            "the colony's log says why it parked: {log}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

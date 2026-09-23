@@ -337,6 +337,14 @@ pub fn global_repo_max_parallel(modules: &ModulesConfig) -> u64 {
     setting_u64(&modules.sandbox, &schema, "repo_max_parallel").max(1)
 }
 
+/// How long a colony waiting on a human (an autopilot hold) keeps its microVM slot before the queue
+/// parks it to free the slot (issue #217). A module config written before the setting existed reads
+/// the schema default of 30 minutes.
+pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").max(1) as i64)
+}
+
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
 pub fn org_enabled(org: &OrgSettings) -> bool {
@@ -931,6 +939,18 @@ mod tests {
         assert_eq!(repo_max_parallel(&limit(None)), None);
         let modules = ModulesConfig::default();
         assert_eq!(global_repo_max_parallel(&modules), 3, "the schema default");
+    }
+
+    #[test]
+    fn the_held_colony_timeout_reads_the_sandbox_setting_with_a_30_minute_default() {
+        let modules = ModulesConfig::default();
+        assert_eq!(hold_timeout(&modules), chrono::Duration::minutes(30));
+        let mut configured = ModulesConfig::default();
+        configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(10));
+        assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(10));
+        // A hand-edited 0 is no timeout at all, so it reads as the smallest real one.
+        configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(0));
+        assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
     }
 
     #[test]
