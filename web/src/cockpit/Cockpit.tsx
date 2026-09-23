@@ -137,10 +137,10 @@ export function Cockpit({
     store(VIEW_KEY, view);
   }, [view]);
 
-  // The inspector renders only on the home view, whatever it is looking at.
+  // The inspector renders only on the home view, and only while something is picked.
   useEffect(() => {
-    onInspectorShown?.(view === "home");
-  }, [view, onInspectorShown]);
+    onInspectorShown?.(view === "home" && inspector !== null);
+  }, [view, inspector, onInspectorShown]);
 
   // An explicit choice is written on the root, where index.css's :root[data-theme] blocks pick it
   // up; clearing it hands the page back to prefers-color-scheme.
@@ -455,7 +455,9 @@ export function Cockpit({
             />
           )}
         </div>
-        {view === "home" && (
+        {/* Only while something is picked: closing it (×) gives the nest the full width back, and
+            clicking a chamber or the mothership opens it again. */}
+        {view === "home" && inspector !== null && (
           <Inspector
             target={inspector}
             avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
