@@ -234,6 +234,11 @@ pub async fn list_all(State(app): State<Shared>) -> Json<Vec<FindingRecord>> {
 
 /// Files `finding` on the colony's repository unless an open issue already has its title.
 pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -> Result<Filed> {
+    // Issue #84: fails closed here too, not only at the caller, so no path to `gh label create` or
+    // `gh issue create` skips the operator's kill-switch.
+    if crate::authority::external_writes_blocked() {
+        bail!("refusing to file a finding: external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS / COLONIZER_NO_WRITE)");
+    }
     let repo = s.repo.as_str();
     let terms = search_terms(&finding.title);
     if !terms.is_empty() {
@@ -425,5 +430,22 @@ mod tests {
         assert_eq!(lines[3].duplicate_of.as_deref(), Some("https://x/2"));
         assert!(records(&dir.join("nowhere")).is_empty(), "no ledger is no ledger");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Issue #84: `file` itself refuses while external writes are blocked, before any `gh` call.
+    #[tokio::test]
+    async fn filing_refuses_while_external_writes_are_blocked() {
+        let root = std::env::temp_dir().join(format!("colonizer-findings-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let s = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        let finding = Finding {
+            title: "A title".into(),
+            body: "A body".into(),
+            evidence: "Checked".into(),
+        };
+        let _blocked = crate::authority::test_block_external_writes();
+        let err = file(&app, &s, &finding, &root.join("body.md")).await.unwrap_err();
+        assert!(format!("{err:#}").contains("external writes are blocked"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

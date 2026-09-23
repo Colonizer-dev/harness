@@ -12,8 +12,10 @@
 //! differently). An approval names one hash; `authorize` grants exactly that
 //! candidate and nothing else.
 //!
-//! Scaffolding (issue #98): the call-site wiring lands in follow-ups, so the
-//! module is allow(dead_code) until the first check is bound.
+//! Scaffolding (issue #98): most of the grant machinery is not wired yet, so the
+//! module stays allow(dead_code). Issue #84 binds the first checks: the publish
+//! path (`Commit`/`Push`/`OpenPr`) and finding filing (`FileIssue`) consult the
+//! `external_writes_blocked` kill-switch below and fail closed when it is set.
 
 #![allow(dead_code)]
 
@@ -78,6 +80,46 @@ pub fn needs_independent_review(effect: &Effect) -> bool {
 /// and cannot silently drop — the re-auth requirement.
 pub fn requires_reauth_after_restart() -> bool {
     true
+}
+
+/// The operator's kill-switch for every write that leaves the harness (issue #84): commits, pushes,
+/// pull requests, PR merges and comments, and filed issues. Set `COLONIZER_NO_EXTERNAL_EFFECTS` (or
+/// `COLONIZER_NO_WRITE`) to anything but `0`/`false`/`off`/`no` and each of those refuses to run.
+pub fn external_writes_blocked() -> bool {
+    // Tests never read the real environment, so a developer's own kill-switch cannot fail the suite;
+    // a test blocks writes for its own thread with `test_block_external_writes`.
+    #[cfg(test)]
+    return TEST_BLOCKED.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    blocked_by_env(&["COLONIZER_NO_EXTERNAL_EFFECTS", "COLONIZER_NO_WRITE"])
+}
+
+/// Whether any of `keys` is set to a value that switches writes off: anything non-empty except the
+/// usual spellings of "off".
+fn blocked_by_env(keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        crate::util::env_nonempty(key)
+            .is_some_and(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BLOCKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Blocks external writes for the calling test's thread until the guard drops. Thread-local on
+/// purpose: tests run in parallel, and a process-wide env var would leak into every other test.
+#[cfg(test)]
+pub(crate) fn test_block_external_writes() -> impl Drop {
+    struct Unblock;
+    impl Drop for Unblock {
+        fn drop(&mut self) {
+            TEST_BLOCKED.with(|b| b.set(false));
+        }
+    }
+    TEST_BLOCKED.with(|b| b.set(true));
+    Unblock
 }
 
 /// Binds a candidate from its parts (e.g. the pr.md bytes, the tree sha).
@@ -234,5 +276,45 @@ mod tests {
             assert!(!needs_independent_review(&e), "{e:?}");
         }
         assert!(requires_reauth_after_restart(), "restarts always re-authorize");
+    }
+
+    #[test]
+    fn the_write_kill_switch_reads_any_non_off_value_as_blocked() {
+        // Keys only this test reads, so setting them cannot leak into a parallel test.
+        const A: &str = "COLONIZER_TEST_84_NO_EXTERNAL_EFFECTS";
+        const B: &str = "COLONIZER_TEST_84_NO_WRITE";
+        let set = |k: &str, v: Option<&str>| match v {
+            // SAFETY: no other test touches these keys.
+            Some(v) => unsafe { std::env::set_var(k, v) },
+            None => unsafe { std::env::remove_var(k) },
+        };
+        set(A, None);
+        set(B, None);
+        assert!(!blocked_by_env(&[A, B]), "unset means writes are allowed");
+        for off in ["", "  ", "0", "false", "OFF", "No"] {
+            set(A, Some(off));
+            assert!(!blocked_by_env(&[A, B]), "{off:?} does not block");
+        }
+        for on in ["1", "true", "yes", "anything"] {
+            set(A, Some(on));
+            assert!(blocked_by_env(&[A, B]), "{on:?} blocks");
+        }
+        set(A, None);
+        set(B, Some("1"));
+        assert!(blocked_by_env(&[A, B]), "either key blocks on its own");
+        set(B, None);
+    }
+
+    #[test]
+    fn a_test_can_block_external_writes_for_its_own_thread_only() {
+        assert!(!external_writes_blocked(), "the test build ignores the real environment");
+        {
+            let _blocked = test_block_external_writes();
+            assert!(external_writes_blocked());
+            std::thread::spawn(|| assert!(!external_writes_blocked(), "other threads are unaffected"))
+                .join()
+                .unwrap();
+        }
+        assert!(!external_writes_blocked(), "the guard unblocks on drop");
     }
 }

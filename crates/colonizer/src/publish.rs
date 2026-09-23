@@ -38,6 +38,13 @@ pub async fn publish_session(app: Shared, id: String) {
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
+    // Issue #84: the operator's kill-switch refuses before the claim too, so nothing is torn down.
+    if crate::authority::external_writes_blocked() {
+        let message = BLOCKED.to_string();
+        app.session_log(&id, "error", format!("not publishing: {message}")).await;
+        app.update_session(&id, |x| x.error = Some(message)).await;
+        return;
+    }
     // The claim captures whether a microVM was live, because the status it leaves behind is `publishing`.
     let Some((s, (claimed, was_live))) = app.update_session(&id, claim_publish).await else {
         return;
@@ -317,7 +324,13 @@ async fn run_retargets(ops: &impl RetargetOps, children: &[Session], destination
     for child in children {
         let Some(url) = child.pr_url.clone() else { continue };
         let id = child.id.clone();
-        match ops.edit_pr(&url, destination).await {
+        // Issue #84: fail closed before GitHub is asked anything; `github::retarget_pr` checks again.
+        let edited = if crate::authority::external_writes_blocked() {
+            Err(anyhow::anyhow!("refusing to retarget {url}: {RETARGET_BLOCKED}"))
+        } else {
+            ops.edit_pr(&url, destination).await
+        };
+        match edited {
             Ok(()) => {
                 // `gh pr edit` has already moved the pull request on GitHub, so the recorded base
                 // must follow or the record quietly disagrees with the real pull request — and a
@@ -357,6 +370,9 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if crate::authority::external_writes_blocked() {
+        return Err(client_error(StatusCode::CONFLICT, BLOCKED));
+    }
     if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
         return Err(client_error(
             StatusCode::CONFLICT,
@@ -374,7 +390,8 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
 /// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
 /// Returns whether the claim landed, and whether a microVM was live under it.
 pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
-    let allowed = can_publish(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+    // `pr_allowed` implies the commit and push gates, and fails closed on the kill-switch (#84).
+    let allowed = pr_allowed(x.status, x.cleaned_up, x.git_admin_dir.is_some());
     // Before the mutation: `publishing` itself is not a live status.
     let was_live = allowed && x.status.is_live();
     if allowed {
@@ -393,8 +410,9 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
 /// `commit_allowed` → `push_allowed` → `pr_allowed` below: each later effect needs the earlier one
 /// plus its own `authority::Effect` grant (`needs_independent_review` is true for all three), and
 /// PR creation additionally needs the candidate bound via `publish_candidate_hash` before it runs.
-/// The three helpers delegate to this gate for now, so behavior is unchanged; they exist so each
-/// external effect can grow its own grant check without re-deriving the lifecycle preconditions.
+/// The three helpers delegate to this gate plus the #84 kill-switch (`claim_publish` goes through
+/// `pr_allowed`); they exist so each external effect can grow its own grant check without
+/// re-deriving the lifecycle preconditions.
 pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     matches!(
         status,
@@ -408,32 +426,38 @@ pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree:
         && has_worktree
 }
 
+/// Why a publish is refused while the operator's kill-switch is on (issue #84).
+pub(crate) const BLOCKED: &str =
+    "external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS / COLONIZER_NO_WRITE); unset it to publish";
+
+/// Why a stacked child's pull request keeps its old base while the kill-switch is on (issue #84).
+/// Nothing retries a retarget, so a person moves it once writes are allowed again.
+pub(crate) const RETARGET_BLOCKED: &str = "external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS / \
+     COLONIZER_NO_WRITE), so the pull request keeps its old base; retarget it by hand once they are allowed";
+
 /// The per-effect split of `can_publish` (issue #98): local commit first, then push, then PR —
-/// each ordered check assumes the earlier effects are granted and adds its own. They delegate to
-/// the single lifecycle gate for now, so existing callers keep their behavior; the point is that
-/// a future per-effect grant check has one named place per effect to live.
-#[allow(dead_code)]
+/// each ordered check assumes the earlier effects are granted and adds its own. Each fails closed
+/// while external writes are blocked (issue #84); otherwise they delegate to the single lifecycle
+/// gate, and a future per-effect grant check has one named place per effect to live.
 pub(crate) fn commit_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Commit));
-    can_publish(status, cleaned_up, has_worktree)
+    !crate::authority::external_writes_blocked() && can_publish(status, cleaned_up, has_worktree)
 }
 
-#[allow(dead_code)]
 pub(crate) fn push_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Push));
-    commit_allowed(status, cleaned_up, has_worktree)
+    !crate::authority::external_writes_blocked() && commit_allowed(status, cleaned_up, has_worktree)
 }
 
-#[allow(dead_code)]
 pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::OpenPr));
-    push_allowed(status, cleaned_up, has_worktree)
+    !crate::authority::external_writes_blocked() && push_allowed(status, cleaned_up, has_worktree)
 }
 
 /// Binds the evidence a PR grant must name: the hex sha256 (see
 /// `authority::bind_candidate`) over the PR body bytes the approval reviewed. A
-/// grant authorizes exactly this hash — `authorize` denies any other candidate.
-#[allow(dead_code)]
+/// grant authorizes exactly this hash — `authorize` denies any other candidate. Logged with every
+/// pull request opened, so the audit trail names the exact body that went out.
 pub(crate) fn publish_candidate_hash(pr_body: &[u8]) -> String {
     crate::authority::bind_candidate(&[pr_body])
 }
@@ -547,6 +571,18 @@ mod tests {
         let bound = publish_candidate_hash(b"the reviewed pr body");
         assert_eq!(bound, crate::authority::bind_candidate(&[b"the reviewed pr body"]));
         assert_ne!(bound, publish_candidate_hash(b"edited after approval"));
+
+        // Issue #84: with external writes blocked, every effect fails closed — and so does the claim.
+        let _blocked = crate::authority::test_block_external_writes();
+        for status in [Running, WaitingForAnswer, Idle, Stopped, Failed, NoChanges] {
+            assert!(!commit_allowed(status, false, true), "{status:?}");
+            assert!(!push_allowed(status, false, true), "{status:?}");
+            assert!(!pr_allowed(status, false, true), "{status:?}");
+            let mut s = colony("acme", status);
+            s.git_admin_dir = Some("git".into());
+            assert_eq!(claim_publish(&mut s), (false, false), "{status:?}");
+            assert_eq!(s.status, status, "a refused claim leaves the colony as it was");
+        }
     }
 
     #[test]
@@ -782,5 +818,35 @@ mod tests {
         );
         let (_, level, _) = ops.said.borrow()[0].clone();
         assert_eq!(level, "warn");
+    }
+
+    /// Issue #84: with external writes blocked, no pull request is edited on GitHub, nothing is
+    /// recorded, and the child's log says why.
+    #[tokio::test]
+    async fn blocked_external_writes_leave_the_child_on_its_old_base_and_say_why() {
+        let _blocked = crate::authority::test_block_external_writes();
+        let ops = FakeRetarget {
+            default_branch: Ok("main".into()),
+            edit_ok: true,
+            colony_exists: true,
+            default_asked: std::cell::Cell::new(0),
+            edits: RefCell::new(Vec::new()),
+            recorded: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
+        };
+        let mut child = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        child.id = "child".into();
+        child.pr_url = Some("https://github.com/acme/repo/pull/10".into());
+
+        run_retargets(&ops, &[child], "main").await;
+        assert!(ops.edits.borrow().is_empty(), "GitHub must not be asked to edit anything");
+        assert!(ops.recorded.borrow().is_empty(), "the old base stays recorded");
+        assert!(
+            ops.said_contains("could not retarget") && ops.said_contains("COLONIZER_NO_EXTERNAL_EFFECTS"),
+            "the refusal is said, for a person: {:?}",
+            ops.said.borrow()
+        );
+        let (id, level, _) = ops.said.borrow()[0].clone();
+        assert_eq!((id.as_str(), level.as_str()), ("child", "warn"));
     }
 }

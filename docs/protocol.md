@@ -214,7 +214,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
-| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried |
+| `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped). Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
@@ -1301,7 +1301,30 @@ retried.
 **Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
 error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn
 ended. An unchanged `pr.md` from an earlier turn doesn't publish a colony the maintainer is still
-talking to.
+talking to. While external writes are blocked (below), a turn that would publish does not: the colony
+log gets a `warn` line (`autopilot: not publishing, external writes are blocked
+(COLONIZER_NO_EXTERNAL_EFFECTS); press Create PR when writes are enabled`) and the colony's
+`attention` is left as it was. Opening pull requests as drafts (`publish.settings.draft`) does not
+change this: a draft PR is still an external write, refused the same way as a ready one.
+
+**No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
+in the mothership's environment to any non-empty value other than `0`, `false`, `off` or `no`
+(trimmed, case-insensitive) blocks the writes the mothership makes on a colony's behalf, each failing
+closed:
+
+- Publish: `POST /api/sessions/{id}/publish` answers **409**, and the publish task (autopilot's
+  included) refuses before it claims the colony, so the colony keeps its status and its `error`
+  carries the reason. The commit, push and pull-request steps each check again before they run.
+- Retargeting a stacked child's pull request: GitHub is not asked, the child keeps its old base and
+  its log says so. Nothing retries it; retarget it by hand once writes are allowed.
+- Reviewing a fix PR (§6.6): whatever the verdict, nothing is merged or commented on GitHub; a
+  `warn` line in the fix colony's log says so.
+- Findings (§6.6): ignored, no issue is filed.
+
+Independently of the kill-switch, a publish refuses to open (or reuse) a pull request when the
+branch's local head moved after the push step, and logs the SHA-256 of the exact PR body it sends
+(`opening the pull request; body sha256 <hex>`). The hash is only logged; nothing yet checks it
+against an approval (issue #98).
 
 ### 6.4 UI additions
 
@@ -1570,6 +1593,11 @@ Mothership side. The GitHub token never enters a colony, so filing happens on th
 
 - Setting: `publish.settings.file_findings`, default `true`. When it is off the variable is not set, and
   a `finding` event that arrives anyway is ignored.
+- Kill-switch: while external writes are blocked (§6.3), a `finding` event is ignored with an `info`
+  line in the colony log (`ignored a finding: external writes are blocked
+  (COLONIZER_NO_EXTERNAL_EFFECTS), so no issue is filed`). This is checked after the setting above and
+  before the finding is parsed or validated, so no validation call is made and nothing is written to
+  the ledger.
 - Validation: `title` (one line, ≤ 200 chars), `body` (≤ 20 000) and `evidence` (≤ 5 000) are all
   required. A finding without evidence is not filed.
 - Cap: at most 5 per colony, counted from `sessions/<id>/findings.jsonl`. A GitHub error does not use
