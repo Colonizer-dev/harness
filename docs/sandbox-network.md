@@ -234,7 +234,7 @@ under `crates/colonizer/src/` unless given in full.
 
 | Port | Default bind | Serves | Auth | Reachable from a colony |
 | :--- | :--- | :--- | :--- | :--- |
-| 7878 | `127.0.0.1`, `COLONIZER_BIND` (`config.rs:44`) | Cockpit: every `/api/*` route, including the session terminal WebSocket, and the web UI (`main.rs:1045-1116`) | No login (`README.md:249`). `host_guard` checks `Host`, and since #375 rejects a write or upgrade whose `Origin` is missing or does not match (`main.rs:691-726`) | Default deny since #375 |
+| 7878 | `127.0.0.1`, `COLONIZER_BIND` (`config.rs:44`) | Cockpit: every `/api/*` route, including the session terminal WebSocket, and the web UI (`main.rs:1179-1246`) | Per-install API token in `Authorization: Bearer` or the `colonizer_token` cookie (`auth.rs`). `host_guard` checks `Host`, and since #375 rejects a cookie-authenticated write or upgrade whose `Origin` is missing or does not match (`main.rs:778`) | Default deny since #375 |
 | 41750 | `127.0.0.1`, `COLONIZER_GATEWAY_BIND` (`config.rs:62`) | Provider gateway, `/providers/{id}/{*path}` (`gateway.rs:545-550`) | Per-colony token in `x-colonizer-colony`, matched against live colonies (`gateway.rs:34`, `gateway.rs:526-538`, `gateway.rs:948-956`) | Allowed when providers are configured |
 | 41740 | `127.0.0.1`, mesh `control_port` (`mesh.rs:246`, `modules.rs:176`) | Headscale control server | Joining needs the pre-auth key minted per VM (`mesh.rs:352-362`); other routes not verified | Allowed when the mesh is on |
 | 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:247`, `mesh.rs:291`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |

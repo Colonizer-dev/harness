@@ -671,7 +671,10 @@ ever dials **out** to the URLs it is given, over whatever private network the op
 by default everywhere, exactly as before; an operator who wants a given host to answer these polls
 sets *that host's own* `COLONIZER_BIND` to a private interface IP of their choosing — never
 `0.0.0.0` — the same opt-in a Settings operator has always had to make to reach the API from another
-machine at all.
+machine at all. Peer polls carry no token, so a peer answers the reduced `GET /api/status`
+(version, queue depth, microVM counts, numeric host capacity, platform/OS, storage verdict — no
+hostnames, host ids, repos, or account identities); the row keys on the configured URL and defaults
+the rest.
 
 ### `GET /api/version`
 
