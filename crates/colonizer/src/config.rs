@@ -297,6 +297,73 @@ pub fn setting_f64(choice: &ModuleChoice, schema: &Value, key: &str) -> f64 {
     setting(choice, schema, key).and_then(Value::as_f64).unwrap_or_default()
 }
 
+/// Who a colony's commits and pull requests name as co-author.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CoAuthor {
+    pub name: String,
+    pub email: String,
+}
+
+impl CoAuthor {
+    /// github.com/colonizer-settlers. GitHub only attributes a trailer whose address belongs to the
+    /// account, so this must be the ID-prefixed noreply form; a bare
+    /// `colonizer-settlers@users.noreply.github.com` shows as plain text.
+    pub fn settlers() -> Self {
+        Self {
+            name: "Colonizer Settlers".into(),
+            email: "331648616+colonizer-settlers@users.noreply.github.com".into(),
+        }
+    }
+
+    /// The `Co-Authored-By` trailer line naming this identity.
+    pub fn trailer(&self) -> String {
+        format!("Co-Authored-By: {} <{}>", self.name, self.email)
+    }
+
+    /// The GitHub login behind a users.noreply.github.com address (`ID+login@…` or legacy
+    /// `login@…`), for crediting the account by name where there is no co-author field; `None`
+    /// for any other address.
+    pub fn github_login(&self) -> Option<&str> {
+        let (local, domain) = self.email.split_once('@')?;
+        if !domain.eq_ignore_ascii_case("users.noreply.github.com") {
+            return None;
+        }
+        let login = match local.split_once('+') {
+            Some((id, login)) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => login,
+            None => local,
+            _ => return None,
+        };
+        if login.is_empty() || !login.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return None;
+        }
+        Some(login)
+    }
+}
+
+/// `co_author` takes a bool or an identity: `true` is Colonizer Settlers, `false` turns the
+/// trailer off, and a table names someone else.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CoAuthorOpt {
+    On(bool),
+    Identity(CoAuthor),
+}
+
+fn default_co_author() -> Option<CoAuthor> {
+    Some(CoAuthor::settlers())
+}
+
+fn de_co_author<'de, D>(deserializer: D) -> Result<Option<CoAuthor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match CoAuthorOpt::deserialize(deserializer)? {
+        CoAuthorOpt::On(true) => Ok(Some(CoAuthor::settlers())),
+        CoAuthorOpt::On(false) => Ok(None),
+        CoAuthorOpt::Identity(identity) => Ok(Some(identity)),
+    }
+}
+
 /// `colonizer.toml`: hand-edited settings with no place in the UI. Colonizer never writes this file, so
 /// a missing file, a missing key or a key we don't know are all the same thing — the default.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -308,13 +375,18 @@ pub struct FileConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct PublishConfig {
-    /// Signs the commit a colony's work is published as with `Co-Authored-By: Colonizer`.
-    pub co_author: bool,
+    /// Who the commit and the pull request body name as co-author (`Co-Authored-By` trailer):
+    /// `true` (the default) is Colonizer Settlers, a table names someone else, `false` turns the
+    /// trailer — and the findings credit — off.
+    #[serde(default = "default_co_author", deserialize_with = "de_co_author")]
+    pub co_author: Option<CoAuthor>,
 }
 
 impl Default for PublishConfig {
     fn default() -> Self {
-        Self { co_author: true }
+        Self {
+            co_author: default_co_author(),
+        }
     }
 }
 
@@ -341,31 +413,104 @@ mod tests {
     }
 
     #[test]
-    fn colonizer_toml_defaults_to_signing_and_can_turn_it_off() {
-        assert!(FileConfig::default().publish.co_author);
-        assert!(parse("").publish.co_author);
-        assert!(parse("[publish]\n").publish.co_author);
-        assert!(!parse("[publish]\nco_author = false\n").publish.co_author);
+    fn colonizer_toml_defaults_to_settlers_and_can_turn_it_off_or_name_someone_else() {
+        let settlers = Some(CoAuthor::settlers());
+        assert_eq!(FileConfig::default().publish.co_author, settlers);
+        assert_eq!(parse("").publish.co_author, settlers);
+        assert_eq!(parse("[publish]\n").publish.co_author, settlers);
+        assert_eq!(parse("[publish]\nco_author = true\n").publish.co_author, settlers);
+        assert_eq!(parse("[publish]\nco_author = false\n").publish.co_author, None);
         // A key we don't know is not a reason to refuse the file.
-        assert!(parse("[publish]\nco_author = true\nsomething_else = 3\n").publish.co_author);
+        assert_eq!(
+            parse("[publish]\nco_author = true\nsomething_else = 3\n").publish.co_author,
+            settlers
+        );
+        let custom = CoAuthor {
+            name: "Someone Else".into(),
+            email: "someone@example.com".into(),
+        };
+        assert_eq!(
+            parse("[publish]\nco_author = { name = \"Someone Else\", email = \"someone@example.com\" }\n")
+                .publish
+                .co_author,
+            Some(custom.clone())
+        );
+        assert_eq!(
+            parse("[publish.co_author]\nname = \"Someone Else\"\nemail = \"someone@example.com\"\n")
+                .publish
+                .co_author,
+            Some(custom)
+        );
+    }
+
+    #[test]
+    fn the_default_co_author_is_the_id_prefixed_noreply_address() {
+        let email = CoAuthor::settlers().email;
+        let (id, rest) = email.split_once('+').expect("the ID-prefixed noreply form");
+        assert_eq!(id.parse::<u64>().expect("a numeric GitHub user id"), 331648616);
+        assert_eq!(rest, "colonizer-settlers@users.noreply.github.com");
+    }
+
+    #[test]
+    fn github_login_reads_the_account_behind_a_noreply_address() {
+        fn login(email: &str) -> Option<String> {
+            CoAuthor {
+                name: "x".into(),
+                email: email.into(),
+            }
+            .github_login()
+            .map(str::to_string)
+        }
+        assert_eq!(
+            login("331648616+colonizer-settlers@users.noreply.github.com").as_deref(),
+            Some("colonizer-settlers")
+        );
+        assert_eq!(
+            login("colonizer-settlers@users.noreply.github.com").as_deref(),
+            Some("colonizer-settlers"),
+            "the legacy form without an id prefix still names the account"
+        );
+        assert_eq!(login("someone@example.com"), None);
+        assert_eq!(login("not-an-email"), None);
+        assert_eq!(login("abc+colonizer-settlers@users.noreply.github.com"), None);
+        assert_eq!(login("+colonizer-settlers@users.noreply.github.com"), None);
+        assert_eq!(login("331648616+@users.noreply.github.com"), None);
+        assert_eq!(
+            login("331648616+colonizer_settlers@users.noreply.github.com"),
+            None,
+            "a login GitHub would not accept is not credited"
+        );
     }
 
     #[test]
     fn load_reads_colonizer_toml_from_the_config_dir() {
         let dir = std::env::temp_dir().join(format!("colonizer-config-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(FileConfig::load(&dir).publish.co_author, "no file means defaults");
+        assert_eq!(
+            FileConfig::load(&dir).publish.co_author,
+            Some(CoAuthor::settlers()),
+            "no file means defaults"
+        );
 
         std::fs::write(dir.join("colonizer.toml"), "[publish]\nco_author = false\n").unwrap();
-        assert!(
-            !FileConfig::load(&dir).publish.co_author,
+        assert_eq!(
+            FileConfig::load(&dir).publish.co_author,
+            None,
             "the file is read from config_dir/colonizer.toml"
         );
 
         std::fs::write(dir.join("colonizer.toml"), "[publish\nco_author = ").unwrap();
-        assert!(
+        assert_eq!(
             FileConfig::load(&dir).publish.co_author,
+            Some(CoAuthor::settlers()),
             "a broken file falls back rather than failing a publish"
+        );
+
+        std::fs::write(dir.join("colonizer.toml"), "[publish]\nco_author = { name = \"x\" }\n").unwrap();
+        assert_eq!(
+            FileConfig::load(&dir).publish.co_author,
+            Some(CoAuthor::settlers()),
+            "a malformed co_author falls back too, so signing stays on"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
