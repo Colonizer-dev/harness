@@ -1194,6 +1194,7 @@ export function createMockApi(): Api {
       status: "pr_opened",
       mesh: null,
       pr_url: "https://github.com/acme/webshop/pull/61",
+      needs_rebase: true,
       cost_usd: 1.12,
       created_at: ago(1600),
       updated_at: ago(1560),
@@ -1379,6 +1380,7 @@ export function createMockApi(): Api {
     status: "queued",
     mesh: null,
     parent: "stuck2468",
+    queued_behind: "stuck2468",
     base: "colonizer/issue-43-stuck2468",
     created_at: ago(2),
   });

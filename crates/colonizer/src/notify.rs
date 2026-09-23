@@ -58,6 +58,10 @@ pub enum Event {
     /// A configured model provider's failure rate crossed the degraded line
     /// ([`crate::gateway::DEGRADED_PCT`]). The one event with no colony behind it.
     ProviderDegraded,
+    /// `rebase_orphaned` became true (issue #453): the colony behind a pull request that fell
+    /// behind its base is gone, so nothing is left running that will ever rebase it or clear the
+    /// flag itself — a person has to.
+    NeedsRebase,
 }
 
 impl Event {
@@ -69,6 +73,7 @@ impl Event {
             Event::Failed => "failed",
             Event::PullRequest => "pull_request",
             Event::ProviderDegraded => "provider_degraded",
+            Event::NeedsRebase => "needs_rebase",
         }
     }
 
@@ -81,6 +86,7 @@ impl Event {
             Event::Attention(_) => "has stalled",
             Event::Failed => "failed",
             Event::PullRequest => "opened a pull request",
+            Event::NeedsRebase => "fell behind its base, but the colony behind it is gone",
             // A provider names no colony, so this session-shaped path is never called with the
             // provider event; its line is [`Event::provider_text`]'s to build.
             Event::ProviderDegraded => {
@@ -107,6 +113,9 @@ impl Event {
 pub struct Seen {
     pub status: SessionStatus,
     pub attention: Option<String>,
+    /// Mirrors [`Session::rebase_orphaned`]: set once nothing is left running to clear
+    /// `needs_rebase` on its own.
+    pub rebase_orphaned: bool,
 }
 
 impl Seen {
@@ -118,6 +127,7 @@ impl Seen {
                 .as_ref()
                 .and_then(|a| a["reason"].as_str())
                 .map(String::from),
+            rebase_orphaned: session.rebase_orphaned,
         }
     }
 }
@@ -147,6 +157,12 @@ pub fn decide(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec
     }
     if settings.on_pull_request && became(SessionStatus::PrOpened) {
         events.push(Event::PullRequest);
+    }
+    // Same switch as attention (issue #453): an orphaned rebase is exactly the kind of thing
+    // attention notifications already exist for — something the loop cannot fix itself — and it
+    // did not seem worth a dedicated schema field for one more edge in the same family.
+    if settings.on_attention && now.rebase_orphaned && !last.rebase_orphaned {
+        events.push(Event::NeedsRebase);
     }
     events
 }
@@ -390,9 +406,9 @@ pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
             "issue": session.issue,
             "status": session.status,
         },
-        // The pull request address only on the event that is about one; the field stays present so
+        // The pull request address only on events that are about one; the field stays present so
         // a receiver reads one shape.
-        "pr_url": if event == Event::PullRequest { session.pr_url.clone() } else { None },
+        "pr_url": if matches!(event, Event::PullRequest | Event::NeedsRebase) { session.pr_url.clone() } else { None },
         // Session events are never about a provider; the key stays present so a receiver reads one
         // shape, the same reason `pr_url` is always here.
         "provider": None::<Value>,
@@ -733,6 +749,7 @@ mod tests {
         Seen {
             status,
             attention: attention.map(String::from),
+            rebase_orphaned: false,
         }
     }
 
@@ -809,6 +826,35 @@ mod tests {
             "autopilot's flag is not the watchdog's"
         );
         assert!(edge(Some("autopilot_held"), None).is_empty(), "clearing announces nothing");
+    }
+
+    #[test]
+    fn rebase_orphaned_becoming_true_fires_once_and_only_with_on_attention() {
+        let s = settings();
+        let orphaned = |rebase_orphaned: bool| Seen {
+            status: SessionStatus::PrOpened,
+            attention: None,
+            rebase_orphaned,
+        };
+        assert_eq!(
+            decide(&s, Some(&orphaned(false)), &orphaned(true)),
+            vec![Event::NeedsRebase],
+            "becoming orphaned is the edge"
+        );
+        assert!(
+            decide(&s, Some(&orphaned(true)), &orphaned(true)).is_empty(),
+            "held orphaned is not an edge"
+        );
+        assert!(
+            decide(&s, Some(&orphaned(true)), &orphaned(false)).is_empty(),
+            "clearing announces nothing"
+        );
+        let mut off = s.clone();
+        off.on_attention = false;
+        assert!(
+            decide(&off, Some(&orphaned(false)), &orphaned(true)).is_empty(),
+            "gated by the same switch as attention"
+        );
     }
 
     #[test]
@@ -941,6 +987,7 @@ mod tests {
             (Event::Attention("stalled"), SessionStatus::Running),
             (Event::Failed, SessionStatus::Failed),
             (Event::PullRequest, SessionStatus::PrOpened),
+            (Event::NeedsRebase, SessionStatus::PrOpened),
         ] {
             let session = colony("abc123", status);
             let body = serde_json::to_string(&payload(event, at, &session)).unwrap();
@@ -964,11 +1011,11 @@ mod tests {
                 value["provider"].is_null(),
                 "a session event is never about a provider: {body}"
             );
-            if event == Event::PullRequest {
+            if matches!(event, Event::PullRequest | Event::NeedsRebase) {
                 assert_eq!(
                     value["pr_url"],
                     json!("https://github.com/acme/webshop/pull/7"),
-                    "the pull request event carries its address"
+                    "events about a pull request carry its address"
                 );
             } else {
                 assert!(value["pr_url"].is_null(), "{event:?} carries no pr_url: {body}");
@@ -1012,6 +1059,7 @@ mod tests {
             Seen {
                 status: SessionStatus::Running,
                 attention: None,
+                rebase_orphaned: false,
             },
         );
         // The known colony failed: an edge. The fresh one is seen for the first time: not.

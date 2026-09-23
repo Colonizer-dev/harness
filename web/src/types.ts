@@ -61,6 +61,10 @@ export interface Session {
   base: string | null;
   /** The colony this one is stacked on: it branched from that colony's branch instead of the default one, which is what `base` then holds. null for an unstacked colony — absent in live data, since the backend omits the field when there is no parent. */
   parent?: string | null;
+  /** The colony this queued one waits for; null when it waits for a parallelism slot instead. Absent in older payloads, which read as a generic queued entry. */
+  queued_behind?: string | null;
+  /** True when the colony branch has diverged from origin/{base} and needs a rebase. Absent in older payloads. */
+  needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
   origin?: string | null;
   worktree: string;
@@ -975,6 +979,8 @@ export interface NewSessionRequest {
   allow_duplicate?: boolean;
   /** Stack the new colony on another's branch: the parent session's id, which becomes `parent` and whose branch becomes `base`. Launching a stack is API-only; no form picker yet. */
   after?: string;
+  /** Opt in to overlap-aware queueing: queue behind a live same-repo colony that's already touching files, instead of developing against the same paths at once. Off by default. */
+  serialize?: boolean;
 }
 
 /**

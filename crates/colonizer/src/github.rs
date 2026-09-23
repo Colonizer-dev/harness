@@ -57,22 +57,10 @@ impl App {
     /// Host-side git, hardened so nothing inside a repository can make it execute code.
     pub fn git_plain(&self) -> Command {
         let mut c = Command::new("git");
-        c.args([
-            "-c",
-            "credential.helper=",
-            "-c",
-            "credential.helper=!gh auth git-credential",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
-        ])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GH_PROMPT_DISABLED", "1");
+        c.args(["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"])
+            .args(HOST_GIT_NO_EXEC)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GH_PROMPT_DISABLED", "1");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
@@ -89,6 +77,20 @@ impl App {
         self.cfg.data_dir.join("repos").join(format!("{repo}.git"))
     }
 }
+
+/// `-c` overrides that stop host-side git from executing anything a repository (or a colony that
+/// can write into it) controls: no hooks, no fsmonitor, no auto gc or maintenance. Every git the
+/// host runs against a colony's worktree or mirror carries these.
+pub(crate) const HOST_GIT_NO_EXEC: [&str; 8] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+];
 
 /// One cached `gh api user` answer: which credential it was read with, when, and what it said.
 /// `Err` keeps the rendered failure. The credential itself is never stored, only its fingerprint,
@@ -859,13 +861,17 @@ pub struct PrInfo {
     /// When GitHub merged the pull request, `None` when it says nothing usable: absent, empty or
     /// unparsable all read as unknown, never as an error — the colony still flips to merged.
     pub merged_at: Option<DateTime<Utc>>,
+    /// The base branch's current commit, as GitHub sees it right now. Issue #453's auto-rebase uses
+    /// this to tell a stale backoff from main having moved on, without a separate `git fetch` just to
+    /// find out: `None` when `gh` left it out, which reads as unknown rather than as a moved sha.
+    pub base_ref_oid: Option<String>,
 }
 
 /// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
 /// the struct and a test holds the two together.
-const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt";
+const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid";
 
 /// Unknown fields are refused so the test below catches a requested field this struct would ignore;
 /// `gh --json` prints only the fields it was asked for, so real output never trips it. The
@@ -881,6 +887,8 @@ struct PrView {
     merge_state_status: Option<String>,
     #[serde(rename = "mergedAt", default)]
     merged_at: Option<String>,
+    #[serde(rename = "baseRefOid", default)]
+    base_ref_oid: Option<String>,
 }
 
 /// Asks GitHub for one pull request's state, mergeability and merge-state status through the user's
@@ -913,6 +921,7 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         mergeability: mergeability_from(view.mergeable.as_deref(), Some(&merge_state_status)),
         merge_state_status,
         merged_at: view.merged_at.as_deref().and_then(parse_merged_at),
+        base_ref_oid: view.base_ref_oid,
     })
 }
 
@@ -2505,6 +2514,7 @@ mod tests {
                 mergeability: Mergeability::Behind,
                 merge_state_status: "BEHIND".to_string(),
                 merged_at: None,
+                base_ref_oid: None,
             }
         );
         assert_eq!(
@@ -2514,6 +2524,7 @@ mod tests {
                 mergeability: Mergeability::Conflicted,
                 merge_state_status: "DIRTY".to_string(),
                 merged_at: None,
+                base_ref_oid: None,
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -2524,7 +2535,17 @@ mod tests {
                 mergeability: Mergeability::Unknown,
                 merge_state_status: "UNKNOWN".to_string(),
                 merged_at: None,
+                base_ref_oid: None,
             }
+        );
+        // `baseRefOid` rides along when GitHub reports one, for the auto-rebase backoff (issue
+        // #453) to tell a stale failure from main having moved on without a separate `git fetch`.
+        assert_eq!(
+            pr_info_from_json(r#"{"state":"OPEN","baseRefOid":"deadbeef"}"#)
+                .unwrap()
+                .base_ref_oid
+                .as_deref(),
+            Some("deadbeef")
         );
         // The raw status rides along uppercased, so the automerge can tell a clean-but-held
         // pull request (blocked for checks, still a draft) apart from a clean-and-ready one.
@@ -2573,6 +2594,7 @@ mod tests {
         assert_eq!(view.mergeable.as_deref(), Some("MERGED"));
         assert_eq!(view.merge_state_status.as_deref(), Some("MERGED"));
         assert_eq!(view.merged_at.as_deref(), Some("MERGED"));
+        assert_eq!(view.base_ref_oid.as_deref(), Some("MERGED"));
     }
 
     #[test]

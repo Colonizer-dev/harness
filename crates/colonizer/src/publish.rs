@@ -4,13 +4,17 @@
 //! The pull-request watcher lives here too: once a colony's work is published, what happens to
 //! that pull request is the last thing the colony's badge still reflects.
 
-use crate::{ApiResult, App, Shared, client_error, github, stack, util::truncate};
+use crate::{
+    ApiResult, App, Shared, client_error, github, stack,
+    util::{short_id, truncate},
+};
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -201,7 +205,7 @@ pub(crate) fn pr_backoff(current: Duration, changed: bool) -> Duration {
 }
 
 /// Per-colony poll bookkeeping, in memory only: it never reaches `sessions.json` or the browsers.
-struct PrPoll {
+pub(crate) struct PrPoll {
     last_checked: Instant,
     backoff: Duration,
     /// Set while `gh` keeps failing, so the reason is logged once per streak, not once per attempt.
@@ -209,6 +213,252 @@ struct PrPoll {
     /// The last mergeability worth saying anything about: only non-`Unknown` readings are kept, so
     /// an `UNKNOWN` between two identical readings never re-logs.
     mergeability: Option<github::Mergeability>,
+    /// The main sha the last auto-rebase acted on: the once-per-sha guard, so a main that has not
+    /// moved never re-triggers.
+    last_rebase_sha: Option<String>,
+    /// When the watcher may try to auto-rebase again after a failure; `None` means now.
+    rebase_backoff_until: Option<Instant>,
+    /// The main sha the failure behind `rebase_backoff_until` was recorded against, so
+    /// [`crate::rebase::rebase_due`] can tell a still-stuck main from one that has since moved on.
+    rebase_failed_base: Option<String>,
+}
+
+/// How long a failed auto-rebase waits before the watcher tries again.
+pub(crate) const REBASE_BACKOFF: Duration = Duration::from_secs(10 * 60);
+
+/// What one auto-rebase attempt did. The watch loop records the guard (`Rebased`, `Woke`) and the
+/// backoff (`Failed`, `Conflicted`) on its in-memory poll; the session's `needs_rebase` flag is
+/// updated here.
+pub(crate) enum RebaseOutcome {
+    /// Nothing to rebase: the colony is gone, merged/closed, or has no worktree left.
+    Gone,
+    /// Already rebased onto this main: the once-per-sha guard held.
+    Skipped,
+    /// A gone colony's branch was rebased on the host and pushed; carries the main sha for the guard.
+    Rebased(String),
+    /// A *live* colony was asked to rebase and re-gate itself, inside its own microVM, instead of
+    /// the host touching its branch; carries the main sha the wake named. Treated the same as
+    /// `Rebased` for the once-per-sha guard — the wake is this attempt's whole effect, and re-sending
+    /// it every tick for a main that has not moved would just spam the colony.
+    Woke(String),
+    /// Conflicts on the host's mechanical rebase of a gone colony's branch: the rebase was aborted
+    /// and, if anyone was left running, the colony was woken to resolve them.
+    Conflicted,
+    /// Anything else (fetch/rebase/push failed, writes blocked); back off.
+    Failed,
+}
+
+/// Runs `git` in a worktree with a deadline: trimmed stdout, or the reason it failed.
+async fn git_in(worktree: &std::path::Path, args: &[&str], secs: u64) -> anyhow::Result<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(worktree).args(crate::github::HOST_GIT_NO_EXEC).args(args);
+    Ok(crate::util::exec_within(Duration::from_secs(secs), &mut cmd)
+        .await?
+        .trim()
+        .to_string())
+}
+
+/// Rebases a behind/conflicted pull request's branch onto its base (issue #453). Security fix from
+/// review: a colony's branch — and everything its own gates run — is attacker/agent-controlled
+/// content, so **whether the colony is live is decided first, before any git write on the host
+/// worktree.** A live colony is asked to rebase and re-gate *itself*, inside its own microVM, where
+/// its own content is the right sandbox for its own content; the host never runs `git rebase`, and
+/// never runs gates, against a live colony's worktree. Only a colony with nothing left running gets
+/// a plain mechanical host rebase — git's own merge machinery, not repo-controlled shell execution —
+/// and even then the host no longer re-runs gates before pushing: GitHub's own CI is the gate for
+/// that path now. On conflict the mechanical rebase is aborted; when no colony is running to fix it,
+/// the session flag says a person should look. Best effort with timeouts throughout — never panics,
+/// and every outcome is said in the colony's own log.
+pub(crate) async fn attempt_auto_rebase(
+    app: &Shared,
+    session_id: &str,
+    mergeability: github::Mergeability,
+    last_rebased: Option<String>,
+) -> RebaseOutcome {
+    let Some(s) = app.session(session_id).await else {
+        return RebaseOutcome::Gone;
+    };
+    if matches!(s.status, SessionStatus::Merged | SessionStatus::Closed)
+        || s.git_admin_dir.is_none()
+        || !std::path::Path::new(&s.worktree).is_dir()
+    {
+        // Nothing to rebase onto what is gone or finished; the flags say a person should look, and
+        // that nothing is left running that will ever clear them itself.
+        app.update_session(session_id, |x| {
+            x.needs_rebase = true;
+            x.rebase_orphaned = true;
+        })
+        .await;
+        return RebaseOutcome::Gone;
+    }
+    // Issue #84: a rebase plus a push writes, so the kill-switch refuses before git runs.
+    if crate::authority::external_writes_blocked() {
+        app.session_log(
+            session_id,
+            "warn",
+            "its pull request fell behind its base, but external writes are blocked, so it was left alone; \
+             rebase it by hand once writes are allowed"
+                .to_string(),
+        )
+        .await;
+        app.update_session(session_id, |x| x.needs_rebase = true).await;
+        return RebaseOutcome::Failed;
+    }
+    // Decided before any git write below: presence in the runtimes map outlives the colony
+    // (`teardown_vm` never removes its entry), so it alone cannot tell a live colony from one
+    // already torn down. The session's own status is the liveness truth; the sender being closed is
+    // the same fact seen from the other side, checked too since a status flip and a channel close
+    // are not the same write.
+    let live_runtime = if s.status.is_live() {
+        app.runtimes
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .filter(|rt| !rt.commands.is_closed())
+    } else {
+        None
+    };
+    let worktree = std::path::PathBuf::from(&s.worktree);
+    let base = s.base.clone().unwrap_or_else(|| "main".to_string());
+    let origin_base = format!("origin/{base}");
+    // A plain `fetch` and `rev-parse` only update the local remote-tracking ref and read it — never
+    // touching the colony's checked-out branch — so both paths below may learn the current base sha
+    // this way regardless of liveness.
+    if let Err(e) = git_in(&worktree, &["fetch", "origin"], 30).await {
+        app.session_log(
+            session_id,
+            "warn",
+            format!("auto-rebase: could not fetch origin ({e:#}); will retry"),
+        )
+        .await;
+        return RebaseOutcome::Failed;
+    }
+    let main_sha = match git_in(&worktree, &["rev-parse", &origin_base], 10).await {
+        Ok(sha) => sha,
+        Err(e) => {
+            app.session_log(
+                session_id,
+                "warn",
+                format!("auto-rebase: could not read {origin_base} ({e:#}); will retry"),
+            )
+            .await;
+            return RebaseOutcome::Failed;
+        }
+    };
+    // The decision, with the sha the guard needs: behind/conflicted onto a main not tried before.
+    if !crate::rebase::should_auto_rebase(mergeability, Some(&main_sha), last_rebased.as_deref()) {
+        return RebaseOutcome::Skipped;
+    }
+    if let Some(rt) = live_runtime {
+        // The colony does its own rebase, its own gates, and its own push — inside its own
+        // microVM — rather than the host running any of that unsandboxed against its branch.
+        let text = crate::rebase::rebase_request_text(&s.branch, &base, &main_sha);
+        rt.send_command(json!({"type": "user_message", "id": format!("rebase-{}", short_id()), "text": text}));
+        app.session_log(
+            session_id,
+            "info",
+            format!("auto-rebase: asked the live colony to rebase onto {main_sha} itself"),
+        )
+        .await;
+        return RebaseOutcome::Woke(main_sha);
+    }
+    // Nothing is running for this colony any more: a plain mechanical rebase on the host is git's
+    // own merge machinery, not repo-controlled shell execution, so it is still done here.
+    // Said before touching anything: files both sides changed are the ones a rebase trips on.
+    let main_range = format!("HEAD..{origin_base}");
+    let overlap = crate::rebase::files_overlap(
+        &crate::rebase::touched_files(&worktree, &origin_base).await,
+        &crate::rebase::diff_names(&worktree, &["diff", "--name-only", &main_range]).await,
+    );
+    if !overlap.is_empty() {
+        app.session_log(
+            session_id,
+            "info",
+            format!(
+                "auto-rebase: its base also touched {} file(s) this branch changed: {}",
+                overlap.len(),
+                overlap.join(", ")
+            ),
+        )
+        .await;
+    }
+    let old_head = git_in(&worktree, &["rev-parse", "HEAD"], 10).await.unwrap_or_default();
+    if git_in(&worktree, &["rebase", &origin_base], 90).await.is_err() {
+        // Read the conflicted files before the abort clears them, then say so — nothing is left
+        // running to wake here, since a live colony already returned above.
+        let conflicted = crate::rebase::unmerged_files(&worktree).await;
+        abort_rebase(app, session_id, &worktree).await;
+        let text = crate::rebase::conflict_wake_text(&conflicted, &main_sha, &s.branch);
+        app.session_log(
+            session_id,
+            "warn",
+            format!("auto-rebase hit conflicts and no colony is running to resolve them: {text}"),
+        )
+        .await;
+        app.update_session(session_id, |x| {
+            x.needs_rebase = true;
+            x.rebase_orphaned = true;
+        })
+        .await;
+        return RebaseOutcome::Conflicted;
+    }
+    // The tree must be clean after the rebase: anything still unmerged is not safe to push.
+    if !crate::rebase::unmerged_files(&worktree).await.is_empty() {
+        abort_rebase(app, session_id, &worktree).await;
+        app.session_log(
+            session_id,
+            "warn",
+            "auto-rebase left unmerged files behind, so it was aborted; will retry".to_string(),
+        )
+        .await;
+        return RebaseOutcome::Failed;
+    }
+    // Issue #453 review: gates no longer run on the host here — that meant piping this repo's
+    // `ci.yml` `run:` steps into `sh -c` against attacker/agent-controlled branch content, which is
+    // unsandboxed code execution with the host's real credentials. GitHub's own CI is the gate for
+    // this conflict-free host rebase now, the same as it is for any other push.
+    let lease = if old_head.is_empty() {
+        "--force-with-lease".to_string()
+    } else {
+        format!("--force-with-lease={}:{}", s.branch, old_head)
+    };
+    match git_in(&worktree, &["push", &lease, "origin", &s.branch], 60).await {
+        Ok(_) => {
+            app.session_log(session_id, "info", format!("auto-rebased onto {main_sha} and pushed"))
+                .await;
+            app.update_session(session_id, |x| {
+                x.needs_rebase = false;
+                x.rebase_orphaned = false;
+            })
+            .await;
+            RebaseOutcome::Rebased(main_sha)
+        }
+        Err(e) => {
+            app.session_log(
+                session_id,
+                "warn",
+                format!("auto-rebase: the push was refused ({e:#}); will retry"),
+            )
+            .await;
+            RebaseOutcome::Failed
+        }
+    }
+}
+
+/// Aborts an in-progress rebase, best effort: a failed abort is a worktree stuck mid-rebase, which
+/// would make every future attempt here fail confusingly (an unrelated "already rebasing" git error)
+/// until someone notices — worth its own distinguishable log line rather than folding into the
+/// conflict or gate-failure message that triggered it.
+async fn abort_rebase(app: &Shared, session_id: &str, worktree: &std::path::Path) {
+    if let Err(e) = git_in(worktree, &["rebase", "--abort"], 30).await {
+        app.session_log(
+            session_id,
+            "error",
+            format!("auto-rebase: `git rebase --abort` itself failed ({e:#}); the worktree may be stuck mid-rebase"),
+        )
+        .await;
+    }
 }
 
 /// What the watcher says when a still-open pull request's mergeability moves, if anything: `Behind`
@@ -285,6 +535,9 @@ pub async fn watch_pull_requests(app: Shared) {
                 backoff: PR_POLL_FIRST,
                 failing: false,
                 mergeability: None,
+                last_rebase_sha: None,
+                rebase_backoff_until: None,
+                rebase_failed_base: None,
             });
             let now = Instant::now();
             if !pr_due(poll.last_checked, poll.backoff, now) {
@@ -293,7 +546,8 @@ pub async fn watch_pull_requests(app: Shared) {
             poll.last_checked = now;
             match github::pr_info(&app, &url).await {
                 Ok(info) => {
-                    let (state, mergeability, pr_merged_at) = (info.state, info.mergeability, info.merged_at);
+                    let (state, mergeability, pr_merged_at, base_ref_oid) =
+                        (info.state, info.mergeability, info.merged_at, info.base_ref_oid);
                     poll.failing = false;
                     let target = match state {
                         github::PrState::Open => SessionStatus::PrOpened, // also picks a reopened PR back up
@@ -367,6 +621,47 @@ pub async fn watch_pull_requests(app: Shared) {
                     // suppress the log when it reopens behind or conflicted.
                     if state == github::PrState::Open && mergeability != github::Mergeability::Unknown {
                         poll.mergeability = Some(mergeability);
+                    }
+                    // Issue #453: a still-open PR that fell behind or conflicts is rebased onto its
+                    // base automatically — once per main sha, and with a backoff after failures that
+                    // holds only while main sha stays the failure was recorded against (a moved main
+                    // is news worth trying again for immediately). The git work runs inline like the
+                    // `gh` call above, with short timeouts throughout.
+                    if state == github::PrState::Open
+                        && matches!(mergeability, github::Mergeability::Behind | github::Mergeability::Conflicted)
+                        && crate::rebase::rebase_due(
+                            poll.rebase_failed_base.as_deref(),
+                            poll.rebase_backoff_until,
+                            base_ref_oid.as_deref().unwrap_or(""),
+                            now,
+                        )
+                    {
+                        match attempt_auto_rebase(&app, &s.id, mergeability, poll.last_rebase_sha.clone()).await {
+                            RebaseOutcome::Rebased(sha) | RebaseOutcome::Woke(sha) => {
+                                // A wake message arms the once-per-sha guard exactly like a host
+                                // rebase does — the colony was asked, and re-asking every tick for a
+                                // main that has not moved would just spam it.
+                                crate::rebase::record_rebase_attempt(&mut poll.last_rebase_sha, &sha);
+                                poll.rebase_backoff_until = None;
+                                poll.rebase_failed_base = None;
+                                // Something actually changed: re-check soon to confirm the PR reads clean.
+                                merge_changed = true;
+                            }
+                            RebaseOutcome::Failed | RebaseOutcome::Conflicted => {
+                                poll.rebase_backoff_until = Some(now + REBASE_BACKOFF);
+                                poll.rebase_failed_base = base_ref_oid.clone();
+                            }
+                            RebaseOutcome::Gone | RebaseOutcome::Skipped => {}
+                        }
+                    }
+                    // A clean reading clears the flags a finished rebase — or a hand rebase — left
+                    // behind, orphaned or not: a person catching it up by hand clears it just as well.
+                    if state == github::PrState::Open && mergeability == github::Mergeability::Clean && s.needs_rebase {
+                        app.update_session(&s.id, |x| {
+                            x.needs_rebase = false;
+                            x.rebase_orphaned = false;
+                        })
+                        .await;
                     }
                     poll.backoff = pr_backoff(poll.backoff, merge_changed || changed);
                 }
@@ -717,6 +1012,222 @@ mod tests {
         assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn rebase_backoff_is_ten_minutes_and_the_poll_tracks_the_sha_it_failed_against() {
+        // The decision itself (`crate::rebase::rebase_due`) is exhaustively unit-tested in
+        // rebase.rs; this pins what the watch loop feeds it from a `PrPoll` (Fix 4: the once-a-sha
+        // backoff, not a pure time one).
+        fn poll(until: Option<Instant>, failed_base: Option<&str>) -> PrPoll {
+            PrPoll {
+                last_checked: Instant::now(),
+                backoff: PR_POLL_FIRST,
+                failing: false,
+                mergeability: None,
+                last_rebase_sha: None,
+                rebase_backoff_until: until,
+                rebase_failed_base: failed_base.map(String::from),
+            }
+        }
+        assert_eq!(REBASE_BACKOFF, Duration::from_secs(600));
+        let now = Instant::now();
+        let until = now + Duration::from_secs(60);
+        let due = |p: &PrPoll, current_base: &str| {
+            crate::rebase::rebase_due(p.rebase_failed_base.as_deref(), p.rebase_backoff_until, current_base, now)
+        };
+        assert!(due(&poll(None, None), "abc"), "no failure yet: due");
+        assert!(
+            !due(&poll(Some(until), Some("abc")), "abc"),
+            "a live backoff against the same sha holds"
+        );
+        assert!(
+            due(&poll(Some(until), Some("abc")), "def"),
+            "main moved on while backing off: due again"
+        );
+    }
+
+    #[test]
+    fn a_dirty_reading_wires_into_the_rebase_decision_and_its_guard() {
+        // `gh` reports a conflicted PR as DIRTY; the watcher must read that as a rebase candidate.
+        let conflicted = github::mergeability_from(Some("MERGEABLE"), Some("DIRTY"));
+        assert_eq!(conflicted, github::Mergeability::Conflicted);
+        assert!(crate::rebase::should_auto_rebase(conflicted, Some("abc"), None));
+        // ... and the guard the loop records must hold the retry until main moves.
+        let mut guard = None;
+        crate::rebase::record_rebase_attempt(&mut guard, "abc");
+        assert!(!crate::rebase::should_auto_rebase(conflicted, Some("abc"), guard.as_deref()));
+        assert!(crate::rebase::should_auto_rebase(conflicted, Some("def"), guard.as_deref()));
+        // Behind wires in the same way; clean and unknown never do.
+        assert!(crate::rebase::should_auto_rebase(
+            github::Mergeability::Behind,
+            Some("abc"),
+            None
+        ));
+        assert!(!crate::rebase::should_auto_rebase(
+            github::Mergeability::Clean,
+            Some("abc"),
+            None
+        ));
+        assert!(!crate::rebase::should_auto_rebase(
+            github::Mergeability::Unknown,
+            Some("abc"),
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn host_git_in_a_colony_worktree_never_runs_the_worktrees_hooks() {
+        // A colony can write into its worktree's git config; the host's rebase must not run a hook
+        // it planted there (post-checkout fires on the checkout below).
+        let dir = std::env::temp_dir().join(format!("git-in-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hooks = dir.join("planted-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let marker = dir.join("hook-ran");
+        let hook = hooks.join("post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_fixture(&repo, &["init", "-q", "-b", "main"]);
+        git_fixture(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        git_fixture(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+
+        git_in(&repo, &["checkout", "-q", "-b", "other"], 30).await.unwrap();
+        assert!(!marker.exists(), "host-side git ran a hook the worktree configured");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs a `git` command synchronously against a fixture repo built for this test only — setup,
+    /// not the code under test, which is why it does not go through `git_in`/`exec_within`.
+    fn git_fixture(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap_or_else(|e| panic!("could not run git {args:?} in {}: {e}", dir.display()));
+        assert!(status.success(), "git {args:?} in {} failed", dir.display());
+    }
+
+    /// `git rev-parse HEAD` in a fixture repo, trimmed — test setup, not the code under test.
+    fn git_head(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap_or_else(|e| panic!("could not run git rev-parse HEAD in {}: {e}", dir.display()));
+        assert!(out.status.success(), "git rev-parse HEAD in {} failed", dir.display());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Security fix for issue #453's review: a live colony must never have the host run `git
+    /// rebase` (or anything else that touches its worktree) against its own attacker/agent
+    /// controlled branch. Instead the host sends it a `user_message` asking it to rebase and
+    /// re-gate itself. Built against real local git repos (no network — `origin` is a plain local
+    /// path) so "the host never touches git for it" is checked by the worktree's own HEAD, not by
+    /// trusting the code path taken.
+    #[tokio::test]
+    async fn a_live_colony_is_woken_to_rebase_itself_and_the_host_never_touches_its_worktree() {
+        let root = std::env::temp_dir().join(format!("colonizer-live-rebase-{}", short_id()));
+        let origin = root.join("origin");
+        let worktree = root.join("worktree");
+        std::fs::create_dir_all(&origin).unwrap();
+        git_fixture(&origin, &["init", "-q", "-b", "main"]);
+        git_fixture(&origin, &["config", "user.email", "colony@example.com"]);
+        git_fixture(&origin, &["config", "user.name", "colony"]);
+        git_fixture(&origin, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        git_fixture(&root, &["clone", "-q", origin.to_str().unwrap(), worktree.to_str().unwrap()]);
+        git_fixture(&worktree, &["config", "user.email", "colony@example.com"]);
+        git_fixture(&worktree, &["config", "user.name", "colony"]);
+        // The colony's own unpushed local commit — what a real host-side `git rebase` would replay.
+        git_fixture(&worktree, &["commit", "--allow-empty", "-q", "-m", "local work"]);
+        let local_head = git_head(&worktree);
+        // Main moves on without the colony: if the host ever rebased onto this, the worktree's
+        // HEAD would change.
+        git_fixture(&origin, &["commit", "--allow-empty", "-q", "-m", "main moved on"]);
+
+        let (app, app_root) = crate::sessions::tests::app_with_colony("live", SessionStatus::Running).await;
+        app.update_session("live", |x| {
+            x.git_admin_dir = Some("git".into());
+            x.worktree = worktree.display().to_string();
+            x.base = Some("main".into());
+            x.branch = "colonizer/live-branch".into();
+        })
+        .await;
+        // A fresh runtime's commands channel is open exactly as a live agent link leaves it.
+        let rt = app.runtime("live").await;
+        let mut commands_rx = rt
+            .commands_rx
+            .lock()
+            .await
+            .take()
+            .expect("a fresh runtime keeps its receiver");
+
+        let outcome = attempt_auto_rebase(&app, "live", github::Mergeability::Behind, None).await;
+        let sha = match outcome {
+            RebaseOutcome::Woke(sha) => sha,
+            RebaseOutcome::Rebased(_) => panic!("a live colony must never be rebased by the host"),
+            _ => panic!("expected the live colony to be woken"),
+        };
+        assert_eq!(
+            sha,
+            git_head(&origin),
+            "the sha named is the base it actually fetched, read via git"
+        );
+
+        let sent = commands_rx.try_recv().expect("a wake message was queued for the colony");
+        assert_eq!(sent["type"], "user_message");
+        let text = sent["text"].as_str().unwrap().to_string();
+        assert!(
+            text.contains("colonizer/live-branch") && text.contains("main") && text.contains(&sha),
+            "{text}"
+        );
+        assert!(
+            commands_rx.try_recv().is_err(),
+            "no second command — no gates, no rebase, no push queued"
+        );
+
+        // The proof the host never touched git for it: the worktree's local branch still points at
+        // the colony's own commit, not something a rebase onto main's new commit would have produced.
+        assert_eq!(
+            git_head(&worktree),
+            local_head,
+            "the host must not rebase, reset, or otherwise write to a live colony's worktree"
+        );
+        assert!(!worktree.join(".git/rebase-merge").exists() && !worktree.join(".git/rebase-apply").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&app_root);
+    }
+
+    /// The policy check's other half (see `rebase::the_host_never_shells_out_to_run_repo_controlled_ci_steps`):
+    /// this module's own host-side rebase spawns nothing but `git` — no shell, and no call into the
+    /// gate-running functions the review had removed from `rebase.rs`.
+    #[test]
+    fn the_host_rebase_path_in_publish_rs_only_ever_spawns_git() {
+        // Scan only the production code above this test module: the banned substrings below
+        // necessarily appear, verbatim, in this very assertion, so scanning the whole file
+        // (test module included) would always fail against itself.
+        let source = include_str!("publish.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        for banned in ["Command::new(\"sh\")", ".arg(\"-c\")", "run_gates(", "extract_ci_gates("] {
+            assert!(!production.contains(banned), "{banned} must not reappear in publish.rs");
+        }
     }
 
     #[test]

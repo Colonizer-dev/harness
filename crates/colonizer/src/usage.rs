@@ -691,6 +691,9 @@ mod tests {
             // Added on main while this branch was open; a batch must stay blind to both.
             publish_stage: None,
             publishing_holds_slot: false,
+            needs_rebase: false,
+            rebase_orphaned: false,
+            queued_behind: None,
             app_slot: None,
             boot_attempt_started_at: None,
             mesh: None,
