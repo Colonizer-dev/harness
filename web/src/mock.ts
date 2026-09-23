@@ -2161,16 +2161,19 @@ export function createMockApi(): Api {
     providerHealth: async (id) => {
       const provider = providers.find((p) => p.id === id);
       if (!provider) throw new ApiError("no such provider", 404);
-      // strix is a local server that is switched off; custom endpoints answer but have no /v1/models.
+      // strix is a local server that is switched off; custom endpoints answer but have no /v1/models,
+      // which the Mothership reports as a note (still healthy) for anthropic wire and an error for openai.
       await sleep(provider.id === "strix" ? 2200 : 700);
       const checked_at = now();
       if (provider.id === "strix") {
-        return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", checked_at };
+        return { reachable: false, status: null, latency_ms: null, models: [], error: "connect timed out after 5 s", note: null, checked_at };
       }
       if (provider.preset === "custom") {
-        return { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", checked_at };
+        return provider.wire === "anthropic"
+          ? { reachable: true, status: 404, latency_ms: 38, models: [], error: null, note: "no model list", checked_at }
+          : { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", note: null, checked_at };
       }
-      return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, checked_at };
+      return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, note: null, checked_at };
     },
     models: () =>
       later((): ModelOption[] => [
