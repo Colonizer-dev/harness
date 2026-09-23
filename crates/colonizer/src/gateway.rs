@@ -575,7 +575,9 @@ impl App {
     }
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// Compares two secrets without short-circuiting, so a wrong guess costs the same regardless of
+/// where it differs. Lengths are not hidden (every token here has a fixed length).
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

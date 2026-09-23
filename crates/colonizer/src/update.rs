@@ -36,7 +36,8 @@ use serde_json::{Value, json};
 use tokio::{process::Command, sync::Mutex};
 
 use crate::{
-    Shared,
+    Shared, auth,
+    config::Settings,
     sessions::{Session, SessionStatus},
     util, version,
 };
@@ -343,17 +344,22 @@ fn exec(_binary: &Path, _args: &[std::ffi::OsString]) -> std::io::Error {
 /// then follows the progress it already reports, so the command and the button
 /// in Settings cannot drift apart.
 pub async fn command() -> Result<()> {
-    let bind = util::env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into());
-    let base = format!("http://{bind}");
+    let cfg = Settings::from_env()?;
+    let base = format!("http://{}", cfg.bind);
+    // The mothership's API needs the per-install token; this CLI reads the file the server minted.
+    let token = auth::load_or_create(&cfg.config_dir)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
 
     let status: Value = client
         .get(format!("{base}/api/update"))
+        .bearer_auth(&token)
         .send()
         .await
-        .with_context(|| format!("no mothership answering on {bind}; start `colonizer` first"))?
+        .with_context(|| format!("no mothership answering on {}; start `colonizer` first", cfg.bind))?
+        // A wrong token answers 401, which must surface as refused, not as unparsable JSON.
+        .error_for_status()?
         .json()
         .await?;
 
@@ -383,7 +389,11 @@ pub async fn command() -> Result<()> {
     }
     println!("updating from {installed} to {latest}");
 
-    let started = client.post(format!("{base}/api/update/apply")).send().await?;
+    let started = client
+        .post(format!("{base}/api/update/apply"))
+        .bearer_auth(&token)
+        .send()
+        .await?;
     if !started.status().is_success() {
         let body = started.text().await.unwrap_or_default();
         bail!("{}", util::truncate(body.trim(), 500));
@@ -394,7 +404,7 @@ pub async fn command() -> Result<()> {
     let mut last = String::new();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let Ok(response) = client.get(format!("{base}/api/update")).send().await else {
+        let Ok(response) = client.get(format!("{base}/api/update")).bearer_auth(&token).send().await else {
             println!("the mothership is restarting into {latest}");
             return Ok(());
         };

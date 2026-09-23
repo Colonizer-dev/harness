@@ -4,6 +4,7 @@ import type { ThreadMessageLike } from "@assistant-ui/react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { SOCKET_OPEN, type Api, type SocketLike } from "./api";
 import type { AntRole } from "./components/AntAvatar";
+import { isLive } from "./components/ui";
 import { settlerName, settlerRole } from "./settlers";
 import type {
   AgentEvent,
@@ -112,6 +113,12 @@ export interface StreamState {
    * is seen; past turns are recovered because a (re)connect replays the session's stored event log.
    */
   modelUsage: Record<string, number> | null;
+  /** The model the colony's next turns use, from the latest `model_changed`. Null until the runner reports one. */
+  model: string | null;
+  /** A model asked for with `set_model` and not yet confirmed; a runner that can't switch logs a warning instead. */
+  switchingModel: string | null;
+  /** The last switch that ended in a warning instead of a `model_changed`; cleared by the next switch or report. */
+  refusedModel: string | null;
 }
 
 export function initialStreamState(): StreamState {
@@ -127,6 +134,9 @@ export function initialStreamState(): StreamState {
     connection: "connecting",
     submitting: {},
     modelUsage: null,
+    model: null,
+    switchingModel: null,
+    refusedModel: null,
   };
 }
 
@@ -200,7 +210,11 @@ function modelsOfTurn(previous: Record<string, number> | null, current: Record<s
 }
 
 export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState {
-  if (frame.type === "session") return { ...state, session: frame.session };
+  if (frame.type === "session") {
+    // A colony that stopped being live drops commands, so a switch still pending will never be answered.
+    const switchingModel = isLive(frame.session.status) ? state.switchingModel : null;
+    return { ...state, session: frame.session, switchingModel };
+  }
   if (frame.type === "harness_log") {
     // The harness replays recent logs on every reconnect.
     if (state.logs.some((l) => l.source === "harness" && l.ts === frame.ts && l.message === frame.message)) {
@@ -353,8 +367,14 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
 
     case "log": {
       const entry: LogEntry = { source: "agent", level: ev.level, message: ev.message, ts };
-      return { ...s, logs: [...s.logs, entry].slice(-MAX_LOGS) };
+      // A failed switch comes back as a warning, not a `model_changed`, so any warning ends the wait.
+      const logs = [...s.logs, entry].slice(-MAX_LOGS);
+      const refused = ev.level !== "info" && s.switchingModel !== null;
+      return refused ? { ...s, logs, switchingModel: null, refusedModel: s.switchingModel } : { ...s, logs };
     }
+
+    case "model_changed":
+      return { ...s, model: ev.model, switchingModel: null, refusedModel: null };
 
     default:
       return s; // unknown event types are ignored
@@ -417,6 +437,8 @@ export class SessionStream {
       this.update((s) => ({ ...s, messages: [...s.messages, message] }));
     } else if (command.type === "answer") {
       this.update((s) => ({ ...s, submitting: { ...s.submitting, [command.question_id]: true } }));
+    } else if (command.type === "set_model") {
+      this.update((s) => ({ ...s, switchingModel: command.model, refusedModel: null }));
     }
     return true;
   }
@@ -463,8 +485,8 @@ export class SessionStream {
       if (this.ws !== ws) return;
       this.ws = null;
       if (this.stopped) return;
-      // Answers in flight may not have arrived; let the user resubmit after reconnecting.
-      this.update((s) => ({ ...s, connection: "reconnecting", submitting: {} }));
+      // Answers and model switches in flight may not have arrived; let the user resubmit after reconnecting.
+      this.update((s) => ({ ...s, connection: "reconnecting", submitting: {}, switchingModel: null }));
       const delay = Math.min(1000 * 2 ** this.retries, 10_000);
       this.retries += 1;
       this.timer = setTimeout(() => {

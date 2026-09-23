@@ -7,6 +7,7 @@
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
 - [ ] `cargo test --workspace` passes
 - [ ] `npm test` passes everywhere I touched (`modules/agents/claude-code`, `services/telemetry`, `web`)
+- [ ] If this builds something `docs/gaps.md` lists, ports a design but leaves part of it out, or changes a `docs/vision.md` claim, `docs/gaps.md` is updated
 
 ## Verified on a real colony
 

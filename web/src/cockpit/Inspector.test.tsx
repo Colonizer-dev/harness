@@ -192,6 +192,34 @@ describe("Inspector boot timing", () => {
   });
 });
 
+// The stuck-colony readout (issue #230): the single-session route's diagnosis and recent events.
+describe("Inspector diagnosis", () => {
+  const QUOTA = "API Error: quota has been exhausted. The quota will reset at 09-23 07:54:00 UTC.";
+  const diagnosed = (overrides: Partial<Session> = {}) =>
+    session({
+      status: "running",
+      diagnosis: { state: "waiting_on_provider", text: `waiting on provider: ${QUOTA}`, resets_at: "2026-09-23T07:54:00Z" },
+      recent_events: [{ seq: 42, ts: "2026-09-18T08:20:00Z", type: "assistant_text", summary: QUOTA }],
+      ...overrides,
+    });
+
+  it("shows the diagnosis text and the recent events of a stuck colony", () => {
+    const markup = renderInspector({ session: diagnosed() });
+    expect(markup).toContain("waiting on provider");
+    expect(markup).toContain(QUOTA);
+    expect(markup).toContain(">STATUS<");
+    expect(markup).toContain(">RECENT EVENTS<");
+    expect(markup).toContain("assistant_text");
+  });
+
+  it("a terminal session shows no diagnosis row, even carrying one", () => {
+    const markup = renderInspector({ session: diagnosed({ status: "stopped" }) });
+    expect(markup).not.toContain(">STATUS<");
+    expect(markup).not.toContain(">RECENT EVENTS<");
+    expect(markup).not.toContain(QUOTA);
+  });
+});
+
 describe("pendingQuestionsOf", () => {
   const ASK = { question: "Push now?", header: "Push", multi_select: false, options: [{ label: "Yes" }] };
   const frame = (body: ServerFrame): ServerFrame => body;

@@ -13,6 +13,7 @@ import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui
 import { useBehind } from "../behind";
 import { useApi } from "../context";
 import { needsYou } from "../notifications";
+import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
@@ -317,6 +318,8 @@ export function Inspector({
   const api = useApi();
   // How far the colony branch lags origin/{base} (issue #173); display-only, like everything here.
   const { behind } = useBehind(session);
+  // Why the colony is not progressing, polled from the single-session route (issue #230).
+  const { diagnosis, recentEvents } = useSessionDiagnosis(session);
   const [findings, setFindings] = useState<FindingChain[]>([]);
   useEffect(() => {
     if (!session) return;
@@ -501,6 +504,36 @@ export function Inspector({
                     open the colony and answer →
                   </button>
                 </div>
+              )}
+
+              {diagnosis && (
+                // Why this colony is not progressing, in the mothership's own words (issue #230).
+                <Section title="STATUS">
+                  <div
+                    role="status"
+                    className="rounded-[9px] bg-panel-2 px-3 py-2 text-[12.5px] leading-snug [overflow-wrap:anywhere]"
+                  >
+                    {diagnosis.text}
+                  </div>
+                </Section>
+              )}
+
+              {recentEvents.length > 0 && (
+                <Section title="RECENT EVENTS">
+                  <details className="rounded-[9px] bg-panel-2 px-3 py-2">
+                    <summary className="cursor-pointer text-[12px] font-semibold text-muted">
+                      {recentEvents.length} recent event{recentEvents.length === 1 ? "" : "s"}
+                    </summary>
+                    <ol className="mt-1.5 flex flex-col gap-1">
+                      {recentEvents.map((event) => (
+                        <li key={event.seq} className="text-[12px] leading-snug [overflow-wrap:anywhere]">
+                          <span className="font-mono text-[11px] text-faint">{event.type}</span>{" "}
+                          <span className="text-muted">{event.summary}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                </Section>
               )}
 
               <div className="grid shrink-0 grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">

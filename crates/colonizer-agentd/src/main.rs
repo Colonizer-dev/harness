@@ -277,7 +277,7 @@ fn forward_command(state: &AppState, text: &str) {
         return;
     };
     let kind = command["type"].as_str().unwrap_or_default();
-    if !matches!(kind, "user_message" | "answer" | "interrupt") {
+    if !matches!(kind, "user_message" | "answer" | "interrupt" | "set_model") {
         return;
     }
     if !state.runner.send(&command) {
