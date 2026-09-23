@@ -159,6 +159,17 @@ fn file_starts_with_shebang(path: &Path) -> bool {
     f.read_exact(&mut head).is_ok() && head == *b"#!"
 }
 
+/// Whether `disk` is a regular file that really lives inside `work_tree`. The colony controls the
+/// worktree's contents, so a symlinked file or a symlinked directory on the way could point the
+/// host's `chmod` at a file outside it; either reads as "not ours" and the path is skipped.
+fn regular_file_inside(work_tree: &Path, disk: &Path) -> bool {
+    let is_file = std::fs::symlink_metadata(disk).is_ok_and(|m| m.file_type().is_file());
+    let (Ok(root), Ok(real)) = (work_tree.canonicalize(), disk.canonicalize()) else {
+        return false;
+    };
+    is_file && real.starts_with(&root)
+}
+
 fn chmod_plus_x(path: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("could not stat {}", path.display()))?;
     let mut perms = meta.permissions();
@@ -195,6 +206,9 @@ pub async fn restore_dropped_exec_bits(
             continue;
         }
         let disk = work_tree.join(&change.path);
+        if !regular_file_inside(work_tree, &disk) {
+            continue;
+        }
         let has_shebang = file_starts_with_shebang(&disk);
         if !should_restore(
             &change.path,
@@ -223,6 +237,41 @@ pub async fn restore_dropped_exec_bits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlinks_and_paths_escaping_the_worktree_are_never_chmodded() {
+        let base = std::env::temp_dir().join(format!("exec-bits-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (work, outside) = (base.join("work"), base.join("outside"));
+        std::fs::create_dir_all(work.join("scripts")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(work.join("scripts/ok.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(outside.join("victim.sh"), "#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("victim.sh"), work.join("scripts/link.sh")).unwrap();
+        std::os::unix::fs::symlink(&outside, work.join("escape")).unwrap();
+
+        assert!(
+            regular_file_inside(&work, &work.join("scripts/ok.sh")),
+            "a plain file inside is ours"
+        );
+        assert!(
+            !regular_file_inside(&work, &work.join("scripts/link.sh")),
+            "a symlinked file is skipped"
+        );
+        assert!(
+            !regular_file_inside(&work, &work.join("escape/victim.sh")),
+            "a symlinked directory is skipped"
+        );
+        assert!(
+            !regular_file_inside(&work, &work.join("../outside/victim.sh")),
+            "a `..` path is skipped"
+        );
+        assert!(
+            !regular_file_inside(&work, &work.join("scripts/missing.sh")),
+            "a missing file is skipped"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn new_added_and_deleted_entries_are_never_candidates() {
