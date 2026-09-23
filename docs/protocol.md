@@ -309,7 +309,7 @@ partition the launch, so they sum to at most `total_ms`:
 | :--- | :--- |
 | `issue` | Fetching the issue and resolving the base branch |
 | `git` | Syncing the bare clone and laying down the worktree |
-| `providers` | Health probes for the model providers this colony will use |
+| `providers` | Health probes for the model providers this colony will use (60 s host-side cache; the manual health check always probes and warms it) |
 | `mesh-start` | Starting the mesh and minting the colony's pre-auth key |
 | `image-pull` | Downloading the colony image, when it was not in the local cache. Near zero once it is |
 | `vm-boot` | `msb run`. The pull is its own phase above, unless it failed and `msb run` had to do it |
@@ -319,6 +319,20 @@ partition the launch, so they sum to at most `total_ms`:
 The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
+
+Warm-start contract: what a second boot reuses, and what it cannot. The bare clone per repository
+under the data dir persists, so `git` only runs `fetch --prune origin` — the colony must branch off
+current upstream, not yesterday's. The colony image is pinned by digest (`presets::pinned()`
+boots `<image>@sha256:<digest>` with the digest compiled in from `crates/colonizer/images.lock`)
+and stays in the local cache,
+pre-warmed from Settings (`POST /api/sandbox/pull`). The `providers` probes are served from a 60 s
+host-side cache keyed on provider id plus endpoint, which the manual health check writes through —
+the unreachable warning still logs on every boot, from the cached value when that is what was used.
+Everything else repeats per boot on purpose: a new boot lays down a fresh worktree, `mesh-join`
+waits on a node whose single-use pre-auth key was minted for this boot (a VM that did not exist
+until `vm-boot` has no identity to reuse, and it runs its own tailscaled), and `agentd` runs inside
+that fresh VM, so its `/v1/health` must be polled per boot. A VM warm pool is not attempted until
+per-phase data shows it would pay.
 
 Pre-worktree boot steps retry transient failures instead of failing the colony on the first blip.
 Fetching the issue, resolving the default branch, syncing the bare clone and creating the

@@ -6,7 +6,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error,
-    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, health},
+    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, forget_probe, health},
     orgs::effective_agent,
     provider_quota,
     sessions::agent_env,
@@ -671,6 +671,9 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         None => providers.push(provider.clone()),
     }
     app.save_providers(&providers)?;
+    // The probe cache key carries no credential, so a rotated key or a changed auth mode /
+    // endpoint would otherwise keep serving the old answer for up to the probe TTL.
+    forget_probe(&app, &id).await;
     let envs = runner_envs(&app).await;
     Ok(Json(describe(&app, &provider, &envs)))
 }
@@ -689,6 +692,8 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // A provider that no longer exists must not keep its usage record forever.
     app.gateway.forget_usage(&id);
     app.gateway.forget_quota(&id);
+    // Nor its probe answer: a later provider reusing the id must be probed fresh.
+    forget_probe(&app, &id).await;
     Ok(Json(json!({"ok": true})))
 }
 
