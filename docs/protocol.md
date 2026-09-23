@@ -415,7 +415,7 @@ new one. `--write` rewrites the lock, comments included. `.github/workflows/vend
 runs it daily, stages the result with `VENDOR_KINDS=plugin scripts/fetch-vendor.sh` so a failing check
 stops the proposal, pushes `vendor/plugin-updates`, and opens a pull request, or, while the repository
 doesn't let GitHub Actions open pull requests, keeps an issue open with the same description and a link to
-open it. It never merges.
+open it, closing the issue once a run finds nothing to change. It never merges.
 
 **Keeping the runtime pins current.** The same model covers the two runtime locks:
 `crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest:
