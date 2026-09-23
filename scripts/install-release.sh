@@ -178,7 +178,7 @@ main() {
     *":$HOME/.local/bin:"*) run="colonizer" ;;
     *) run="$HOME/.local/bin/colonizer" ;;
   esac
-  echo "Run '$run' and open http://127.0.0.1:7878. If it was already running, restart it."
+  echo "Run '$run'; it prints and opens a sign-in link ('colonizer open' reprints it). If it was already running, restart it."
   echo "Guide: $docs"
 }
 

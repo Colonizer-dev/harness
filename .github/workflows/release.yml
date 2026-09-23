@@ -181,8 +181,9 @@ jobs:
               exit 1
             fi
           fi
+          # COLONIZER_NO_BROWSER: the app opens its sign-in link at startup, and a runner has no one to see it.
           HOME="$PWD/smoke/home" COLONIZER_BIND=127.0.0.1:17878 COLONIZER_GATEWAY_BIND=127.0.0.1:17879 \
-            smoke/colonizer/bin/colonizer > smoke/log 2>&1 &
+            COLONIZER_NO_BROWSER=1 smoke/colonizer/bin/colonizer > smoke/log 2>&1 &
           pid=$!
           for _ in $(seq 60); do
             curl -fsS -o /dev/null http://127.0.0.1:17878/api/status && break
@@ -190,13 +191,16 @@ jobs:
           done
           cat smoke/log
           grep -q "^assets: .*/smoke/colonizer$" smoke/log
-          curl -fsS http://127.0.0.1:17878/api/status | tee smoke/status.json
+          # Since #405 the full status and the UI need the per-install API token; without it
+          # /api/status answers only counts and health, and / answers 401.
+          token=$(cat smoke/home/.config/colonizer/api-token)
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:17878/api/status | tee smoke/status.json
           echo
           # The app found its own parts: the in-VM daemon, the web UI and the Claude Code module.
           grep -q '"agentd":true' smoke/status.json
           grep -q '"web":true' smoke/status.json
           grep -q '"claude-code"' smoke/status.json
-          curl -fsS http://127.0.0.1:17878/ | grep -qi '<html'
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:17878/ | grep -qi '<html'
           kill "$pid"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
