@@ -26,6 +26,7 @@ mod findings;
 mod fleet;
 mod gateway;
 mod github;
+mod graft;
 mod headroom;
 mod hunters;
 mod jev;
@@ -236,6 +237,8 @@ pub struct App {
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<headroom::Status>,
+    /// The graft skillset download (graft.rs), for Settings.
+    pub graft: Mutex<graft::Status>,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
     pub updates: version::Updates,
@@ -1394,6 +1397,7 @@ async fn serve() -> Result<()> {
         fleet_cache: fleet::FleetCache::new(),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
+        graft: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
         updates: version::Updates::new(&cfg.config_dir)?,
         updater: update::Updater::new(),
@@ -1434,6 +1438,8 @@ async fn serve() -> Result<()> {
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
+        .route("/api/plugins/graft", get(graft::status))
+        .route("/api/plugins/graft/download", post(graft::download))
         .route("/api/hunters/{id}/install", post(hunters::install_handler))
         .route("/api/hunters/{id}/probe", get(hunters::probe_handler))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
@@ -1740,6 +1746,7 @@ pub(crate) mod tests {
             orgs_failed_at: Mutex::new(None),
             pull: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
+            graft: Mutex::new(Default::default()),
             telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
             stream: stream::Hub::new(),
         })

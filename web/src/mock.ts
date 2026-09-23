@@ -16,6 +16,7 @@ import type {
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
+  DownloadableSkillset,
   Issue,
   LogLevel,
   LoginView,
@@ -881,6 +882,19 @@ const MOCK_PRESET_IMAGES: Record<string, string> = {
 const mockPulled = new Set<string>(["node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0"]);
 let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finished_at: null, error: null };
 // Headroom's bundle: a few seconds of download progress, then installed.
+let mockGraft: DownloadableSkillset = { name: "graft", release: "0.19.0-1", installed_release: null, state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
+const GRAFT_BYTES = 84_213_760;
+/** Advances the mock graft download: about four seconds from start to installed. */
+function tickGraft(): DownloadableSkillset {
+  if (mockGraft.state === "downloading" && mockGraft.started_at) {
+    const bytes = Math.min(GRAFT_BYTES, Math.round(((Date.now() - Date.parse(mockGraft.started_at)) / 4000) * GRAFT_BYTES));
+    mockGraft =
+      bytes >= GRAFT_BYTES
+        ? { ...mockGraft, state: "installed", installed_release: mockGraft.release, bytes, total: GRAFT_BYTES, finished_at: new Date().toISOString() }
+        : { ...mockGraft, bytes, total: GRAFT_BYTES };
+  }
+  return mockGraft;
+}
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
 // The live map: not asked yet, so the prompt shows.
@@ -2160,6 +2174,13 @@ export function createMockApi(): Api {
       }, 2500);
       return { started: true };
     },
+    graftSkillset: async () => clone(tickGraft()),
+    graftDownload: async () => {
+      if (mockGraft.state === "idle" || mockGraft.state === "failed") {
+        mockGraft = { ...mockGraft, state: "downloading", bytes: 0, total: GRAFT_BYTES, started_at: new Date().toISOString(), finished_at: null, error: null };
+      }
+      return clone(mockGraft);
+    },
     headroom: async () => {
       if (mockHeadroom.state === "downloading" && mockHeadroom.started_at) {
     const total = 231_330_241;
@@ -2483,7 +2504,12 @@ export function createMockApi(): Api {
         agents: 0,
         commands: 1,
       },
+      // Once downloaded, graft is an ordinary local skillset.
+      ...(tickGraft().state === "installed"
+        ? [{ name: "graft", description: "A code map of the colony's repository (graft by Nanonets)", version: "0.19.0", source: "local" as const, shadows_vendored: false, skills: 1, agents: 0, commands: 0 }]
+        : []),
     ],
+    downloadable: [clone(tickGraft())],
       })),
     providers: () => later(() => providers),
     saveProvider: async (id, body) => {

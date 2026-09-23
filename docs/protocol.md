@@ -1365,6 +1365,8 @@ pull requests small; they will adopt the red-team runs of
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/plugins` | `{local_root, plugins: [{name, description, version, source: "vendored"\|"local", shadows_vendored, skills, agents, commands}]}`, one entry per name resolved the way a colony's boot resolves it. `local_root` is where an operator adds their own; the counts are what Claude Code discovers: `skills/<name>/SKILL.md`, `agents/*.md`, `commands/*.md` |
+| `GET /api/plugins/graft` | The downloadable graft skillset (docs/skill-packs.md, "Downloadable skillsets"): `{name, release, installed_release, state: "idle"\|"downloading"\|"unpacking"\|"installed"\|"failed"\|"unavailable"\|"local", bytes, total, started_at, finished_at, error}`. `GET /api/plugins` carries the same objects under `downloadable` |
+| `POST /api/plugins/graft/download` | Start downloading the bundle `graft.lock` pins for this architecture into `<data>/plugins/graft`, or join the running download; returns at once. `409` when nothing is pinned, or when `plugins/graft` is the operator's own directory |
 
 **Model providers** (credentials stay on the mothership, keys stored 0600):
 

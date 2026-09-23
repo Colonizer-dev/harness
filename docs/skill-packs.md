@@ -131,6 +131,49 @@ description: Use when the colony needs an example worked through.
 Do the example thing, then stop.
 ```
 
+## Downloadable skillsets
+
+Some skillsets are too big, or carry native code, to ship in every release. Those are
+**downloadable**: Settings → Skillsets lists them with a Download button, the mothership
+fetches a bundle pinned by sha256 and unpacks it to `<data>/plugins/<name>`, and from then on
+it is an ordinary local skillset — the same resolution, validation and read-only mount at
+`/opt/colonizer/plugins/<name>` as any other, switched on with the same toggle. Nothing is
+fetched until someone asks, and an operator's own `plugins/<name>` directory is never
+overwritten (the download refuses, and the row says the local copy is used instead).
+
+### graft
+
+[graft](https://github.com/NanoNets/context-graph-engine) (`@nanonets/graft`, MIT) builds a
+code map of a repository — files, symbols and call edges — and answers `graft ask "<task>" --source`,
+`graft grep`, `graft callers <symbol> --depth all`, `graft skeleton <file>` and `graft map` with
+exact `file:line`. The skillset's `SKILL.md` teaches the agent to reach for it before grepping and
+reading files.
+
+| | |
+| --- | --- |
+| Pin | `crates/colonizer/graft.lock`, one row per colony architecture (`linux-x86_64`, `linux-aarch64`), compiled into the mothership |
+| Bundle | `graft/` with the plugin (`.claude-plugin/plugin.json`, `plugin.json`, `skills/graft/SKILL.md`), `bin/graft`, `node/bin/node` (Node 22, `vendor/graft/node.lock`), `runtime/node_modules` (`npm ci` from `vendor/graft/package-lock.json`), `BUNDLE.json`, `LICENSE` — about 80 MB compressed |
+| Built by | `.github/workflows/graft-bundle.yml` on a `graft-<graft version>-<build>` tag (native runners, `node:22-bookworm`, smoke-tested by `scripts/graft-bundle/smoke.sh`); `workflow_dispatch` is a dry run that only uploads artifacts. Locally: `scripts/build-graft-bundle.sh` in a microVM |
+| API | `GET /api/plugins/graft` (state: `idle`, `downloading`, `unpacking`, `installed`, `failed`, `unavailable` when nothing is pinned for this architecture, `local` when `plugins/graft` is the operator's own); `POST /api/plugins/graft/download` starts or joins the download; `GET /api/plugins` carries the same status under `downloadable` |
+
+**Why its own Node.** graft 0.19 imports the native `tree-sitter` 0.21 core at startup, and that
+binding does not compile against Node 24's V8 headers — the major `node-guest` pins for colonies.
+Several grammars also publish no `linux-arm64` prebuild (`tree-sitter-kotlin` none at all), so the
+bundle compiles them against the Node 22 it carries, inside Debian bookworm (the colony image's
+glibc), and `bin/graft` runs graft with that Node, never the colony's.
+
+**In the colony.** The mount is read-only, so `bin/graft` keeps the graph under
+`/var/tmp/colonizer-graft` — outside the worktree, never in a commit — and builds it on the first
+query (`graft build`, the free pass: no model). Every later query keeps it in sync with the agent's
+edits. It runs offline by construction: `ANTHROPIC_*`, `OPENAI_API_KEY` and `GRAFT_*` keys are
+unset for it (only `graft build --deep` would use a model), `DO_NOT_TRACK=1` and `CI=1` close its
+telemetry, and its background registry version check is answered from a cache that never expires.
+
+**Updating graft.** Bump `@nanonets/graft` in `vendor/graft/package.json`, regenerate the lock
+(`npm install --package-lock-only --ignore-scripts`), push a `graft-<version>-1` tag, and pin the
+release's `SHA256SUMS` in `graft.lock` by pull request. A pinned release newer than what is on
+disk shows the Download button again.
+
 ## Reference migration: superpowers
 
 superpowers ([obra/superpowers](https://github.com/obra/superpowers), v6.4.1, MIT) is the

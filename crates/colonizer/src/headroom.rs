@@ -6,13 +6,9 @@
 
 use crate::{App, Shared, util::exec};
 use anyhow::{Context, Result, bail};
-use futures_util::StreamExt;
 use serde::Serialize;
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
-use tokio::{io::AsyncWriteExt, process::Command};
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
 
 /// Compiled in, so the pin always matches the harness that was built.
 const LOCK: &str = include_str!("../headroom.lock");
@@ -169,10 +165,6 @@ pub async fn download(axum::extract::State(app): axum::extract::State<Shared>) -
     Ok(axum::Json(started))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Downloads the archive, checks its sha256 against the pin, and unpacks it into `<data>/headroom/<release>`.
 /// Nothing lands at the final path until the archive has been verified and fully unpacked.
 async fn fetch(app: &Shared, pin: &Pin, generation: u64) -> Result<()> {
@@ -209,48 +201,21 @@ async fn fetch(app: &Shared, pin: &Pin, generation: u64) -> Result<()> {
 }
 
 async fn download_verified(app: &Shared, pin: &Pin, generation: u64, part: &Path) -> Result<()> {
-    // GitHub release downloads redirect to object storage, so redirects are followed here (the provider
-    // gateway's client deliberately does not).
-    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).build()?;
-    let response = client.get(&pin.url).send().await?.error_for_status()?;
-    {
-        let mut status = app.headroom.lock().await;
-        if status.generation == generation {
-            status.total = response.content_length();
-        }
-    }
-    let mut file = tokio::fs::File::create(part).await?;
-    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut stream = response.bytes_stream();
-    let mut bytes = 0u64;
-    let mut reported = 0u64;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("the download was interrupted")?;
-        digest.update(&chunk);
-        file.write_all(&chunk).await?;
-        bytes += chunk.len() as u64;
-        // Progress for Settings about every megabyte, not on every chunk.
-        if bytes - reported >= 1 << 20 {
-            reported = bytes;
+    let progress = |total: Option<u64>, bytes: u64| {
+        let app = app.clone();
+        async move {
             let mut status = app.headroom.lock().await;
             if status.generation == generation {
+                if total.is_some() {
+                    status.total = total;
+                }
                 status.bytes = bytes;
             }
         }
-    }
-    file.flush().await?;
-    drop(file);
-    app.headroom.lock().await.bytes = bytes;
-
-    let got = hex(digest.finish().as_ref());
-    if got != pin.sha256 {
-        bail!(
-            "checksum mismatch for Headroom {}: expected {}, got {got}",
-            pin.release,
-            pin.sha256
-        );
-    }
-    Ok(())
+    };
+    crate::util::download_sha256(&pin.url, &pin.sha256, part, progress)
+        .await
+        .with_context(|| format!("Headroom {}", pin.release))
 }
 
 #[cfg(test)]
@@ -321,6 +286,5 @@ headroom     0.37.0-1  linux-aarch64 bundle  2222  https://example.com/headroom-
         ] {
             assert_eq!(serde_json::to_value(state).unwrap(), name);
         }
-        assert_eq!(hex(&[0x00, 0xab, 0xff]), "00abff");
     }
 }
