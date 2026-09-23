@@ -834,7 +834,7 @@ Client → server:
 {"type":"user_message","text":"…"}                        // harness assigns the id
 {"type":"answer","question_id":"…","answers":{…},"response":null}
 {"type":"interrupt"}
-{"type":"set_model","model":"claude-sonnet-5"}              // trimmed; 1–128 of A–Z a–z 0–9 . _ : - / [ ]
+{"type":"set_model","model":"claude-sonnet-5"}              // trimmed; 1–153 of A–Z a–z 0–9 . _ : - / [ ]
 ```
 
 The harness drops a `set_model` whose trimmed model is empty, too long or has any other character.
