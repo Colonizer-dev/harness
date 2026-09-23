@@ -4,20 +4,25 @@
 // means redefining the built-ins the orchestrator actually delegates to, under their own names, so a
 // Task call keeps landing where it did. An `agents` entry replaces the built-in of the same name.
 //
-// The prompts and the Explore deny list follow the built-ins in Claude Code 2.1.280, the build
-// vendor/claude-code.lock pins. They are copies, so a Claude Code
-// bump that rewrites a built-in leaves these on the older text until someone refreshes them here.
+// The descriptions and prompts are verbatim copies of the built-ins in the build vendor/claude-code.lock
+// pins, snapshotted in vendor/claude-code-builtins.json; the Explore prompt is the variant a colony gets
+// (a POSIX guest searching with find and grep via Bash). A Claude Code bump that rewrites a built-in
+// fails CI until they are refreshed: `sh scripts/fetch-agent-binary.sh && node
+// scripts/builtin-subagents.mjs --write dist/bin/claude-guest` re-extracts the snapshot and shows the diff.
 // Plugin agents and the built-in Plan agent are left alone and keep inheriting the session's effort.
 // `model` is omitted on purpose: CLAUDE_CODE_SUBAGENT_MODEL (COLONIZER_SUBAGENT_MODEL) then applies,
 // exactly as it did for the built-ins.
 
 const GENERAL_PURPOSE_PROMPT = [
   "You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.",
+  '',
   'Your strengths:',
   '- Searching for code, configurations, and patterns across large codebases',
   '- Analyzing multiple files to understand system architecture',
   '- Investigating complex questions that require exploring many files',
   '- Performing multi-step research tasks',
+  '',
+  'Guidelines:',
   "- For file searches: search broadly when you don't know where something lives. Use Read when you know the specific file path.",
   "- For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.",
   '- Be thorough: Check multiple locations, consider different naming conventions, look for related files.',
@@ -28,6 +33,7 @@ const GENERAL_PURPOSE_PROMPT = [
 
 const EXPLORE_PROMPT = [
   "You are a file search specialist for Claude Code, Anthropic's official CLI for Claude. You excel at thoroughly navigating and exploring codebases.",
+  '',
   '=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===',
   'This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:',
   '- Creating new files (no Write, touch, or file creation of any kind)',
@@ -37,21 +43,27 @@ const EXPLORE_PROMPT = [
   '- Creating temporary files anywhere, including /tmp',
   '- Using redirect operators (>, >>, |) or heredocs to write to files',
   '- Running ANY commands that change system state',
+  '',
   'Your role is EXCLUSIVELY to search and analyze existing code. You do NOT have access to file editing tools - attempting to edit files will fail.',
+  '',
   'Your strengths:',
   '- Rapidly finding files using glob patterns',
   '- Searching code and text with powerful regex patterns',
   '- Reading and analyzing file contents',
-  '- Use Glob for broad file pattern matching',
-  '- Use Grep for searching file contents with regex',
+  '',
+  'Guidelines:',
+  '- Use `find` via Bash for broad file pattern matching',
+  '- Use `grep` via Bash for searching file contents with regex',
   '- Use Read when you know the specific file path you need to read',
-  '- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)',
+  '- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail)',
   '- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification',
   '- Adapt your search approach based on the thoroughness level specified by the caller',
   '- Communicate your final report directly as a regular message - do NOT attempt to create files',
+  '',
   'NOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:',
   '- Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations',
   '- Wherever possible you should try to spawn multiple parallel tool calls for grepping and reading files',
+  '',
   "Complete the user's search request efficiently and report your findings clearly.",
 ].join('\n');
 
@@ -85,8 +97,8 @@ export function subagentDefinitions(effort) {
       description:
         'Fast read-only search agent for locating code. Use it to find files by pattern (eg. "src/components/**/*.tsx"), grep for symbols or keywords (eg. "API endpoints"), or answer "where is X defined / which files reference Y." Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: "quick" for a single targeted lookup, "medium" for moderate exploration, or "very thorough" to search across multiple locations and naming conventions.',
       prompt: EXPLORE_PROMPT,
-      // The prompt forbids writing; this is what enforces it. At least the built-in's own deny list in
-      // Claude Code 2.1.280 (the Artifact tools publish pages), plus Task, Agent's older name.
+      // The prompt forbids writing; this is what enforces it. At least the built-in's own deny list (the
+      // Artifact tools publish pages), plus Task, Agent's older name; CI checks it against the snapshot.
       disallowedTools: EXPLORE_DISALLOWED,
       effort,
     },
