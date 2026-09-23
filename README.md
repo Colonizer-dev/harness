@@ -54,7 +54,7 @@ On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git` and `gh`:
 
 ```sh
 curl -fsSL https://colonizer.dev/install.sh | sh
-colonizer               # then open http://127.0.0.1:7878
+colonizer               # prints a sign-in link and opens it (`colonizer open` reprints it)
 ```
 
 That installs the latest [release](https://github.com/Colonizer-dev/harness/releases). To build from
@@ -246,7 +246,10 @@ Stated here rather than buried.
   Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
   publishes no macOS build of it.
 - **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
-- **The web UI has no login.** It binds to `127.0.0.1`, checks `Host` and `Origin` headers, and should stay there.
+- **The cockpit needs its per-install token.** Startup prints a sign-in link and opens it
+  (`colonizer open` reprints it later; `COLONIZER_NO_BROWSER=1` skips the auto-open). The token is
+  kept in `~/.config/colonizer/api-token`. The server binds to `127.0.0.1`, checks `Host` and
+  `Origin` headers, and should stay there.
 - **Colony images need glibc.** A Linux Claude Code binary is mounted read-only into the microVM: the
   host's own on Linux, the `linux-arm64` build fetched at install time on a Mac.
 - **Relays are Tailscale's.** Direct connections don't need them; when a colony falls back to a relay,
@@ -348,6 +351,7 @@ built. Process settings come from the environment:
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
 | `COLONIZER_BIND` | `127.0.0.1:7878` | Listen address |
+| `COLONIZER_NO_BROWSER` | – | Set to skip auto-opening the cockpit sign-in link |
 | `COLONIZER_ALLOWED_HOSTS` | – | Extra `Host` names to accept, comma separated |
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | Provider gateway; colonies reach it through `host.microsandbox.internal` |
 | `COLONIZER_DATA_DIR` | `~/.local/share/colonizer` | Clones, worktrees, colonies, mesh state |

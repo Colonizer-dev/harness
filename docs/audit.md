@@ -27,8 +27,12 @@ These held when the audit checked them against the code.
   limit.
 - **Memory review.** Proposals arrive pending, and only an approved note is mounted into another
   colony. An operator can turn this off for repo notes only; org and global notes are always reviewed.
-- **Host and Origin checks.** The API binds to loopback, rejects unknown `Host` values, and requires
-  a matching `Origin` on non-GET requests and WebSocket upgrades.
+- **API token.** Every cockpit API request needs the per-install token (`<config_dir>/api-token`):
+  an `Authorization: Bearer` header, or the `colonizer_token` cookie, which keeps the same-origin
+  `Origin` requirement on writes and upgrades. The earlier Host-and-Origin checks stopped browsers,
+  not scripts — the API had no authentication until this change. `Host` is still checked against
+  the bind address (DNS rebinding), and unauthenticated `GET /api/status` answers a reduced body
+  (version, counts, capacity and health only) for fleet peers.
 - **Pinned inputs.** The vendored artefacts, the agent binary and the Headroom bundles are verified
   against recorded sha256 digests, and the GitHub Actions are pinned by commit.
 
