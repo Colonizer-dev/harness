@@ -140,6 +140,9 @@ pub struct App {
     session_persist: Mutex<()>,
     /// The latest write failure. Only `Write` alerts go here.
     pub storage_alert: RwLock<Option<StorageAlert>>,
+    /// The last queue-tick free-space verdict, refreshed where the queue
+    /// computes its admission pause so `/api/status` reads it with no I/O.
+    pub disk_verdict: Mutex<reclaim::FreeSpaceVerdict>,
     /// The `LoadDamage` alert `load_sessions` raised at startup, set once and never changed. Kept
     /// apart from `storage_alert` so a later write failure cannot overwrite it and its `.corrupt-`
     /// path, nor a later save mark it recovered.
@@ -496,8 +499,11 @@ pub type ApiResult<T> = Result<Json<T>, AppError>;
 /// alert is `ok` again but keeps its message, time and count: the gap it reports still happened.
 /// `ok` says whether writes are going through, so load damage is `ok` with a null `recovered_at`:
 /// its `kind` is what keeps it on screen, since the colonies it reports never come back.
-fn storage_status(alert: Option<StorageAlert>) -> Value {
-    match alert {
+/// Every payload also carries the last queue-tick free-space verdict: `free_bytes` (null before the
+/// first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk`
+/// (below the higher of the two), and `admission_paused` (below the floor, so the queue holds).
+fn storage_status(alert: Option<StorageAlert>, verdict: &reclaim::FreeSpaceVerdict) -> Value {
+    let mut value = match alert {
         None => json!({"ok": true}),
         Some(alert) => json!({
             "ok": alert.kind == StorageAlertKind::LoadDamage || alert.recovered_at.is_some(),
@@ -507,7 +513,13 @@ fn storage_status(alert: Option<StorageAlert>) -> Value {
             "failures": alert.failures,
             "recovered_at": alert.recovered_at,
         }),
-    }
+    };
+    value["free_bytes"] = json!(verdict.free_bytes);
+    value["warn_free_bytes"] = json!(verdict.warn_free_bytes);
+    value["min_free_bytes"] = json!(verdict.min_free_bytes);
+    value["low_disk"] = json!(verdict.low_disk);
+    value["admission_paused"] = json!(verdict.admission_paused);
+    value
 }
 
 /// An overall bound on the mesh branch of `/api/status`, not just its individual subprocesses:
@@ -584,7 +596,7 @@ async fn reduced_status(app: &Shared) -> Value {
         }
     }
     // The storage message names files, so only its verdict crosses over.
-    let storage_ok = storage_status(app.shown_storage_alert().await)
+    let storage_ok = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default())
         .get("ok")
         .cloned()
         .unwrap_or(json!(true));
@@ -644,7 +656,7 @@ async fn status(
         .count();
     // Cheap, no filesystem I/O: both predicates read in-memory session fields only.
     let (reclaimable, unpushed) = {
-        let cfg = reclaim::ReclaimConfig::from_env();
+        let cfg = reclaim::ReclaimConfig::from_modules(&modules);
         let now = chrono::Utc::now();
         let sessions = app.sessions.read().await;
         (
@@ -668,6 +680,8 @@ async fn status(
     let sandbox_schema = modules::schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let asset = |rel: &str| app.cfg.assets.as_ref().is_some_and(|a| a.join(rel).exists());
     let storage_alert = app.shown_storage_alert().await;
+    // The last queue-tick verdict, read with no I/O: the queue refreshes it every tick.
+    let disk_verdict = app.disk_verdict.lock().await.clone();
     // One entry per configured model provider, so a provider the colony fan-out is degrading is visible
     // from the status poll without opening the providers screen. Named `model_providers` because the
     // `modules` section's `sandbox`/`source`/`mesh` entries are this status's other "providers".
@@ -714,7 +728,7 @@ async fn status(
             "claude_bin_error": claude_bin.err().map(|e| format!("{e:#}")),
         },
         "mesh": mesh,
-        "storage": storage_status(storage_alert),
+        "storage": storage_status(storage_alert, &disk_verdict),
         "runtime": runtime,
         "host": host_value,
         "model_providers": model_providers,
@@ -1152,6 +1166,7 @@ async fn serve() -> Result<()> {
         redteam: redteam::RedTeamStore::new(&cfg.data_dir),
         session_persist: Mutex::new(()),
         storage_alert: RwLock::new(None),
+        disk_verdict: Mutex::new(Default::default()),
         load_damage: corrupt,
         runtimes: Mutex::new(HashMap::new()),
         repo_locks: Mutex::new(HashMap::new()),
@@ -1422,6 +1437,7 @@ pub(crate) mod tests {
             redteam: redteam::RedTeamStore::new(&root.join("data")),
             session_persist: Mutex::new(()),
             storage_alert: RwLock::new(None),
+            disk_verdict: Mutex::new(Default::default()),
             load_damage: None,
             runtimes: Mutex::new(HashMap::new()),
             repo_locks: Mutex::new(HashMap::new()),
@@ -1916,7 +1932,14 @@ pub(crate) mod tests {
 
     #[test]
     fn the_status_storage_key_is_ok_until_a_write_goes_unconfirmed() {
-        assert_eq!(storage_status(None), json!({"ok": true}));
+        let verdict = reclaim::FreeSpaceVerdict::default();
+        let value = storage_status(None, &verdict);
+        assert_eq!(value["ok"], true);
+        assert!(value["free_bytes"].is_null(), "no queue tick has measured yet: {value}");
+        assert_eq!(value["warn_free_bytes"], json!(verdict.warn_free_bytes));
+        assert_eq!(value["min_free_bytes"], json!(verdict.min_free_bytes));
+        assert_eq!(value["low_disk"], false);
+        assert_eq!(value["admission_paused"], false);
         let alert = StorageAlert {
             kind: StorageAlertKind::Write,
             message: "save the session list failed: disk is full".into(),
@@ -1924,7 +1947,7 @@ pub(crate) mod tests {
             failures: 3,
             recovered_at: None,
         };
-        let value = storage_status(Some(alert));
+        let value = storage_status(Some(alert), &verdict);
         assert_eq!(value["ok"], false);
         assert_eq!(value["kind"], "write");
         assert_eq!(value["message"], "save the session list failed: disk is full");
@@ -1949,12 +1972,15 @@ pub(crate) mod tests {
         );
 
         app.storage_failed("save the session list", &anyhow!("disk is full")).await;
-        let failing = storage_status(app.storage_alert.read().await.clone());
+        let failing = storage_status(app.storage_alert.read().await.clone(), &reclaim::FreeSpaceVerdict::default());
         assert_eq!(failing["ok"], false);
         assert!(failing["recovered_at"].is_null(), "{failing}");
+        assert_eq!(failing["failures"], 1, "{failing}");
+        assert!(failing["message"].as_str().unwrap().contains("disk is full"), "{failing}");
+        assert!(failing["ts"].is_string(), "{failing}");
 
         app.persist_sessions().await.unwrap();
-        let recovered = storage_status(app.storage_alert.read().await.clone());
+        let recovered = storage_status(app.storage_alert.read().await.clone(), &reclaim::FreeSpaceVerdict::default());
         assert_eq!(recovered["ok"], true, "a write went through, so the disk is not broken now");
         assert!(recovered["recovered_at"].is_string(), "{recovered}");
         assert_eq!(
@@ -1964,7 +1990,7 @@ pub(crate) mod tests {
         assert_eq!(recovered["failures"], 1);
         assert!(recovered["message"].as_str().unwrap().contains("disk is full"));
         app.storage_succeeded().await;
-        let again = storage_status(app.storage_alert.read().await.clone());
+        let again = storage_status(app.storage_alert.read().await.clone(), &reclaim::FreeSpaceVerdict::default());
         assert_eq!(
             again["recovered_at"], recovered["recovered_at"],
             "recovery is stamped by the first success, not moved by every later one"
@@ -1972,10 +1998,18 @@ pub(crate) mod tests {
 
         app.storage_failed("save the session list", &anyhow!("disk is full again"))
             .await;
-        let failing_again = storage_status(app.storage_alert.read().await.clone());
+        let failing_again = storage_status(app.storage_alert.read().await.clone(), &reclaim::FreeSpaceVerdict::default());
         assert_eq!(failing_again["ok"], false, "a new failure makes the alert current again");
         assert!(failing_again["recovered_at"].is_null(), "{failing_again}");
         assert_eq!(failing_again["failures"], 2, "failures stay cumulative across a recovery");
+        assert_ne!(
+            failing_again["ts"], recovered["ts"],
+            "the new failure is stamped afresh: {failing_again}"
+        );
+        assert!(
+            failing_again["message"].as_str().unwrap().contains("disk is full again"),
+            "{failing_again}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1992,7 +2026,7 @@ pub(crate) mod tests {
         Arc::get_mut(&mut app).unwrap().load_damage = damage;
 
         app.persist_sessions().await.unwrap();
-        let damaged = storage_status(app.shown_storage_alert().await);
+        let damaged = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default());
         assert_eq!(damaged["kind"], "load_damage");
         assert_eq!(damaged["ok"], true, "writes are going through; the kind keeps it shown");
         assert!(
@@ -2002,13 +2036,13 @@ pub(crate) mod tests {
         assert!(damaged["message"].as_str().unwrap().contains(".corrupt-"), "{damaged}");
 
         app.storage_failed("save the session list", &anyhow!("disk is full")).await;
-        let failing = storage_status(app.shown_storage_alert().await);
+        let failing = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default());
         assert_eq!(failing["kind"], "write");
         assert_eq!(failing["ok"], false);
         assert_eq!(failing["failures"], 1, "the load damage is not counted as a failed write");
 
         app.persist_sessions().await.unwrap();
-        let after = storage_status(app.shown_storage_alert().await);
+        let after = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default());
         assert_eq!(after, damaged, "the load damage is shown again, unchanged");
         let _ = std::fs::remove_dir_all(root);
     }

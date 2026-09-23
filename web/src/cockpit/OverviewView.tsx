@@ -40,6 +40,7 @@ import { colonyFacts, hostFacts } from "./host";
 import { OrgSpend } from "./OrgSpend";
 import { RedAnts } from "./RedAnts";
 import { RedTeamCard } from "./RedTeamCard";
+import { StoragePanel } from "./StoragePanel";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -492,6 +493,8 @@ export function OverviewView({
         )}
 
         <FleetPanel hosts={fleet ?? []} />
+
+        <StoragePanel onOpenColony={onOpenColony} />
 
         <BurnDownCard />
 

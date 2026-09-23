@@ -6,7 +6,7 @@
 use crate::{
     ApiResult, Shared, client_error, lifecycle, runtime, sandbox,
     sessions::{Session, SessionStatus},
-    util::{dir_size, env_nonempty, exec, parse_disk_size},
+    util::{dir_size, env_nonempty, exec, format_disk_size, parse_disk_size},
 };
 use axum::{
     Json,
@@ -25,6 +25,7 @@ pub struct ReclaimConfig {
     pub enabled: bool,
     pub retention_secs: u64,
     pub min_free_bytes: u64,
+    pub warn_free_bytes: u64,
 }
 
 pub fn default_retention_secs() -> u64 {
@@ -33,6 +34,10 @@ pub fn default_retention_secs() -> u64 {
 
 pub fn default_min_free_bytes() -> u64 {
     parse_disk_size("5G").unwrap_or(5 * 1024 * 1024 * 1024)
+}
+
+pub fn default_warn_free_bytes() -> u64 {
+    parse_disk_size("10G").unwrap_or(10 * 1024 * 1024 * 1024)
 }
 
 /// Anything but an explicit opt-out keeps the tick on.
@@ -52,18 +57,116 @@ pub fn parse_min_free(text: &str) -> u64 {
     parse_disk_size(text.trim()).unwrap_or_else(default_min_free_bytes)
 }
 
+fn env_enabled() -> bool {
+    env_nonempty("COLONIZER_RECLAIM").map(|v| parse_enabled(&v)).unwrap_or(true)
+}
+
+fn env_retention() -> u64 {
+    env_nonempty("COLONIZER_RECLAIM_RETENTION_HOURS")
+        .map(|v| parse_retention(&v))
+        .unwrap_or_else(default_retention_secs)
+}
+
+/// Floor precedence, pure so tests never touch the process env: an explicitly
+/// saved setting wins, then the env var (backward compatible), then the schema
+/// default. Garbage at any level falls through to the next.
+fn floor_bytes(explicit: Option<&str>, min_env: Option<&str>, schema_default: Option<&str>) -> u64 {
+    explicit
+        .and_then(parse_disk_size)
+        .or_else(|| min_env.map(parse_min_free))
+        .or_else(|| schema_default.and_then(parse_disk_size))
+        .unwrap_or_else(default_min_free_bytes)
+}
+
 impl ReclaimConfig {
-    pub fn from_env() -> Self {
+    /// The live config: env-only switches with the free-space thresholds
+    /// resolved from the sandbox module (precedence: explicit setting, then
+    /// env, then schema default).
+    pub fn from_modules(modules: &crate::config::ModulesConfig) -> Self {
+        let schema = crate::modules::schema_for("sandbox", &modules.sandbox.provider, &[]);
+        let has = |key: &str| schema["properties"].get(key).is_some();
+        // Read once: a folded env-or-default value can't say whether the env
+        // var was set, which decides if the schema default applies.
+        let min_env = env_nonempty("COLONIZER_RECLAIM_MIN_FREE");
         Self {
-            enabled: env_nonempty("COLONIZER_RECLAIM").map(|v| parse_enabled(&v)).unwrap_or(true),
-            retention_secs: env_nonempty("COLONIZER_RECLAIM_RETENTION_HOURS")
-                .map(|v| parse_retention(&v))
-                .unwrap_or_else(default_retention_secs),
-            min_free_bytes: env_nonempty("COLONIZER_RECLAIM_MIN_FREE")
-                .map(|v| parse_min_free(&v))
-                .unwrap_or_else(default_min_free_bytes),
+            enabled: env_enabled(),
+            retention_secs: env_retention(),
+            min_free_bytes: if has("min_free_disk") {
+                floor_bytes(
+                    modules.sandbox.settings.get("min_free_disk").and_then(Value::as_str),
+                    min_env.as_deref(),
+                    schema["properties"]["min_free_disk"]["default"].as_str(),
+                )
+            } else {
+                floor_bytes(None, min_env.as_deref(), None)
+            },
+            warn_free_bytes: if has("warn_free_disk") {
+                parse_disk_size(&crate::config::setting_str(&modules.sandbox, &schema, "warn_free_disk"))
+                    .unwrap_or_else(default_warn_free_bytes)
+            } else {
+                default_warn_free_bytes()
+            },
         }
     }
+
+    pub async fn load(app: &Shared) -> Self {
+        let modules = app.modules.read().await;
+        Self::from_modules(&modules)
+    }
+}
+
+/// The last queue-tick free-space verdict, stored on [`crate::App`] so
+/// `/api/status` reads it with no I/O.
+#[derive(Clone, Debug)]
+pub struct FreeSpaceVerdict {
+    pub free_bytes: Option<u64>,
+    pub warn_free_bytes: u64,
+    pub min_free_bytes: u64,
+    pub low_disk: bool,
+    pub admission_paused: bool,
+}
+
+impl Default for FreeSpaceVerdict {
+    fn default() -> Self {
+        Self {
+            free_bytes: None,
+            warn_free_bytes: default_warn_free_bytes(),
+            min_free_bytes: default_min_free_bytes(),
+            low_disk: false,
+            admission_paused: false,
+        }
+    }
+}
+
+/// Pure verdict math: `low_disk` while free space is below the higher of the
+/// two thresholds, `admission_paused` while it is below the floor. A threshold
+/// of 0 is off, and unknown free space (`None`) pauses nothing — no signal is
+/// never a full disk.
+pub fn free_space_verdict(free_bytes: Option<u64>, warn_free_bytes: u64, min_free_bytes: u64) -> FreeSpaceVerdict {
+    let (low_disk, admission_paused) = match free_bytes {
+        Some(free) => (
+            (warn_free_bytes > 0 && free < warn_free_bytes) || (min_free_bytes > 0 && free < min_free_bytes),
+            min_free_bytes > 0 && free < min_free_bytes,
+        ),
+        None => (false, false),
+    };
+    FreeSpaceVerdict {
+        free_bytes,
+        warn_free_bytes,
+        min_free_bytes,
+        low_disk,
+        admission_paused,
+    }
+}
+
+/// Microsandbox's home directory, which holds its shared state including the
+/// OCI image cache: `$MSB_HOME` when set, else `~/.microsandbox`. `None` when
+/// neither answers.
+pub fn microsandbox_home() -> Option<PathBuf> {
+    if let Some(dir) = env_nonempty("MSB_HOME") {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".microsandbox"))
 }
 
 /// A colony whose work is safely on the remote: a pushed terminal state, or
@@ -290,7 +393,7 @@ pub async fn run(app: Shared) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
-        let report = sweep_once(&app, &ReclaimConfig::from_env()).await;
+        let report = sweep_once(&app, &ReclaimConfig::load(&app).await).await;
         if !report.is_empty() {
             eprintln!(
                 "reclaim: reclaimed {}, failed {}, orphans removed {}, held {}",
@@ -303,36 +406,58 @@ pub async fn run(app: Shared) {
     }
 }
 
-pub async fn admission_paused(app: &Shared) -> bool {
-    let cfg = ReclaimConfig::from_env();
-    match free_bytes(&app.cfg.data_dir).await {
-        Some(free) => free < cfg.min_free_bytes,
-        None => false,
+/// One queue-tick verdict: probe free space, record the verdict on the app,
+/// and log the transitions into and out of the pause. Running colonies are
+/// never touched and nothing is deleted — the pause only holds new admissions.
+async fn refresh_disk_verdict(app: &Shared) -> FreeSpaceVerdict {
+    let cfg = ReclaimConfig::load(app).await;
+    let verdict = free_space_verdict(free_bytes(&app.cfg.data_dir).await, cfg.warn_free_bytes, cfg.min_free_bytes);
+    let mut guard = app.disk_verdict.lock().await;
+    if guard.admission_paused != verdict.admission_paused {
+        let free = verdict.free_bytes.map(format_disk_size).unwrap_or_else(|| "unknown".into());
+        let floor = format_disk_size(verdict.min_free_bytes);
+        if verdict.admission_paused {
+            eprintln!(
+                "queue admission paused: {free} free on the data dir's volume is below the {floor} floor; running colonies keep running"
+            );
+        } else {
+            eprintln!("queue admission resumed: {free} free on the data dir's volume is above the {floor} floor");
+        }
     }
+    *guard = verdict.clone();
+    verdict
+}
+
+pub async fn admission_paused(app: &Shared) -> bool {
+    refresh_disk_verdict(app).await.admission_paused
 }
 
 /// `GET /api/storage`: on-demand, read-only disk accounting — totals, what a
 /// sweep would reclaim, and what it would hold back, without deleting anything.
+/// The microsandbox total is its home directory's size — it holds the shared
+/// image cache — informational and never reclaimed.
 pub async fn storage(State(app): State<Shared>) -> Json<Value> {
-    let cfg = ReclaimConfig::from_env();
+    let cfg = ReclaimConfig::load(&app).await;
     let now = Utc::now();
     let sessions = app.sessions.read().await.clone();
     let data_dir = app.cfg.data_dir.clone();
+    let msb_home = microsandbox_home();
     let paths: Vec<(PathBuf, PathBuf)> = sessions
         .iter()
         .map(|s| (PathBuf::from(&s.worktree), app.session_dir(&s.id)))
         .collect();
-    let (wt_total, repos_total, sess_total, sizes) = tokio::task::spawn_blocking(move || {
+    let (wt_total, repos_total, sess_total, sizes, msb_bytes) = tokio::task::spawn_blocking(move || {
         let sizes: Vec<u64> = paths.iter().map(|(wt, dir)| dir_size(wt) + dir_size(dir)).collect();
         (
             dir_size(&data_dir.join("worktrees")),
             dir_size(&data_dir.join("repos")),
             dir_size(&data_dir.join("sessions")),
             sizes,
+            msb_home.filter(|p| p.is_dir()).map(|p| dir_size(&p)),
         )
     })
     .await
-    .unwrap_or((0, 0, 0, Vec::new()));
+    .unwrap_or((0, 0, 0, Vec::new(), None));
     let mut reclaimable = Vec::new();
     let mut unpushed = Vec::new();
     for (s, bytes) in sessions.iter().zip(sizes.into_iter().chain(std::iter::repeat(0))) {
@@ -361,10 +486,15 @@ pub async fn storage(State(app): State<Shared>) -> Json<Value> {
         let action = orphan_action(classify_orphan(&wt, cfg.retention_secs).await);
         orphans.push(json!({"path": path, "bytes": bytes, "action": action}));
     }
+    let free = free_bytes(&app.cfg.data_dir).await;
+    let verdict = free_space_verdict(free, cfg.warn_free_bytes, cfg.min_free_bytes);
     Json(json!({
         "enabled": cfg.enabled, "retention_secs": cfg.retention_secs, "min_free_bytes": cfg.min_free_bytes,
-        "free_bytes": free_bytes(&app.cfg.data_dir).await,
-        "totals": {"worktrees_bytes": wt_total, "repos_bytes": repos_total, "sessions_bytes": sess_total},
+        "warn_free_bytes": cfg.warn_free_bytes,
+        "free_bytes": free,
+        "admission_paused": verdict.admission_paused,
+        "totals": {"worktrees_bytes": wt_total, "repos_bytes": repos_total, "sessions_bytes": sess_total,
+            "microsandbox_bytes": msb_bytes},
         "reclaimable": reclaimable, "unpushed": unpushed, "orphans": orphans,
     }))
 }
@@ -490,6 +620,67 @@ mod tests {
         assert_eq!(orphan_action(OrphanVerdict::Held("dirty".into())), "dirty");
     }
 
+    #[test]
+    fn the_free_space_verdict_pauses_below_the_floor_and_warns_below_the_warn_line() {
+        let gb = 1024 * 1024 * 1024;
+        let paused = free_space_verdict(Some(4 * gb), 10 * gb, 5 * gb);
+        assert!(paused.admission_paused, "below the floor: {paused:?}");
+        assert!(paused.low_disk, "{paused:?}");
+        let low = free_space_verdict(Some(6 * gb), 10 * gb, 5 * gb);
+        assert!(!low.admission_paused, "between floor and warn line: {low:?}");
+        assert!(low.low_disk, "{low:?}");
+        let roomy = free_space_verdict(Some(11 * gb), 10 * gb, 5 * gb);
+        assert!(!roomy.admission_paused && !roomy.low_disk, "above both: {roomy:?}");
+        let unknown = free_space_verdict(None, 10 * gb, 5 * gb);
+        assert!(
+            !unknown.admission_paused && !unknown.low_disk,
+            "no signal is never a full disk: {unknown:?}"
+        );
+        let off = free_space_verdict(Some(0), 0, 0);
+        assert!(!off.admission_paused && !off.low_disk, "0 turns both thresholds off: {off:?}");
+        let empty = free_space_verdict(Some(0), 0, 5 * gb);
+        assert!(
+            empty.admission_paused && empty.low_disk,
+            "zero free is below any live floor: {empty:?}"
+        );
+    }
+
+    #[test]
+    fn the_floor_prefers_an_explicit_setting_then_env_then_the_schema_default() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(floor_bytes(Some("1G"), Some("7G"), Some("5G")), gb);
+        assert_eq!(floor_bytes(Some("0"), Some("7G"), Some("5G")), 0, "0 turns the floor off");
+        assert_eq!(
+            floor_bytes(Some("garbage"), Some("7G"), Some("5G")),
+            7 * gb,
+            "a hand-edited bad value falls through to the env var"
+        );
+        assert_eq!(floor_bytes(None, Some("7G"), Some("5G")), 7 * gb);
+        assert_eq!(floor_bytes(None, None, Some("5G")), 5 * gb);
+        assert_eq!(floor_bytes(None, None, None), default_min_free_bytes());
+    }
+
+    #[test]
+    fn from_modules_honours_explicit_threshold_settings_whatever_the_environment() {
+        // Explicit settings beat any ambient `COLONIZER_RECLAIM_MIN_FREE`, so
+        // this test never reads the process env and stays hermetic.
+        let gb = 1024 * 1024 * 1024;
+        let mut modules = crate::config::ModulesConfig::default();
+        modules.sandbox.settings.insert("min_free_disk".into(), json!("1G"));
+        modules.sandbox.settings.insert("warn_free_disk".into(), json!("2G"));
+        let cfg = ReclaimConfig::from_modules(&modules);
+        assert_eq!(cfg.min_free_bytes, gb);
+        assert_eq!(cfg.warn_free_bytes, 2 * gb);
+        // A provider whose schema lacks the keys ignores even explicit settings;
+        // the warning has no env var, so its fallback is always the default.
+        let mut unknown = modules.clone();
+        unknown.sandbox.provider = "unknown-provider".into();
+        assert_eq!(
+            ReclaimConfig::from_modules(&unknown).warn_free_bytes,
+            default_warn_free_bytes()
+        );
+    }
+
     #[tokio::test]
     async fn a_sweep_reclaims_an_old_pushed_colony_without_external_binaries() {
         let (app, root) = app_with_colony("old1", SessionStatus::PrOpened).await;
@@ -513,6 +704,7 @@ mod tests {
             enabled: true,
             retention_secs: 3600,
             min_free_bytes: 0,
+            warn_free_bytes: 0,
         };
         let report = sweep_once(&app, &cfg).await;
         assert_eq!(report.reclaimed, ["old1"]);
@@ -522,6 +714,7 @@ mod tests {
             enabled: false,
             retention_secs: 0,
             min_free_bytes: 0,
+            warn_free_bytes: 0,
         };
         assert!(sweep_once(&app, &off).await.is_empty(), "disabled means nothing happens");
         let _ = std::fs::remove_dir_all(root);
