@@ -23,6 +23,31 @@ export interface Attention {
   nudges: number;
 }
 
+/** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
+export interface RecentEvent {
+  seq: number;
+  ts: string | null;
+  type: string;
+  summary: string;
+}
+
+export type DiagnosisState = "queued" | "booting" | "working" | "waiting_on_human" | "waiting_on_provider" | "stuck";
+
+/** Why this colony is not progressing — GET /api/sessions/{id} only, non-terminal colonies (issue #230). */
+export interface Diagnosis {
+  state: DiagnosisState;
+  text: string;
+  resets_at?: string;
+}
+
+/** GET /api/status `stall` (issue #230): the queue-wide idle readout; null when nothing is stalled. */
+export interface StallInfo {
+  idle_secs: number;
+  last_event_at: string | null;
+  live: number;
+  queued: number;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -82,6 +107,10 @@ export interface Session {
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+  /** Why the colony is not progressing — single-session GET only (issue #230). */
+  diagnosis?: Diagnosis | null;
+  /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
+  recent_events?: RecentEvent[] | null;
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -181,6 +210,8 @@ export interface HarnessStatus {
   model_providers?: ModelProviderStatus[];
   /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
   quota?: StatusQuota | null;
+  /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
+  stall?: StallInfo | null;
 }
 
 /** GET /api/status `runtime` (issue #129): what kind of machine the mothership runs on, and what it can reach. The mothership re-probes all of it; the frontend only reads. */

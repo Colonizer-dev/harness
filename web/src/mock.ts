@@ -1879,7 +1879,20 @@ export function createMockApi(): Api {
     findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
-    session: async (id) => later(() => find(id).session),
+    session: async (id) =>
+      later(() => {
+        const s = clone(find(id).session);
+        // The single-session route alone carries the stuck-colony readout (issue #230).
+        if (id === "demo1234") {
+          const quota = "API Error: quota has been exhausted. The quota will reset at 09-23 07:54:00 UTC.";
+          s.diagnosis ??= { state: "waiting_on_provider", text: `waiting on provider: quota exhausted, resets 09-23 07:54:00 UTC`, resets_at: "2026-09-23T07:54:00Z" };
+          s.recent_events ??= [
+            { seq: 41, ts: ago(65), type: "status", summary: "working" },
+            { seq: 42, ts: ago(22), type: "assistant_text", summary: quota },
+          ];
+        }
+        return s;
+      }),
     createSession: async (body) => {
       await sleep(450);
       const id = Math.random().toString(16).slice(2, 10);
