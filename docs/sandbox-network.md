@@ -1,7 +1,7 @@
 # Sandbox network policy
 
 This page states what a colony's network policy allows and denies. It covers microsandbox (`msb`)
-0.6.18 as the harness drives it at commit `10a8054`. Every upstream claim cites the v0.6.18 tag,
+0.6.18 as the harness drives it at commit `b60fe59`. Every upstream claim cites the v0.6.18 tag,
 commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/303) and
 [#304](https://github.com/Colonizer-dev/harness/issues/304) build on it.
 
@@ -16,20 +16,31 @@ commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/
 
 - **Boot only.** `crates/colonizer/src/sandbox.rs:62-67` passes one `--net` with the profiles joined
   by `,`, and one `--net-rule` per rule. They go only to `msb run --detach --replace`
-  (`crates/colonizer/src/sandbox.rs:43`), called from `crates/colonizer/src/sessions.rs:1930` and
+  (`crates/colonizer/src/sandbox.rs:43`), called from `crates/colonizer/src/sessions.rs:1981` and
   `crates/colonizer/src/execution.rs:79`. The other `msb` calls (`rm`, `ls`, `image list`, `pull`,
   `--version`) take no network flags (`crates/colonizer/src/sandbox.rs:78-134`,
-  `crates/colonizer/src/main.rs:509-510`).
+  `crates/colonizer/src/main.rs:540-541`).
 - **No other policy flags.** The harness passes no `--dns-nameserver`,
   `--no-dns-rebind-protection`, pool or `--deployment-profile` flag. Besides `--net` and
   `--net-rule`, the flags that change networking are the `-p` publish in risk 5 and the Claude
   credential's `--secret` (`crates/colonizer/src/sandbox.rs:56-70`).
-- **Single-tenant.** Without `--deployment-profile` the CLI leaves the default
+- **Single-tenant by default.** Without `--deployment-profile` the CLI leaves the default
   ([`common.rs:1342-1344`][cli-dp]), which is `SingleTenant` ([`domain.rs:247-254`][dp-default]).
   The multi-tenant floor ([`network.rs:185-186`][dp-enforce], [`network.rs:294-301`][dp-floor])
-  therefore does not apply to colonies.
+  then does not apply, unless the host overrides the profile.
+- **Host override (inferred).** A `deployment_profile` in microsandbox's host-wide config overrides
+  the profile a sandbox asks for, on create and on restart ([`config/mod.rs:151-161`][dp-config],
+  [`local/mod.rs:231-260`][dp-apply], [`create.rs:104`][dp-create],
+  [`sandbox/mod.rs:163`][dp-restart]). That file is `~/.microsandbox/config.json`, unless
+  `MSB_CONFIG_PATH` or `MSB_HOME` points elsewhere ([`config/mod.rs:863-871`][config-path],
+  [`utils/lib/lib.rs:169-176`][msb-home]). The harness does not isolate it: the only variable it
+  sets on `msb` is the secret's (`crates/colonizer/src/sandbox.rs:60`). If the file says
+  `multi-tenant`, the floor is `from_profiles([Public])`, checked alongside the colony's policy
+  ([`poll.rs:395-399`][poll-floor]). That blocks the scoped Host allows, so the gateway and
+  Headscale become unreachable, and published ports are dropped ([`network.rs:523-583`][dp-ports]).
+  The result is stricter: colonies break rather than gain reach.
 - **Out of scope.** The Claude credential's `--secret`, passed when the agent needs Claude
-  (`crates/colonizer/src/sessions.rs:1809-1824`), is not covered here. The egress policy is built
+  (`crates/colonizer/src/sessions.rs:1845-1860`), is not covered here. The egress policy is built
   from `--net` and `--net-rule` alone ([`common.rs:866-923`][cli-parse]).
 - **TLS interception.** A `--secret` also turns on TLS interception
   ([`common.rs:2369-2380`][cli-secret], [`builder.rs:870-887`][secret-tls]), by default on TCP 443
@@ -60,13 +71,13 @@ Every colony starts with `public` (`crates/colonizer/src/sessions.rs:1826`).
 - **Provider gateway.** It binds `127.0.0.1:41750` by default (`crates/colonizer/src/config.rs:62`).
   The guest gets `http://host.microsandbox.internal:<gateway port>/providers/<id>`
   (`crates/colonizer/src/providers.rs:343-357`) in `COLONIZER_MODEL_ROUTES`
-  (`crates/colonizer/src/sessions.rs:1557-1561`).
+  (`crates/colonizer/src/sessions.rs:1580-1584`).
 - **Headscale control.** It listens on `127.0.0.1:<control>` (`crates/colonizer/src/mesh.rs:246`),
-  default 41740 (`crates/colonizer/src/modules.rs:156`). The guest logs in to
+  default 41740 (`crates/colonizer/src/modules.rs:176`). The guest logs in to
   `http://host.microsandbox.internal:<control>` (`crates/colonizer/src/mesh.rs:115-116`).
 
 The WireGuard rules (`crates/colonizer/src/mesh.rs:424-450`) are `allow@<ip>:udp:<udp_port>`, with
-`udp_port` defaulting to 41743 (`crates/colonizer/src/modules.rs:157`), the port the harness node
+`udp_port` defaulting to 41743 (`crates/colonizer/src/modules.rs:177`), the port the harness node
 listens on (`crates/colonizer/src/mesh.rs:188-189`).
 
 - **Addresses.** One rule for every IPv4 that `ip -4 -o addr show scope global` lists. If that
@@ -76,7 +87,7 @@ listens on (`crates/colonizer/src/mesh.rs:188-189`).
 - **Order.** Explicit rules go before the profile rules ([`common.rs:920-922`][cli-order]). Profile
   rules only allow, so these rules open that UDP port even on private-range host addresses, which
   `public` leaves to the default deny.
-- **Read once.** The list is taken at each boot (`crates/colonizer/src/sessions.rs:1848`) and fixed
+- **Read once.** The list is taken at each boot (`crates/colonizer/src/sessions.rs:1889`) and fixed
   for the life of the microVM (see [Runtime changes](#runtime-changes)).
 
 ## How microsandbox enforces policy
@@ -86,9 +97,10 @@ listens on (`crates/colonizer/src/mesh.rs:188-189`).
 - **Host-side.** The network is a smoltcp userspace stack in the host `msb` process, behind libkrun
   virtio-net ([`backend.rs:1-10`][backend], [`poll.rs:1-6`][poll-hdr]). Enforcement happens
   outside the guest.
-- **TCP** is checked at SYN ([`poll.rs:360-411`][poll-syn]). It is re-checked after connect only
-  when the policy has domain rules ([`tcp/proxy.rs:200-216`][tcp-recheck]), which the harness does
-  not pass, or on a TLS-intercepted port ([`tls/proxy.rs:184-190`][tls-recheck]).
+- **TCP** is checked at SYN ([`poll.rs:360-411`][poll-syn]). It is checked again, after the guest's
+  connection is accepted but before the upstream dial, only when the policy has domain rules
+  ([`tcp/proxy.rs:195-216`][tcp-recheck]), which the harness does not pass. A TLS-intercepted port
+  is also checked against the SNI ([`tls/proxy.rs:184-190`][tls-recheck]).
 - **UDP** is checked per datagram ([`poll.rs:764-772`][udp-check]).
 - **ICMP** is echo only and policy-checked ([`icmp/relay.rs:1-8`][icmp-hdr],
   [`icmp/relay.rs:173-184`][icmp-check]).
@@ -97,7 +109,7 @@ listens on (`crates/colonizer/src/mesh.rs:188-189`).
 
 - **Profiles.** `public`, `private` and `host` compose; `all` and `none` are terminal and cannot be
   combined with them ([`common.rs:342-358`][cli-flag], [`common.rs:871-917`][cli-profiles],
-  [`types.rs:69-78`][profile-enum]). The harness uses only `public` and `host`.
+  [`types.rs:69-78`][profile-enum]). The harness passes only `public`, plus explicit rules.
 - **Expansion.** Any profile prepends one DNS rule: egress to the gateway on UDP and TCP port 53
   ([`types.rs:827-835`][allow-dns]). Each profile then adds one `allow egress` rule for its group,
   with any protocol and any port ([`types.rs:295-331`][from-profiles],
@@ -170,6 +182,10 @@ match no group at all.
   [`poll.rs:751-760`][udp-altdns]). TCP 853 is refused unless TLS interception is on; then it
   skips the egress check and goes to the forwarder like TCP/53 ([`poll.rs:375-382`][dot-syn],
   [`poll.rs:579-600`][dot-proxy]).
+- **DNS over TLS (inferred).** The forwarder checks such a query against policy as TCP 853
+  ([`transport.rs:37-53`][dot-policy], [`forwarder.rs:834-846`][dns-action]). The profile DNS rule
+  covers port 53 only ([`types.rs:827-835`][allow-dns]), and no colony rule allows the Host group on
+  853, so the query gets NXDOMAIN ([`forwarder.rs:289-301`][fwd-policy]). Untested.
 - **Rebind protection** is on by default ([`config/types.rs:255-263`][rebind-default]). An A or AAAA
   answer in the block lists gets NXDOMAIN unless a rule with no port filter, profile rules
   included, allows that address ([`forwarder.rs:347-376`][fwd-rebind],
@@ -177,8 +193,9 @@ match no group at all.
   [`filter.rs:12-53`][rebind-lists]). The lists cover `64:ff9b:1::/48` but not `64:ff9b::/96`.
 - **Rebind gaps (inferred).** Under `public`, a listed range that the classifier puts in Public,
   such as `198.18/15` or `64:ff9b:1::/48`, is allowed by the profile rule and so still passes.
-  Under `host`, so does the gateway address. Rebind protection filters answers only; a direct IP
-  connection never passes through it.
+  Under the `host` profile, so does the gateway address; the harness's rules all name a port, so
+  they exempt nothing. Rebind protection filters answers only; a direct IP connection never passes
+  through it.
 
 ### Runtime changes
 
@@ -191,6 +208,42 @@ Rules cannot change while a colony runs.
 
 Composable profiles arrived in v0.6.7 ([`2026-07-24.mdx:9-18`][changelog]). The upstream changelog
 has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`][changelog-last]).
+
+## Host-loopback listeners
+
+A colony's profile is `public` alone (`crates/colonizer/src/sessions.rs:1862`). Besides the
+profile's port-53 DNS rule, which the forwarder answers ([`types.rs:827-835`][allow-dns]), its only
+Host-group allows are the Headscale control port when the mesh is on
+(`crates/colonizer/src/sessions.rs:1889-1890`) and the gateway port when providers are configured
+(`crates/colonizer/src/sessions.rs:1907-1916`). A `host` rule names the Host group
+([`net_rule.rs:563-574`][rule-host]), so it covers the gateway's IPv4 and IPv6, and TCP to either is
+dialled to host loopback ([`poll.rs:817-835`][tcp-host]). Every other Host port falls to the default
+deny. The table lists what the harness host has on loopback, at default ports. Its `.rs` paths are
+under `crates/colonizer/src/` unless given in full.
+
+| Port | Default bind | Serves | Auth | Reachable from a colony |
+| :--- | :--- | :--- | :--- | :--- |
+| 7878 | `127.0.0.1`, `COLONIZER_BIND` (`config.rs:44`) | Cockpit: every `/api/*` route, including the session terminal WebSocket, and the web UI (`main.rs:1045-1116`) | No login (`README.md:249`). `host_guard` checks `Host`, and since #375 rejects a write or upgrade whose `Origin` is missing or does not match (`main.rs:691-726`) | Default deny since #375 |
+| 41750 | `127.0.0.1`, `COLONIZER_GATEWAY_BIND` (`config.rs:62`) | Provider gateway, `/providers/{id}/{*path}` (`gateway.rs:545-550`) | Per-colony token in `x-colonizer-colony`, matched against live colonies (`gateway.rs:34`, `gateway.rs:526-538`, `gateway.rs:948-956`) | Allowed when providers are configured |
+| 41740 | `127.0.0.1`, mesh `control_port` (`mesh.rs:246`, `modules.rs:176`) | Headscale control server | Joining needs the pre-auth key minted per VM (`mesh.rs:352-362`); other routes not verified | Allowed when the mesh is on |
+| 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:247`, `mesh.rs:291`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |
+| 41742 | `127.0.0.1`, control port + 2 (`mesh.rs:248-249`, `mesh.rs:292`) | Headscale gRPC | `grpc_allow_insecure: false` and no TLS configured; not verified | Default deny since #375 |
+| 41744 | `127.0.0.1`, mesh `socks_port` (`mesh.rs:190-191`, `modules.rs:178`) | Harness `tailscaled` SOCKS5, which the harness uses to dial colonies (`mesh.rs:418-422`) | None (tailscale v1.102.4 [`proxy.go:98-101`][ts-socks-server], [`socks5.go:158-172`][ts-socks-auth]) | Default deny since #375 |
+| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:68-70`, `sessions.rs:1898-1901`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`sessions.rs:1479`, `crates/colonizer-agentd/src/main.rs:176-188`) | Default deny since #375 |
+| Any | The operator's, such as the `local` provider preset's `127.0.0.1:8080` (`web/src/components/SettingsDialog.tsx:1971`) | Anything else on host loopback | Its own | Default deny since #375; the gateway still proxies to a configured provider |
+
+Still open, all **(inferred)** and untested:
+
+- **Gateway bind.** The gateway allow is built from the configured bind string
+  (`crates/colonizer/src/sessions.rs:1907-1916`), not from the listener that bound; a bind failure
+  is only logged (`crates/colonizer/src/main.rs:1129-1143`). If the gateway fails to bind, whatever
+  else holds that port is reachable.
+- **IPv6 loopback.** TCP to the gateway's IPv6 address is dialled to host `::1` first (see
+  [`host`](#host)), so an unrelated service on `[::1]:<allowed port>` would be reached.
+- **Headscale.** The control-port allow exposes Headscale's whole HTTP surface on that port, not
+  just node registration. Auth on its other routes is not verified.
+- **WireGuard.** The WireGuard rules name the host's LAN or public IPv4s
+  (`crates/colonizer/src/mesh.rs:424-450`), not the gateway, so they open no loopback port.
 
 ## Open risks
 
@@ -218,7 +271,12 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
    to published ports ([`publisher.rs:569`][ingress-tcp], [`publisher.rs:614`][ingress-udp]), and
    the harness adds no ingress rules. It publishes one port, on host `127.0.0.1`, only when the
    mesh is off (`crates/colonizer/src/sandbox.rs:68-70`,
-   `crates/colonizer/src/sessions.rs:1856-1859`).
+   `crates/colonizer/src/sessions.rs:1898-1901`). Since
+   [#375](https://github.com/Colonizer-dev/harness/issues/375) other colonies no longer reach that
+   port through host loopback, and, as before, direct guest-to-guest traffic is denied, because
+   other sandboxes' addresses fall in `172.16/12` or `fd42:6d73:62::/48`, both Private
+   ([`destination.rs:79-98`][private]), and only a sandbox's own gateway is Host
+   ([`destination.rs:65-70`][host-match]) (inferred).
 6. **Binary provenance.** The pinned tarballs are checked by digest, but no one has tied them to
    `fa3e439`, and a non-vendored `msb` can be picked up instead
    (`crates/colonizer/src/config.rs:52-58`).
@@ -233,7 +291,16 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 [dp-default]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/packages/microsandbox-types/rust/lib/domain.rs#L247-L254
 [dp-enforce]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/network.rs#L185-L186
 [dp-floor]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/network.rs#L294-L301
+[dp-ports]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/network.rs#L523-L583
+[dp-config]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/sdk/rust/lib/config/mod.rs#L151-L161
+[dp-apply]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/sdk/rust/lib/backend/local/mod.rs#L231-L260
+[dp-create]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/sdk/rust/lib/backend/local/sandbox/create.rs#L104
+[dp-restart]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/sdk/rust/lib/backend/local/sandbox/mod.rs#L163
+[config-path]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/sdk/rust/lib/config/mod.rs#L863-L871
+[msb-home]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/utils/lib/lib.rs#L169-L176
+[poll-floor]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/netstack/poll.rs#L395-L399
 [grammar]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/net_rule.rs#L6-L17
+[rule-host]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/net_rule.rs#L563-L574
 [types-hdr]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L1-L20
 [profile-enum]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L69-L78
 [from-profiles]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L295-L331
@@ -273,7 +340,7 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 [tcp-direct]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/netstack/poll.rs#L833
 [udp-host]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/netstack/poll.rs#L837-L856
 [udp53]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/netstack/poll.rs#L1108-L1113
-[tcp-recheck]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/tcp/proxy.rs#L200-L216
+[tcp-recheck]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/tcp/proxy.rs#L195-L216
 [icmp-hdr]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/icmp/relay.rs#L1-L8
 [icmp-check]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/icmp/relay.rs#L173-L184
 [hosts]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/agentd/lib/network.rs#L106-L115
@@ -285,6 +352,8 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 [fwd-rebind]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/forwarder.rs#L347-L376
 [fwd-upstream]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/forwarder.rs#L797-L828
 [dns-ports]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/common/ports.rs#L72-L78
+[dot-policy]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/common/transport.rs#L37-L53
+[dns-action]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/forwarder.rs#L834-L846
 [rebind-lists]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/common/filter.rs#L12-L53
 [rebind-default]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/config/types.rs#L255-L263
 [modify]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/packages/microsandbox-types/rust/lib/modify.rs#L26-L79
@@ -300,5 +369,7 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 [dot-proxy]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/netstack/poll.rs#L579-L600
 [rebind-allow]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/dns/forwarder.rs#L759-L776
 [explicit-egress]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L371-L393
+[ts-socks-server]: https://github.com/tailscale/tailscale/blob/v1.102.4/cmd/tailscaled/proxy.go#L98-L101
+[ts-socks-auth]: https://github.com/tailscale/tailscale/blob/v1.102.4/net/socks5/socks5.go#L158-L172
 [rfc6052]: https://www.rfc-editor.org/rfc/rfc6052#section-3.1
 [rfc8215]: https://www.rfc-editor.org/rfc/rfc8215#section-5
