@@ -75,7 +75,9 @@ export function App() {
   const [notifyPrefs, setNotifyPrefs] = useState<NotificationPrefs>(() => parseNotificationPrefs(stored(NOTIFICATIONS_KEY)));
   // The mothership's storage alert is sticky, so dismissal is client-side, keyed on the alert's ts
   // (or its message when an older mothership omits the ts): a newer failure shows the card again.
-  const [dismissedStorageTs, setDismissedStorageTs] = useState<string | null>(null);
+  // Every dismissed key is kept, not just the last: load damage the operator dismissed comes back
+  // from the mothership once a later write failure recovers (issue #371), and must stay hidden.
+  const [dismissedStorage, setDismissedStorage] = useState<ReadonlySet<string>>(() => new Set());
   const promptedForSettings = useRef(false);
   // Setup's own state lives only in this page load: "Not now" holds the auto-open off, and
   // "has been shown" retires the standalone live-map prompt. Neither is ever persisted.
@@ -425,10 +427,7 @@ export function App() {
 
   const current = sessions.find((s) => s.id === selectedId) ?? null;
 
-  const storage = status?.storage;
-  // A recovered alert is `ok` again but still reports the gap, so it keeps its card until dismissed.
-  const storageAlert =
-    storage && (storage.ok === false || storage.recovered_at) && storageAlertKey(storage) !== dismissedStorageTs ? storage : null;
+  const storageAlert = visibleStorageAlert(status?.storage, dismissedStorage);
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;
   // a mothership already set up still gets asked, in memory, on its first load of the page.
   const liveMapPrompt = telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && !setupShown;
@@ -627,7 +626,12 @@ export function App() {
       {(storageAlert || liveMapPrompt) && (
         // Both fixed cards live in the same corner; the shared column keeps them stacked and clickable.
         <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(narrow, inspectorShown))}>
-          {storageAlert && <StorageAlert storage={storageAlert} onDismiss={() => setDismissedStorageTs(storageAlertKey(storageAlert))} />}
+          {storageAlert && (
+            <StorageAlert
+              storage={storageAlert}
+              onDismiss={() => setDismissedStorage((dismissed) => dismissStorageAlert(dismissed, storageAlert))}
+            />
+          )}
           {liveMapPrompt && (
             <LiveMapPrompt
               onAnswered={setTelemetry}
@@ -699,8 +703,19 @@ function LiveMapPrompt({
   );
 }
 
-/** Identity of a storage failure for dismissal: its ts, or — for older motherships that omit it — its message, prefixed so neither can be confused with "nothing dismissed yet" (null). */
+/** Identity of a storage alert for dismissal: its ts, or — for older motherships that omit it — its message, prefixed so it cannot pass for a ts. */
 const storageAlertKey = (storage: StorageHealth) => storage.ts ?? `no-ts:${storage.message ?? "unknown"}`;
+
+/** Whether `storage` carries an alert: a failing write, a recovered one (`ok` again, but the gap it reports still happened), or load damage, which is `ok` because writes work yet never recovers (issue #371). */
+export const storageAlertShown = (storage: StorageHealth) => storage.kind === "load_damage" || storage.ok === false || !!storage.recovered_at;
+
+/** The storage alert to show, or null when there is none or the operator dismissed this one. */
+export const visibleStorageAlert = (storage: StorageHealth | undefined, dismissed: ReadonlySet<string>) =>
+  storage && storageAlertShown(storage) && !dismissed.has(storageAlertKey(storage)) ? storage : null;
+
+/** `dismissed` plus `storage`'s key; earlier keys stay, so a dismissed alert the mothership shows again stays hidden. */
+export const dismissStorageAlert = (dismissed: ReadonlySet<string>, storage: StorageHealth): ReadonlySet<string> =>
+  new Set(dismissed).add(storageAlertKey(storage));
 
 /** harness_log frames render ts with toLocaleTimeString (SessionView's activity strip); an odd or missing ts shows nothing. */
 const localTime = (ts: string | null | undefined) => {
@@ -708,17 +723,31 @@ const localTime = (ts: string | null | undefined) => {
   return at && !Number.isNaN(at.getTime()) ? at.toLocaleTimeString() : null;
 };
 
-/** A write the mothership could not make (issue #87). Sticky server-side; dismissed here per failure, a newer one reopens it. Once a later write goes through (issue #220) the card stays, in amber, saying so: the gap it reports still happened. */
-function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; onDismiss: () => void }) {
-  const failedAt = localTime(storage.ts);
+/**
+ * A write the mothership could not make (issue #87). Sticky server-side; dismissed here per failure, a newer one reopens it. Once a later write goes through (issue #220) the card stays, in amber, saying so: the gap it reports still happened.
+ * Colony records lost at startup (issue #371) never recover, whatever `ok` says: that card stays red, pointing at the saved copy, until dismissed.
+ */
+export function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; onDismiss: () => void }) {
+  const raisedAt = localTime(storage.ts);
   const recoveredAt = localTime(storage.recovered_at);
-  const recovered = storage.ok;
+  const loadDamage = storage.kind === "load_damage";
+  const recovered = storage.ok && !loadDamage;
   const meta = [
-    failedAt ? `Failed at ${failedAt}` : null,
-    storage.failures != null ? `${storage.failures} failed ${storage.failures === 1 ? "write" : "writes"}` : null,
+    raisedAt ? (loadDamage ? `Found at startup, ${raisedAt}` : `Failed at ${raisedAt}`) : null,
+    !loadDamage && storage.failures != null ? `${storage.failures} failed ${storage.failures === 1 ? "write" : "writes"}` : null,
     recovered && recoveredAt ? `Writing again since ${recoveredAt}` : null,
   ].filter(Boolean);
   const tone = recovered ? "text-warn" : "text-err";
+  const heading = loadDamage
+    ? "The mothership could not load all its colony records"
+    : recovered
+      ? "The mothership is writing to disk again"
+      : "The mothership could not write to disk";
+  const note = loadDamage
+    ? "The copy named above keeps the original file as it was. Later writes do not bring the missing colonies back, so this card stays until you dismiss it."
+    : recovered
+      ? "Writes are going through again, but colony event logs may still have gaps from while they failed. Dismissing hides this card."
+      : "What you see here can drift from what is on disk, and colony event logs may have gaps. The card turns amber once a write goes through again — dismissing just hides it.";
   return (
     <div
       role={recovered ? "status" : "alert"}
@@ -727,15 +756,9 @@ function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; onDismis
         recovered ? "border-warn/30 bg-warn-soft" : "border-err/30 bg-err-soft",
       )}
     >
-      <p className={cx("text-[14px] font-semibold", tone)}>
-        {recovered ? "The mothership is writing to disk again" : "The mothership could not write to disk"}
-      </p>
+      <p className={cx("text-[14px] font-semibold", tone)}>{heading}</p>
       {storage.message && <p className={cx("mt-1.5 font-mono text-[12px] [overflow-wrap:anywhere]", tone)}>{storage.message}</p>}
-      <p className="mt-1.5 text-[12.5px] text-muted">
-        {recovered
-          ? "Writes are going through again, but colony event logs may still have gaps from while they failed. Dismissing hides this card."
-          : "What you see here can drift from what is on disk, and colony event logs may have gaps. The card turns amber once a write goes through again — dismissing just hides it."}
-      </p>
+      <p className="mt-1.5 text-[12.5px] text-muted">{note}</p>
       {meta.length > 0 && <p className={cx("mt-1.5 text-[12px]", tone)}>{meta.join(" · ")}</p>}
       <div className="mt-3 flex justify-end">
         <Button size="sm" onClick={onDismiss}>
