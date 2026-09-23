@@ -135,6 +135,58 @@ struct PrPoll {
     backoff: Duration,
     /// Set while `gh` keeps failing, so the reason is logged once per streak, not once per attempt.
     failing: bool,
+    /// The last mergeability worth saying anything about: only non-`Unknown` readings are kept, so
+    /// an `UNKNOWN` between two identical readings never re-logs.
+    mergeability: Option<github::Mergeability>,
+}
+
+/// What the watcher says when a still-open pull request's mergeability moves, if anything: `Behind`
+/// and `Conflicted` each log once on arrival with what to do about them, `Clean` logs once on the
+/// way back, and `Unknown` is no news — it neither logs nor clears what was last seen, so it can
+/// never flip-flop the log. The `Unknown` arm is why this takes the previous reading rather than
+/// deciding from the current one alone.
+pub(crate) fn mergeability_message(
+    previous: Option<github::Mergeability>,
+    current: github::Mergeability,
+    pr_url: &str,
+    base: Option<&str>,
+) -> Option<(&'static str, String)> {
+    use github::Mergeability::*;
+    if current == Unknown || Some(current) == previous {
+        return None;
+    }
+    // The git command names the branch, so it is only suggested when the base is known; the
+    // cockpit action is always available.
+    let branch = base.unwrap_or("its base branch");
+    match current {
+        Behind => {
+            let how = match base {
+                Some(known) => format!(
+                    "catch it up from the cockpit (Catch up action) or run `git merge origin/{known}` in the colony's worktree"
+                ),
+                None => "catch it up from the cockpit (Catch up action)".to_string(),
+            };
+            Some(("warn", format!("{pr_url} is behind {branch}: {how}")))
+        }
+        Conflicted => {
+            let how = match base {
+                Some(known) => {
+                    format!("resolve by merging `origin/{known}` into the branch and fixing the conflicts (no force pushes)")
+                }
+                None => {
+                    "resolve by merging the base branch into the branch and fixing the conflicts (no force pushes)".to_string()
+                }
+            };
+            Some((
+                "warn",
+                format!("{pr_url} conflicts with {branch}: {how} — GitHub does not list the conflicted files"),
+            ))
+        }
+        Clean if matches!(previous, Some(Behind) | Some(Conflicted)) => {
+            Some(("info", format!("{pr_url} can merge cleanly again")))
+        }
+        Clean | Unknown => None,
+    }
 }
 
 /// Watches the pull requests of `pr_opened` and `closed` colonies, so a merge or close elsewhere turns
@@ -161,14 +213,15 @@ pub async fn watch_pull_requests(app: Shared) {
                 last_checked: Instant::now(),
                 backoff: PR_POLL_FIRST,
                 failing: false,
+                mergeability: None,
             });
             let now = Instant::now();
             if !pr_due(poll.last_checked, poll.backoff, now) {
                 continue;
             }
             poll.last_checked = now;
-            match github::pr_state(&app, &url).await {
-                Ok(state) => {
+            match github::pr_info(&app, &url).await {
+                Ok((state, mergeability)) => {
                     poll.failing = false;
                     let target = match state {
                         github::PrState::Open => SessionStatus::PrOpened, // also picks a reopened PR back up
@@ -215,7 +268,24 @@ pub async fn watch_pull_requests(app: Shared) {
                             });
                         }
                     }
-                    poll.backoff = pr_backoff(poll.backoff, changed);
+                    // While the pull request is still open, a move into behind/conflicted — or back
+                    // to clean — is said once in the colony's own log. A behind or conflicted PR
+                    // stays `PrOpened`, so it keeps being watched and re-checked on backoff until it
+                    // merges, closes, or moves again.
+                    let mut merge_changed = false;
+                    if state == github::PrState::Open
+                        && let Some((level, message)) =
+                            mergeability_message(poll.mergeability, mergeability, &url, s.base.as_deref())
+                    {
+                        app.session_log(&s.id, level, message).await;
+                        merge_changed = true;
+                    }
+                    // Only an open PR's reading is remembered: a closed PR's last reading must not
+                    // suppress the log when it reopens behind or conflicted.
+                    if state == github::PrState::Open && mergeability != github::Mergeability::Unknown {
+                        poll.mergeability = Some(mergeability);
+                    }
+                    poll.backoff = pr_backoff(poll.backoff, merge_changed || changed);
                 }
                 Err(e) => {
                     // No news is no change: leave the colony's status alone and try again later.
@@ -544,6 +614,67 @@ mod tests {
         assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn mergeability_moves_are_said_once_per_transition_and_unknown_is_no_news() {
+        use github::Mergeability::*;
+        let url = "https://github.com/acme/repo/pull/7";
+        // An open PR falling behind logs once, with where to catch up.
+        let said = mergeability_message(None, Behind, url, Some("main"));
+        let (level, text) = said.expect("arriving at behind is said");
+        assert_eq!(level, "warn");
+        assert!(text.contains(url), "{text}");
+        assert!(text.contains("Catch up"), "{text}");
+        assert!(text.contains("origin/main"), "{text}");
+        // The same reading on the next poll says nothing.
+        assert_eq!(mergeability_message(Some(Behind), Behind, url, Some("main")), None);
+        // Back to clean says so once, then stays quiet.
+        let (level, text) = mergeability_message(Some(Behind), Clean, url, Some("main")).expect("the recovery is said");
+        assert_eq!(level, "info");
+        assert!(text.contains(url), "{text}");
+        assert_eq!(mergeability_message(Some(Clean), Clean, url, Some("main")), None);
+        assert_eq!(mergeability_message(None, Clean, url, Some("main")), None);
+        // Unknown never logs and never clears what was last seen: the caller keeps the old
+        // reading, so the next real one still compares against it.
+        assert_eq!(mergeability_message(Some(Behind), Unknown, url, Some("main")), None);
+        assert_eq!(mergeability_message(None, Unknown, url, Some("main")), None);
+        assert_eq!(mergeability_message(Some(Clean), Unknown, url, Some("main")), None);
+    }
+
+    #[test]
+    fn mergeability_hints_without_a_recorded_base_name_no_branch() {
+        use github::Mergeability::*;
+        let url = "https://github.com/acme/repo/pull/7";
+        // With no recorded base there is no branch to name, so the git command is dropped and the
+        // cockpit action stands alone.
+        let (level, text) = mergeability_message(None, Behind, url, None).expect("behind with no base is still said");
+        assert_eq!(level, "warn");
+        assert!(text.contains("Catch up"), "{text}");
+        assert!(!text.contains("origin/"), "{text}");
+        let (level, text) = mergeability_message(None, Conflicted, url, None).expect("conflicted with no base is still said");
+        assert_eq!(level, "warn");
+        assert!(text.contains("no force pushes"), "{text}");
+        assert!(!text.contains("origin/"), "{text}");
+    }
+
+    #[test]
+    fn a_conflicted_pull_request_stays_flagged_without_a_duplicate_line() {
+        use github::Mergeability::*;
+        let url = "https://github.com/acme/repo/pull/7";
+        // The first conflicted reading logs, with how to resolve it and no force pushes.
+        let (level, text) = mergeability_message(None, Conflicted, url, Some("main")).expect("arriving at conflicted is said");
+        assert_eq!(level, "warn");
+        assert!(text.contains(url), "{text}");
+        assert!(text.contains("origin/main"), "{text}");
+        assert!(text.contains("no force pushes"), "{text}");
+        // Two more polls with nothing new: still flagged in the caller's stored reading, but silent.
+        assert_eq!(mergeability_message(Some(Conflicted), Conflicted, url, Some("main")), None);
+        assert_eq!(mergeability_message(Some(Conflicted), Conflicted, url, Some("main")), None);
+        // Resolved: one info line, naming the PR.
+        let (level, text) = mergeability_message(Some(Conflicted), Clean, url, Some("main")).expect("the recovery is said");
+        assert_eq!(level, "info");
+        assert!(text.contains(url), "{text}");
     }
 
     #[test]

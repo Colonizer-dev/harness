@@ -46,8 +46,8 @@ Use the metaphor lightly in the product; plain words win whenever clarity is at 
    published it, and a human has reviewed the pull request.
 
 These are the design. Where the code does not yet meet the security and trust claims, [audit.md](audit.md)
-says so; a design element that has not been built yet, such as something the website illustrates but the
-cockpit does not render, is tracked as an issue.
+says so; where something this page describes or the website illustrates has not been built yet,
+[gaps.md](gaps.md) says so, with its tracking issue where one is filed.
 
 ## Horizon
 

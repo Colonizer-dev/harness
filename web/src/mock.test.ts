@@ -2,9 +2,10 @@
 // the body omits keeps its saved value, one it names (null included) wins — because the prompt card
 // answers with `{enabled}` alone and must not clear the org's other settings. If the mock replaced
 // wholesale it would hide exactly the bug the merge rule prevents.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createMockApi } from "./mock";
+import { SessionStream } from "./sessionStream";
 
 describe("mock spend (issue #209)", () => {
   it("carries the measured org rollup on /api/orgs and keeps an unmeasured one null", async () => {
@@ -65,6 +66,37 @@ describe("mock startRedTeamRun", () => {
     await expect(api.startRedTeamRun({ repo: "acme/webshop", arm: true })).rejects.toThrow(
       "a red-team run is already active on this repo",
     );
+  });
+});
+
+describe("mock set_model (issue #240)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports the model at start, and a switch only once the colony confirms it", async () => {
+    vi.useFakeTimers();
+    const api = createMockApi();
+    const stream = new SessionStream(api, "demo1234");
+    stream.start();
+    await vi.advanceTimersByTimeAsync(150);
+    expect(stream.getState().model).toBe("claude-opus-5");
+    // A second client sees the raw frames, `previous` included.
+    const frames: unknown[] = [];
+    const raw = api.openEvents("demo1234", 0);
+    raw.onmessage = (event) => frames.push(JSON.parse(event.data as string));
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(stream.send({ type: "set_model", model: "sonnet" })).toBe(true);
+    expect(stream.getState()).toMatchObject({ model: "claude-opus-5", switchingModel: "sonnet" });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(stream.getState()).toMatchObject({ model: "sonnet", switchingModel: null });
+    expect(frames.filter((f) => (f as { type: string }).type === "model_changed")).toMatchObject([
+      { model: "claude-opus-5", previous: null },
+      { model: "sonnet", previous: "claude-opus-5" },
+    ]);
+    raw.close();
+    stream.stop();
   });
 });
 

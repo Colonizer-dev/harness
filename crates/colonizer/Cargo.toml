@@ -34,3 +34,5 @@ uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
+# `ServiceExt::oneshot` for the auth tests, which drive a router through the real `host_guard`.
+tower = { version = "0.5.3", features = ["util"] }

@@ -15,6 +15,7 @@
     { "$ref": "#/$defs/question_answered" },
     { "$ref": "#/$defs/turn_end" },
     { "$ref": "#/$defs/log" },
+    { "$ref": "#/$defs/model_changed" },
     { "$ref": "#/$defs/memory_proposal" },
     { "$ref": "#/$defs/finding" }
   ],
@@ -185,6 +186,16 @@
         "message": { "type": "string" }
       },
       "required": ["type", "level", "message"]
+    },
+    "model_changed": {
+      "type": "object",
+      "description": "The orchestrator model the session runs on (§2): announced when Claude Code's init first names it, and after each set_model command the SDK accepted. The conversation, VM and worktree stay the same across a switch.",
+      "properties": {
+        "type": { "const": "model_changed" },
+        "model": { "type": "string", "description": "The model in effect from the next response on, as requested and set (the CLI may substitute one unreported; the next init corrects it): a Claude alias or ID, or <provider>/<model>." },
+        "previous": { "type": ["string", "null"], "description": "The model announced before this one; null on the first announcement of the run." }
+      },
+      "required": ["type", "model", "previous"]
     },
     "memory_proposal": {
       "type": "object",
