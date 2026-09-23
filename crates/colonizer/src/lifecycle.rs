@@ -346,6 +346,10 @@ pub(crate) async fn stop_colony(
         app.session_log(&s.id, "warn", warn).await;
         app.note_cleared_attention(&s.id, attention).await;
         teardown_vm(app, s).await;
+        // A stopped colony frees the issue for a retry, on GitHub as well as locally.
+        if let Some(s) = app.session(&s.id).await {
+            crate::claims::spawn_release_if_needed(app.clone(), &s);
+        }
     }
     claimed
 }
@@ -755,7 +759,11 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     // A queued colony never started, so there is no microVM to remove.
     if was == SessionStatus::Queued {
         app.session_log(&id, "info", "left the queue before it started".into()).await;
-        return Ok(stopped(app.session(&id).await.unwrap_or(s)));
+        let session = app.session(&id).await.unwrap_or(s);
+        // Stopped before it ever booted: it frees the issue for a retry, on GitHub as well as
+        // locally, same as any other colony that ends without a pull request.
+        crate::claims::spawn_release_if_needed(app.clone(), &session);
+        return Ok(stopped(session));
     }
     // `was` is read under the same write lock that would have claimed the colony, so the status
     // reported here is the one this stop found, not a later one.
@@ -772,6 +780,10 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     app.session_log(&id, "info", "stopping: removing the microVM (the worktree is kept)".into())
         .await;
     teardown_vm(&app, &s).await;
+    // A stopped colony frees the issue for a retry, on GitHub as well as locally.
+    if let Some(s) = app.session(&id).await {
+        crate::claims::spawn_release_if_needed(app.clone(), &s);
+    }
     Ok(stopped(app.session(&id).await.unwrap_or(s)))
 }
 
