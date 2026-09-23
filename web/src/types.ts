@@ -572,6 +572,7 @@ export interface UpdateStatus {
     error: string | null;
     log: string;
     colonies: { id: string; repo: string; outcome: string }[];
+    backup: string | null;
   };
 }
 

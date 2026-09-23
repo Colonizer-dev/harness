@@ -29,9 +29,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, body::Bytes, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{process::Command, sync::Mutex};
 
@@ -66,6 +66,8 @@ pub struct Progress {
     pub log: String,
     /// What each colony was doing when the update was applied.
     pub colonies: Vec<ColonyNote>,
+    /// Where `sessions.json` was backed up before the install, when there was one to back up.
+    pub backup: Option<String>,
 }
 
 /// What happened to one colony, reported per the issue's last acceptance line.
@@ -124,20 +126,65 @@ pub fn blocker(assets: Option<&Path>) -> Option<String> {
     }
 }
 
-/// Why this build must not be replaced by a release, if it must not.
+/// The one refusal decision, shared by the route and `colonizer update` alike:
+/// why this build must not be replaced by `latest`, if it must not.
 ///
 /// A development build — commits after its last tag, a modified tree, or no tag
 /// at all — holds work the newest release does not, however much newer that
-/// release's number is. Installing the release would swap that work out without
-/// a word, so the refusal names the way such a build is updated instead.
-pub fn dev_refusal(build: &version::Build) -> Option<String> {
-    build.development.then(|| dev_guidance(&build.version))
+/// release's number is. And a release newer than the latest one would be a
+/// downgrade, not an update. Both refuse unless `force` says the operator has
+/// read the reason and means it anyway; anything else is the caller's
+/// newer-or-nothing decision to make, not a refusal.
+///
+/// The refusal names both versions, so either side can print it as is: the
+/// route only has the stamped build, and the command only has the JSON.
+pub fn refusal(build: &version::Build, latest: Option<&str>, force: bool) -> Option<String> {
+    if force {
+        return None;
+    }
+    if build.development {
+        return Some(dev_refusal(&build.version, build.release.as_deref(), latest));
+    }
+    let running = build.release.as_deref().and_then(version::Semver::parse);
+    let newest = latest.and_then(version::Semver::parse);
+    match (running, newest, latest) {
+        (Some(running), Some(newest), Some(latest)) if running > newest => Some(format!(
+            "running `{}`, newer than the latest release `{latest}` — refusing to downgrade; pass `--force` to install `{latest}` anyway",
+            build.version
+        )),
+        _ => None,
+    }
 }
 
-/// The one wording, shared with `colonizer update`, which only has the JSON.
-fn dev_guidance(version: &str) -> String {
+/// How many commits a `git describe` build sits ahead of its release, if it says so.
+///
+/// `v0.1.5-60-gd62bfb2` is 60 commits ahead of `v0.1.5`; anything that does not
+/// start with the tag is not counted rather than guessed at.
+fn commits_ahead(version: &str, release: &str) -> Option<u64> {
+    version
+        .strip_prefix(release)?
+        .strip_prefix('-')?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn dev_refusal(version: &str, release: Option<&str>, latest: Option<&str>) -> String {
+    let mut running = "development build".to_string();
+    if let Some(release) = release
+        && let Some(ahead) = commits_ahead(version, release)
+    {
+        running.push_str(&format!(", {ahead} commits ahead of release `{release}`"));
+    }
+    let known = latest
+        .map(|latest| format!(" and the latest release is `{latest}`"))
+        .unwrap_or_default();
+    let force = latest
+        .map(|latest| format!(", or pass `--force` to install `{latest}` anyway"))
+        .unwrap_or_default();
     format!(
-        "this is a development build ({version}); update it from its checkout with `git pull && scripts/install.sh --install`"
+        "running `{version}` ({running}){known} — refusing to replace a source build with a release; update it from its checkout with `git pull && scripts/install.sh --install`{force}"
     )
 }
 
@@ -258,9 +305,24 @@ async fn back_up_sessions(app: &Shared) -> Result<Option<PathBuf>> {
 /// while it waits for the save lock (the client went away) would otherwise
 /// leave the phase at `Installing` for good, and every retry refused. Here a
 /// failed backup takes the same `Failed` path a failed install does.
-async fn back_up_and_install(app: &Shared, version: &str) -> Result<String> {
-    back_up_sessions(app).await?;
-    install(app, version).await
+///
+/// Returns the installer's output and where the backup went, and records the
+/// path on the progress first, so `GET /api/update` names it while the
+/// installer is still running rather than only once it finishes.
+async fn back_up_and_install(app: &Shared, version: &str) -> Result<(String, Option<PathBuf>)> {
+    let saved = back_up_sessions(app).await?;
+    {
+        let mut progress = app.updater.progress.lock().await;
+        progress.backup = saved.as_ref().map(|path| path.display().to_string());
+    }
+    // The progress is in memory and gone after the restart, so the path is
+    // logged where the mothership's own output goes — a Cockpit-initiated
+    // update leaves it behind there.
+    if let Some(path) = &saved {
+        println!("update: sessions.json backed up to {}", path.display());
+    }
+    let log = install(app, version).await?;
+    Ok((log, saved))
 }
 
 async fn install(app: &Shared, version: &str) -> Result<String> {
@@ -336,13 +398,110 @@ fn exec(_binary: &Path, _args: &[std::ffi::OsString]) -> std::io::Error {
 
 /* --------------------------------------------------------------------- cli */
 
-/// `colonizer update` — a thin client of a running mothership.
+/// Just what the update decision reads from the mothership's `installed`
+/// object. Read tolerantly: the CLI on disk may be newer or older than the
+/// running mothership, so unknown fields are ignored and a missing one falls
+/// back rather than failing the whole command.
+struct Installed {
+    version: String,
+    release: Option<String>,
+    development: bool,
+}
+
+impl Installed {
+    fn from_status(status: &Value) -> Self {
+        let installed = &status["installed"];
+        Self {
+            version: installed["version"].as_str().unwrap_or("this build").to_string(),
+            release: installed["release"].as_str().map(str::to_string),
+            development: installed["development"].as_bool().unwrap_or(false),
+        }
+    }
+
+    /// The decision only reads these three fields; the rest of the stamped
+    /// build — commit, build time — is filler it never looks at.
+    fn as_build(&self) -> version::Build {
+        version::Build {
+            version: self.version.clone(),
+            commit: None,
+            dirty: false,
+            built_at: Utc::now(),
+            release: self.release.clone(),
+            development: self.development,
+        }
+    }
+}
+
+/// What one `/api/update` read decides, before anything is posted.
+#[derive(Debug, PartialEq)]
+enum Preflight {
+    /// Already there: print it and stop.
+    NothingToDo { installed: String },
+    /// POST (forced when forcing) and follow the progress.
+    Proceed { installed: String, latest: String },
+}
+
+/// The CLI's go/no-go from a single status read: the refusal both sides share,
+/// the nothing-to-install short-circuit, and — unless forced — the mothership's
+/// own verdict.
+///
+/// With `--force` there is no `can_apply` pre-check: the route rechecks the
+/// blocker and the publishing colonies anyway, and its 409 is printed as is.
+fn preflight(status: &Value, force: bool) -> Result<Preflight> {
+    let installed = Installed::from_status(status);
+    let build = installed.as_build();
+    let Some(latest) = status["latest"]["version"].as_str().map(str::to_string) else {
+        // No answer is not the same as no update, and must never be reported as
+        // one: the check may be off, or simply not have run yet. Forcing changes
+        // nothing here: with no release known there is nothing to install.
+        if let Some(blocked) = status["blocked_by"].as_str() {
+            bail!(
+                "the update check is kept off by {blocked}, so there is nothing to compare {} against",
+                installed.version
+            );
+        }
+        if !status["enabled"].as_bool().unwrap_or(false) {
+            bail!("the update check is switched off, so this mothership does not know what the newest release is");
+        }
+        bail!("this mothership has not reached the release feed yet; try again shortly");
+    };
+    // One decision, the same one the route makes.
+    if let Some(reason) = refusal(&build, Some(&latest), force) {
+        bail!("{reason}");
+    }
+    if !status["available"].as_bool().unwrap_or(false) && !force {
+        return Ok(Preflight::NothingToDo {
+            installed: installed.version,
+        });
+    }
+    if !force && let Some(reason) = status["can_apply"]["reason"].as_str() {
+        bail!("{latest} is out, but it cannot be installed from here: {reason}");
+    }
+    Ok(Preflight::Proceed {
+        installed: installed.version,
+        latest,
+    })
+}
+
+/// What the CLI sends as `Origin` on its apply POST. The mothership's
+/// `host_guard` rejects a non-GET whose `Origin` does not name the request's
+/// own host, so this is the base URL the request goes to — the same authority
+/// reqwest puts in its `Host` header.
+fn origin(base: &str) -> String {
+    base.to_string()
+}
+
+/// `colonizer update [--force]` — a thin client of a running mothership.
 ///
 /// The work belongs to the mothership: it knows what is installed, which
 /// colonies are publishing, and how to restart itself. This asks it to start,
 /// then follows the progress it already reports, so the command and the button
 /// in Settings cannot drift apart.
-pub async fn command() -> Result<()> {
+///
+/// `force` installs the latest release over a development build, or over a
+/// release newer than it, after saying what is at risk. It never skips the
+/// wait for a publishing colony: that refusal comes from the mothership.
+pub async fn command(force: bool) -> Result<()> {
     let bind = util::env_nonempty("COLONIZER_BIND").unwrap_or_else(|| "127.0.0.1:7878".into());
     let base = format!("http://{bind}");
     let client = reqwest::Client::builder()
@@ -357,41 +516,38 @@ pub async fn command() -> Result<()> {
         .json()
         .await?;
 
-    let installed = status["installed"]["version"].as_str().unwrap_or("this build").to_string();
-    // Before anything about releases: whether one is newer or not, it would
-    // replace work this build has and it does not.
-    if status["installed"]["development"].as_bool().unwrap_or(false) {
-        bail!("{}", dev_guidance(&installed));
-    }
-    let Some(latest) = status["latest"]["version"].as_str().map(str::to_string) else {
-        // No answer is not the same as no update, and must never be reported as
-        // one: the check may be off, or simply not have run yet.
-        if let Some(blocked) = status["blocked_by"].as_str() {
-            bail!("the update check is kept off by {blocked}, so there is nothing to compare {installed} against");
+    let flight = preflight(&status, force)?;
+    let (installed, latest) = match flight {
+        Preflight::NothingToDo { installed } => {
+            println!("{installed} is the newest release.");
+            return Ok(());
         }
-        if !status["enabled"].as_bool().unwrap_or(false) {
-            bail!("the update check is switched off, so this mothership does not know what the newest release is");
-        }
-        bail!("this mothership has not reached the release feed yet; try again shortly");
+        Preflight::Proceed { installed, latest } => (installed, latest),
     };
-    if !status["available"].as_bool().unwrap_or(false) {
-        println!("{installed} is the newest release.");
-        return Ok(());
-    }
-    if let Some(reason) = status["can_apply"]["reason"].as_str() {
-        bail!("{latest} is out, but it cannot be installed from here: {reason}");
+    if force {
+        println!("{}", force_warning(&client, &base, &installed, &latest).await);
     }
     println!("updating from {installed} to {latest}");
 
-    let started = client.post(format!("{base}/api/update/apply")).send().await?;
+    // No body, like the Settings button, unless forcing: the route reads a
+    // missing body as "just install the newer release".
+    let request = client
+        .post(format!("{base}/api/update/apply"))
+        .header("Origin", origin(&base));
+    let started = if force {
+        request.json(&json!({ "force": true })).send().await?
+    } else {
+        request.send().await?
+    };
     if !started.status().is_success() {
         let body = started.text().await.unwrap_or_default();
-        bail!("{}", util::truncate(body.trim(), 500));
+        bail!("{}", util::truncate(&server_error(&body), 500));
     }
 
     // The mothership replaces itself when it is done, so the connection drops
     // rather than reporting success. A drop after `restarting` is the success.
     let mut last = String::new();
+    let mut backup_announced = false;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let Ok(response) = client.get(format!("{base}/api/update")).send().await else {
@@ -399,6 +555,12 @@ pub async fn command() -> Result<()> {
             return Ok(());
         };
         let status: Value = response.json().await?;
+        if let Some(path) = status["apply"]["backup"].as_str()
+            && !backup_announced
+        {
+            println!("sessions.json backed up to {path}");
+            backup_announced = true;
+        }
         let phase = status["apply"]["phase"].as_str().unwrap_or("idle").to_string();
         if phase != last {
             println!("  {phase}");
@@ -412,27 +574,103 @@ pub async fn command() -> Result<()> {
     }
 }
 
+/// What `--force` is about to risk, in one line: the release going over the
+/// running build, and how many sessions were written by that build.
+///
+/// Queued colonies hold nothing yet, so an update does not interrupt them — but
+/// `--force` is the explicit acknowledgement of the queue, and the count
+/// belongs in the warning next to the total.
+async fn force_warning(client: &reqwest::Client, base: &str, installed: &str, latest: &str) -> String {
+    let sessions = session_counts(client, base).await;
+    let at_risk = match sessions {
+        Ok((total, queued)) => {
+            let noun = if total == 1 {
+                "1 session".to_string()
+            } else {
+                format!("{total} sessions")
+            };
+            format!("the {noun} in sessions.json ({queued} queued)")
+        }
+        Err(_) => "the sessions in sessions.json".to_string(),
+    };
+    format!(
+        "warning: --force installs `{latest}` over `{installed}`; {at_risk} were written by the running build and are backed up first"
+    )
+}
+
+async fn session_counts(client: &reqwest::Client, base: &str) -> Result<(usize, usize)> {
+    let sessions: Vec<Value> = client.get(format!("{base}/api/sessions")).send().await?.json().await?;
+    let queued = sessions.iter().filter(|s| s["status"].as_str() == Some("queued")).count();
+    Ok((sessions.len(), queued))
+}
+
+/// A refused POST answers `{"error": …}`; print the message, not the JSON.
+/// Anything else — a proxy's HTML, an empty body — prints as it arrived.
+fn server_error(body: &str) -> String {
+    let body = body.trim();
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|json| json["error"].as_str().map(str::to_string))
+        .unwrap_or_else(|| body.to_string())
+}
+
 /* ------------------------------------------------------------------ routes */
+
+/// The optional body of `POST /api/update/apply`. Absent, blank or `{}` all
+/// mean the same as the Settings button sending no body at all; anything else
+/// that is not JSON is a 400 rather than a silent no-force.
+#[derive(Default, Deserialize)]
+struct ApplyRequest {
+    #[serde(default)]
+    force: bool,
+}
 
 /// `POST /api/update/apply` — install the latest release and restart into it.
 ///
 /// Answers as soon as the work starts; `GET /api/update` carries the progress.
-pub async fn apply(State(app): State<Shared>) -> crate::ApiResult<Value> {
+/// Takes an optional `{"force": true}` body, which installs the latest release
+/// over a development build or over a newer release. No body — what the
+/// Settings button sends — means "just install the newer release": the body is
+/// read as bytes so a missing one is `force: false`, not a 422. Anything else
+/// that is not JSON is a 400.
+pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<Value> {
+    // No body is the Cockpit button: `fetch` sends no bytes, and that has
+    // always meant "just install the newer release".
+    let force = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        false
+    } else {
+        match serde_json::from_slice::<ApplyRequest>(&body) {
+            Ok(request) => request.force,
+            Err(e) => {
+                return Err(crate::client_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("the apply body must be JSON like {{\"force\": true}}: {e}"),
+                ));
+            }
+        }
+    };
     if let Some(reason) = blocker(app.cfg.assets.as_deref()) {
         return Err(crate::client_error(StatusCode::CONFLICT, &reason));
     }
-    if let Some(reason) = dev_refusal(version::build()) {
-        return Err(crate::client_error(StatusCode::CONFLICT, &reason));
-    }
-
-    let status = app.updates.latest_release().await;
-    let Some(version) = status else {
+    let running = version::build();
+    let Some(latest) = app.updates.latest_known().await else {
         return Err(crate::client_error(
             StatusCode::CONFLICT,
-            "there is no newer release to install",
+            "the latest release is not known yet; the check may be switched off or not have run",
         ));
     };
+    // The one decision, the same one `colonizer update` makes before posting.
+    if let Some(reason) = refusal(running, Some(&latest), force) {
+        return Err(crate::client_error(StatusCode::CONFLICT, &reason));
+    }
+    if !force && !version::is_newer(running.release.as_deref(), &latest) {
+        return Err(crate::client_error(
+            StatusCode::CONFLICT,
+            &format!("{} is already the newest release", running.version),
+        ));
+    }
 
+    let version = latest;
     let sessions = app.sessions.read().await.clone();
     let busy = publishing(&sessions);
     if !busy.is_empty() {
@@ -461,17 +699,23 @@ pub async fn apply(State(app): State<Shared>) -> crate::ApiResult<Value> {
             error: None,
             log: String::new(),
             colonies: notes(&sessions),
+            backup: None,
         };
     }
 
     let background = app.clone();
     tokio::spawn(async move {
         match back_up_and_install(&background, &version).await {
-            Ok(log) => {
+            Ok((log, saved)) => {
                 {
                     let mut progress = background.updater.progress.lock().await;
                     progress.phase = Phase::Restarting;
-                    progress.log = log;
+                    // The path went onto the progress when the backup was taken;
+                    // the log keeps it for anyone reading after the restart.
+                    progress.log = match saved.as_ref().map(|path| path.display().to_string()) {
+                        Some(path) => format!("sessions.json backed up to {path}\n{log}"),
+                        None => log,
+                    };
                 }
                 // Give the answer above a moment to reach the browser before the
                 // process is replaced underneath it.
@@ -535,27 +779,154 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    fn a_build(version: &str, development: bool) -> version::Build {
+    fn a_build(version: &str, release: &str, development: bool) -> version::Build {
         version::Build {
             version: version.into(),
             commit: Some("d62bfb2".into()),
             dirty: false,
             built_at: Utc::now(),
-            release: Some("v0.1.5".into()),
+            release: Some(release.into()),
             development,
         }
     }
 
     #[test]
-    fn a_development_build_refuses_to_be_replaced_by_a_release() {
-        let reason = dev_refusal(&a_build("v0.1.5-60-gd62bfb2", true)).expect("should refuse");
+    fn a_development_build_refuses_and_names_both_versions() {
+        let reason = refusal(&a_build("v0.1.5-60-gd62bfb2", "v0.1.5", true), Some("v0.1.5"), false).expect("should refuse");
         assert!(reason.contains("v0.1.5-60-gd62bfb2"), "{reason}");
+        assert!(reason.contains("60 commits ahead of release `v0.1.5`"), "{reason}");
+        assert!(reason.contains("the latest release is `v0.1.5`"), "{reason}");
         assert!(reason.contains("git pull && scripts/install.sh --install"), "{reason}");
+        assert!(reason.contains("`--force` to install `v0.1.5` anyway"), "{reason}");
     }
 
     #[test]
-    fn a_release_build_is_allowed_to_update() {
-        assert_eq!(dev_refusal(&a_build("v0.1.5", false)), None);
+    fn a_development_build_refuses_even_when_the_latest_release_is_unknown() {
+        // The command bails before reading the feed when the check is off; the
+        // route refuses before asking for it. Either way the build is named.
+        let reason = refusal(&a_build("v0.1.5-60-gd62bfb2", "v0.1.5", true), None, false).expect("should refuse");
+        assert!(reason.contains("v0.1.5-60-gd62bfb2"), "{reason}");
+        assert!(reason.contains("git pull && scripts/install.sh --install"), "{reason}");
+        assert!(!reason.contains("--force"), "{reason}");
+    }
+
+    #[test]
+    fn a_release_newer_than_the_latest_release_refuses_the_downgrade() {
+        let reason = refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), false).expect("should refuse");
+        assert!(reason.contains("`v0.1.6`"), "{reason}");
+        assert!(reason.contains("newer than the latest release `v0.1.5`"), "{reason}");
+        assert!(reason.contains("`--force` to install `v0.1.5` anyway"), "{reason}");
+    }
+
+    #[test]
+    fn a_release_at_or_behind_the_latest_release_is_no_refusal() {
+        // Behind: proceeds to the newer-or-nothing decision. Equal: the caller
+        // reports nothing to install. Neither is a refusal.
+        assert_eq!(refusal(&a_build("v0.1.4", "v0.1.4", false), Some("v0.1.5"), false), None);
+        assert_eq!(refusal(&a_build("v0.1.5", "v0.1.5", false), Some("v0.1.5"), false), None);
+    }
+
+    #[test]
+    fn force_proceeds_past_either_refusal() {
+        assert_eq!(
+            refusal(&a_build("v0.1.5-60-gd62bfb2", "v0.1.5", true), Some("v0.1.5"), true),
+            None
+        );
+        assert_eq!(refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), true), None);
+    }
+
+    /// One `/api/update` read, as the command sees it.
+    fn status(
+        version: &str,
+        release: Option<&str>,
+        development: bool,
+        latest: Option<&str>,
+        available: bool,
+        reason: Option<String>,
+    ) -> Value {
+        let mut installed = serde_json::Map::new();
+        installed.insert("version".into(), Value::String(version.into()));
+        if let Some(release) = release {
+            installed.insert("release".into(), Value::String(release.into()));
+        }
+        if development {
+            installed.insert("development".into(), Value::Bool(true));
+        }
+        json!({
+            "installed": installed,
+            "latest": latest.map(|v| json!({"version": v})).unwrap_or(Value::Null),
+            "available": available,
+            "can_apply": {"ok": reason.is_none(), "reason": reason},
+            "enabled": true,
+            "blocked_by": Value::Null,
+        })
+    }
+
+    #[test]
+    fn a_forced_update_proceeds_past_the_refusal_in_can_apply() {
+        // With force there is no `can_apply` pre-check — the route enforces the
+        // blocker itself — so the refusal sitting in the read is not even looked at.
+        let reason = refusal(&a_build("v0.1.5-60-gd62bfb2", "v0.1.5", true), Some("v0.1.5"), false);
+        let flight = preflight(
+            &status("v0.1.5-60-gd62bfb2", Some("v0.1.5"), true, Some("v0.1.5"), false, reason),
+            true,
+        )
+        .expect("force proceeds");
+        assert_eq!(
+            flight,
+            Preflight::Proceed {
+                installed: "v0.1.5-60-gd62bfb2".into(),
+                latest: "v0.1.5".into()
+            }
+        );
+    }
+
+    #[test]
+    fn without_force_the_refusal_stops_before_any_post() {
+        let reason = refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), false);
+        let error = format!(
+            "{:#}",
+            preflight(&status("v0.1.6", Some("v0.1.6"), false, Some("v0.1.5"), false, reason), false)
+                .expect_err("the downgrade refusal stops the command")
+        );
+        assert!(error.contains("refusing to downgrade"), "{error}");
+    }
+
+    #[test]
+    fn an_up_to_date_release_has_nothing_to_do_unless_forced() {
+        let read = status("v0.1.5", Some("v0.1.5"), false, Some("v0.1.5"), false, None);
+        assert_eq!(
+            preflight(&read, false).expect("no refusal, nothing newer"),
+            Preflight::NothingToDo {
+                installed: "v0.1.5".into()
+            }
+        );
+        // Forced, the same read reinstalls rather than stopping.
+        assert!(matches!(preflight(&read, true), Ok(Preflight::Proceed { .. })));
+    }
+
+    #[test]
+    fn a_newer_or_older_motherships_installed_object_still_decides() {
+        // Fields the decision never reads are ignored, and missing ones fall
+        // back: this read names no release and no development flag.
+        let read = status("v0.1.4", None, false, Some("v0.1.5"), true, None);
+        assert!(matches!(preflight(&read, false), Ok(Preflight::Proceed { .. })));
+    }
+
+    #[test]
+    fn the_cli_origin_names_the_base_url_it_posts_to() {
+        // `host_guard` compares `Origin` against the request's own `Host`, so
+        // the apply POST carries the base URL it is already connecting to.
+        assert_eq!(origin("http://127.0.0.1:7878"), "http://127.0.0.1:7878");
+    }
+
+    #[test]
+    fn a_refused_post_prints_the_message_not_the_json() {
+        assert_eq!(
+            server_error(r#"{"error":"a colony is publishing: o/r (abc)"}"#),
+            "a colony is publishing: o/r (abc)"
+        );
+        assert_eq!(server_error("  Bad Gateway  "), "Bad Gateway");
     }
 
     #[test]
@@ -589,10 +960,17 @@ mod tests {
         let original = br#"[{"id":"abc","repo":"o/r"}]"#;
         let app = app_with_installer(&root, &fake, original);
 
-        let log = back_up_and_install(&app, "v9.9.9")
+        let (log, saved) = back_up_and_install(&app, "v9.9.9")
             .await
             .expect("the installer should find the backup");
         assert!(log.contains("swapped"), "{log}");
+        let saved = saved.expect("the backup path is returned");
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+        assert_eq!(
+            app.updater.progress().await.backup,
+            Some(saved.display().to_string()),
+            "the progress names the backup while the installer runs"
+        );
         let saved: Vec<PathBuf> = std::fs::read_dir(root.join("data"))
             .unwrap()
             .map(|e| e.unwrap().path())

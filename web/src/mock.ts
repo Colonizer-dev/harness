@@ -1035,7 +1035,7 @@ let mockUpdate: UpdateStatus = {
   last_checked: "2026-09-17T18:00:00Z",
   error: null,
   can_apply: { ok: true, reason: null },
-  apply: { phase: "idle", version: null, started_at: null, error: null, log: "", colonies: [] },
+  apply: { phase: "idle", version: null, started_at: null, error: null, log: "", colonies: [], backup: null },
 };
 
 let mockTelemetry: TelemetryStatus = {
@@ -1818,6 +1818,7 @@ export function createMockApi(): Api {
           error: null,
           log: "",
           colonies: live.map((s) => ({ id: s.id, repo: s.repo, outcome: "reconnected after the restart" })),
+          backup: null,
         },
       };
       // The real one replaces the process here; the mock just reports it did.
