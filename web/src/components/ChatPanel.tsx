@@ -12,8 +12,9 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useToast } from "../context";
+import { useModels } from "../useModels";
 import {
   ASK_USER_TOOL,
   END_OF_THREAD,
@@ -214,7 +215,12 @@ export function ChatPanel({
               <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
             </div>
           </ThreadPrimitive.Viewport>
-          <Composer isRunning={isRunning} live={live} waiting={thread.hasOpenQuestion} />
+          <Composer
+            isRunning={isRunning}
+            live={live}
+            waiting={thread.hasOpenQuestion}
+            picker={<ModelPicker stream={stream} state={state} enabled={connected && live} />}
+          />
         </ThreadPrimitive.Root>
       </AssistantRuntimeProvider>
       </SimpleViewContext.Provider>
@@ -699,7 +705,57 @@ function WorkingLine({ detail }: { detail: string | null | undefined }) {
   );
 }
 
-function Composer({ isRunning, live, waiting }: { isRunning: boolean; live: boolean; waiting: boolean }) {
+/**
+ * Switches the model a live colony uses for its next turns, keeping the conversation. The shown model is only ever
+ * the runner's latest `model_changed`, never the choice itself; a runner that never reports one can't switch, so
+ * the picker stays hidden.
+ */
+function ModelPicker({ stream, state, enabled }: { stream: SessionStream | null; state: StreamState; enabled: boolean }) {
+  const toast = useToast();
+  const models = useModels();
+  const { model, switchingModel, refusedModel } = state;
+  // Toast a refusal seen while mounted; one already in the state when the panel mounts was shown before.
+  const shownRefusal = useRef(refusedModel);
+  useEffect(() => {
+    if (refusedModel && refusedModel !== shownRefusal.current) toast(`Could not switch to ${refusedModel} — see the logs.`, "error");
+    shownRefusal.current = refusedModel;
+  }, [refusedModel, toast]);
+  if (!model) return null;
+  // The runner may report an id the suggestions don't list, such as a routed model.
+  const options = models.some((m) => m.id === model) ? models : [{ id: model, label: model }, ...models];
+  const choose = (next: string) => {
+    if (next !== model && !stream?.send({ type: "set_model", model: next })) {
+      toast("Not connected to the colony — the model was not switched.", "error");
+    }
+  };
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5"
+      title={switchingModel ? `Switching to ${switchingModel}…` : "Switch the model for the next turns; the conversation is kept."}
+    >
+      {switchingModel && <Spinner className="text-accent" />}
+      <span role="status" className="sr-only">
+        {switchingModel && `Switching to ${switchingModel}…`}
+      </span>
+      <select
+        value={model}
+        onChange={(e) => choose(e.target.value)}
+        disabled={!enabled || switchingModel !== null}
+        aria-busy={switchingModel !== null}
+        aria-label="Model for the next turns"
+        className="h-9 max-w-40 cursor-pointer truncate rounded-xl border border-border bg-panel-2 px-2 text-[12.5px] text-muted outline-none hover:text-text focus:border-accent disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {options.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+}
+
+function Composer({ isRunning, live, waiting, picker }: { isRunning: boolean; live: boolean; waiting: boolean; picker: ReactNode }) {
   return (
     <div className="border-t border-border bg-panel/60 p-3">
       <ComposerPrimitive.Root className="flex items-end gap-2 rounded-2xl border border-border bg-panel p-1.5 pl-3 shadow-[var(--shadow)] focus-within:border-accent">
@@ -716,6 +772,7 @@ function Composer({ isRunning, live, waiting }: { isRunning: boolean; live: bool
           }
           className="scroll-thin max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[14px] leading-5 outline-none placeholder:text-faint"
         />
+        {picker}
         {isRunning ? (
           <ComposerPrimitive.Cancel
             className="grid size-9 shrink-0 cursor-pointer place-items-center rounded-xl border border-border bg-panel-2 text-text hover:bg-panel-3"

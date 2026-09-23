@@ -1,14 +1,14 @@
 //! The agent event contract as a Rust type. `docs/protocol.md` §2 keeps the prose and
-//! `docs/agent-events.schema.json` the machine-readable schema for all thirteen event types; this
+//! `docs/agent-events.schema.json` the machine-readable schema for all fourteen event types; this
 //! enum is the slice of that contract the harness itself acts on (#73 item 4), and the committed
 //! fixture `modules/agents/claude-code/test/fixtures/events.jsonl` proves the runner's real output
 //! deserialises into it.
 //!
 //! Events the harness only forwards to the browser (`assistant_text_delta`, `assistant_text`,
-//! `thinking`, `tool_call`, `tool_result`, `log`) are deliberately not variants: together with any
-//! type a newer runner adds they land on [`AgentEvent::Other`], so a new event type can never make
-//! a line fail to deserialise. That matters because the browser receives every line regardless —
-//! pass-through happens before this dispatch (`events.rs`).
+//! `thinking`, `tool_call`, `tool_result`, `log`, `model_changed`) are deliberately not variants:
+//! together with any type a newer runner adds they land on [`AgentEvent::Other`], so a new event
+//! type can never make a line fail to deserialise. That matters because the browser receives every
+//! line regardless — pass-through happens before this dispatch (`events.rs`).
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -154,45 +154,45 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &events[7],
+            &events[8],
             AgentEvent::Question { question_id, questions, message_id: Some(message_id), .. }
                 if question_id == "toolu_ask" && message_id == "msg_1" && questions.len() == 1
         ));
         assert!(matches!(
-            &events[8],
+            &events[9],
             AgentEvent::Status {
                 state: AgentState::WaitingForAnswer,
                 detail: None
             }
         ));
         assert!(matches!(
-            &events[9],
+            &events[10],
             AgentEvent::QuestionAnswered { question_id, response: None, .. } if question_id == "toolu_ask"
         ));
         assert!(matches!(
-            &events[14],
+            &events[15],
             AgentEvent::MemoryProposal { scope: Some(scope), tags, .. }
                 if scope == "repo" && tags == &["workspace".to_string()]
         ));
         assert!(matches!(
-            &events[15],
+            &events[16],
             AgentEvent::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
         ));
         assert!(matches!(
-            &events[17],
+            &events[18],
             AgentEvent::Status {
                 state: AgentState::Idle,
                 detail: None
             }
         ));
         assert!(matches!(
-            &events[18],
+            &events[19],
             AgentEvent::Status {
                 state: AgentState::Exited,
                 detail: None
             }
         ));
-        match &events[16] {
+        match &events[17] {
             AgentEvent::TurnEnd {
                 is_error,
                 cost_usd,
@@ -208,11 +208,12 @@ mod tests {
 
         // The forwarded-only types land on the catch-all on purpose: the browser is their consumer.
         assert_eq!(events[3], AgentEvent::Other, "log");
-        assert_eq!(events[4], AgentEvent::Other, "assistant_text_delta");
-        assert_eq!(events[6], AgentEvent::Other, "assistant_text");
-        assert_eq!(events[11], AgentEvent::Other, "thinking");
-        assert_eq!(events[12], AgentEvent::Other, "tool_call");
-        assert_eq!(events[13], AgentEvent::Other, "tool_result");
+        assert_eq!(events[4], AgentEvent::Other, "model_changed");
+        assert_eq!(events[5], AgentEvent::Other, "assistant_text_delta");
+        assert_eq!(events[7], AgentEvent::Other, "assistant_text");
+        assert_eq!(events[12], AgentEvent::Other, "thinking");
+        assert_eq!(events[13], AgentEvent::Other, "tool_call");
+        assert_eq!(events[14], AgentEvent::Other, "tool_result");
     }
 
     /// The regression guard for browser pass-through: a type a newer runner adds, or a known body
@@ -254,6 +255,7 @@ mod tests {
             "thinking",
             "tool_call",
             "tool_result",
+            "model_changed",
             "brand_new",
         ] {
             assert!(!AgentEvent::is_acted_on(tag), "{tag} is forwarded only, or not known at all");

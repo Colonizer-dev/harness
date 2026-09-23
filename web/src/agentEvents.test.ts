@@ -29,6 +29,7 @@ const WEB_TYPES = {
   question_answered: true,
   turn_end: true,
   log: true,
+  model_changed: true,
   memory_proposal: true,
   finding: true,
 } satisfies Record<AgentEventBody["type"], true>;

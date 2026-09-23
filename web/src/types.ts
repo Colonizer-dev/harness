@@ -910,6 +910,8 @@ export type AgentEventBody =
       model_usage?: Record<string, ModelTokens>;
     }
   | { type: "log"; level: LogLevel; message: string }
+  /** The model the colony's next turns use: sent at start with no `previous`, then after each `set_model` that took. */
+  | { type: "model_changed"; model: string; previous: string | null }
   /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
   | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
@@ -927,7 +929,9 @@ export type ServerFrame =
 export type ClientCommand =
   | { type: "user_message"; text: string }
   | { type: "answer"; question_id: string; answers: Answers; response: string | null }
-  | { type: "interrupt" };
+  | { type: "interrupt" }
+  /** Switches the model for the colony's next turns, keeping the conversation; `model_changed` confirms it. */
+  | { type: "set_model"; model: string };
 
 export interface NewSessionRequest {
   repo: string;

@@ -137,6 +137,8 @@ stateDiagram-v2
    on the same worktree and branch and tells the agent to continue from what is already there. A resume past
    the parallel limit queues instead, and boots on its worktree when a slot frees. The new
    agentd numbers its events from 1, so the previous transcript is rotated to `events-<n>.jsonl` first.
+   Changing models does not need a resume: a live `set_model` switches the running colony's model for
+   its next turns and keeps the session (docs/protocol.md §6.1b).
 
 ## Per-colony limits
 
