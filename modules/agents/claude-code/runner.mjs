@@ -4,7 +4,8 @@
 // Diagnostics go to stderr only.
 
 import { execFile } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -111,6 +112,35 @@ export function superpowersBootstrap(skill) {
 export const RTK_BIN = '/opt/colonizer/bin/rtk';
 export const CAVEMAN_SKILL = '/opt/colonizer/caveman/SKILL.md';
 export const CAVEMAN_LEVELS = new Set(['lite', 'full', 'ultra']);
+// Jev compaction loads as a plugin, like the skill dirs: the mothership mounts it read-only here,
+// and its SDK id for a local plugin dir is the name plus @inline.
+export const JEV_PLUGIN = 'fast-jev-compaction';
+export const JEV_PLUGIN_ID = `${JEV_PLUGIN}@inline`;
+export const JEV_COMPACTION_DIR = '/opt/colonizer/jev-compaction';
+
+/** True when buildOptions switched Jev compaction on: its plugin config is in the SDK settings. */
+export function jevEnabled(options) {
+  return Boolean(options?.settings?.pluginConfigs?.[JEV_PLUGIN_ID]);
+}
+
+/** Dotted-version compare against 2.1.274 (function hooks), tolerating suffixes like "2.1.280 (Claude Code)". */
+export function jevVersionOk(version) {
+  const parts = String(version ?? '').match(/\d+(\.\d+)*/)?.[0].split('.').map(Number) ?? [];
+  for (const [i, want] of [2, 1, 274].entries()) {
+    if ((parts[i] ?? 0) !== want) return (parts[i] ?? 0) > want;
+  }
+  return true;
+}
+
+/** The last Jev verdict in debug-log text, stripped of any log prefix, or null when there is none. */
+export function latestJevVerdict(text) {
+  let verdict = null;
+  for (const line of String(text ?? '').split('\n')) {
+    const match = line.match(/kept \d+\/\d+ messages, no summary.*|fallback to built-in summary.*/);
+    if (match) verdict = match[0].trim();
+  }
+  return verdict;
+}
 
 /**
  * caveman's ruleset for the system prompt. The plugin switches itself on with SessionStart and
@@ -358,6 +388,10 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   const rtkBin = env.COLONIZER_RTK === 'true' ? env.COLONIZER_RTK_BIN || RTK_BIN : null;
   // Rewritten commands call `rtk`, so it has to be on the PATH the Bash tool runs with.
   if (rtkBin) claudeEnv.PATH = `${dirname(rtkBin)}:${claudeEnv.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`;
+  // Jev compaction is default-off: only 'true' loads the plugin, and childEnv already drops a stale
+  // CLAUDE_CODE_ENABLE_FUNCTION_HOOKS from the input env, so the flag below is the only way it is set.
+  const jevDir = env.COLONIZER_JEV_COMPACTION === 'true' ? env.COLONIZER_JEV_COMPACTION_DIR || JEV_COMPACTION_DIR : null;
+  if (jevDir) claudeEnv.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS = '1';
 
   const options = {
     cwd: process.cwd(),
@@ -459,6 +493,23 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (pluginDirs.length) {
     options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
   }
+  if (jevDir) {
+    // Beside the skill dirs: the superpowers scan above only reads skill files, so this changes
+    // nothing about the prompt.
+    (options.plugins ??= []).push({ type: 'local', path: jevDir });
+    // The hook only accepts real numbers; anything else falls back to its own defaults.
+    const jevOptions = {};
+    const keepThreshold = Number(env.COLONIZER_JEV_KEEP_THRESHOLD);
+    if (Number.isFinite(keepThreshold)) jevOptions.keepThreshold = keepThreshold;
+    const preserveRecent = Number(env.COLONIZER_JEV_PRESERVE_RECENT);
+    if (Number.isFinite(preserveRecent)) jevOptions.preserveRecentMessages = preserveRecent;
+    options.settings = {
+      ...options.settings,
+      pluginConfigs: { ...options.settings?.pluginConfigs, [JEV_PLUGIN_ID]: { options: jevOptions } },
+    };
+    // Headless Claude Code keeps the plugin's verdict only in its debug log, which runAgent reads back.
+    options.debugFile = env.COLONIZER_JEV_COMPACTION_LOG || join(tmpdir(), 'colonizer-jev-compaction.log');
+  }
   if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
   if (env.COLONIZER_EFFORT) {
     if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
@@ -500,6 +551,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   const fallbackIndex = new Map(); // message_id -> next index when nothing was streamed
   const subagents = new Map(); // Task tool_use id -> { id, name, description }
   let streamMessageId = null;
+  let jevDebugOffset = 0; // bytes of the debug log already scanned for a Jev verdict
   let currentModel = null; // the orchestrator model last announced in a model_changed
 
   /**
@@ -736,11 +788,39 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
           case 'system':
             if (msg.subtype === 'init') {
               emit({ type: 'log', level: 'info', message: `Claude Code session ${msg.session_id} started (model ${msg.model})` });
+              if (jevEnabled(options)) {
+                // A restarted runAgent must not re-report a verdict from before it started.
+                try { jevDebugOffset = statSync(options.debugFile).size; } catch { jevDebugOffset = 0; }
+                if (!jevVersionOk(msg.claude_code_version)) {
+                  emit({ type: 'log', level: 'warn', message: `Jev compaction needs Claude Code 2.1.274 or later (function hooks), but this colony runs ${msg.claude_code_version}; compaction falls back to the built-in summary` });
+                } else if (!msg.plugins?.some((p) => p?.name === JEV_PLUGIN)) {
+                  emit({ type: 'log', level: 'warn', message: "Jev compaction is switched on, but Claude Code didn't load the fast-jev-compaction plugin; compaction falls back to the built-in summary" });
+                }
+              }
               // init can come once per turn: announce the model only when it is news to clients.
               if (typeof msg.model === 'string' && msg.model && msg.model !== currentModel) {
                 emit({ type: 'model_changed', model: msg.model, previous: currentModel });
                 currentModel = msg.model;
               }
+            } else if (msg.subtype === 'compact_boundary' && jevEnabled(options)) {
+              let added = '';
+              let fd;
+              try {
+                fd = openSync(options.debugFile, 'r');
+                const size = fstatSync(fd).size;
+                if (size < jevDebugOffset) jevDebugOffset = 0; // rotated or truncated
+                const buf = Buffer.alloc(size - jevDebugOffset);
+                readSync(fd, buf, 0, buf.length, jevDebugOffset);
+                added = buf.toString('utf8');
+                jevDebugOffset = size;
+              } catch {
+                // A missing or unreadable debug log means no verdict, never an error.
+              } finally {
+                if (fd !== undefined) try { closeSync(fd); } catch {}
+              }
+              const meta = msg.compact_metadata ?? {};
+              const verdict = latestJevVerdict(added) ?? 'fast-jev-compaction left no verdict';
+              emit({ type: 'log', level: 'info', message: `Compaction (${meta.trigger}, ${meta.pre_tokens} → ${meta.post_tokens ?? '?'} tokens): ${verdict}` });
             }
             break;
         }

@@ -26,7 +26,8 @@
     },
     {
       "env": [
-        "JEV_API_KEY"
+        "JEV_API_KEY",
+        "TYPESAFE_API_KEY"
       ],
       "hosts": [
         "api.typesafe.ai"
@@ -157,6 +158,31 @@
         "description": "Token savings: shell commands the agent runs, such as git status or a test run, go through rtk, which shortens their output before the agent reads it. Commands rtk has no rule for run unchanged. Off by default.",
         "default": false,
         "env": "COLONIZER_RTK"
+      },
+      "jev_compaction": {
+        "type": "boolean",
+        "title": "Prune stale tool calls at compaction (fast-jev-compaction)",
+        "description": "Token savings: when the context fills, stale tool calls are pruned by their Jev score instead of Claude Code's lossy summary, and everything kept stays word for word. Off by default. Each compaction sends this colony's conversation and tool-call history — file paths, command output — to TypeSafe at api.typesafe.ai, so read TypeSafe's data-handling terms before using it on private repos; TypeSafe bills that use directly and it is not tracked in model usage or colony cost, and it needs the mothership's TypeSafe key (JEV_API_KEY). It is separate from the Jev routing second opinion (jev_shadow_mode), and it composes with Headroom and rtk.",
+        "default": false,
+        "env": "COLONIZER_JEV_COMPACTION"
+      },
+      "jev_keep_threshold": {
+        "type": "number",
+        "title": "Jev compaction keep threshold",
+        "description": "Minimum Jev score a message needs to survive compaction; lower keeps more. Only used when Jev compaction is on.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.5,
+        "env": "COLONIZER_JEV_KEEP_THRESHOLD"
+      },
+      "jev_preserve_recent": {
+        "type": "integer",
+        "title": "Jev compaction recent messages",
+        "description": "How many of the most recent messages compaction always keeps verbatim, whatever their score; the first message is always kept too. Only used when Jev compaction is on.",
+        "minimum": 0,
+        "maximum": 100,
+        "default": 6,
+        "env": "COLONIZER_JEV_PRESERVE_RECENT"
       },
       "scan": {
         "type": "string",

@@ -204,6 +204,11 @@ fn valid_key(raw: Option<String>) -> Option<String> {
     raw.filter(|key| !key.trim().is_empty())
 }
 
+/// The mothership's own TypeSafe key, shared by the Jev features that call TypeSafe from a colony.
+pub fn api_key() -> Option<String> {
+    valid_key(std::env::var("JEV_API_KEY").ok())
+}
+
 /// The entry point the boot path calls before `routing::decide`. Two short-circuits, both silent and
 /// both make zero network calls: the setting is off, or there is no usable `JEV_API_KEY`. Either way
 /// a missing/disabled Jev is a clean "no opinion", never an error.
@@ -211,7 +216,7 @@ pub async fn shadow_opinion(enabled: bool, title: &str, labels: &[String], signa
     if !enabled {
         return None;
     }
-    let api_key = valid_key(std::env::var("JEV_API_KEY").ok())?;
+    let api_key = api_key()?;
     let state = CondensedState::build(title, labels, signals);
     JevClient::new(api_key).ask(&state).await
 }
