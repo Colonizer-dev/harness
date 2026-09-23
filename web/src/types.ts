@@ -65,8 +65,16 @@ export interface Session {
   boot_cpus?: number | null;
   /** `8G`-shaped, like the sandbox's `memory` setting. Absent on a colony booted before this change. */
   boot_memory?: string | null;
-  /** Where the last launch's time went, filled in when the colony finished booting (docs/protocol.md §4). */
-  boot_timing?: { total_ms: number; phases?: { name: string; ms: number }[] } | null;
+  /**
+   * Where the last launch's time went (docs/protocol.md §4): phases back to back in boot order, their
+   * sum at most `total_ms`. While `starting` it holds the phases finished so far; a failed boot keeps
+   * the ones it got through.
+   */
+  boot_timing?: {
+    /** Present only once the boot finished: a boot under way or stopped part way has no total. */
+    total_ms?: number;
+    phases: { name: string; ms: number }[];
+  } | null;
   cleaned_up: boolean;
   /** True opts this colony's worktree out of automatic reclamation (issue #223). */
   keep_worktree: boolean;

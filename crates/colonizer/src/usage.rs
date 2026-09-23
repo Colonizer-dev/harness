@@ -223,7 +223,13 @@ fn settings_set(modules: &ModulesConfig, agents: &[AgentModule]) -> Vec<String> 
 fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
     let mut samples: Vec<(&str, Vec<u64>)> = BOOT_PHASES.iter().map(|phase| (*phase, Vec::new())).collect();
     for session in sessions {
-        let Some(phases) = session.boot_timing.as_ref().and_then(|t| t["phases"].as_array()) else {
+        // A breakdown without `total_ms` is a boot still under way or one that stopped part way, with
+        // only its early phases. Counting those would put different colonies behind each phase's
+        // median, so only finished boots are sampled.
+        let Some(timing) = session.boot_timing.as_ref().filter(|t| t.get("total_ms").is_some()) else {
+            continue;
+        };
+        let Some(phases) = timing["phases"].as_array() else {
             continue;
         };
         for phase in phases {
@@ -1349,9 +1355,9 @@ mod tests {
         a.boot_timing =
             Some(json!({"total_ms": 10_000, "phases": [{"name": "vm-boot", "ms": 1_200}, {"name": "agentd", "ms": 400}]}));
         let mut b = session(SessionStatus::Idle);
-        b.boot_timing = Some(json!({"phases": [{"name": "vm-boot", "ms": 6_000}]}));
+        b.boot_timing = Some(json!({"total_ms": 9_000, "phases": [{"name": "vm-boot", "ms": 6_000}]}));
         let mut c = session(SessionStatus::Idle);
-        c.boot_timing = Some(json!({"phases": [{"name": "vm-boot", "ms": 900_000}]}));
+        c.boot_timing = Some(json!({"total_ms": 950_000, "phases": [{"name": "vm-boot", "ms": 900_000}]}));
         let batch = build(None, &[a, b, c], &ModulesConfig::default(), &[], 0);
         assert_eq!(
             batch.boot_ms,
@@ -1366,6 +1372,33 @@ mod tests {
                 }
             ],
             "the median of 1200, 6000 and 900000, in boot order, and an unnamed phase never appears"
+        );
+    }
+
+    #[test]
+    fn boot_ms_leaves_out_a_boot_that_never_finished() {
+        let mut booted = session(SessionStatus::Idle);
+        booted.boot_timing =
+            Some(json!({"total_ms": 1_800, "phases": [{"name": "issue", "ms": 200}, {"name": "vm-boot", "ms": 1_200}]}));
+        // Failed after the VM came up, or still starting: a breakdown with no `total_ms`.
+        let mut failed = session(SessionStatus::Failed);
+        failed.boot_timing = Some(json!({"phases": [{"name": "issue", "ms": 90_000}, {"name": "vm-boot", "ms": 90_000}]}));
+        let mut starting = session(SessionStatus::Starting);
+        starting.boot_timing = Some(json!({"phases": [{"name": "issue", "ms": 90_000}]}));
+        let batch = build(None, &[booted, failed, starting], &ModulesConfig::default(), &[], 0);
+        assert_eq!(
+            batch.boot_ms,
+            vec![
+                BootPhase {
+                    phase: "issue",
+                    bucket: "<1s"
+                },
+                BootPhase {
+                    phase: "vm-boot",
+                    bucket: "1-2s"
+                }
+            ],
+            "only the boot that finished, and so has `total_ms`, is sampled"
         );
     }
 

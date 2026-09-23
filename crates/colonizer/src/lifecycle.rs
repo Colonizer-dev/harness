@@ -616,6 +616,8 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         x.attention = None;
         x.mesh = None;
         x.local_port = None;
+        // The last boot's phases would read as this one's under `starting` or `queued`.
+        x.boot_timing = None;
         x.updated_at = Utc::now();
         Ok(Some((x.clone(), room, waiting)))
     })
