@@ -220,22 +220,41 @@ pub fn diagnose(session: &Session, tail: &[Value], now: DateTime<Utc>) -> Option
     match session.status {
         Queued => Some(state("queued", "queued, waiting for a free slot".into(), None)),
         Starting => {
-            let phase = session
+            // `mark` records a phase only after it finishes, so the last one named is the last
+            // DONE phase; the clock is the whole boot, and the next phase has the remainder.
+            let phases: Vec<(&str, u64)> = session
                 .boot_timing
                 .as_ref()
-                .and_then(|t| t.get("phases")?.as_array()?.last()?.get("name")?.as_str())
-                .unwrap_or("starting");
+                .and_then(|t| t.get("phases")?.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| Some((p.get("name")?.as_str()?, p.get("ms")?.as_u64().unwrap_or(0))))
+                        .collect()
+                })
+                .unwrap_or_default();
             let start = session
                 .boot_attempt_started_at
                 .and_then(|unix| DateTime::from_timestamp(unix as i64, 0))
                 .unwrap_or(session.created_at);
-            Some(state(
-                "booting",
-                format!("booting: {phase} for {}", fmt_dur(age(start))),
-                None,
-            ))
+            let total = age(start);
+            let text = match phases.last() {
+                Some((last, _)) => {
+                    let done_ms: u64 = phases.iter().map(|(_, ms)| ms).sum();
+                    let running_ms = (total.max(0) as u64 * 1000).saturating_sub(done_ms);
+                    format!(
+                        "booting for {}; {last} done, next phase running {}",
+                        fmt_dur(total),
+                        fmt_dur((running_ms / 1000) as i64)
+                    )
+                }
+                None => format!("booting for {}; first phase running", fmt_dur(total)),
+            };
+            Some(state("booting", text, None))
         }
         Running | WaitingForAnswer | Idle => {
+            // Parked colonies never reach here: quota exhaustion stops them with a
+            // `provider_quota_exhausted` attention (events.rs), and an expired autopilot hold
+            // stops them with `hold_timeout` (queue.rs) — `Stopped` below reads as terminal.
             // Provider failure outranks the human wait: the tail's most recent `assistant_text`
             // with no `user_message` after it, when it classifies as exhaustion (its reset words
             // ride along verbatim), else the quota attention flag on its own, naming no reset.
@@ -431,8 +450,11 @@ mod tests {
         let held = || with(Idle, |s| s.attention = Some(serde_json::json!({"reason": "autopilot_held"})));
         let quota = || vec![serde_json::json!({"seq": 1, "type": "assistant_text", "text": QUOTA_TEXT})];
         let booting = with(Starting, |s| {
-            s.boot_timing = Some(serde_json::json!({"phases": [{"name": "git", "ms": 810}]}));
+            s.boot_timing = Some(serde_json::json!({"phases": [{"name": "clone", "ms": 60000}, {"name": "git", "ms": 30000}]}));
             s.created_at = now() - chrono::Duration::minutes(3);
+        });
+        let booting_first = with(Starting, |s| {
+            s.created_at = now() - chrono::Duration::seconds(45);
         });
         let stale = with(Running, |s| {
             s.last_activity_at = Some(now() - chrono::Duration::hours(2));
@@ -461,7 +483,20 @@ mod tests {
             Option<&'static str>,
         );
         let cases: Vec<Case> = vec![
-            (booting, vec![], Some("booting"), &["booting: git for "], None),
+            (
+                booting,
+                vec![],
+                Some("booting"),
+                &["booting for 3m", "git done", "next phase running 1m"],
+                None,
+            ),
+            (
+                booting_first,
+                vec![],
+                Some("booting"),
+                &["booting for 45s", "first phase running"],
+                None,
+            ),
             (with(Queued, |_| {}), vec![], Some("queued"), &[], None),
             (
                 with(Running, |s| s.last_activity_at = Some(now() - chrono::Duration::seconds(60))),
