@@ -10,6 +10,31 @@ export function orgEnabled(settings: OrgSettings | undefined): boolean {
   return settings?.enabled !== false;
 }
 
+/**
+ * The design's "Hide orgs with no colonies" toggle, persisted client-side under the house
+ * `colonizer.*` naming. On matches the design's default; only an explicit "0" is off, so a
+ * stored blob from a newer build never hides orgs for an existing install by accident.
+ */
+export const HIDE_EMPTY_ORGS_KEY = "colonizer.hideEmptyOrgs";
+
+export function parseHideEmptyOrgs(raw: string | null): boolean {
+  return raw !== "0";
+}
+
+export function serializeHideEmptyOrgs(hide: boolean): string {
+  return hide ? "1" : "0";
+}
+
+/**
+ * The toggle applied to the workspace list: with it on, entries with no colonies in the live
+ * list are hidden from the overview, the rail and the totals. The design hides on "no colony
+ * launched in the last 30 days", but the mothership serves no launch history — only the live
+ * list — so empty means zero sessions there. Takes either the visible or the hidden split.
+ */
+export function hideEmptyOrgEntries(entries: OrgEntry[], hideEmpty: boolean): OrgEntry[] {
+  return hideEmpty ? entries.filter((e) => e.total > 0) : entries;
+}
+
 /** One row of the sidebar's org switcher, merged from GET /api/orgs and the colony list. */
 export interface OrgEntry {
   org: string;
