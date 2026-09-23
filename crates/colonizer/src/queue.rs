@@ -7,6 +7,7 @@
 use crate::{
     Shared, orgs, provider_quota, providers, spend,
     stack::{self, Stacked},
+    util::short_id,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -46,9 +47,9 @@ pub(crate) fn repo_limit(modules: &crate::config::ModulesConfig, org: &orgs::Org
 /// The attention reason an autopilot hold carries, set where the hold is taken (events) and read here.
 pub(crate) const AUTOPILOT_HELD_REASON: &str = "autopilot_held";
 
-/// The attention reason a colony parked for outlasting its hold carries. `Stopped` stands in until
-/// #213 adds `Parked`, the same stand-in quota parking uses — and the reason string is what keeps
-/// [`resume_quota_parked`] from requeueing these: it only matches its own reason.
+/// The attention reason a colony parked for outlasting its hold carries. `Stopped` plus this
+/// reason is the parked state (#213), the same stand-in quota parking uses — and the reason
+/// string is what keeps [`resume_quota_parked`] from requeueing these: it only matches its own reason.
 pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
 
 /// Whether this colony's autopilot hold has outlasted its slot (issue #217).
@@ -237,6 +238,8 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Quota-parked colonies whose provider recovered rejoin the queue on this same 5 s tick, ahead
     // of admission; a colony that only just parked keeps its terminal state until its reset passes.
     resume_quota_parked(app).await;
+    // Warm-parked colonies whose provider recovered continue in place on the same tick.
+    continue_warm_parked(app).await;
     // Holds past their timeout park on this same tick, ahead of admission, so the slots they release
     // are visible to the loop below. Read per tick, so a settings save applies at once.
     park_expired_holds(app, orgs::hold_timeout(&app.modules.read().await.clone())).await;
@@ -357,12 +360,26 @@ fn stamp_hold_timeout(x: &mut Session) {
     }
 }
 
+/// Whether a quota-parked colony's provider has recovered: a named provider when its record lapsed
+/// or is gone (a deleted provider reads as recovered); an unnamed or account-wide park when
+/// nothing is exhausted anywhere, the account record included. Shared by the cold requeue below
+/// and the warm continue beside it.
+fn quota_recovered(app: &Shared, s: &Session, provider_ids: &[String], any_exhausted: bool) -> bool {
+    match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), provider_ids, &[]) {
+        Some(pid) => !app.gateway.is_quota_exhausted(&pid),
+        None => !any_exhausted,
+    }
+}
+
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
 /// worktree never left, so the normal admission loop resumes them like any operator resume. A
 /// named provider recovers when its record lapses (reset passed) or is gone (provider deleted); an
 /// unnamed one recovers when nothing is exhausted anywhere, the account record included — an
 /// account-parked colony stays parked while the account record holds and resumes when it lapses.
 pub(crate) async fn resume_quota_parked(app: &Shared) {
+    // A halted burn-down's colonies stay parked with their ticket: requeueing them on a recovery
+    // would resume spending the operator explicitly halted.
+    let burn_down_off = crate::burn_down::halted(&app.modules.read().await.clone());
     let ids: Vec<String> = {
         let sessions = app.sessions.read().await;
         let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
@@ -376,15 +393,45 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
                         .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
                     && !s.cleaned_up
                     && s.git_admin_dir.is_some()
-                    && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
-                        Some(pid) => !app.gateway.is_quota_exhausted(&pid),
-                        None => !any_exhausted,
-                    }
+                    && !(burn_down_off && s.origin.as_deref() == Some("burn_down"))
+                    && quota_recovered(app, s, &ids, any_exhausted)
             })
             .map(|s| s.id.clone())
             .collect()
     };
     for id in ids {
+        // The old agent link is dropped and the event log rotated before the requeue, exactly as an
+        // operator resume does: agentd keeps its event store inside the microVM, so the fresh
+        // microVM numbers from 1 regardless, and with the stale log still in place the restored
+        // cursors would drop the new run's first events — including its turn_ends — as replays. A
+        // rotation that fails leaves the colony parked: queueing onto a log the new run cannot
+        // safely continue is worse than waiting for the next tick.
+        let runtime = app.runtimes.lock().await.remove(&id);
+        if let Some(rt) = &runtime {
+            rt.stop.send_replace(true);
+            rt.retired.send_replace(true);
+        }
+        let dir = app.session_dir(&id);
+        let rotated = {
+            let _file_lock = match runtime.as_ref() {
+                Some(rt) => Some(rt.file_lock.lock().await),
+                None => None,
+            };
+            rotate_events(&dir)
+        };
+        if let Err(e) = rotated {
+            let e = anyhow::Error::from(e);
+            app.storage_failed("rotate the old event log", &e).await;            app.session_log(
+                &id,
+                "error",
+                format!(
+                    "could not move the old event log aside ({e}); the colony stays parked — move {} aside yourself and try again",
+                    dir.join("events.jsonl").display()
+                ),
+            )
+            .await;
+            continue;
+        }
         // Queued holds no slot, so the flip needs no admission; the loop below boots it. The status
         // is re-checked under the lock, so a concurrent operator resume wins instead of doubling.
         let flipped = app
@@ -406,6 +453,79 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
                 app.persist_and_broadcast(&s).await;
             }
             app.session_log(&id, "info", "the provider's quota recovered; queued to resume".into())
+                .await;
+        }
+    }
+}
+
+/// What a warm-parked agent hears when its provider recovers: short, so an agent that has been
+/// waiting on an empty plan simply picks up where the quota stopped it.
+pub(crate) const QUOTA_RECOVERED_TEXT: &str =
+    "The provider quota that parked this colony has recovered. Continue where you left off.";
+
+/// Continues warm-parked colonies whose provider recovered: a live colony flagged with the quota
+/// reason gets the recovery message in place — through the runtime's command channel, the same one
+/// the watchdog's nudges travel — and the flag is cleared. No agent link yet, or a failed send,
+/// keeps the flag for the next tick.
+pub(crate) async fn continue_warm_parked(app: &Shared) {
+    let now = Utc::now();
+    // Same halted-burn-down stay-parked rule as the cold requeue above.
+    let burn_down_off = crate::burn_down::halted(&app.modules.read().await.clone());
+    let ids: Vec<(String, Value)> = {
+        let sessions = app.sessions.read().await;
+        let provider_ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
+        let any_exhausted = !app.gateway.quota_exhausted().is_empty();
+        sessions
+            .iter()
+            .filter(|s| {
+                s.status.is_live()
+                    && s.status != SessionStatus::Starting
+                    && !s.cleaned_up
+                    && s.attention
+                        .as_ref()
+                        .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+                    && !(burn_down_off && s.origin.as_deref() == Some("burn_down"))
+                    && quota_recovered(app, s, &provider_ids, any_exhausted)
+            })
+            .map(|s| (s.id.clone(), s.attention.clone().expect("filtered to quota-flagged colonies")))
+            .collect()
+    };
+    for (id, ticket) in ids {
+        let Some(rt) = app.runtimes.lock().await.get(&id).cloned() else {
+            continue;
+        };
+        let command = json!({
+            "type": "user_message",
+            "id": format!("quota-{}", short_id()),
+            "text": QUOTA_RECOVERED_TEXT,
+        });
+        // A dropped link reads as a failed send and the flag stays for the next tick. The id is not
+        // `watchdog-`, so the echo counts as progress — and the activity clock restarts here, so the
+        // watchdog gives the continued agent a full stall window before its next nudge.
+        if rt.commands.send(command).is_err() {
+            continue;
+        }
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = now;
+            activity.nudges = 0;
+            activity.last_nudge = None;
+        }
+        // Cleared only while the flag is still this ticket: the agent may have re-parked on a fresh
+        // ticket between the send and this write, and that flag belongs to the next recovery.
+        let cleared = app
+            .update_session(&id, |x| {
+                if x.attention.as_ref() == Some(&ticket) {
+                    x.attention = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .await
+            .is_some_and(|(_, cleared)| cleared);
+        if cleared {
+            app.session_log(&id, "info", "the provider's quota recovered; told the agent to continue".into())
                 .await;
         }
     }
@@ -820,8 +940,20 @@ mod tests {
         *app.sessions.write().await = vec![
             quota_parked("parked-hot", "provider quota exhausted (bailian, resets 09-23 07:54 UTC)"),
             quota_parked("parked-cool", "provider quota exhausted (zai)"),
+            quota_parked("parked-burn", "provider quota exhausted (zai)"),
         ];
-        // Bailian's reset is ahead (still out); zai's passed (recovered).
+        // The burn-down scheduler is halted (never configured here), so its parked colony stays
+        // parked even once its provider recovers — until the operator resumes it by hand.
+        app.sessions.write().await.iter_mut().find(|s| s.id == "parked-burn").unwrap().origin =
+            Some("burn_down".into());
+        // Both parked runs left an event log behind; the requeued one must rotate its own.
+        for (id, body) in [("parked-hot", "hot-run"), ("parked-cool", "cool-run"), ("parked-burn", "burn-run")] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+            tokio::fs::write(app.session_dir(id).join("events.jsonl"), body).await.unwrap();
+        }
+        let (stale, _rx) = crate::sessions::tests::test_runtime(&app.session_dir("parked-cool"));
+        let stale = Arc::new(stale);
+        app.runtimes.lock().await.insert("parked-cool".into(), stale.clone());        // Bailian's reset is ahead (still out); zai's passed (recovered).
         app.gateway
             .mark_quota_exhausted("bailian", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
         app.gateway
@@ -837,7 +969,110 @@ mod tests {
             cool.attention.is_none() && cool.error.is_none(),
             "a requeue reads like a resume"
         );
+        let burn = sessions.iter().find(|s| s.id == "parked-burn").unwrap();
+        assert_eq!(burn.status, SessionStatus::Stopped, "a halted burn-down stays parked");
+        assert!(burn.attention.is_some(), "with its resume ticket, for a hand resume");
         drop(sessions);
+        // The requeue rotated the old run's log aside and dropped its link, like an operator
+        // resume: the fresh microVM numbers from 1, so a stale log left in place would have the
+        // restored cursors drop the new run's first events as replays.
+        assert!(
+            !app.session_dir("parked-cool").join("events.jsonl").exists(),
+            "the old log moved aside"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.session_dir("parked-cool").join("events-1.jsonl")).unwrap(),
+            "cool-run",
+            "the archive holds the previous run"
+        );
+        assert!(
+            app.runtimes.lock().await.get("parked-cool").is_none_or(|rt| !Arc::ptr_eq(rt, &stale)),
+            "the stale agent link is gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.session_dir("parked-hot").join("events.jsonl")).unwrap(),
+            "hot-run",
+            "a colony that stays parked keeps its log"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.session_dir("parked-burn").join("events.jsonl")).unwrap(),
+            "burn-run",
+            "a skipped burn-down colony rotates nothing"
+        );
+        // Switched back on, the burn-down colony rejoins the queue like any other park.
+        app.modules.write().await.get_mut("burn_down").expect("created on first access").enabled = true;
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "parked-burn").unwrap().status,
+            SessionStatus::Queued,
+            "enabled again, the burn-down park requeues"
+        );
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A warm-parked colony hears the recovery in place: while the record holds nothing moves, and
+    /// once it lapses the linked colony is told to continue and loses its flag while a colony with
+    /// no agent link keeps its flag for the next tick.
+    #[tokio::test]
+    async fn warm_parked_colonies_continue_in_place_once_the_provider_recovers() {
+        let root = std::env::temp_dir().join(format!("colonizer-warm-resume-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        let mut warm = colony("acme", SessionStatus::Idle);
+        warm.id = "warm".into();
+        warm.git_admin_dir = Some("git".into());
+        warm.error = Some("provider quota exhausted (bailian, resets 09-23 07:54 UTC)".into());
+        warm.attention =
+            Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        let mut linkless = warm.clone();
+        linkless.id = "linkless".into();
+        // A warm-parked burn-down colony while the scheduler is halted: same stay-parked rule.
+        let mut burn_warm = warm.clone();
+        burn_warm.id = "burn-warm".into();
+        burn_warm.origin = Some("burn_down".into());
+        *app.sessions.write().await = vec![warm, linkless, burn_warm];
+        for id in ["warm", "linkless", "burn-warm"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        let (rt, mut rx) = crate::sessions::tests::test_runtime(&app.session_dir("warm"));
+        app.runtimes.lock().await.insert("warm".into(), Arc::new(rt));
+        let (burn_rt, mut burn_rx) = crate::sessions::tests::test_runtime(&app.session_dir("burn-warm"));
+        app.runtimes.lock().await.insert("burn-warm".into(), Arc::new(burn_rt));
+        // Still exhausted: the flag stays and nobody hears anything.
+        app.gateway
+            .mark_quota_exhausted("bailian", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
+        continue_warm_parked(&app).await;
+        assert!(app.session("warm").await.unwrap().attention.is_some(), "still out, still parked");
+        assert!(rx.try_recv().is_err(), "nothing sent while exhausted");
+        // Recovered: the linked colony continues in place; the linkless one waits for the next tick.
+        app.gateway.forget_quota("bailian");
+        continue_warm_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        assert!(
+            sessions.iter().find(|s| s.id == "warm").unwrap().attention.is_none(),
+            "continued, flag cleared"
+        );
+        assert!(
+            sessions.iter().find(|s| s.id == "linkless").unwrap().attention.is_some(),
+            "no link, flag kept"
+        );
+        assert!(
+            sessions.iter().find(|s| s.id == "burn-warm").unwrap().attention.is_some(),
+            "a halted burn-down is not continued in place"
+        );
+        drop(sessions);
+        let cmd = rx.try_recv().expect("the agent hears the recovery");
+        assert_eq!(cmd["type"], json!("user_message"));
+        assert_eq!(cmd["text"], json!(QUOTA_RECOVERED_TEXT));
+        assert!(
+            !cmd["id"].as_str().unwrap_or_default().starts_with("watchdog-"),
+            "the echo counts as progress"
+        );
+        let log = std::fs::read_to_string(app.session_dir("warm").join("harness.jsonl")).unwrap();
+        assert!(log.contains("told the agent to continue"), "the colony's log says why: {log}");
+        assert!(burn_rx.try_recv().is_err(), "the halted burn-down hears nothing");
         let _ = std::fs::remove_dir_all(root);
     }
 

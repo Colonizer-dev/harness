@@ -64,6 +64,13 @@ impl Cfg {
     }
 }
 
+/// Whether the burn-down scheduler is switched off — never configured reads as off, like
+/// `Cfg::from_choice`. While off, its parked colonies stay parked: the queue must not requeue
+/// them on a quota recovery, or a halted burn-down would resume spending without being asked.
+pub(crate) fn halted(modules: &ModulesConfig) -> bool {
+    modules.get("burn_down").is_none_or(|c| !c.enabled)
+}
+
 /// What the scheduler measures off the session list, pure and cheap.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Observed {
@@ -439,6 +446,12 @@ pub async fn stop(State(app): State<Shared>) -> impl IntoResponse {
             )
             .await;
         } else if s.status.is_live() {
+            // A warm-parked colony stops into a cold park, not a plain stop: without its resume
+            // ticket the queue would never requeue it on recovery. The stamp is conditional — the
+            // same shape as the hold-timeout park's — so a resume admitted in between keeps its claim.
+            let park = s.attention.clone().filter(|a| {
+                a.get("reason").and_then(Value::as_str) == Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON)
+            });
             lifecycle::stop_colony(
                 &app,
                 s,
@@ -447,6 +460,14 @@ pub async fn stop(State(app): State<Shared>) -> impl IntoResponse {
                 "burn-down stop: halted by the operator".into(),
             )
             .await;
+            if let Some(park) = park {
+                app.update_session(&s.id, |x| {
+                    if x.status == SessionStatus::Stopped && !x.cleaned_up {
+                        x.attention = Some(park.clone());
+                    }
+                })
+                .await;
+            }
         }
     }
     StatusCode::NO_CONTENT
@@ -925,6 +946,49 @@ mod tests {
         // The record is created, already off, so a later save from the UI finds it.
         let modules = ModulesConfig::load(&app.modules_file());
         assert_eq!(modules.get("burn_down").map(|c| c.enabled), Some(false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Stopping burn-down turns a warm park into a cold one: the live colony stops, but its quota
+    /// resume ticket survives the stop so the queue still requeues it on recovery. An already
+    /// cold-parked colony is left alone.
+    #[tokio::test]
+    async fn the_stop_keeps_a_parked_colonys_resume_ticket() {
+        let root = std::env::temp_dir().join(format!("colonizer-burn-park-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut warm = colony("acme", SessionStatus::Idle);
+        warm.id = "burn-warm".into();
+        warm.origin = Some("burn_down".into());
+        warm.git_admin_dir = Some("git".into());
+        warm.attention =
+            Some(json!({"reason": crate::provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        let mut cold = colony("acme", SessionStatus::Stopped);
+        cold.id = "burn-cold".into();
+        cold.origin = Some("burn_down".into());
+        cold.git_admin_dir = Some("git".into());
+        cold.attention =
+            Some(json!({"reason": crate::provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        std::fs::create_dir_all(app.session_dir("burn-warm")).unwrap();
+        std::fs::create_dir_all(app.session_dir("burn-cold")).unwrap();
+        *app.sessions.write().await = vec![warm, cold];
+
+        let response = stop(State(app.clone())).await;
+        assert_eq!(response.into_response().status(), StatusCode::NO_CONTENT);
+
+        let sessions = app.sessions.read().await;
+        let by = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(by("burn-warm").status, SessionStatus::Stopped);
+        assert_eq!(
+            by("burn-warm").attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON),
+            "the stop keeps the park's resume ticket"
+        );
+        assert_eq!(
+            by("burn-cold").attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON),
+            "an already cold park is left alone"
+        );
+        drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -345,6 +345,13 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").max(1) as i64)
 }
 
+/// Whether a quota-parked colony discards its microVM (cold park) or keeps it and its slot until
+/// the quota resets (warm park). A module config written before the setting existed reads `true`.
+pub fn discard_vm(modules: &ModulesConfig) -> bool {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting(&modules.sandbox, &schema, "discard_vm").and_then(Value::as_bool).unwrap_or(true)
+}
+
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
 pub fn org_enabled(org: &OrgSettings) -> bool {
@@ -770,6 +777,14 @@ mod tests {
             ..Default::default()
         };
         assert!(!effective_memory_enabled(&modules, &disabled));
+    }
+
+    #[test]
+    fn quota_parking_discards_the_microvm_unless_switched_off() {
+        assert!(discard_vm(&ModulesConfig::default()), "unset reads the schema default: cold park");
+        let mut modules = ModulesConfig::default();
+        modules.sandbox.settings.insert("discard_vm".into(), json!(false));
+        assert!(!discard_vm(&modules), "off keeps the microVM: warm park");
     }
 
     #[test]

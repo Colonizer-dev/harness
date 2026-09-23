@@ -21,6 +21,8 @@ export interface Attention {
   reason: AttentionReason;
   since: string;
   nudges: number;
+  /** When the quota resets, as the upstream error named it (RFC 3339 UTC); present only on some `provider_quota_exhausted` flags. */
+  resumes_at?: string;
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */

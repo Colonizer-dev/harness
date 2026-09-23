@@ -276,11 +276,30 @@ export function attentionText(attention: Attention): string {
       return "Waiting for your answer";
     case "autopilot_held":
       return "Autopilot held the PR";
+    case "provider_quota_exhausted": {
+      const when = formatResumeTime(attention.resumes_at);
+      return when ? `Out of tokens — parked, resumes ${when}` : "Out of tokens — parked until the quota resets";
+    }
     case "hold_timeout":
       return "Held too long — parked, resume to continue";
     default:
       return "Needs attention";
   }
+}
+
+/** An RFC 3339 timestamp as `MM-DD HH:MM UTC`, like the quota banner's reset words. Null when absent or unparseable. */
+export function formatResumeTime(resumesAt: string | null | undefined): string | null {
+  if (!resumesAt) return null;
+  const date = new Date(resumesAt);
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
+}
+
+/** Whether the colony is parked: flagged for quota exhaustion or an overlong hold, worktree kept. */
+export function isParked(session: Pick<Session, "attention" | "cleaned_up">): boolean {
+  const reason = session.attention?.reason;
+  return (reason === "provider_quota_exhausted" || reason === "hold_timeout") && !session.cleaned_up;
 }
 
 /** The amber marker for colonies the watchdog flagged. */

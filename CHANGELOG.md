@@ -14,6 +14,30 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+### Added
+
+- **Quota parks discard the microVM.** A colony whose turn dies on an
+  exhausted provider snapshots its uncommitted work to
+  `refs/colonizer/parked/<id>`, discards its microVM to free memory, disk and
+  its parallel slot, and parks as `stopped` with a resume ticket (`resumes_at`
+  when the upstream error named a reset). When the quota recovers a fresh
+  microVM boots on the kept worktree and branch, and the resume prompt carries
+  a compact summary of the previous run instead of a replay. The sandbox
+  module's `discard_vm` (default on) keeps the microVM and its slot and
+  continues the same agent in place instead; if the snapshot fails the colony
+  warm-parks rather than lose work. Parked colonies read as Parked in the
+  overview with a Resume action, and never count as needing you. Burn-down
+  colonies stay parked while the burn-down module is off, even when the quota
+  recovers. ([#213])
+
+### Fixed
+
+- A hold-timeout park no longer loses its reason across a mothership restart,
+  which used to strand it as a plain stopped colony with no resume ticket.
+  A restart also reaps a leftover `colonizer-<id>` microVM of a terminal
+  colony, e.g. a park interrupted between the status flip and VM removal.
+  ([#213])
+
 ## [v0.1.8] - 2026-09-23
 
 ### Added
@@ -374,6 +398,7 @@ Macs. ([#74])
 [#205]: https://github.com/Colonizer-dev/harness/issues/205
 [#210]: https://github.com/Colonizer-dev/harness/issues/210
 [#212]: https://github.com/Colonizer-dev/harness/issues/212
+[#213]: https://github.com/Colonizer-dev/harness/issues/213
 [#215]: https://github.com/Colonizer-dev/harness/issues/215
 [#226]: https://github.com/Colonizer-dev/harness/issues/226
 [#240]: https://github.com/Colonizer-dev/harness/issues/240

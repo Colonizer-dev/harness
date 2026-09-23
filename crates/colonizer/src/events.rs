@@ -6,7 +6,7 @@
 //! apart from the stream it acts on.
 
 use crate::{Shared, findings, github, memory, orgs, provider_quota, spend, util::append_line};
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -393,9 +393,14 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     }
 }
 
-/// Parks a colony whose turn died on an exhausted provider: the same stop the budget path takes —
-/// microVM removed, worktree kept, slot released — with the quota attention reason instead of a
-/// hold. `Stopped` stands in until #213 adds `Parked`; the reason string is the #230 contract.
+/// Parks a colony whose turn died on an exhausted provider. `Stopped` plus the quota attention
+/// reason is the parked state (#213); the reason string is the #230 contract.
+///
+/// With `sandbox.discard_vm` (the default) this cold-parks the way the budget path stops: the
+/// worktree's uncommitted state is snapshotted first, so discarding the microVM cannot lose work,
+/// then the microVM is removed and the slot released. With it off the colony warm-parks instead:
+/// it stays live on its microVM and keeps its slot, flagged for the queue to continue in place
+/// once the provider recovers.
 async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_quota::QuotaExhaustion) {
     let providers = app.providers();
     let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
@@ -419,6 +424,41 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
         (None, Some(reset)) => format!("provider quota exhausted (resets {reset})"),
         (None, None) => "provider quota exhausted".to_string(),
     };
+    let attention = quota_park_attention(hit);
+    // Read per park, so a settings save applies to the next exhausted turn at once.
+    if !orgs::discard_vm(&app.modules.read().await.clone()) {
+        app.session_log(
+            id,
+            "info",
+            "parking: keeping the microVM (sandbox.discard_vm is off); the colony stays live and continues in place when the quota resets".into(),
+        )
+        .await;
+        warm_park(app, id, attention).await;
+        return;
+    }
+    match github::snapshot_worktree(app, &s).await {
+        Ok(Some(sha)) => {
+            app.session_log(
+                id,
+                "info",
+                format!("parking: snapshotted uncommitted work to refs/colonizer/parked/{id} ({sha})"),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // Refusing to discard the microVM when the snapshot failed: losing the agent's
+            // uncommitted work to free a slot would be the wrong trade, so warm-park instead.
+            app.session_log(
+                id,
+                "warn",
+                format!("parking: keeping the microVM — could not snapshot uncommitted work: {e:#}"),
+            )
+            .await;
+            warm_park(app, id, attention).await;
+            return;
+        }
+    }
     let parked = stop_colony(
         app,
         &s,
@@ -429,11 +469,41 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     )
     .await;
     if parked {
+        // Conditional on purpose, like the hold-timeout stamp: an operator resume admitted while
+        // the teardown was running owns the colony now, and must not inherit the park ticket.
         app.update_session(id, |x| {
-            x.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+            if x.status == SessionStatus::Stopped && !x.cleaned_up {
+                x.attention = Some(attention);
+            }
         })
         .await;
     }
+}
+
+/// The park record a quota park stamps: `{reason, since, nudges, resumes_at?}`, where `resumes_at`
+/// is RFC 3339 UTC from the provider's named reset and is omitted when the upstream named no reset.
+fn quota_park_attention(hit: &provider_quota::QuotaExhaustion) -> Value {
+    let mut attention = json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0});
+    if let Some(ts) = hit.reset_unix
+        && let Some(reset) = DateTime::from_timestamp(ts, 0)
+    {
+        attention["resumes_at"] = json!(reset.to_rfc3339_opts(SecondsFormat::Secs, true));
+    }
+    attention
+}
+
+/// Stamps the quota park attention onto a still-live colony without stopping it (warm park): the
+/// colony keeps its microVM and its slot until the queue continues it in place. Conditional on
+/// purpose, like the hold-timeout stamp — a stop that claimed the colony in between wins.
+async fn warm_park(app: &Shared, id: &str, attention: Value) {
+    app.update_session(id, |x| {
+        if !x.status.is_live() {
+            return false;
+        }
+        x.attention = Some(attention.clone());
+        true
+    })
+    .await;
 }
 
 /// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
@@ -759,7 +829,15 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
         s.id = "parked".into();
-        s.git_admin_dir = Some("git".into());
+        // A live colony always has a real worktree, and the cold park snapshots it before stopping.
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let wt = root.join("wt");
+        test_git(&repo, &["init", "-q", "-b", "main", "."]);
+        test_git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        test_git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(test_git(&wt, &["rev-parse", "--absolute-git-dir"]).trim().to_string());
         app.sessions.write().await.push(s);
         tokio::fs::create_dir_all(app.session_dir("parked")).await.unwrap();
 
@@ -821,6 +899,52 @@ mod tests {
         );
         drop(sessions);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A snapshot failure refuses to discard the microVM: the colony warm-parks instead — still
+    /// live, flagged with the quota reason — and its log says why.
+    #[tokio::test]
+    async fn a_failed_snapshot_warm_parks_instead_of_discarding_the_microvm() {
+        let root = std::env::temp_dir().join(format!("colonizer-snap-fail-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+        s.id = "parked".into();
+        // No worktree on disk: the snapshot errors, so the park must not discard anything.
+        s.worktree = root.join("gone").display().to_string();
+        s.git_admin_dir = Some(root.join("no-admin").display().to_string());
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir("parked")).await.unwrap();
+
+        let text = "You've hit your session limit · resets 7am (UTC)";
+        let hit = provider_quota::classify_quota_exhaustion(0, "", text).expect("session limit classifies");
+        park_quota_colony(&app, "parked", text, &hit).await;
+
+        let parked = app.session("parked").await.unwrap();
+        assert!(parked.status.is_live(), "the colony keeps its microVM: {:?}", parked.status);
+        assert_eq!(
+            parked.attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(provider_quota::QUOTA_EXHAUSTED_REASON),
+            "still flagged with the park reason"
+        );
+        let log = std::fs::read_to_string(app.session_dir("parked").join("harness.jsonl")).unwrap();
+        assert!(log.contains("keeping the microVM — could not snapshot"), "the log says why: {log}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Raw git for the tests that need a real worktree. The runner may export the colony
+    /// worktree's own GIT_DIR/GIT_WORK_TREE: drop them, or git operates on the wrong repository.
+    fn test_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
     }
 
     /// With no gateway providers at all, the account record alone still pauses the queue.

@@ -338,6 +338,7 @@ export function Cockpit({
               setInspector({ kind: "colony", session });
               setView("home");
             }}
+            onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
           />
         );
       case "launch":

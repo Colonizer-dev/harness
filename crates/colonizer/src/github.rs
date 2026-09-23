@@ -7,7 +7,7 @@ use crate::{
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
     util::{
-        delete_secret, env_nonempty, exec, exec_status, exec_within, fingerprint, read_secret, truncate, valid_repo, write_secret,
+        delete_secret, env_nonempty, exec, exec_status, exec_within, fingerprint, read_secret, short_id, truncate, valid_repo, write_secret,
     },
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -516,6 +516,75 @@ pub async fn remove_worktree(app: &App, s: &Session) -> Result<()> {
     Ok(())
 }
 
+/// Host-side git against a worktree with a throwaway index, in the publish path's shape
+/// (`GitPublishOps::wt_git`): `--git-dir` names the worktree's admin dir, `--work-tree` the
+/// checkout, and `GIT_INDEX_FILE` keeps the worktree's own index untouched.
+fn park_git(app: &App, admin: &FsPath, wt: &FsPath, index: &FsPath) -> Command {
+    let mut c = app.git(admin);
+    c.arg("--work-tree").arg(wt).env("GIT_INDEX_FILE", index);
+    c
+}
+
+/// Records the worktree's full current state — tracked changes and untracked, non-ignored files —
+/// as a commit object, without touching the worktree, its index, HEAD or the branch: a temporary
+/// index outside the worktree stages everything, and a tree differing from `HEAD^{tree}` is
+/// committed onto HEAD as `refs/colonizer/parked/<id>`. Returns the sha, or `None` when clean.
+/// Errors when the worktree or admin dir is missing, or git fails — the cold park treats that as a
+/// reason to keep the microVM.
+pub async fn snapshot_worktree(app: &App, s: &Session) -> Result<Option<String>> {
+    let wt = PathBuf::from(&s.worktree);
+    let admin = s
+        .git_admin_dir
+        .as_deref()
+        .with_context(|| format!("colony {} has no worktree to snapshot", s.id))?;
+    let admin = FsPath::new(admin);
+    if !wt.is_dir() {
+        bail!("cannot snapshot colony {}: worktree {} is missing", s.id, wt.display());
+    }
+    if !admin.is_dir() {
+        bail!("cannot snapshot colony {}: git admin dir {} is missing", s.id, admin.display());
+    }
+    let index = std::env::temp_dir().join(format!("colonizer-park-index-{}-{}", s.id, short_id()));
+    let result = snapshot_to_ref(app, s, &wt, admin, &index).await;
+    // The temp index is scratch either way; never leave one behind in tmp.
+    let _ = std::fs::remove_file(&index);
+    result
+}
+
+async fn snapshot_to_ref(app: &App, s: &Session, wt: &FsPath, admin: &FsPath, index: &FsPath) -> Result<Option<String>> {
+    let ctx = |what: &str| format!("cannot snapshot colony {}: {what}", s.id);
+    exec(park_git(app, admin, wt, index).args(["read-tree", "HEAD"]))
+        .await
+        .with_context(|| ctx("read-tree HEAD failed"))?;
+    exec(park_git(app, admin, wt, index).args(["add", "-A"]))
+        .await
+        .with_context(|| ctx("add -A failed"))?;
+    let tree = exec(park_git(app, admin, wt, index).args(["write-tree"]))
+        .await
+        .with_context(|| ctx("write-tree failed"))?;
+    let tree = tree.trim().to_string();
+    let head = exec(park_git(app, admin, wt, index).args(["rev-parse", "HEAD^{tree}"]))
+        .await
+        .with_context(|| ctx("rev-parse HEAD failed"))?;
+    if tree == head.trim() {
+        return Ok(None);
+    }
+    let mut commit = park_git(app, admin, wt, index);
+    commit
+        .args(["commit-tree", &tree, "-p", "HEAD", "-m", &format!("colonizer parked snapshot of colony {}", s.id)])
+        .env("GIT_AUTHOR_NAME", "colonizer")
+        .env("GIT_AUTHOR_EMAIL", "colonizer@localhost")
+        .env("GIT_COMMITTER_NAME", "colonizer")
+        .env("GIT_COMMITTER_EMAIL", "colonizer@localhost");
+    let sha = exec(&mut commit).await.with_context(|| ctx("commit-tree failed"))?;
+    let sha = sha.trim().to_string();
+    let parked_ref = format!("refs/colonizer/parked/{}", s.id);
+    exec(park_git(app, admin, wt, index).args(["update-ref", &parked_ref, &sha]))
+        .await
+        .with_context(|| ctx("update-ref failed"))?;
+    Ok(Some(sha))
+}
+
 /// A pull request a person can review in one sitting. Soft: a colony may exceed it, but must say so.
 const PR_LINE_BUDGET: usize = 400;
 const PR_FILE_BUDGET: usize = 10;
@@ -613,6 +682,77 @@ pub async fn touched_files(app: &App, sessions: &[Session], s: &Session) -> Hash
         }
     }
     touched
+}
+
+/// The previous run's event log for a resume prompt: the archive `rotate_events` moved aside
+/// (`events-N.jsonl`, highest N wins). Every resume rotates first — the operator path and the
+/// queue requeue alike — so the latest archive is always the run just ended. A missing or
+/// unreadable log reads as no summary, silently.
+pub(crate) fn previous_run_summary(dir: &FsPath) -> Option<String> {
+    let archived = (1..crate::lifecycle::run_epoch_for_dir(dir)).rev().find_map(|n| {
+        let p = dir.join(format!("events-{n}.jsonl"));
+        p.is_file().then_some(p)
+    })?;
+    summarize_previous_run(&std::fs::read_to_string(archived).ok()?)
+}
+
+/// What the resume prompt says about the previous run: how many turns completed, the last few
+/// assistant messages, and the error ending the last turn, if any — a summary of the rotated event
+/// log, never a replay. `None` when the log holds nothing worth resuming from. Capped around 2 KB
+/// so a long-lived colony's resume stays cheap.
+pub(crate) fn summarize_previous_run(content: &str) -> Option<String> {
+    let mut turns = 0u64;
+    // Bounded while scanning: only the last three ever reach the prompt.
+    let mut texts: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut error: Option<String> = None;
+    for line in content.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else { continue };
+        match event.get("type").and_then(Value::as_str) {
+            Some("turn_end") => {
+                if event.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+                    error = event.get("result").and_then(Value::as_str).map(|r| truncate(r.trim(), 500));
+                } else {
+                    turns += 1;
+                    error = None;
+                }
+            }
+            // `assistant_text` is forwarded-only (protocol.rs), so it shows up only in the raw log
+            // this reads — never as a variant the dispatch could have matched.
+            Some("assistant_text") => {
+                if let Some(text) = event
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    texts.push_back(truncate(text, 400));
+                    while texts.len() > 3 {
+                        texts.pop_front();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if turns == 0 && texts.is_empty() && error.is_none() {
+        return None;
+    }
+    let mut section = format!(
+        "\nPrevious run (a summary of its event log, not a replay): {} turn{} completed.\n",
+        turns,
+        if turns == 1 { "" } else { "s" }
+    );
+    for text in &texts {
+        section.push_str("- ");
+        section.push_str(text);
+        section.push('\n');
+    }
+    if let Some(error) = error.filter(|e| !e.is_empty()) {
+        section.push_str("The last turn ended in error: ");
+        section.push_str(&error);
+        section.push('\n');
+    }
+    Some(truncate(&section, 2048))
 }
 
 pub fn build_prompt(
@@ -1803,7 +1943,6 @@ mod tests {
 
     use super::*;
     use crate::sessions::tests::colony;
-    use crate::util::short_id;
 
     /// A colony on this repo, with the id and issue the test needs.
     fn sibling(id: &str, issue: Option<u64>, title: &str, status: SessionStatus) -> Session {
@@ -2706,5 +2845,105 @@ mod tests {
         let user = viewer(&app).await.unwrap();
         assert_eq!(user["login"], "cached-user");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The quota park snapshots uncommitted work before discarding the microVM: against a real repo,
+    /// a dirty tracked file plus an untracked file land in `refs/colonizer/parked/<id>` while the
+    /// worktree files, `git status` output and HEAD are unchanged afterwards. A clean tree snapshots
+    /// to nothing, and a missing worktree errors instead of parking blind.
+    #[tokio::test]
+    async fn a_park_snapshot_records_dirty_work_without_touching_the_checkout() {
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!("colonizer-park-snap-{}", short_id()));
+        let repo = root.join("repo");
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            // The test runner may export the colony worktree's own GIT_DIR/GIT_WORK_TREE: drop
+            // them, or every git below operates on the wrong repository.
+            let out = Command::new("git")
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap()
+        };
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "main", "."]);
+        run(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        std::fs::write(repo.join("tracked.txt"), "committed\n").unwrap();
+        run(&repo, &["add", "-A"]);
+        run(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "tracked"]);
+        let wt = root.join("wt");
+        run(&repo, &["worktree", "add", "-q", "-b", "colony-1", wt.to_str().unwrap()]);
+        let admin = run(&wt, &["rev-parse", "--absolute-git-dir"]).trim().to_string();
+        let git = |args: &[&str]| {
+            let full: Vec<&str> = [&["--git-dir", admin.as_str()], args].concat();
+            run(&root, &full)
+        };
+        let app = crate::tests::test_app(&root);
+        let mut s = colony("acme", SessionStatus::Idle);
+        s.id = "snap".into();
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(admin.clone());
+        // A dirty tracked file, an untracked file, and an ignored one the snapshot must skip.
+        std::fs::write(wt.join("tracked.txt"), "uncommitted\n").unwrap();
+        std::fs::write(wt.join("new.txt"), "untracked\n").unwrap();
+        std::fs::write(wt.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(wt.join("ignored.txt"), "ignored\n").unwrap();
+        let status_before = run(&wt, &["status", "--porcelain"]);
+        let head_before = git(&["rev-parse", "HEAD"]);
+        let sha = snapshot_worktree(&app, &s).await.expect("a dirty tree snapshots").expect("a dirty tree is not clean");
+        assert_eq!(git(&["rev-parse", "refs/colonizer/parked/snap"]).trim(), sha, "the ref names the snapshot");
+        let parent = format!("{sha}^");
+        assert_eq!(git(&["rev-parse", &parent]).trim(), head_before.trim(), "the snapshot commits onto HEAD");
+        let tracked = format!("{sha}:tracked.txt");
+        assert_eq!(git(&["show", &tracked]).trim(), "uncommitted", "tracked changes are in");
+        let new = format!("{sha}:new.txt");
+        assert_eq!(git(&["show", &new]).trim(), "untracked", "untracked files are in");
+        let names = git(&["ls-tree", "-r", "--name-only", &sha]);
+        assert!(!names.lines().any(|n| n == "ignored.txt"), "ignored files stay out: {names}");
+        assert_eq!(run(&wt, &["status", "--porcelain"]), status_before, "the worktree's status is untouched");
+        assert_eq!(git(&["rev-parse", "HEAD"]).trim(), head_before.trim(), "HEAD is untouched");
+        assert_eq!(std::fs::read(wt.join("tracked.txt")).unwrap(), b"uncommitted\n", "the files are untouched");
+        // Back to clean: nothing to record.
+        run(&wt, &["checkout", "-q", "--", "."]);
+        for f in ["new.txt", "ignored.txt", ".gitignore"] {
+            std::fs::remove_file(wt.join(f)).unwrap();
+        }
+        assert_eq!(snapshot_worktree(&app, &s).await.unwrap(), None, "a clean tree snapshots to nothing");
+        // Gone entirely: an error, so the park keeps the microVM instead of discarding blind.
+        s.worktree = root.join("gone").display().to_string();
+        assert!(snapshot_worktree(&app, &s).await.is_err(), "a missing worktree errors");
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(root.join("no-admin").display().to_string());
+        assert!(snapshot_worktree(&app, &s).await.is_err(), "a missing admin dir errors");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_prompt_summarises_the_previous_run_instead_of_replaying_it() {
+        let log = concat!(
+            "{\"type\":\"status\",\"state\":\"working\",\"seq\":1}\n",
+            "{\"type\":\"assistant_text\",\"message_id\":\"msg_1\",\"block_index\":0,\"text\":\"I'll fix the retry loop first.\",\"seq\":2}\n",
+            "{\"type\":\"turn_end\",\"is_error\":false,\"result\":\"Fixed the loop\",\"cost_usd\":0.1,\"seq\":3}\n",
+            "{\"type\":\"assistant_text\",\"message_id\":\"msg_2\",\"block_index\":0,\"text\":\"Now the backoff.\",\"seq\":4}\n",
+            "{\"type\":\"turn_end\",\"is_error\":true,\"result\":\"provider quota exhausted (resets 7am)\",\"seq\":5}\n",
+        );
+        let summary = summarize_previous_run(log).expect("a run with turns summarises");
+        assert!(summary.contains("1 turn completed"), "{summary}");
+        assert!(summary.contains("retry loop") && summary.contains("backoff"), "{summary}");
+        assert!(summary.contains("provider quota exhausted (resets 7am)"), "{summary}");
+        assert!(summary.len() <= 2048, "the section is capped: {}", summary.len());
+        assert!(summarize_previous_run("").is_none(), "an empty log reads as no section");
+        assert!(
+            summarize_previous_run("not json\n{\"type\":\"status\",\"state\":\"idle\"}\n").is_none(),
+            "no turns, texts or errors reads as no section"
+        );
+        let long = format!("{{\"type\":\"assistant_text\",\"text\":\"{}\"}}\n", "x".repeat(900));
+        let capped = summarize_previous_run(&long).unwrap();
+        assert!(capped.len() < 900, "long messages truncate: {}", capped.len());
     }
 }

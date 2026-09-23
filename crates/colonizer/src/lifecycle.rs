@@ -52,6 +52,9 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
 /// Reconnects to microVMs that kept running while the harness was down.
 pub async fn recover(app: &Shared) {
     let running = sandbox::running(&app.cfg.msb).await.unwrap_or_default();
+    // Every sandbox microsandbox knows about, running or not: a stop that crashed between its
+    // status flip and `teardown_vm` leaves a microVM no running-only snapshot would find.
+    let all = sandbox::all(&app.cfg.msb).await.unwrap_or_default();
     // Both this list and the running set above are a snapshot, and the list moves under it while
     // this loop works down the colonies — the HTTP API keeps serving through a restart. Each
     // colony is handled the way `watch_sandboxes` handles its own: under the colony's lifecycle
@@ -126,6 +129,21 @@ pub async fn recover(app: &Shared) {
             app.note_cleared_attention(&fresh.id, attention).await;
             continue;
         }
+        // A terminal colony that still has a microVM under its sandbox name: its stop crashed
+        // between the status flip and `teardown_vm` — a cold park interrupted mid-park reads exactly
+        // this way — and nothing else reaps it: `watch_sandboxes` skips non-live colonies, and the
+        // orphan-VM sweep only matches session ids. The status stays as it was; only the leftover
+        // microVM goes, so a cold park keeps its worktree and its resume ticket.
+        if stranded_vm(fresh.status, all.contains(&fresh.sandbox)) {
+            teardown_vm(app, &fresh).await;
+            app.session_log(
+                &fresh.id,
+                "warn",
+                "harness restarted: removing the microVM a stopped colony left behind; the worktree is kept".into(),
+            )
+            .await;
+            continue;
+        }
         if !s.status.is_live() {
             continue;
         }
@@ -169,6 +187,14 @@ pub async fn recover(app: &Shared) {
                     return false;
                 }
                 attention = x.clear_attention();
+                // A warm-parked colony whose microVM is gone degrades to a cold park, not a plain
+                // stop: keep its resume ticket so the queue still requeues it on recovery.
+                if attention.as_ref().and_then(|a| a["reason"].as_str())
+                    == Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON)
+                {
+                    x.attention = attention.clone();
+                    attention = None;
+                }
                 true
             })
             .await;
@@ -182,6 +208,12 @@ pub async fn recover(app: &Shared) {
 /// publish claimed in the meantime is not orphaned — it owns the worktree now.
 fn orphaned_publish(snap: &Session, fresh: &Session) -> bool {
     snap.status == SessionStatus::Publishing && fresh.status == SessionStatus::Publishing
+}
+
+/// A terminal colony that still has a microVM under its sandbox name: its stop crashed between the
+/// status flip and `teardown_vm`. Pure so the shape can be tested without a harness.
+fn stranded_vm(status: SessionStatus, vm_present: bool) -> bool {
+    status.is_terminal() && vm_present
 }
 
 /// A boot this pass must not touch: the snapshot did not have the colony `Starting`, so a resume
@@ -264,7 +296,23 @@ pub async fn watch_sandboxes(app: Shared) {
                 .await
                 .is_some_and(|(_, landed)| landed);
             if landed {
-                app.note_cleared_attention(&s.id, had_attention).await;
+                // A warm-parked colony whose microVM died (its max session length, or the host
+                // stopped it) degrades to a cold park, not a plain stop: keep its resume ticket so
+                // the queue still requeues it on recovery.
+                let ticket = had_attention.clone().filter(|a| {
+                    a.get("reason").and_then(Value::as_str) == Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON)
+                });
+                match ticket {
+                    Some(ticket) => {
+                        app.update_session(&s.id, |x| {
+                            if x.status == SessionStatus::Stopped && !x.cleaned_up {
+                                x.attention = Some(ticket.clone());
+                            }
+                        })
+                        .await;
+                    }
+                    None => app.note_cleared_attention(&s.id, had_attention).await,
+                }
             }
         }
     }
@@ -996,6 +1044,21 @@ mod tests {
             SessionStatus::NoChanges,
         ] {
             assert!(!can_resume(status, false, true), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_finished_colony_with_a_leftover_microvm_is_reaped_on_startup() {
+        use SessionStatus::*;
+        // A cold park interrupted between its status flip and `teardown_vm` reads exactly this way.
+        for status in [Stopped, Failed, PrOpened, Merged, Closed, NoChanges] {
+            assert!(stranded_vm(status, true), "{status:?} with a VM is reaped");
+            assert!(!stranded_vm(status, false), "{status:?} without a VM is left alone");
+        }
+        // Live, queued and publishing colonies own their microVMs (or never had one); the
+        // reconnect path and the orphaned-push handling above own those, never this reap.
+        for status in [Queued, Starting, Running, WaitingForAnswer, Idle, Publishing] {
+            assert!(!stranded_vm(status, true), "{status:?} is never this reap's to touch");
         }
     }
 

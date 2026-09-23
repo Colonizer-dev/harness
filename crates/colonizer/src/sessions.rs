@@ -146,6 +146,21 @@ impl Session {
         self.attention.take()
     }
 
+    /// Whether this colony is parked: carrying a park reason as its resume ticket. `Stopped` plus
+    /// this attention reason is the parked state (#213) — a cold park — and a still-live colony may
+    /// carry the quota reason too (a warm park, with `sandbox.discard_vm` off). The queue requeues
+    /// quota parks on recovery, and an operator resumes either kind onto the kept worktree.
+    pub fn is_parked(&self) -> bool {
+        !self.cleaned_up
+            && self
+                .attention
+                .as_ref()
+                .and_then(|a| a["reason"].as_str())
+                .is_some_and(|reason| {
+                    reason == crate::provider_quota::QUOTA_EXHAUSTED_REASON || reason == HOLD_TIMEOUT_REASON
+                })
+    }
+
     /// Whether this colony holds a microVM slot against the parallel limit — the predicate
     /// `queue::has_room` counts. Any live colony holds one, and so does a publish claimed from a
     /// live colony: the teardown inside the publish frees the microVM, but the slot stays claimed
@@ -172,19 +187,12 @@ pub(crate) fn cleared_attention_message(attention: &Option<Value>) -> Option<Str
 /// persisted as finished while still carrying an attention flag predate the clearing every
 /// terminal transition now does. A finished colony that still carries one looks like it needs
 /// attention it no longer does, so drop the flag from every terminal colony that has one — except a
-/// quota-parked colony, whose flag is its resume ticket: stripping it would strand the colony,
-/// parked with no reason for the queue to ever requeue. Returns how many flags were cleared.
+/// parked colony, whose flag is its resume ticket: stripping it would strand the colony, parked
+/// with no reason for the queue to ever requeue. Returns how many flags were cleared.
 pub(crate) fn clear_stale_attention(sessions: &mut [Session]) -> usize {
     let mut cleared = 0;
     for s in sessions.iter_mut() {
-        if s.status.is_terminal() && s.attention.is_some() {
-            let quota_parked = s
-                .attention
-                .as_ref()
-                .is_some_and(|a| a["reason"].as_str() == Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON));
-            if quota_parked {
-                continue;
-            }
+        if s.status.is_terminal() && s.attention.is_some() && !s.is_parked() {
             s.attention = None;
             cleared += 1;
         }
@@ -1483,7 +1491,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let colonies = app.sessions.read().await.clone();
     let touched = github::touched_files(app, &colonies, &s).await;
     let siblings = github::siblings_of(&colonies, &s, &touched);
-    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
+    let mut prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
+    if resume {
+        // A compact summary of the previous run's rotated event log: missing or unreadable reads
+        // as no summary, never a failed resume.
+        if let Some(summary) = github::previous_run_summary(&dir) {
+            prompt.push_str(&summary);
+        }
+    }
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let agent_choice = orgs::effective_agent(&modules, &org_settings);
     let mut runner_env = agent_env(&agent, &agent_choice);
@@ -2669,6 +2684,34 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn startup_migration_keeps_a_hold_timeout_park_resumable_too() {
+        // Hold-timeout parks used to lose their reason here and strand as plain stopped colonies.
+        let mut parked = stopped_colony_with_worktree("acme", "parked".into());
+        parked.attention = Some(json!({"reason": HOLD_TIMEOUT_REASON, "since": Utc::now(), "nudges": 0}));
+        assert!(parked.is_parked(), "a hold-timeout park reads as parked");
+        let mut sessions = vec![parked];
+        assert_eq!(clear_stale_attention(&mut sessions), 0);
+        assert_eq!(
+            sessions[0].attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(HOLD_TIMEOUT_REASON)
+        );
+    }
+
+    #[test]
+    fn only_a_colony_carrying_a_park_reason_reads_as_parked() {
+        let mut s = colony("acme", SessionStatus::Stopped);
+        assert!(!s.is_parked(), "no flag, no park");
+        s.attention = Some(json!({"reason": "stalled", "since": Utc::now(), "nudges": 1}));
+        assert!(!s.is_parked(), "a watchdog flag is not a park");
+        s.attention = Some(json!({"reason": crate::provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        assert!(s.is_parked());
+        s.status = SessionStatus::Idle;
+        assert!(s.is_parked(), "a warm park is live and still parked");
+        s.cleaned_up = true;
+        assert!(!s.is_parked(), "a cleaned-up colony has nothing left to resume");
+    }
+
     /// sessions.json written before `routed_cost_usd` existed must still load, cost and all.
     #[test]
     fn a_session_saved_before_routed_cost_still_deserialises() {
@@ -2942,6 +2985,36 @@ pub(crate) mod tests {
         app.sessions.write().await.push(s);
         tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
         (app, root)
+    }
+
+    /// A live agent link with its command channel held back for assertions: the queue's warm
+    /// continue sends through it, and the test reads what the agent would hear. Paths point at the
+    /// session dir, so harness logging lands in the real `harness.jsonl` like a live link's would.
+    pub(crate) fn test_runtime(dir: &std::path::Path) -> (Runtime, mpsc::UnboundedReceiver<Value>) {
+        let (commands, rx) = mpsc::unbounded_channel();
+        let (events, _) = broadcast::channel(16);
+        let (stop, _) = watch::channel(false);
+        let (retired, _) = watch::channel(false);
+        let rt = Runtime {
+            events,
+            commands,
+            commands_rx: Mutex::new(None),
+            agent_seq: std::sync::atomic::AtomicU64::new(0),
+            last_seq: std::sync::atomic::AtomicU64::new(0),
+            logs: Mutex::new(std::collections::VecDeque::new()),
+            open_question: Mutex::new(None),
+            pr_mark: Mutex::new(None),
+            interrupted: std::sync::atomic::AtomicBool::new(false),
+            stop,
+            retired,
+            file_lock: Mutex::new(()),
+            findings_lock: Mutex::new(()),
+            events_path: dir.join("events.jsonl"),
+            logs_path: dir.join("harness.jsonl"),
+            activity: Mutex::new(crate::watchdog::Activity::new(Utc::now())),
+            load_error: Mutex::new(None),
+        };
+        (rt, rx)
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@
 // edge-triggered with no backlog: the first session list only seeds the snapshot, so a colony that
 // was already waiting when the page loaded is the sidebar's job, not an interruption.
 import type { AttentionReason, Session, SessionStatus } from "./types";
-import { orgOf, sameOrg } from "./components/ui";
+import { isParked, orgOf, sameOrg } from "./components/ui";
 
 // ---------------------------------------------------------------------------
 // Pure decisions
@@ -39,7 +39,9 @@ export function isTerminal(status: SessionStatus): boolean {
 /**
  * The one definition of "needs a person": flagged by the watchdog or autopilot, or sat on an open
  * question. Terminal colonies never need anyone, even with a stale attention flag: the flag is
- * cleared by the next agent event and there is no next event once the run is over. Deliberately
+ * cleared by the next agent event and there is no next event once the run is over. Parked colonies
+ * never need anyone either: a warm-parked one continues on its own when the quota resets, and a
+ * cold-parked one waits on a resume, not an answer. Deliberately
  * not `!isLive`: `waiting_for_answer` is live and must stay true, and non-terminal non-live
  * statuses (`queued`, `publishing`) keep their attention behaviour. The sidebar's rank-0 group,
  * the tab-title count, the favicon dot and the strip all read this, so none of them can disagree
@@ -47,6 +49,7 @@ export function isTerminal(status: SessionStatus): boolean {
  */
 export function needsYou(session: Session): boolean {
   if (isTerminal(session.status)) return false;
+  if (isParked(session)) return false;
   return Boolean(session.attention) || session.status === "waiting_for_answer";
 }
 

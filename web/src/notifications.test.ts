@@ -105,6 +105,12 @@ describe("needsYou", () => {
     expect(needsYou(session({ status: "waiting_for_answer", attention: null }))).toBe(true);
   });
 
+  it("is false for a parked colony: it waits on a quota reset or a resume, not a person", () => {
+    for (const reason of ["provider_quota_exhausted", "hold_timeout"] satisfies AttentionReason[]) {
+      expect(needsYou(session({ status: "idle", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 0 } }))).toBe(false);
+    }
+  });
+
   it("is false for a colony that is merely working, finished or failed unflagged", () => {
     expect(needsYou(session({ status: "running" }))).toBe(false);
     expect(needsYou(session({ status: "failed" }))).toBe(false);

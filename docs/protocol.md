@@ -222,7 +222,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
-| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
+| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree). A parked colony (§6.5) resumes the same way; its prompt gains a compact summary of the previous run — turns completed, the last few assistant messages, the error that ended the last turn — capped around 2 KB, taken from the latest rotated archive (`events-N.jsonl`), never a replay. Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch (VM must be stopped). Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below) |
@@ -890,8 +890,10 @@ Server → client:
   `{"type":"session","session":Session}`, then the last ≤200 harness logs as
   `{"type":"harness_log","level":"info|warn|error","message":"…","ts":"…"}`, then agent events with
   `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then live.
-- Each resume rotates the event log aside (`events.jsonl` → `events-N.jsonl`) and bumps the epoch,
-  and the new run's `seq` numbering starts from 1 again. The effective cursor is `0` when the
+- Every resume rotates the event log aside (`events.jsonl` → `events-N.jsonl`) and bumps the epoch,
+  and the new run's `seq` numbering starts from 1 again — the operator endpoint and the queue's
+  automatic resume of a cold-parked colony alike, which also drops the old agent link first. A
+  rotation that fails leaves the colony parked. The effective cursor is `0` when the
   client's `epoch` names a retired run — its `since` is a rank in that run's numbering, meaningless
   in the new run — and `since` when `epoch` is absent (legacy clients), `0` ("unknown"), or current,
   so a tab left open across a resume replays the new run from the start instead of dropping its
@@ -1188,8 +1190,10 @@ have actually cost since the previous reset anchor. `allowance_usd` is your esti
 
 `POST /api/burn-down/stop` persistently switches the module off — it stays off until re-enabled in
 Settings — then stops every `origin: "burn_down"` colony: live ones through the ordinary stop
-(worktree kept), queued ones out of the queue. It is idempotent, and safe before the module was ever
-configured.
+(worktree kept), queued ones out of the queue, parked ones left parked. While the module is off —
+after a stop, or never enabled — its quota-parked colonies are not auto-resumed or auto-continued
+on a quota recovery; they keep their reason and wait for a hand resume. It is idempotent, and safe
+before the module was ever configured.
 
 Failures are quiet and never spike: unknown `allowance_usd` → `state: "unknown_allowance"` and
 nothing launches; an unparseable `reset_time`/`reset_weekday` → `next_reset` null and the window
@@ -1255,7 +1259,10 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's
 `max_parallel` if set, and the per-repository limit all have room, so the tightest wins. The sandbox
 module's `hold_timeout_minutes` (default 30, 1 to 1440) bounds how long an autopilot-held colony keeps
-counting: past it the queue parks the colony and frees its slot (see the Watchdog section). The two
+counting: past it the queue parks the colony and frees its slot (see the Watchdog section). The sandbox
+module's `discard_vm` (default `true`) decides how a token-exhausted colony parks (§6.5): on, the
+microVM is discarded after snapshotting uncommitted work; off, the colony keeps its microVM and slot
+and continues the same agent in place on recovery. The two
 per-colony limits override the global ones: `budget_usd` is the org's own spend budget per colony in dollars, `host_disk` its own
 host-disk quota per colony, a size like `16G`. `null` inherits the sandbox module's setting (`budget_usd`,
 `host_disk`); `0` (or `"0"`) means unlimited, which is how an org opts out of a global limit. The same
@@ -1333,7 +1340,7 @@ settings `enabled` = true, `require_review` = true; off lets only `repo` notes s
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout", "since": "…", "nudges": 2, "resumes_at?": "…"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -1341,7 +1348,9 @@ Every minute the mothership checks live colonies. A colony that is `running` wit
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
 `nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) is not published and gets
-`autopilot_held`. Any new agent event clears `attention`; a disabled watchdog clears only the reasons
+`autopilot_held`. `resumes_at` (RFC 3339 UTC) appears on `provider_quota_exhausted` only, when the
+upstream error named a reset, and is omitted otherwise. Any new agent event clears `attention`;
+a disabled watchdog clears only the reasons
 it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
@@ -1350,6 +1359,10 @@ announce here either. A hold that waits longer than the sandbox module's `hold_t
 timeout is stopped with its worktree kept and `attention.reason` `hold_timeout`, so its microVM slot
 frees for queued colonies (one org's held colonies cannot block every other org past the timeout)
 while staying resumable. Within the timeout a held colony still counts against the parallel limits.
+Both park reasons survive a restart. The cockpit reads a cold-parked colony (`stopped` with a park
+reason) as Parked — with its reason (`Out of tokens — parked, resumes MM-DD HH:MM UTC`) and a Resume
+action — while a warm-parked one keeps its live reading, continues on its own, and never counts as
+needing you.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
@@ -1669,10 +1682,23 @@ says. `GET /api/status` carries `quota`: `{paused, reason, reset_at, reset_unix,
 `paused` when every routable provider (every `used_by` non-empty one, or every provider when none
 is used) is exhausted, with the earliest reset and the queue holder's own `reason`. A paused queue
 admits nothing; the overview banners the reason. A colony whose turn dies on an exhausted provider
-is parked: `status` `stopped` with the worktree kept (reused until #213 adds a real `Parked`
-state, so slots release and resume works today) and `attention.reason`
-`provider_quota_exhausted`. The queue's 5 s tick requeues parked colonies whose provider recovered
-— reset passed, or the provider deleted — and leaves the rest parked.
+is parked: `status` `stopped` with the worktree kept, and the attention record
+`{reason: provider_quota_exhausted, since, nudges, resumes_at?}` as its resume ticket. How it parks
+follows the sandbox module's `discard_vm` (default `true`). On, the colony cold-parks: uncommitted
+work — tracked changes and untracked, non-ignored files — is snapshotted to
+`refs/colonizer/parked/<id>` in the bare repo without touching the worktree, index, HEAD or branch,
+then the microVM is discarded and the slot freed; when the quota recovers (or on manual resume) a
+fresh microVM boots on the kept worktree and branch. If the snapshot fails the colony warm-parks
+instead and the log says why. Off, the colony warm-parks: it stays live with its microVM and slot
+under the same flag, the watchdog leaves it alone, and the queue's 5 s tick sends it "quota
+recovered, continue" in place and clears the flag once the provider recovers. A warm-parked colony
+whose microVM dies, or that a burn-down stop halts, degrades to a cold park keeping its reason. The
+queue's 5 s tick requeues cold-parked colonies whose provider recovered — reset passed, or the
+provider deleted — and leaves the rest parked. `origin: "burn_down"` colonies are neither
+auto-resumed nor auto-continued while the burn-down module is off (§6.2c); they stay parked for a
+hand resume. On start, `recover` reaps a leftover
+`colonizer-<id>` microVM of any terminal (cold-parked included) colony — e.g. a park interrupted
+between the status flip and VM removal — keeping the worktree and the ticket.
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 

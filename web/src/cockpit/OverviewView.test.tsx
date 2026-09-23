@@ -171,6 +171,59 @@ describe("ColonyRow", () => {
   });
 });
 
+// Parked colonies (issue #213): a cold-parked colony reads as parked rather than stopped and offers
+// a resume, while a warm-parked one keeps its idle reading and continues on its own.
+describe("ColonyRow parked", () => {
+  const coldParked = session({
+    status: "stopped",
+    attention: { reason: "provider_quota_exhausted", since: "2026-09-18T09:12:00Z", nudges: 0, resumes_at: "2026-09-23T07:54:00Z" },
+  });
+  const warmParked = session({
+    status: "idle",
+    attention: { reason: "provider_quota_exhausted", since: "2026-09-18T09:12:00Z", nudges: 0, resumes_at: "2026-09-23T07:54:00Z" },
+  });
+  const onResume = () => {};
+
+  it("collapsed: a cold-parked colony reads Parked, never Stopped", () => {
+    const markup = renderToStaticMarkup(<ColonyRow session={coldParked} open={false} onToggle={noop} onOpenColony={noop} onSelect={noop} onResume={onResume} />);
+    expect(markup).toContain("Parked");
+    expect(markup).not.toContain("Stopped");
+  });
+
+  it("expanded: names the reason with the resume time and offers a resume", () => {
+    const markup = renderToStaticMarkup(<ColonyRow session={coldParked} open onToggle={noop} onOpenColony={noop} onSelect={noop} onResume={onResume} />);
+    expect(markup).toContain("Out of tokens — parked, resumes 09-23 07:54 UTC");
+    expect(markup).toMatch(/<button type="button"[^>]*>resume →<\/button>/);
+  });
+
+  it("expanded: a hold-timeout park reads parked too, with its own reason", () => {
+    const held = session({
+      status: "stopped",
+      attention: { reason: "hold_timeout", since: "2026-09-18T09:12:00Z", nudges: 0 },
+    });
+    const collapsed = renderToStaticMarkup(<ColonyRow session={held} open={false} onToggle={noop} onOpenColony={noop} onSelect={noop} onResume={onResume} />);
+    expect(collapsed).toContain("Parked");
+    const markup = renderToStaticMarkup(<ColonyRow session={held} open onToggle={noop} onOpenColony={noop} onSelect={noop} onResume={onResume} />);
+    expect(markup).toContain("Held too long — parked, resume to continue");
+    expect(markup).toContain("resume →");
+  });
+
+  it("expanded: no resume without a handler, so callers that cannot resume show none", () => {
+    const markup = renderToStaticMarkup(<ColonyRow session={coldParked} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
+    expect(markup).toContain("Out of tokens");
+    expect(markup).not.toContain("resume →");
+  });
+
+  it("a warm-parked colony stays Idle and shows the reason but no resume", () => {
+    const collapsed = renderToStaticMarkup(<ColonyRow session={warmParked} open={false} onToggle={noop} onOpenColony={noop} onSelect={noop} onResume={onResume} />);
+    expect(collapsed).toContain("Idle");
+    expect(collapsed).not.toContain("Parked");
+    const markup = renderToStaticMarkup(<ColonyRow session={warmParked} open onToggle={noop} onOpenColony={noop} onSelect={noop} onResume={onResume} />);
+    expect(markup).toContain("Out of tokens — parked, resumes 09-23 07:54 UTC");
+    expect(markup).not.toContain("resume →");
+  });
+});
+
 describe("OverviewView", () => {
   it("shows no issue title anywhere by default", () => {
     const markup = renderToStaticMarkup(

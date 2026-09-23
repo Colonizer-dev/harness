@@ -2,7 +2,7 @@
 //! the user when nudging doesn't help. The decision is a pure function so it can be tested with a
 //! fixed clock; the loop around it runs once a minute.
 
-use crate::{Shared, orgs::effective_watchdog, sessions::SessionStatus, util::short_id};
+use crate::{Shared, orgs::effective_watchdog, provider_quota, sessions::SessionStatus, util::short_id};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 
@@ -148,6 +148,12 @@ async fn check_all(app: &Shared) {
             _ => Observed::Other,
         };
         let attention = s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(String::from);
+        // A warm-parked colony waits on the provider, not the agent: its quota flag is the queue's
+        // resume ticket, so the stall, question and gateway-busy paths below must not nudge, flag,
+        // clear or overwrite it while the plan is out.
+        if attention.as_deref() == Some(provider_quota::QUOTA_EXHAUSTED_REASON) {
+            continue;
+        }
         // A request waiting on a slow model through the gateway is progress, not a stall.
         if app.gateway.colony_busy(&s.id) {
             {

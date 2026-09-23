@@ -1219,7 +1219,7 @@ export function createMockApi(): Api {
   sessions.set(stuck.session.id, stuck);
   if (mockQuotaParam() === "paused") {
     // The banner's Resume all needs a parked colony to resume: stopped, flagged, worktree kept.
-    sessions.get("fail4321")?.patch({ attention: { reason: "provider_quota_exhausted", since: ago(10), nudges: 0 } });
+    sessions.get("fail4321")?.patch({ attention: { reason: "provider_quota_exhausted", since: ago(10), nudges: 0, resumes_at: "2026-09-23T07:54:00Z" } });
   }
 
   const mem0: Mem0Status = { has_key: false, source: null, active: false };
@@ -1531,7 +1531,7 @@ export function createMockApi(): Api {
       provider: "microsandbox",
       providers: [{ id: "microsandbox", name: "microsandbox", description: "Rootless libkrun microVMs" }],
       enabled: true,
-      settings: { preset: "node", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0" },
+      settings: { preset: "node", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", budget_usd: 0, host_disk: "0", discard_vm: true },
       schema: {
         type: "object",
         properties: {
@@ -1546,6 +1546,7 @@ export function createMockApi(): Api {
           repo_max_parallel: { type: "integer", title: "Parallel sessions per repository", minimum: 1, maximum: 32, default: 3 },
           budget_usd: { type: "number", title: "Budget per colony (USD)", minimum: 0, default: 0, description: "Dollars one colony may spend on models in total. 0, the default, means unlimited." },
           host_disk: { type: "string", title: "Host disk per colony", default: "0", format: "disk-size", description: "How much disk one colony may leave on the host, like 512M or 16G. 0, the default, means unlimited." },
+          discard_vm: { type: "boolean", title: "Discard the microVM when quota-parking", default: true, description: "When a provider's quota runs out, cold-park the colony: snapshot uncommitted work, discard the microVM and release its slot, then boot a fresh microVM on the kept worktree when the quota resets. Off keeps the microVM and the colony's slot and continues the same agent in place when the quota resets." },
         },
       },
     },

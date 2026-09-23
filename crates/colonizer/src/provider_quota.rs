@@ -1,8 +1,7 @@
 //! Provider quota exhaustion (issue #225): telling "the plan ran out" apart from transport failure
 //! and model refusal, so an exhausted provider parks colonies and pauses the queue instead of
 //! retrying against an empty plan. Pure, so the gateway error path and the colony-side turn-end
-//! scan share it. Parking reuses `Stopped` plus this module's attention reason until #213 adds
-//! `Parked`.
+//! scan share it. Parking reuses `Stopped` plus this module's attention reason as the parked state (#213).
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use chrono_tz::Tz;

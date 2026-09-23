@@ -7,7 +7,7 @@ import { useId, useMemo, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { IconAlert, IconChevron, IconCpu, IconMemory, IconServer } from "../components/icons";
-import { SESSION_STATUS, type Tone, attentionText, cx, formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, attentionText, cx, formatDuration, isLive, isParked, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
 import { colonyLabel, needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { HIDE_EMPTY_ORGS_KEY, hideEmptyOrgEntries, parseHideEmptyOrgs } from "../orgs";
@@ -80,6 +80,7 @@ export function ColonyRow({
   onToggle,
   onOpenColony,
   onSelect,
+  onResume,
 }: {
   session: Session;
   /** Whether this colony's detail is revealed. */
@@ -88,6 +89,8 @@ export function ColonyRow({
   onOpenColony: (id: string) => void;
   /** Puts the colony into the inspector, whose pane can answer a waiting question directly. */
   onSelect: (session: Session) => void;
+  /** Resumes a cold-parked colony; absent the row shows no Resume button. */
+  onResume?: (id: string) => void;
 }): ReactElement {
   const detailsId = useId();
   const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
@@ -100,6 +103,10 @@ export function ColonyRow({
     : session.status === "waiting_for_answer"
       ? "Waiting for your answer"
       : null;
+  // A cold-parked colony reads as parked, not stopped: its VM is gone but its worktree is kept and
+  // a resume boots it again. Only the cold kind gets a Resume button — a warm-parked colony keeps
+  // its VM and continues on its own when the quota resets.
+  const coldParked = isParked(session) && session.status === "stopped";
   // The colony's machine facts (issue #205): the microVM it booted, the boot itself, its mesh
   // address and its agent — only the ones that exist, so a pre-#205 colony shows just its agent.
   const meta = colonyFacts(session);
@@ -118,7 +125,7 @@ export function ColonyRow({
           {short} <span className="text-faint">· {timeAgo(session.last_activity_at ?? session.updated_at)}</span>
         </span>
         <span className="whitespace-nowrap font-mono text-[11px]" style={{ color: edge }}>
-          {SESSION_STATUS[session.status]?.label ?? session.status}
+          {coldParked ? "Parked" : (SESSION_STATUS[session.status]?.label ?? session.status)}
         </span>
         <IconChevron size={13} className={cx("text-faint transition-transform", open && "rotate-90")} />
       </button>
@@ -158,6 +165,15 @@ export function ColonyRow({
                 answer in the pane →
               </button>
             )}
+            {coldParked && onResume && (
+              <button
+                type="button"
+                onClick={() => onResume(session.id)}
+                className="cursor-pointer whitespace-nowrap font-sans text-[12.5px] font-semibold text-accent hover:underline"
+              >
+                resume →
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onOpenColony(session.id)}
@@ -187,6 +203,7 @@ export function OverviewView({
   onOpenOrg,
   onOpenColony,
   onSelect,
+  onResume,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -212,6 +229,8 @@ export function OverviewView({
   onOpenColony: (id: string) => void;
   /** Puts a chosen colony into the cockpit's inspector; its pane can answer a waiting question. */
   onSelect: (session: Session) => void;
+  /** Resumes a cold-parked colony; the rows show no Resume button without it. */
+  onResume?: (id: string) => void;
 }): ReactElement {
   // The filter lives here, not in the cockpit: toggling a counter narrows the page, and a second
   // click on the active one (or the counts themselves) clears it. State is per-visit on purpose.
@@ -557,6 +576,7 @@ export function OverviewView({
                           onToggle={toggle}
                           onOpenColony={onOpenColony}
                           onSelect={onSelect}
+                          onResume={onResume}
                         />
                       ))
                     )}
