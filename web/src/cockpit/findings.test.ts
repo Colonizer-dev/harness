@@ -76,6 +76,18 @@ describe("chains", () => {
     expect(chain.records.map((r) => r.state)).toEqual(["validated", "rejected"]);
   });
 
+  it("a blocked finding stops at its reason and keeps its pr", () => {
+    const records = [
+      line("Coupon field accepts expired codes", { state: "review", review_session: "rev0004", verdict: "pass", ts: at(0) }),
+      line("Coupon field accepts expired codes", { state: "blocked", reason: "GitHub reports a merge conflict", pr: "https://github.com/acme/webshop/pull/244", ts: at(1) }),
+    ];
+    const [chain] = chains(records);
+    expect(chain.state).toBe("blocked");
+    expect(chain.reason).toBe("GitHub reports a merge conflict");
+    expect(chain.pr).toBe("https://github.com/acme/webshop/pull/244");
+    expect(chain.verdict).toBe("pass");
+  });
+
   it("a legacy duplicate line still lands", () => {
     // A duplicate written by an older mothership: the line names the finding it duplicates, and
     // neither that reference nor the issue it was first filed as gets lost.

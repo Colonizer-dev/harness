@@ -115,9 +115,9 @@ pub fn issue_body(finding: &Finding, s: &Session) -> String {
 /// Only the line that filed or matched counts: a finding that was validated but never filed consumed
 /// nothing, so a colony that keeps submitting junk is stopped by the cap while one whose findings the
 /// orchestrator rejects is not punished for trying. The later stages of a filed finding — its fix
-/// colony (which carries the `issue` again), review, merge, or an error along the way — are the same
-/// finding, so they do not count a second time. A legacy line with no `state` counts when it carries
-/// `issue` or `duplicate_of`, which is how filing was recorded before states existed.
+/// colony (which carries the `issue` again), review, merge (or blocked), or an error along the way —
+/// are the same finding, so they do not count a second time. A legacy line with no `state` counts
+/// when it carries `issue` or `duplicate_of`, which is how filing was recorded before states existed.
 pub fn count(record: &Path) -> usize {
     std::fs::read_to_string(record)
         .map(|content| {

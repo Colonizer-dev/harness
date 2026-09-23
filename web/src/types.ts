@@ -898,16 +898,17 @@ export interface NewSessionRequest {
 
 /**
  * One line of a colony's finding ledger (GET /api/sessions/{id}/findings). The ledger is append-only:
- * as a finding moves validated → filed (or rejected/duplicate) → fix_colony → review → merged, a new
- * line is written and nothing is rewritten, so one finding — keyed by `title` — is the several lines
- * that mention it. The present is the last line's state; `error` and `rejected` lines carry a
- * `reason`, and `cockpit/findings.ts` folds the lines into one chain per title.
+ * as a finding moves validated → filed (or rejected/duplicate) → fix_colony → review → merged (or
+ * blocked, when the review passed but GitHub would not merge the PR), a new line is written and
+ * nothing is rewritten, so one finding — keyed by `title` — is the several lines that mention it.
+ * The present is the last line's state; `error`, `rejected` and `blocked` lines carry a `reason`,
+ * and `cockpit/findings.ts` folds the lines into one chain per title.
  */
 export interface FindingRecord {
   session: string;
   repo?: string;
   title: string;
-  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "error";
+  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
   ts?: string;
   reason?: string;
   severity?: "low" | "medium" | "high" | "critical";

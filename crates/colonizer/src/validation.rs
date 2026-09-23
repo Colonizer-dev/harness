@@ -23,6 +23,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use axum::{Json, extract::State};
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 
@@ -90,6 +91,43 @@ pub(crate) fn ensure_independent(author: &str, reviewer: &str) -> Result<()> {
         bail!("reviewer session must be independent of the author colony");
     }
     Ok(())
+}
+
+/// Whether a reviewed pull request is worth trying to merge, as GitHub reports it.
+#[derive(Debug, PartialEq)]
+enum Preflight {
+    Merge,
+    /// Why it was not tried, worded to follow "not merged: ".
+    Skip(String),
+}
+
+/// Reads GitHub's `mergeable` and `mergeStateStatus` for a pull request about to be merged. Only a
+/// state GitHub already says cannot merge is skipped; everything else is tried.
+fn merge_preflight(mergeable: &str, merge_state_status: &str) -> Preflight {
+    let why = match (mergeable, merge_state_status) {
+        ("CONFLICTING", _) | (_, "DIRTY") => "it conflicts with its base branch",
+        ("UNKNOWN", _) | (_, "UNKNOWN") => "GitHub has not worked out yet whether it can merge",
+        // `gh pr merge` refuses a blocked pull request without `--admin`, so trying would only fail.
+        (_, "BLOCKED") => "branch protection blocks it, for example a required review or check",
+        (_, "DRAFT") => "it is a draft",
+        // CLEAN, HAS_HOOKS and UNSTABLE can merge. BEHIND is not a blocker unless branch protection
+        // requires an up-to-date branch, and these two fields cannot tell which, so the merge is tried
+        // and a refusal is recorded as an error as before; so is anything unrecognised.
+        _ => return Preflight::Merge,
+    };
+    Preflight::Skip(format!("{why} (mergeable {mergeable}, merge state {merge_state_status})"))
+}
+
+/// The fields the merge preflight asks `gh pr view --json` for, which must be exactly the ones
+/// `PrMergeView` reads: `gh` rejects the whole call when any requested field is not one it knows
+/// (github.rs `PR_VIEW_FIELDS`), so a test holds the two together.
+const PR_MERGE_FIELDS: &str = "mergeable,mergeStateStatus";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PrMergeView {
+    mergeable: String,
+    merge_state_status: String,
 }
 
 /// What the validator is asked: the repository plus the agent's whole claim, and a reply contract
@@ -307,9 +345,10 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
 }
 
 /// Reviews a fix colony's pull request once it is open, and merges it when the review passes and
-/// was opted in. Spawned from the publish path, so it must run without blocking it — and without
-/// panicking: every failure lands in the fix colony's log and the hunter's ledger, and the pull
-/// request stays open for a person either way.
+/// was opted in, unless GitHub already reports it cannot merge (`merge_preflight`). Spawned from the
+/// publish path, so it must run without blocking it — and without panicking: every failure lands in
+/// the fix colony's log and the hunter's ledger, and the pull request stays open for a person either
+/// way.
 pub(crate) async fn review_fix_pr(app: Shared, fix_id: String) {
     if let Err(e) = review_fix_pr_inner(&app, &fix_id).await {
         let reason = format!("{e:#}");
@@ -369,6 +408,29 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
     }
 
     if verdict.vote == "pass" && automerge_enabled(app, &fix).await {
+        // GitHub is asked first whether the pull request can merge at all, so a conflict or a rule that
+        // forbids it is minuted as what it is rather than as a failed merge.
+        let view = crate::util::exec(&mut app.gh(["pr", "view", pr_url.as_str(), "--json", PR_MERGE_FIELDS]))
+            .await
+            .context("the review passed, but GitHub could not say whether it can merge")?;
+        let view: PrMergeView = serde_json::from_str(&view).context("could not parse `gh pr view` output")?;
+        if let Preflight::Skip(reason) = merge_preflight(&view.mergeable, &view.merge_state_status) {
+            app.session_log(
+                fix_id,
+                "warn",
+                format!("the independent review of {pr_url} passed, but it was not merged: {reason}"),
+            )
+            .await;
+            if app.session(&hunter).await.is_some() {
+                record(
+                    app,
+                    &hunter,
+                    &json!({"title": fix_for.title.clone(), "state": "blocked", "reason": reason, "pr": pr_url}),
+                )
+                .await;
+            }
+            return Ok(());
+        }
         app.session_log(fix_id, "info", format!("the independent review of {pr_url} passed; merging"))
             .await;
         crate::util::exec(&mut app.gh(["pr", "merge", pr_url.as_str(), "--squash"]))
@@ -476,6 +538,46 @@ mod tests {
         let error = ensure_independent("abc", "abc").unwrap_err().to_string();
         assert_eq!(error, "reviewer session must be independent of the author colony");
         assert!(ensure_independent("abc", "def").is_ok(), "a fresh session reviews freely");
+    }
+
+    /// Which of GitHub's merge states a passing review tries to merge, and why each other one is skipped.
+    #[test]
+    fn merge_preflight_is_a_table_of_merges_and_skips() {
+        for state in ["CLEAN", "BEHIND", "HAS_HOOKS", "UNSTABLE", "SOMETHING_NEW"] {
+            assert_eq!(merge_preflight("MERGEABLE", state), Preflight::Merge, "{state} is tried");
+        }
+        for (mergeable, state, cause) in [
+            ("CONFLICTING", "DIRTY", "conflicts"),
+            ("MERGEABLE", "DIRTY", "conflicts"),
+            ("CONFLICTING", "CLEAN", "conflicts"),
+            ("UNKNOWN", "UNKNOWN", "not worked out"),
+            ("MERGEABLE", "UNKNOWN", "not worked out"),
+            ("UNKNOWN", "BEHIND", "not worked out"),
+            ("MERGEABLE", "BLOCKED", "branch protection"),
+            ("MERGEABLE", "DRAFT", "draft"),
+        ] {
+            let Preflight::Skip(reason) = merge_preflight(mergeable, state) else {
+                panic!("{mergeable}/{state} is not tried");
+            };
+            assert!(reason.contains(cause), "{mergeable}/{state}: {reason}");
+            assert!(
+                reason.contains(mergeable) && reason.contains(state),
+                "the raw values are kept: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_requested_merge_field_is_one_the_struct_reads() {
+        // As with github.rs's PR_VIEW_FIELDS: PrMergeView refuses unknown fields and needs both of its
+        // own, so an object with exactly the requested fields only parses when the two agree.
+        let sample: serde_json::Map<String, Value> = PR_MERGE_FIELDS
+            .split(',')
+            .map(|f| (f.to_string(), Value::String("UNKNOWN".into())))
+            .collect();
+        assert!(serde_json::from_value::<PrMergeView>(Value::Object(sample)).is_ok());
+        let view: PrMergeView = serde_json::from_str(r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#).unwrap();
+        assert_eq!(merge_preflight(&view.mergeable, &view.merge_state_status), Preflight::Merge);
     }
 
     #[tokio::test]

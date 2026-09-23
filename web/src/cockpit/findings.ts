@@ -1,7 +1,7 @@
 // What the inspector's findings section shows, folded out of a colony's finding ledger.
 //
 // The ledger is append-only: as a finding moves validated → filed (or rejected or duplicate) →
-// fix_colony → review → merged, the mothership writes a new line, and nothing in an earlier line is
+// fix_colony → review → merged (or blocked), the mothership writes a new line, and no earlier line is
 // ever rewritten. The browser's job is to say where each finding is *now*, so this folds the lines
 // into one chain per title. The last line to mention a field wins, because it is the most recent
 // thing the mothership told us about it. Two consequences follow from the ledger being append-only:

@@ -495,10 +495,10 @@ fn advance_state(run: &mut RedTeamRun, sessions: &[Session]) {
 
 /// The run's findings counts from its hunters' ledgers (`sessions/<id>/findings.jsonl`, §6.6). The
 /// ledger has one line per stage a finding reached — validated, rejected, filed, duplicate, then the
-/// fix colony, its review and merge — all carrying the finding's title, so lines are grouped by title
-/// within each hunter's ledger and each finding is counted once per state it reached. Filed counts a
-/// finding that matched an open issue too: either way it is on GitHub. Legacy lines with no `state`
-/// are read by what they carry (`findings::records` does that).
+/// fix colony, its review and merge (or blocked) — all carrying the finding's title, so lines are
+/// grouped by title within each hunter's ledger and each finding is counted once per state it
+/// reached. Filed counts a finding that matched an open issue too: either way it is on GitHub.
+/// Legacy lines with no `state` are read by what they carry (`findings::records` does that).
 fn counts_for(app: &App, run: &RedTeamRun) -> Counts {
     let mut counts = Counts::default();
     for hunter in &run.hunters {

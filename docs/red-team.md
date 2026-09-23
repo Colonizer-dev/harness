@@ -50,7 +50,9 @@ fix itself, and autopilot runs.
 Each hunter writes `findings.jsonl` in its session directory (protocol §6.6), one line
 per stage a finding reaches: `validated` or `rejected` by the orchestrator, then `filed`
 or `duplicate` (an open issue already had the title), and with autofix the fix colony,
-its review and merge. The run's tally groups a hunter's lines by the finding's title and
+its review and merge. A merge GitHub reports as not possible (a conflict, mergeability not
+yet computed, branch protection, a draft) is recorded as `blocked` with the reason instead
+of being attempted. The run's tally groups a hunter's lines by the finding's title and
 counts each finding once: every finding counts as found, and as validated, rejected or
 filed (`filed` or `duplicate`) when it reached that stage. Lines written before stages
 existed carry no `state` and are read by what they carry: an `issue` or `duplicate_of`
