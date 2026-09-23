@@ -402,8 +402,12 @@ which you write and Colonizer only reads — a missing file means the defaults:
 
 ```toml
 [publish]
-# Colonizer signs the commit it publishes a colony's work as:
-#   Co-Authored-By: Colonizer <noreply@colonizer.dev>
+# Who the commit and the pull request body name as co-author: `true` (the default) is the
+# github.com/colonizer-settlers account, `co_author = { name = "…", email = "…" }` names
+# someone else, and `false` turns the commit trailer, the PR-body trailer and the findings
+# credit off. The address must belong to the account or GitHub shows it as plain text —
+# for a user account that is the ID-prefixed noreply form. An unreadable or malformed file
+# falls back to the defaults, so co-author stays on.
 co_author = true
 ```
 
