@@ -79,7 +79,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
     process::ExitCode,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     process::Command,
@@ -183,6 +183,11 @@ pub struct App {
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
     /// bypasses it.
     pub host_cache: Mutex<Option<runtime::HostCached>>,
+    /// Boot-time provider probe results, keyed on provider id + base URL
+    /// (`gateway::probe_cache_key`) so repointing a provider never serves the old endpoint's
+    /// answer. Both reachable and unreachable answers are kept for [`gateway::PROVIDER_PROBE_TTL`];
+    /// a dead provider would otherwise cost every boot up to the 5 s probe timeout.
+    pub provider_probe_cache: Mutex<HashMap<String, (Instant, Value)>>,
     /// The fleet view's peer half (issue #231): last-known `HostSummary` per configured peer base URL,
     /// so a peer that goes quiet still shows its last real numbers instead of nulls. This machine's
     /// own entry is never cached here — `fleet::self_summary` always computes it live.
@@ -1164,6 +1169,7 @@ async fn serve() -> Result<()> {
         claude_bins: Mutex::new(HashMap::new()),
         runtime_cache: Mutex::new(None),
         host_cache: Mutex::new(None),
+        provider_probe_cache: Mutex::new(HashMap::new()),
         fleet_cache: fleet::FleetCache::new(),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
@@ -1429,6 +1435,7 @@ pub(crate) mod tests {
             claude_bins: Mutex::new(HashMap::new()),
             runtime_cache: Mutex::new(None),
             host_cache: Mutex::new(None),
+            provider_probe_cache: Mutex::new(HashMap::new()),
             fleet_cache: fleet::FleetCache::new(),
             usage: usage::Usage::new(&root.join("config")),
             updates: version::Updates::new(&root.join("config")).unwrap(),

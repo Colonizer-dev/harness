@@ -192,6 +192,38 @@ describe("Inspector boot timing", () => {
   });
 });
 
+// The mothership pane's cross-colony medians: per-phase medians across recent finished boots.
+describe("Inspector boot medians", () => {
+  const renderMothership = (sessions: Session[]): string =>
+    renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <Inspector target={{ kind: "mothership" }} avatarUrl={null} settlers={[]} pendingQuestions={[]}
+          questionActions={CONNECTED} sessions={sessions} status={null} liveCount={0} queuedCount={0}
+          needCount={0} spend={null} maxParallel={null} update={null} onClose={noop} onOpenColony={noop}
+          onStop={noop} onResume={noop} onLaunch={noop} onOpenSettings={noop} />
+      </ApiContext.Provider>,
+    );
+
+  const PHASES = [{ name: "git", ms: 1_180 }, { name: "vm-boot", ms: 86_400 }];
+
+  it("shows per-phase medians and the median total across the sampled boots", () => {
+    const markup = renderMothership([
+      session({ id: "a", created_at: "2026-09-18T09:00:00Z", boot_timing: { total_ms: 90_000, phases: PHASES } }),
+      session({ id: "b", created_at: "2026-09-18T09:01:00Z", boot_timing: { total_ms: 94_320, phases: PHASES } }),
+    ]);
+    expect(markup).toContain("BOOT · MEDIAN OF 2");
+    expect(markup).toContain(">git<");
+    expect(markup).toContain(">vm-boot<");
+    expect(markup).toContain("median total 94s");
+    expect(markup.match(/SLOWEST/g)).toHaveLength(1);
+  });
+
+  it("no finished boots is no section", () => {
+    const unfinished = session({ id: "a", status: "starting", boot_timing: { phases: PHASES.slice(0, 1) } });
+    expect(renderMothership([unfinished, session({ id: "b", status: "running" })])).not.toContain("MEDIAN OF");
+  });
+});
+
 // The stuck-colony readout (issue #230): the single-session route's diagnosis and recent events.
 describe("Inspector diagnosis", () => {
   const QUOTA = "API Error: quota has been exhausted. The quota will reset at 09-23 07:54:00 UTC.";

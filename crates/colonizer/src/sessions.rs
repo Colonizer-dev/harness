@@ -1592,7 +1592,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         );
     }
     let used = routing.used(&runner_env);
-    let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe(app, p))).await;
+    let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe_cached(app, p))).await;
     for (provider, health) in used.iter().zip(probes) {
         if health["reachable"] != true {
             let then = match &provider.fallback_model {

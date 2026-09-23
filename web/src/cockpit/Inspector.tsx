@@ -18,7 +18,7 @@ import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
 import type { FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
-import { bootView } from "./bootTiming";
+import { bootMedians, bootView } from "./bootTiming";
 import { chains, type FindingChain } from "./findings";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -312,6 +312,8 @@ export function Inspector({
     ? `${stackParent.repo}${stackParent.issue != null ? `#${stackParent.issue}` : ""} · ${stackParent.branch}`
     : (session?.parent ?? null);
   const boot = session ? bootView(session.boot_timing, session.status === "starting") : null;
+  // Cross-colony boot medians for the mothership pane; the colony branch never reads it.
+  const medianBoot = mothership ? bootMedians(sessions) : null;
 
   // The finding ledger is a separate call, keyed by colony: the event stream does not carry it, and
   // a colony that never validated a finding has none, so an error reads as "nothing yet".
@@ -426,6 +428,26 @@ export function Inspector({
                       </span>
                     </button>
                   ))}
+                </div>
+              </Section>
+            )}
+
+            {medianBoot && (
+              // Per-phase medians across recent finished boots, in the colony BOOT rows' shape; after
+              // CONNECTIONS so the update chip stays last as the call to action.
+              <Section title={`BOOT · MEDIAN OF ${medianBoot.count}`}>
+                <div className="flex flex-col gap-1.5">
+                  {medianBoot.rows.map((row) => (
+                    <div
+                      key={row.name}
+                      className={cx("flex gap-2.5 text-[12px]", row.slowest ? "font-semibold text-text" : "text-muted")}
+                    >
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{row.name}</span>
+                      {row.slowest && <span className="font-mono text-[10px] tracking-[0.1em] text-warn">SLOWEST</span>}
+                      <span className="shrink-0 font-mono text-[11px] tabular-nums">{row.duration}</span>
+                    </div>
+                  ))}
+                  <div className="text-[12px] text-faint">{medianBoot.summary}</div>
                 </div>
               </Section>
             )}

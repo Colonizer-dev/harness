@@ -3,7 +3,8 @@
 // finished one took. A colony with no timing and no boot under way gets no section at all.
 import { describe, expect, it } from "vitest";
 
-import { bootView } from "./bootTiming";
+import type { Session } from "../types";
+import { bootMedians, bootView } from "./bootTiming";
 
 const FULL = {
   total_ms: 94_320,
@@ -64,5 +65,50 @@ describe("bootView", () => {
   it("a tie flags only the first of the equal phases", () => {
     const view = bootView({ total_ms: 2_000, phases: [{ name: "a", ms: 900 }, { name: "b", ms: 900 }] }, false);
     expect(view?.rows.map((r) => r.slowest)).toEqual([true, false]);
+  });
+});
+
+// The mothership pane's cross-colony medians: per-phase medians across recent finished boots.
+describe("bootMedians", () => {
+  const colony = (id: string, created_at: string, timing: Session["boot_timing"]): Session =>
+    ({ id, created_at, boot_timing: timing }) as Session;
+  const done = (ms: number, total = 10_000) => ({ total_ms: total, phases: [{ name: "git", ms }, { name: "vm-boot", ms: ms * 10 }] });
+  const gitOf = (view: ReturnType<typeof bootMedians>) => view?.rows.find((r) => r.name === "git")?.duration;
+
+  it("null when no boot finished", () => {
+    expect(bootMedians([])).toBeNull();
+    expect(bootMedians([colony("a", "2026-09-18T09:00:00Z", null), colony("b", "2026-09-18T09:01:00Z", undefined)])).toBeNull();
+  });
+
+  it("excludes boots still under way or stopped part way", () => {
+    const view = bootMedians([
+      colony("a", "2026-09-18T09:00:00Z", { phases: [{ name: "git", ms: 50 }] }),
+      colony("b", "2026-09-18T09:01:00Z", done(1_000)),
+      colony("c", "2026-09-18T09:02:00Z", { phases: [{ name: "git", ms: 9_999 }] }),
+    ]);
+    expect(view?.count).toBe(1);
+    expect(view?.rows).toEqual([
+      { name: "git", duration: "1s", slowest: false },
+      { name: "vm-boot", duration: "10s", slowest: true },
+    ]);
+    expect(view?.summary).toBe("median total 10s");
+  });
+
+  it("even counts take the upper middle over the most recent boots", () => {
+    const all = [100, 200, 300, 400, 500].map((ms, i) => colony(`s${i}`, `2026-09-18T09:0${i}:00Z`, done(ms, ms * 10)));
+    expect(gitOf(bootMedians(all))).toBe("300 ms");
+    const limited = bootMedians(all, 4);
+    expect(limited?.count).toBe(4);
+    expect(gitOf(limited)).toBe("400 ms");
+    expect(limited?.summary).toBe("median total 4s");
+  });
+
+  it("a phase missing from some boots medians over the ones that ran it, slowest flagged", () => {
+    const view = bootMedians([
+      colony("a", "2026-09-18T09:00:00Z", { total_ms: 5_000, phases: [{ name: "vm-boot", ms: 4_000 }] }),
+      colony("b", "2026-09-18T09:01:00Z", { total_ms: 6_000, phases: [{ name: "git", ms: 500 }, { name: "vm-boot", ms: 5_000 }] }),
+    ]);
+    expect(view?.rows.map((r) => r.name)).toEqual(["git", "vm-boot"]);
+    expect(view?.rows.filter((r) => r.slowest).map((r) => r.name)).toEqual(["vm-boot"]);
   });
 });
