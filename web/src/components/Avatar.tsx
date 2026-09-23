@@ -18,6 +18,7 @@ export function Avatar({
   size = 32,
   rounded = "lg",
   className,
+  fallback,
 }: {
   /** What the initial falls back to; the login or org name. */
   name: string;
@@ -27,6 +28,9 @@ export function Avatar({
   size?: number;
   rounded?: keyof typeof ROUNDING;
   className?: string;
+  /** Rendered instead of the grey initial tile when there is no image or it fails to load —
+   *  the cockpit org tiles pass their coloured lettermark, so the fallback keeps its hue. */
+  fallback?: ReactNode;
 }) {
   const [broken, setBroken] = useState(false);
   // A different image arriving is a fresh chance to load (the prompt card moves from one org to the next).
@@ -46,7 +50,7 @@ export function Avatar({
     </span>
   );
 
-  if (!src || broken) return tile(initialOf(name), "bg-panel-3 text-muted");
+  if (!src || broken) return fallback ?? tile(initialOf(name), "bg-panel-3 text-muted");
   return (
     <img
       src={src}
