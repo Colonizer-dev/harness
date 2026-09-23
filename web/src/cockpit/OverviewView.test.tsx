@@ -1,22 +1,23 @@
-// The overview's colony rows are disclosures: collapsed they must not leak the issue title (that is
-// the whole point of the issue), a click reveals the title and a working link to the issue itself,
-// and the toggle is pure enough to pin in the plain node environment — a Set keyed by session id, so
-// one row's state cannot touch its siblings'. Rendering through react-dom/server, because this
-// codebase keeps tests off jsdom: the collapsed and expanded markup are both fully visible there.
+// The overview dashboard (issue #398): six KPI tiles with honest empty states, the needs-you
+// queue oldest first, the merged-per-day chart, the workspaces-compared table, workspace cards
+// and the colonies table with its status + org filter chips. Rendering through
+// react-dom/server, because this codebase keeps tests off jsdom; renderToStaticMarkup runs no
+// effects, so the spend-history fetch never fires and history-backed figures read as unmeasured —
+// exactly the older-mothership path. Static markup cannot click, so the filtered states render
+// through the `initialFilter` prop.
 //
 // The overview page's relationship between the header total and the org cards (issue #209): when a
 // mothership reports per-org spend, the header is the sum of the rows (never a session-derived
 // figure that could disagree), and an org whose spend was never measured reads "—", never "$0.00".
-// renderToStaticMarkup runs no effects, so the sparkline fetch never fires and the org cards simply
-// have no history — which is exactly the older-mothership path.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
 import type { OrgEntry } from "../orgs";
-import type { HarnessStatus, Session } from "../types";
-import { ColonyRow, OverviewView, flipExpanded } from "./OverviewView";
+import type { Session } from "../types";
+import { OverviewView } from "./OverviewView";
+import { changeFailRate, dailyMerged, formatWait, mergedInWindow, shortDayLabel } from "./dash";
 import type { OverviewFilter } from "./feed";
 
 const api = createMockApi();
@@ -63,10 +64,16 @@ const entry = (org: string, spend: OrgEntry["spend"]): OrgEntry => ({
   spend,
 });
 
-const render = (orgs: OrgEntry[], cost: number | null) =>
+const renderOverview = (list: Session[], orgs: OrgEntry[], filter: OverviewFilter | null = null) =>
   renderToStaticMarkup(
     <ApiContext.Provider value={api}>
-      <OverviewView sessions={[]} orgs={orgs} cost={cost} onOpenOrg={() => {}} onOpenColony={() => {}} onSelect={noop} />
+      <OverviewView
+        sessions={list}
+        orgs={orgs}
+        cost={null}
+        initialFilter={filter}
+        onOpenColony={noop}
+      />
     </ApiContext.Provider>,
   );
 
@@ -84,116 +91,224 @@ const unmeasured: OrgEntry["spend"] = {
   models: [],
 };
 
-describe("flipExpanded", () => {
-  it("expands a collapsed row on the first click", () => {
-    expect(flipExpanded(new Set(), "s1")).toEqual(new Set(["s1"]));
+describe("overview dash helpers", () => {
+  const from = Date.parse("2026-09-01T00:00:00Z");
+  const to = Date.parse("2026-10-01T00:00:00Z");
+  const merged = (id: string, created_at: string, status: Session["status"] = "merged") =>
+    session({ id, created_at, updated_at: created_at, status });
+
+  it("mergedInWindow buckets by created_at: only merged sessions created in the window count", () => {
+    const list = [
+      merged("in", "2026-09-10T09:00:00Z"),
+      merged("too-old", "2026-08-10T09:00:00Z"),
+      merged("pr-open", "2026-09-10T09:00:00Z", "pr_opened"),
+      merged("failed", "2026-09-10T09:00:00Z", "failed"),
+    ];
+    expect(mergedInWindow(list, from, to).map((s) => s.id)).toEqual(["in"]);
   });
 
-  it("collapses an expanded row on the second click", () => {
-    expect(flipExpanded(new Set(["s1", "s2"]), "s1")).toEqual(new Set(["s2"]));
+  it("dailyMerged counts merged sessions per day and per org", () => {
+    const list = [
+      merged("a1", "2026-09-10T09:00:00Z"),
+      merged("a2", "2026-09-10T10:00:00Z"),
+      merged("b1", "2026-09-11T09:00:00Z", "merged"),
+    ];
+    const other = session({ id: "o1", org: "beta", repo: "beta/api", created_at: "2026-09-10T09:00:00Z", updated_at: "2026-09-10T09:00:00Z", status: "merged" });
+    expect(dailyMerged([...list, other], ["2026-09-10", "2026-09-11"])).toEqual([3, 1]);
+    expect(dailyMerged([...list, other], ["2026-09-10", "2026-09-11"], "acme")).toEqual([2, 1]);
   });
 
-  it("leaves the other rows' state alone, so rows expand independently", () => {
-    expect(flipExpanded(new Set(["s2"]), "s1")).toEqual(new Set(["s1", "s2"]));
+  it("changeFailRate reads failed ÷ decided among sessions created in the window", () => {
+    const list = [
+      merged("m1", "2026-09-10T09:00:00Z"),
+      merged("m2", "2026-09-10T09:00:00Z"),
+      merged("f1", "2026-09-10T09:00:00Z", "failed"),
+      merged("run", "2026-09-10T09:00:00Z", "running"),
+      merged("old", "2026-08-10T09:00:00Z", "failed"),
+    ];
+    const rate = changeFailRate(list, from, to);
+    expect(rate.failed).toBe(1);
+    expect(rate.decided).toBe(3);
+    expect(rate.rate).toBeCloseTo(1 / 3);
+    expect(changeFailRate([merged("run", "2026-09-10T09:00:00Z", "running")], from, to).rate).toBeNull();
+  });
+
+  it("formatWait compacts a wait the way the queue shows it", () => {
+    expect(formatWait(45_000)).toBe("45s");
+    expect(formatWait(22 * 60_000)).toBe("22m");
+    expect(formatWait(7 * 3_600_000)).toBe("7h");
+    expect(formatWait(3 * 86_400_000)).toBe("3d");
+    expect(formatWait(NaN)).toBe("—");
+  });
+
+  it("shortDayLabel shortens a history day for the x axis", () => {
+    expect(shortDayLabel("2026-09-03")).toBe("Sep 3");
   });
 });
 
-describe("ColonyRow", () => {
-  it("collapsed: one compact line with no issue title, and aria-expanded false", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open={false} onToggle={noop} onOpenColony={noop} onSelect={noop} />);
-    expect(markup).not.toContain("Checkout fails for guest users");
-    expect(markup).toContain("webshop#42");
-    expect(markup).not.toContain("open colony →");
-    expect(markup).toMatch(/aria-expanded="false"/);
-    expect(markup).toMatch(/aria-controls="/);
+describe("OverviewView KPIs", () => {
+  const recent = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  const list = [
+    session({ id: "m1", status: "merged", created_at: recent, updated_at: recent }),
+    session({ id: "m2", status: "merged", created_at: recent, updated_at: recent }),
+    session({ id: "f1", status: "failed", created_at: recent, updated_at: recent }),
+    session({ id: "r1", status: "running" }),
+  ];
+
+  it("renders the six tiles, with empty states where no data source exists", () => {
+    const html = renderOverview(list, [ACME]);
+    for (const label of ["MERGED PRS", "LEAD TIME", "PR CYCLE TIME", "CHANGE FAILURE RATE", "CI PASS RATE", "SPEND"]) {
+      expect(html).toContain(label);
+    }
+    // Lead time, PR cycle time and CI pass rate have no source: honest empty states, same shape.
+    expect(html.match(/no data source yet/g)?.length).toBe(3);
   });
 
-  it("expanded: reveals the issue title and a real link to the issue, and keeps the way in", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
-    expect(markup).toContain("Checkout fails for guest users");
-    expect(markup).toContain('href="https://github.com/acme/webshop/issues/42"');
-    expect(markup).toContain("acme/webshop #42");
-    expect(markup).toContain("open colony →");
-    expect(markup).toMatch(/aria-expanded="true"/);
+  it("counts merged PRs from sessions and says the bucket out loud", () => {
+    const html = renderOverview(list, [ACME]);
+    expect(html).toContain("by created_at, no merge date");
+    expect(html).toContain("MERGED PRS PER DAY · BY WORKSPACE");
   });
 
-  it("offers the open-colony affordance as a real enabled button, whatever the host Setup calls the machine", () => {
-    // The overview never reads which platform the mothership is on — the affordance is a plain,
-    // ungated <button>. The fixture only names the shape the ?runtime=other mock produces
-    // (platform "other", kvm null — issue #214's unsupported-host scenario); with a colony to
-    // inspect the way in must be present and live, not replaced by Settings.
-    const unsupportedHost: HarnessStatus = {
-      github: { connected: true, login: "octocat", name: "The Octocat", source: "gh CLI login" },
-      claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" },
-      sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
-      mesh: { enabled: true, provider: "headscale", state: "running", harness_ip: "100.64.0.1", nodes: 1, error: null },
-      runtime: {
-        platform: "other",
-        kvm: null,
-        git: { ok: true, version: "2.45.0" },
-        gh: { ok: true, version: "2.60.0" },
-        host_claude_bin: "/usr/local/bin/claude",
-        host_claude_bin_error: null,
-        os: { vendor: "unknown", name: "Other", version: null, id: null },
-      },
-    };
-    expect(unsupportedHost.runtime?.platform).toBe("other");
-    expect(unsupportedHost.runtime?.kvm).toBeNull();
-
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
-    // A real focusable button — never a clickable div — and never disabled.
-    expect(markup).toMatch(/<button type="button"[^>]*>open colony →<\/button>/);
-    expect(markup).not.toContain("disabled");
+  it("labels the change-failure basis in the sub-line", () => {
+    const html = renderOverview(list, [ACME]);
+    expect(html).toContain("1 failed of 3 decided (merged+failed)");
   });
 
-  it("never invents an issue link for a colony with no issue", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session({ issue: null, issue_title: "" })} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
-    expect(markup).not.toContain("/issues/");
-    expect(markup).toContain("acme/webshop");
+  it("reads empty when nothing was decided in range", () => {
+    const html = renderOverview([session({ id: "r1", status: "running" })], [ACME]);
+    expect(html).toContain("nothing decided in range");
   });
+});
 
-  it("says why a flagged colony needs attention", () => {
-    const flagged = session({ attention: { reason: "stalled", since: "2026-09-18T09:05:00Z", nudges: 2 } });
-    const markup = renderToStaticMarkup(<ColonyRow session={flagged} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
-    expect(markup).toContain("No progress, nudged 2×");
-  });
+describe("OverviewView needs-you queue", () => {
+  const waiting = (id: string, issue: number, since: string): Session =>
+    session({
+      id,
+      issue,
+      issue_title: `Question ${issue}`,
+      status: "waiting_for_answer",
+      attention: { reason: "waiting_for_answer", since, nudges: 0 },
+      updated_at: since,
+    });
 
-  it("a colony that needs you gets a shortcut that opens it in the inspector pane", () => {
-    const markup = renderToStaticMarkup(
-      <ColonyRow session={session({ status: "waiting_for_answer" })} open onToggle={noop} onOpenColony={noop} onSelect={noop} />,
+  it("lists waiting colonies oldest first with an Answer affordance each", () => {
+    const html = renderOverview(
+      [waiting("new", 2, "2026-09-18T09:00:00Z"), waiting("old", 1, "2026-09-10T09:00:00Z")],
+      [ACME],
     );
-    expect(markup).toContain("answer in the pane →");
+    expect(html).toContain("NEEDS YOU · 2");
+    expect(html).toContain("oldest first");
+    expect(html.indexOf("webshop#1")).toBeLessThan(html.indexOf("webshop#2"));
+    expect(html.match(/Answer →/g)?.length).toBe(2);
   });
 
-  it("a colony that does not need you has no pane shortcut", () => {
-    const markup = renderToStaticMarkup(<ColonyRow session={session()} open onToggle={noop} onOpenColony={noop} onSelect={noop} />);
-    expect(markup).not.toContain("answer in the pane →");
+  it("stays hidden when nobody waits", () => {
+    expect(renderOverview([session()], [ACME])).not.toContain("NEEDS YOU");
   });
 });
 
-describe("OverviewView", () => {
-  it("shows no issue title anywhere by default", () => {
-    const markup = renderToStaticMarkup(
+describe("OverviewView workspaces", () => {
+  const withModels = (org: string): OrgEntry => ({
+    ...entry(org, {
+      cost_usd: 12.5,
+      routed_cost_usd: 0.5,
+      tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 },
+      models: [{ model: "deepseek/deepseek-flash", tokens: 1_204_000, cost_usd: 2.91 }],
+    }),
+    live: 1,
+    total: 2,
+  });
+
+  it("compares workspaces with merged, fail % and spend, and names the failure basis", () => {
+    const recent = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const html = renderOverview(
+      [
+        session({ id: "m1", status: "merged", created_at: recent, updated_at: recent }),
+        session({ id: "f1", status: "failed", created_at: recent, updated_at: recent }),
+      ],
+      [withModels("acme")],
+    );
+    expect(html).toContain("WORKSPACES COMPARED");
+    expect(html).toContain("FAIL %");
+    expect(html).toContain("1 failed of 2 decided (merged+failed)");
+    expect(html).toContain("$13.00");
+  });
+
+  it("cards carry merged, spend and fail stats plus the top model and a dashboard way in", () => {
+    const html = renderOverview([session({ id: "r1" }), session({ id: "w1", status: "waiting_for_answer" })], [withModels("acme")]);
+    expect(html).toContain("WORKSPACES");
+    expect(html).toContain("MERGED");
+    expect(html).toContain("FAIL %");
+    expect(html).toContain("deepseek/deepseek-flash");
+    expect(html).toContain("dashboard →");
+    expect(html).toContain("1 need you");
+  });
+
+  it("cards admit to no model usage instead of inventing one", () => {
+    const html = renderOverview([session()], [ACME]);
+    expect(html).toContain("no model usage");
+  });
+});
+
+describe("OverviewView colonies table", () => {
+  it("shows colony titles with status, org, updated and spent", () => {
+    const html = renderOverview(
+      [session({ id: "s1", cost_usd: 0.87 }), session({ id: "s2", repo: "acme/design-system", issue: 7, issue_title: "Bad contrast on the nav" })],
+      [ACME],
+    );
+    expect(html).toContain("COLONIES · 2");
+    expect(html).toContain("Checkout fails for guest users");
+    expect(html).toContain("Bad contrast on the nav");
+    expect(html).toContain("Working");
+    expect(html).toContain("$0.87");
+    expect(html).toContain("—");
+  });
+
+  it("sorts needs-you longest-wait first, ahead of working colonies", () => {
+    const html = renderOverview(
+      [
+        session({ id: "work", status: "running", updated_at: "2026-09-18T09:10:00Z" }),
+        session({ id: "need", status: "waiting_for_answer", attention: { reason: "waiting_for_answer", since: "2026-09-10T09:00:00Z", nudges: 0 }, updated_at: "2026-09-10T09:00:00Z" }),
+      ],
+      [ACME],
+    );
+    expect(html.indexOf("Needs your answer")).toBeLessThan(html.indexOf("Working"));
+  });
+
+  it("chips filter by bucket and by org", () => {
+    const beta: OrgEntry = { org: "beta", live: 1, queued: 0, total: 1, pending: 0, avatar: null };
+    const html = renderOverview(
+      [session({ id: "a1" }), session({ id: "b1", org: "beta", repo: "beta/api" })],
+      [ACME, beta],
+    );
+    for (const label of ["live", "need you", "returned", "queued"]) expect(html).toContain(label);
+    expect(html).toContain("All orgs");
+    expect(html).toContain("beta");
+    // A pinned bucket narrows the table and names the filter.
+    const filtered = renderOverview([session({ id: "a1" }), session({ id: "b1", org: "beta", repo: "beta/api", status: "queued" })], [ACME, beta], "live");
+    expect(filtered).toContain("COLONIES · 1");
+    expect(filtered).toContain("showing 1 of 2");
+  });
+
+  it("caps a long table at ten with a way to see the rest", () => {
+    const many = Array.from({ length: 11 }, (_, i) => session({ id: `s${i}`, issue: i, issue_title: `Work ${i}` }));
+    const html = renderOverview(many, [ACME]);
+    expect(html).toContain("Show all 11 colonies");
+    const few = renderOverview(many.slice(0, 3), [ACME]);
+    expect(few).not.toContain("Show all");
+  });
+});
+
+describe("OverviewView spend", () => {
+  const render = (orgs: OrgEntry[], cost: number | null) =>
+    renderToStaticMarkup(
       <ApiContext.Provider value={api}>
-        <OverviewView
-          sessions={[session({ id: "s1" }), session({ id: "s2", repo: "acme/design-system", issue: 7, issue_title: "Bad contrast on the nav" })]}
-          orgs={[ACME]}
-          cost={null}
-          onOpenOrg={noop}
-          onOpenColony={noop}
-          onSelect={noop}
-        />
+        <OverviewView sessions={[]} orgs={orgs} cost={cost} onOpenColony={() => {}} />
       </ApiContext.Provider>,
     );
-    expect(markup).not.toContain("Checkout fails for guest users");
-    expect(markup).not.toContain("Bad contrast on the nav");
-    // One disclosure header per colony, all collapsed; no "open colony →" affordance leaks into the roster.
-    expect(markup.match(/aria-expanded="false"/g)?.length).toBe(2);
-    expect(markup).not.toContain("open colony →");
-  });
-});
 
-describe("OverviewView spend", () => {  it("derives the header from the org rows, matching their sum and ignoring the session-based cost prop", () => {
+  it("derives the header from the org rows, matching their sum and ignoring the session-based cost prop", () => {
     const html = render([entry("acme", measured(12.5, 0.5)), entry("globex", measured(2, 0))], 999);
     // 12.5 + 0.5 + 2 = 15. The `cost` prop of 999 must not win.
     expect(html).toContain("$15.00 spent");
@@ -248,23 +363,8 @@ describe("OverviewView counters vs list", () => {
     { org: "beta", live: 5, queued: 0, total: 5, pending: 0, avatar: null },
   ];
 
-  const renderOverview = (list: Session[], filter: OverviewFilter | null = null) =>
-    renderToStaticMarkup(
-      <ApiContext.Provider value={api}>
-        <OverviewView
-          sessions={list}
-          orgs={workspaces}
-          cost={null}
-          initialFilter={filter}
-          onOpenOrg={() => {}}
-          onOpenColony={() => {}}
-          onSelect={noop}
-        />
-      </ApiContext.Provider>,
-    );
-
   it("scopes the counter chips to the visible workspaces and names the hidden org", () => {
-    const html = renderOverview(sessions());
+    const html = renderOverview(sessions(), workspaces);
     // 14 live and 2 queued in acme/beta; gamma's 11 waiting must not reach any chip.
     expect(html).toContain(">14</span> live");
     expect(html).toContain(">0</span> need you");
@@ -276,7 +376,7 @@ describe("OverviewView counters vs list", () => {
   });
 
   it("labels an active bucket filter with a one-click clear", () => {
-    const html = renderOverview(sessions(), "live");
+    const html = renderOverview(sessions(), workspaces, "live");
     expect(html).toContain("showing 14 of 16");
     expect(html).toContain("clear ×");
   });
@@ -284,7 +384,7 @@ describe("OverviewView counters vs list", () => {
   it("an empty filtered page explains where the hidden colonies are and links back", () => {
     // "returned" matches nothing anywhere, so the page is empty: the 16 visible colonies sit in
     // other buckets and gamma's 11 wait in a hidden org. Neither may read as bare numbers.
-    const html = renderOverview(sessions(), "returned");
+    const html = renderOverview(sessions(), workspaces, "returned");
     expect(html).toContain("nothing under");
     expect(html).toContain("16 in other buckets");
     expect(html).toContain("hidden org (gamma)");
@@ -300,22 +400,15 @@ describe("OverviewView held slots and stalled queue", () => {
   const idleHeld = (id: string): Session =>
     session({ id, status: "idle", attention: { reason: "autopilot_held", since: "2026-09-18T09:00:00Z", nudges: 0 } });
 
-  const renderOverview = (list: Session[]) =>
-    renderToStaticMarkup(
-      <ApiContext.Provider value={api}>
-        <OverviewView sessions={list} orgs={[ACME]} cost={null} onOpenOrg={noop} onOpenColony={noop} onSelect={noop} />
-      </ApiContext.Provider>,
-    );
-
   it("marks the queued counter stalled when every live colony is held", () => {
-    const html = renderOverview([idleHeld("h1"), idleHeld("h2"), session({ id: "q1", status: "queued" })]);
+    const html = renderOverview([idleHeld("h1"), idleHeld("h2"), session({ id: "q1", status: "queued" })], [ACME]);
     expect(html).toContain("queued · stalled");
     expect(html).toContain("border-warn");
     expect(html).toContain("2 held");
   });
 
   it("renders the queued counter normally while a colony is still working", () => {
-    const html = renderOverview([idleHeld("h1"), session({ id: "r1", status: "running" }), session({ id: "q1", status: "queued" })]);
+    const html = renderOverview([idleHeld("h1"), session({ id: "r1", status: "running" }), session({ id: "q1", status: "queued" })], [ACME]);
     expect(html).not.toContain("stalled");
     expect(html).toContain("1 held");
   });

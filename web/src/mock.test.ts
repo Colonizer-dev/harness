@@ -30,6 +30,22 @@ describe("mock spend (issue #209)", () => {
       for (const o of day.orgs) if (o.org === "octocat") expect(o.cost_usd).toBeNull();
     }
   });
+
+  it("splits each day's model costs/tokens so the stacks agree with the day total", async () => {
+    const api = createMockApi();
+    const { days } = await api.spendHistory();
+    for (const day of days) {
+      for (const o of day.orgs) {
+        if (o.org !== "acme") continue;
+        const dayTokens = o.tokens.input + o.tokens.output + o.tokens.cache_read + o.tokens.cache_write;
+        expect(o.models.reduce((n, m) => n + m.tokens, 0)).toBe(dayTokens);
+        const priced = o.models.reduce((n, m) => n + (m.cost_usd ?? 0), 0);
+        expect(Math.abs(priced - (o.cost_usd ?? 0))).toBeLessThan(0.015);
+        // The unpriced routed model keeps cost null instead of a $0.00 slice.
+        expect(o.models.find((m) => m.model === "strix/ds4-flash")?.cost_usd).toBeNull();
+      }
+    }
+  });
 });
 
 describe("mock saveOrg", () => {

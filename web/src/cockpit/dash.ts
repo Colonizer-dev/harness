@@ -2,15 +2,22 @@
 // SpendHistory and the session list. Every figure keeps its source — history days carry launched /
 // returned / cost per org per day, sessions carry status / cost / repo — so anything without one
 // (lead time, CI pass, coverage, latency, …) simply has no helper here and is never rendered.
-import { sameOrg } from "../components/ui";
+import { orgOf, sameOrg, type Tone } from "../components/ui";
 import { sessionCost, sumCosts } from "../spend";
-import type { Session, SpendDay, SpendHistory, SpendOrgDay } from "../types";
+import type { ModelProviderStatus, Session, SpendDay, SpendHistory, SpendOrgDay } from "../types";
 
 export type RangeDays = 7 | 30 | 90;
 export const RANGES: readonly RangeDays[] = [7, 30, 90];
 
-/** Series colours, cycling: index.css tokens only, so they follow light/dark automatically. */
-export const DASH_COLORS = ["var(--accent)", "var(--ok)", "var(--info)", "var(--warn)", "var(--err)"];
+/** Status-tone → CSS var, shared by the overview and org colony rows so the two cannot drift. */
+export const TONE_VAR: Record<Tone, string> = {
+  neutral: "var(--faint)",
+  info: "var(--info)",
+  ok: "var(--ok)",
+  warn: "var(--warn)",
+  err: "var(--err)",
+  accent: "var(--accent)",
+};
 
 export function sortedDays(history: SpendHistory | null): SpendDay[] {
   return [...(history?.days ?? [])].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
@@ -141,4 +148,173 @@ export function repoRows(sessions: Session[]): RepoRow[] {
 export function costPerMerged(spend: number | null, merged: number): number | null {
   if (spend == null || merged <= 0) return null;
   return spend / merged;
+}
+
+/** Deterministic hue for a name (FNV-1a into 0..359): the same org always draws the same
+ *  colour, across reloads and across themes. */
+export function orgHue(name: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % 360;
+}
+
+/** Per-org colour in the design's form, oklch(0.72 0.17 <hue>) — theme-independent like the
+ *  reference, so it reads the same in light and dark. */
+export function orgColorFor(name: string): string {
+  return `oklch(0.72 0.17 ${orgHue(name)})`;
+}
+
+/** Per-model colour: the design's three pinned hues by name fragment, anything else hashed
+ *  like an org so a new model still draws deterministically. */
+export function modelColorFor(model: string): string {
+  const id = model.toLowerCase();
+  if (id.includes("deepseek")) return "var(--model-deepseek)";
+  if (id.includes("opus")) return "var(--model-opus)";
+  if (id.includes("muse-spark") || id.includes("muse_spark")) return "var(--model-spark)";
+  return orgColorFor(model);
+}
+
+export type DeltaTone = "good" | "bad" | "flat";
+
+/** Colours a period delta: flat (faint) when null or under half a point, else good/bad with
+ *  `goodWhen` deciding which direction reads as good (spend and failure rates pass "down"). */
+export function deltaTone(delta: number | null, goodWhen: "up" | "down" = "up"): DeltaTone {
+  if (delta == null || !Number.isFinite(delta) || Math.abs(delta) < 0.005) return "flat";
+  return (goodWhen === "up") === delta > 0 ? "good" : "bad";
+}
+
+// ---------------------------------------------------------------------------
+// Overview derivations (issue #398): everything the OVERVIEW screen reads off the
+// session list. The mothership records NO merge timestamp, NO CI data and NO failure
+// history — so merged PRs are bucketed by created_at (said out loud wherever they
+// render), lead time / PR cycle time / CI pass rate have no helper here at all, and the
+// change-failure rate is a snapshot reading (failed ÷ decided among sessions created in
+// the window), never a history.
+// ---------------------------------------------------------------------------
+
+function windowMs(ts: string, fromMs: number, toMs: number): boolean {
+  const t = Date.parse(ts);
+  return !Number.isNaN(t) && t >= fromMs && t < toMs;
+}
+
+/** Sessions with status merged created in [fromMs, toMs): a real count, bucketed by
+ *  created_at because the merge date itself is not recorded. */
+export function mergedInWindow(sessions: Session[], fromMs: number, toMs: number): Session[] {
+  return sessions.filter((s) => s.status === "merged" && windowMs(s.created_at, fromMs, toMs));
+}
+
+/** The local-calendar "YYYY-MM-DD" of a Date — the same day key the mock's spend
+ *  history is built on, so session buckets line up with history days. */
+export function dayKeyOfDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** The local-calendar "YYYY-MM-DD" of a timestamp — the same day key the mock's spend
+ *  history is built on, so session buckets line up with history days. */
+export function dayKeyOf(ts: string): string {
+  return dayKeyOfDate(new Date(ts));
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-09-03" → "Sep 3", for the chart's sparse x labels. */
+export function shortDayLabel(day: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return day;
+  return `${MONTHS[Number(m[2]) - 1] ?? ""} ${Number(m[3])}`;
+}
+
+/** Merged sessions per day over `days` (ascending "YYYY-MM-DD"), bucketed by created_at,
+ *  optionally scoped to one org. */
+export function dailyMerged(sessions: Session[], days: string[], org?: string): number[] {
+  return days.map((day) => sessions.filter((s) => s.status === "merged" && dayKeyOf(s.created_at) === day && (!org || sameOrg(orgOf(s), org))).length);
+}
+
+export interface FailRate {
+  /** failed ÷ (merged + failed) among sessions created in the window; null when nothing was decided. */
+  rate: number | null;
+  failed: number;
+  /** merged + failed: the snapshot basis, named in the sub-line wherever it renders. */
+  decided: number;
+}
+
+/** The honest change-failure reading: failed ÷ decided among sessions created in the window. */
+export function changeFailRate(sessions: Session[], fromMs: number, toMs: number, org?: string): FailRate {
+  const inScope = sessions.filter((s) => windowMs(s.created_at, fromMs, toMs) && (!org || sameOrg(orgOf(s), org)));
+  const failed = inScope.filter((s) => s.status === "failed").length;
+  const decided = inScope.filter((s) => s.status === "merged" || s.status === "failed").length;
+  return { rate: decided > 0 ? failed / decided : null, failed, decided };
+}
+
+/** Per-day failure rate over `days` (null = nothing decided that day, a gap — never a zero). */
+export function dailyFailRate(sessions: Session[], days: string[], org?: string): (number | null)[] {
+  return days.map((day) => {
+    const list = sessions.filter((s) => dayKeyOf(s.created_at) === day && (!org || sameOrg(orgOf(s), org)));
+    const decided = list.filter((s) => s.status === "merged" || s.status === "failed").length;
+    if (decided === 0) return null;
+    return list.filter((s) => s.status === "failed").length / decided;
+  });
+}
+
+/** When a colony started waiting: the watchdog flag's `since`, else the last update. */
+export function waitingSince(session: Session): string {
+  return session.attention?.since ?? session.updated_at;
+}
+
+/** Milliseconds a colony has waited, clamped at zero; unparseable stamps read as zero. */
+export function waitingMs(session: Session, nowMs: number = Date.now()): number {
+  const t = Date.parse(waitingSince(session));
+  return Number.isNaN(t) ? 0 : Math.max(0, nowMs - t);
+}
+
+/** Compact wait/age: "45s", "22m", "7h", "3d"; unmeasurable reads as "—", never "NaNd". */
+export function formatWait(ms: number): string {
+  if (!Number.isFinite(ms)) return "—";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** A rate delta in points ("1.3 pts"), the design's unit for failure-rate moves. */
+export function formatPts(d: number | null): string {
+  if (d == null || !Number.isFinite(d)) return "—";
+  return `${(Math.abs(d) * 100).toFixed(1)} pts`;
+}
+
+/** Distinct repositories with sessions in scope — the workspace card's repo count. */
+export function orgRepos(sessions: Session[], org: string): number {
+  return new Set(sessions.filter((s) => sameOrg(orgOf(s), org)).map((s) => s.repo)).size;
+}
+
+/** Cumulative provider tallies for the org dashboard's API-error tile and latency caption —
+ *  GET /api/status `model_providers`, mapped by the caller. The view fetches nothing itself,
+ *  like every dashboard surface; absent means those two figures stay empty. */
+export interface ProviderErrorSnapshot {
+  name: string;
+  requests: number;
+  failures: number;
+  /** Mean dispatched-request duration; null when the mothership never measured one. */
+  avgLatencyMs?: number | null;
+  /** When the tally started; null when the mothership doesn't say. */
+  since?: string | null;
+}
+
+/** Maps GET /api/status `model_providers` onto ProviderErrorSnapshot. The status payload
+ *  carries no failure count — only `failure_pct`, rounded to one decimal by the mothership —
+ *  so failures are re-derived from it (the displayed rate reads back exactly); `avg_latency_ms`
+ *  is 0 with no requests, which maps to null; `since` is not served, so it stays absent. */
+export function providerSnapshots(from: readonly ModelProviderStatus[] | null | undefined): ProviderErrorSnapshot[] {
+  return (from ?? []).map((p) => ({
+    name: p.name,
+    requests: p.requests,
+    failures: Math.round((p.requests * (p.failure_pct ?? 0)) / 100),
+    avgLatencyMs: p.avg_latency_ms > 0 ? p.avg_latency_ms : null,
+  }));
 }

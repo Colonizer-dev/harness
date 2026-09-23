@@ -4,14 +4,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { ApiContext } from "../context";
-import { createMockApi } from "../mock";
 import type { OrgEntry } from "../orgs";
 import type { Session, SpendHistory } from "../types";
-import { OrgDashboard } from "./OrgDashboard";
-import { OverviewView } from "./OverviewView";
+import { OrgDashboard, type ProviderErrorSnapshot } from "./OrgDashboard";
 
-const api = createMockApi();
 const noop = () => {};
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -36,61 +32,101 @@ const history: SpendHistory = { days: [histDay("2026-09-17", 2, 1, 2), histDay("
 
 const orgSessions = () => [
   session({ id: "a", status: "running" }),
-  session({ id: "b", status: "merged", repo: "acme/api", issue: 7 }),
+  session({ id: "b", status: "merged", repo: "acme/api", issue: 7, cost_usd: 4 }),
   session({ id: "c", status: "pr_opened", repo: "acme/webshop", issue: 9 }),
+  session({ id: "d", status: "failed", repo: "acme/api", issue: 8 }),
 ];
 
 describe("OrgDashboard", () => {
-  const render = (h: SpendHistory | null = history) =>
-    renderToStaticMarkup(<OrgDashboard org={ACME} sessions={orgSessions()} history={h} range={30} compare onBack={noop} />);
+  const render = (h: SpendHistory | null = history, extra: { providers?: ProviderErrorSnapshot[]; initialRepo?: string | null } = {}) =>
+    renderToStaticMarkup(<OrgDashboard org={ACME} sessions={orgSessions()} history={h} range={30} compare onBack={noop} {...extra} />);
 
-  it("renders KPIs, the funnel and the repo drill-down from real data", () => {
+  it("renders the render's eight KPI tiles with honest empty states", () => {
     const html = render();
-    expect(html).toContain("← overview");
-    for (const kpi of ["LAUNCHED", "RETURNED", "MERGED", "SPEND", "COST / MERGED PR"]) expect(html).toContain(kpi);
-    expect(html).toContain("$6.00"); // org rollup $6 ÷ 1 merged session
-    for (const text of ["Colonies launched", "PR opened", "Merged", "acme/webshop", "acme/api", "100%", "OUTCOMES PER DAY", "SPEND PER DAY"]) {
-      expect(html).toContain(text);
+    for (const kpi of ["MERGED PRS", "LEAD TIME", "PR CYCLE TIME", "CHANGE FAILURE RATE", "TIME TO RECOVER", "CI PASS RATE", "COST PER MERGED PR", "API ERROR RATE"]) {
+      expect(html).toContain(kpi);
     }
+    expect(html).toContain("no data source yet");
+    // Real figures: 1 merged of 4 colonies, 1 failed of 4, $6 rollup ÷ 1 merged.
+    expect(html).toContain("25% of 4 colonies");
+    expect(html).toContain("25.0%");
+    expect(html).toContain("1 failed of 4");
+    expect(html).toContain("$6.00");
+    // No provider tallies by default: the API-error tile stays empty, not zero.
+    expect(html).not.toContain("0.00%");
+  });
+
+  it("derives API error rate from cumulative provider tallies, labelled as a snapshot", () => {
+    const html = render(history, { providers: [{ name: "Strix Halo", requests: 32_689, failures: 9_599, avgLatencyMs: 12_800, since: "2026-03-12T09:00:00Z" }] });
+    expect(html).toContain("29.36%");
+    expect(html).toContain("since 2026-03-12");
+    expect(html).toContain("Strix Halo avg 12.8s");
+  });
+
+  it("renders the repository chip row, and a repo filter narrows the whole dashboard", () => {
+    const html = render();
+    expect(html).toContain("REPOSITORY");
+    for (const chip of ["All", "webshop", "api"]) expect(html).toContain(chip);
+    const filtered = render(history, { initialRepo: "acme/api" });
+    // Only the api colonies remain; the webshop rows are gone from table and list.
+    expect(filtered).not.toContain("webshop#9");
+    expect(filtered).toContain("api#7");
+    // Spend history is per org: the spend panel says it stays org-wide while filtered.
+    expect(filtered).toContain("org-wide: spend history is per org");
+  });
+
+  it("buckets outcomes by launch day and keeps the CI-green funnel step empty", () => {
+    const html = render();
+    expect(html).toContain("COLONY OUTCOMES PER DAY");
+    expect(html).toContain("by launch day · current status");
+    for (const legend of ["Merged", "PR open", "No changes", "Failed", "Stopped"]) expect(html).toContain(legend);
+    expect(html).toContain("DELIVERY FUNNEL");
+    expect(html).toContain("Colonies launched");
+    expect(html).toContain("PR opened");
+    expect(html).toContain("CI green");
+    // The funnel note reads off real statuses: 1 merged of 4 colonies.
+    expect(html).toContain("25% of colonies end in a merged PR");
+  });
+
+  it("keeps the repositories table and colonies list honest", () => {
+    const html = render();
+    for (const col of ["COLONIES", "MERGE RATE", "LEAD TIME", "PR CYCLE", "CI PASS", "COVERAGE", "SPEND", "$/PR"]) {
+      expect(html).toContain(col);
+    }
+    expect(html).toContain("Click a row to filter the dashboard");
+    expect(html).toContain("COLONIES · 4");
+    // No CI/coverage API: those cells stay dashes with the reason in the title.
+    expect(html).toContain("the API serves no CI results");
+    expect(html).toContain("the API serves no coverage");
+  });
+
+  it("adds previous-period deltas and sparklines to the measured KPI tiles", () => {
+    const days = ["2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"];
+    const h: SpendHistory = { days: days.map((d) => histDay(d, 1, 0, 1)) };
+    const list = [
+      session({ id: "a", status: "merged", created_at: "2026-09-11T09:00:00Z" }),
+      session({ id: "b", status: "merged", created_at: "2026-09-18T09:00:00Z" }),
+    ];
+    const html = renderToStaticMarkup(<OrgDashboard org={ACME} sessions={list} history={h} range={7} compare onBack={noop} />);
+    // 1 merged in range vs 1 before: a flat zero delta, plus the sparkline area.
+    expect(html).toContain("0.0%");
+    expect(html).toContain('viewBox="0 0 100 28"');
+    // The empty-state tiles stay empty, with no sparkline or delta.
+    expect(html).toContain("no data source yet");
   });
 
   it("renders gracefully with no history: dashes, not crashes", () => {
     const html = render(null);
     expect(html).toContain("← overview");
-    expect(html).toContain("LAUNCHED");
+    expect(html).toContain("MERGED PRS");
     expect(html).toContain("no model spend in range");
-    expect(html).toContain("acme/webshop");
+    expect(html).toContain("no data in range");
+    expect(html).toContain("webshop");
   });
 
   it("renders gracefully with no colonies", () => {
     const html = renderToStaticMarkup(<OrgDashboard org={ACME} sessions={[]} history={null} range={30} compare={false} onBack={noop} />);
     expect(html).toContain("No colonies right now.");
-  });
-});
-
-describe("OverviewView dashboard", () => {
-  it("shows the range picker, the KPI strip, the charts and a dashboard entry per org card", () => {
-    const html = renderToStaticMarkup(
-      <ApiContext.Provider value={api}>
-        <OverviewView sessions={orgSessions()} orgs={[ACME]} cost={null} onOpenOrg={noop} onOpenColony={noop} onSelect={noop} />
-      </ApiContext.Provider>,
-    );
-    expect(html).toContain('aria-label="Range"');
-    for (const text of [">7d<", ">30d<", ">90d<", "Compare to previous 30d", "SPEND PER DAY", "WORKSPACES COMPARED", "dashboard →"]) {
-      expect(html).toContain(text);
-    }
-    for (const kpi of ["LAUNCHED", "RETURNED", "MERGED", "SPEND", "NEEDS YOU"]) expect(html).toContain(kpi);
-  });
-
-  it("hides org cards with no colonies while the toggle is on (the default)", () => {
-    const empty: OrgEntry = { ...ACME, org: "empty", live: 0, queued: 0, total: 0, spend: undefined };
-    const html = renderToStaticMarkup(
-      <ApiContext.Provider value={api}>
-        <OverviewView sessions={orgSessions()} orgs={[ACME, empty]} cost={null} onOpenOrg={noop} onOpenColony={noop} onSelect={noop} />
-      </ApiContext.Provider>,
-    );
-    expect(html).toContain("webshop#42");
-    expect(html).toContain("dashboard →");
-    expect(html).not.toContain("empty");
+    expect(html).toContain("no colonies in scope");
   });
 });
