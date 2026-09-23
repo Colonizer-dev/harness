@@ -14,6 +14,20 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+### Added
+
+- **A parallel limit per repository.** Beside the global and per-org limits, the
+  sandbox module's `repo_max_parallel` caps the colonies live at once in any one
+  repository, and an org can set its own. All three apply and the tightest wins;
+  a colony held back by its repository queues without holding up colonies of
+  other repositories. ([#174])
+
+### Take care
+
+- `repo_max_parallel` defaults to 3. An install that raised `max_parallel` and
+  ran more than 3 colonies on one repository now queues the rest; raise the
+  new setting (up to 32) to keep the old behaviour.
+
 ## [v0.1.7] - 2026-09-22
 
 ### Added
@@ -275,6 +289,7 @@ Macs. ([#74])
 [#146]: https://github.com/Colonizer-dev/harness/pull/146
 [#150]: https://github.com/Colonizer-dev/harness/pull/150
 [#172]: https://github.com/Colonizer-dev/harness/pull/172
+[#174]: https://github.com/Colonizer-dev/harness/issues/174
 [#177]: https://github.com/Colonizer-dev/harness/issues/177
 [#178]: https://github.com/Colonizer-dev/harness/pull/178
 [#180]: https://github.com/Colonizer-dev/harness/pull/180
