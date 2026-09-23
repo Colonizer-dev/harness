@@ -22,6 +22,7 @@ import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
 import { OverviewView } from "./OverviewView";
+import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { Rail, type CockpitView } from "./Rail";
 import { needCountByOrg } from "./feed";
 
@@ -284,6 +285,17 @@ export function Cockpit({
     [onSessionChanged],
   );
 
+  // The global quota banner's keyed dismissal: dismissing hides this pause, and a new reset (or a
+  // new pause scope) re-shows it — the same pattern as the storage alert App owns.
+  const [dismissedQuota, setDismissedQuota] = useState<ReadonlySet<string>>(() => new Set());
+  const quotaBanner = visibleQuotaBanner(status?.quota ?? null, dismissedQuota);
+  // Resume-all has no bulk endpoint: one resume per parked colony through the existing act path,
+  // settled per colony so a single 409 cannot block the rest.
+  const resumeAllQuotaParked = useCallback(
+    () => resumeQuotaParkedSessions(sessions, (id) => act(id, (x) => api.resumeSession(x))),
+    [sessions, act, api],
+  );
+
   const body = () => {
     switch (view) {
       case "colony":
@@ -302,6 +314,7 @@ export function Cockpit({
             fleet={fleet}
             runs={redRuns}
             quota={status?.quota ?? null}
+            quotaBannerVisible={quotaBanner !== null}
             onStart={onRedStart}
             onStop={onRedStop}
             onOpenOrg={(org) => {
@@ -404,7 +417,18 @@ export function Cockpit({
           onOpenUpdates={() => onOpenSettings("updates")}
         />
         <div className="flex min-h-0 min-w-0">
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">{body()}</div>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {/* The session-limit banner sits above every view, outside each view's own scroll. */}
+            {quotaBanner ? (
+              <QuotaBanner
+                quota={quotaBanner}
+                sessions={sessions}
+                onResumeAll={() => void resumeAllQuotaParked()}
+                onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
+              />
+            ) : null}
+            {body()}
+          </div>
           {view === "home" && (
             <Inspector
               target={inspector}
