@@ -42,7 +42,8 @@ is not built yet, and nothing in this README pretends otherwise.
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
-it's going, is in [docs/vision.md](docs/vision.md). What has been decided against, and why, is in
+it's going, is in [docs/vision.md](docs/vision.md); what the design shows that the code has not built
+yet is in [docs/gaps.md](docs/gaps.md). What has been decided against, and why, is in
 [docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without
 losing colonies, is in [docs/updates.md](docs/updates.md).
 
@@ -440,6 +441,8 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   <a href="docs/updates.md">Updates</a>
   &nbsp;·&nbsp;
   <a href="docs/audit.md">Audit</a>
+  &nbsp;·&nbsp;
+  <a href="docs/gaps.md">Gaps</a>
 </p>
 
 <p align="center">
