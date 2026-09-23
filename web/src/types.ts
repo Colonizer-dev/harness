@@ -104,6 +104,8 @@ export interface Session {
   /** True opts this colony's worktree out of automatic reclamation (issue #223). */
   keep_worktree: boolean;
   created_at: string;
+  /** When the PR merged (GitHub mergedAt, or when the mothership saw the flip); omitted when absent. */
+  merged_at?: string | null;
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;

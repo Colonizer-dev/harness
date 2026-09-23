@@ -7,15 +7,17 @@
 // Design elements with NO data source behind them (reported, never faked):
 // - "Auto-answer with Jev" toggle and "Let Jev answer" buttons: no auto-answer backend exists.
 //   Omitted; "Answer →" deep-links to the colony through the existing onOpenColony path.
-// - Lead time, PR cycle time, CI pass rate KPIs: no PR timestamps, no CI data. KpiTile empty states.
+// - Lead time, PR cycle time, CI pass rate KPIs: no PR-opened timestamps, no CI data. KpiTile empty states.
 // - Change failure rate: no failure history — derived from current session statuses as
-//   failed ÷ (merged + failed) among sessions created in the window, with the basis in the sub-line.
-// - Merged PRs (count, per-day bars, compared table): the mothership records no merge timestamp,
-//   so everything "merged per day" is bucketed by created_at, said out loud in the sub-lines.
+//   failed ÷ (merged + failed) in the window (merged by merge date, failed by created
+//   date), with the basis in the sub-line.
+// - Merged PRs (count, per-day bars, compared table): bucketed by merged_at, falling
+//   back to created_at when the mothership omits it, said out loud in the sub-lines.
 // - "Manage workspaces": this view receives no settings opener, so the buttons are omitted.
 import { useMemo, useState, type ReactElement } from "react";
 
 import { initialOf } from "../components/Avatar";
+import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
@@ -116,6 +118,7 @@ export function OverviewView({
   onStart,
   onStop,
   onOpenColony,
+  onOpenSettings,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -141,6 +144,8 @@ export function OverviewView({
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
+  /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
+  onOpenSettings?: (section: SectionId) => void;
 }): ReactElement {
   // Dashboard toolbar state (issue #398): the range scopes the history-backed KPIs and charts;
   // the compare toggle adds previous-period deltas and the ghost line. Client state, per visit.
@@ -194,8 +199,8 @@ export function OverviewView({
       ? sumCosts(orgs.map((o) => orgCost(o.spend)))
       : cost;
 
-  // Range windows over wall-clock time for the session-derived figures. There is no merge
-  // timestamp, so "merged in range" means created in range — bucketed by created_at.
+  // Range windows over wall-clock time for the session-derived figures. Merged sessions
+  // bucket by merge date (merged_at, falling back to created_at); failed ones by created_at.
   const nowMs = Date.now();
   const fromMs = nowMs - range * 86_400_000;
   const prevFromMs = fromMs - range * 86_400_000;
@@ -224,13 +229,13 @@ export function OverviewView({
       deltaTone: deltaTone(mergedDelta),
       deltaDir: (mergedDelta ?? 0) < 0 ? "down" : "up",
       spark: sparkPoints(dailyMerged(visibleSessions, days)),
-      sub: `${(mergedCur.length / range).toFixed(1)} per day · by created_at, no merge date`,
-      hint: "sessions with status merged created in range, GET /api/sessions — the merge date is not recorded, so they bucket by created_at",
+      sub: `${(mergedCur.length / range).toFixed(1)} per day · by merge date`,
+      hint: "sessions with status merged in range, GET /api/sessions — bucketed by merged_at, falling back to created_at when absent",
     },
-    { label: "LEAD TIME", value: "—", emptyNote: "no data source yet", hint: "issue picked up → PR opened: no PR timestamps are served" },
-    { label: "PR CYCLE TIME", value: "—", emptyNote: "no data source yet", hint: "PR opened → merged: no PR timestamps are served" },
+    { label: "LEAD TIME", value: "—", emptyNote: "no data source yet", hint: "issue picked up → PR opened: the API serves neither timestamp" },
+    { label: "PR CYCLE TIME", value: "—", emptyNote: "no data source yet", hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
     failCur.rate == null
-      ? { label: "CHANGE FAILURE RATE", value: "—", emptyNote: "nothing decided in range", hint: "failed ÷ (merged + failed) among sessions created in range, GET /api/sessions" }
+      ? { label: "CHANGE FAILURE RATE", value: "—", emptyNote: "nothing decided in range", hint: "failed ÷ (merged + failed) in range, GET /api/sessions" }
       : {
           label: "CHANGE FAILURE RATE",
           value: `${(failCur.rate * 100).toFixed(1)}%`,
@@ -239,7 +244,7 @@ export function OverviewView({
           deltaDir: (failDelta ?? 0) < 0 ? "down" : "up",
           spark: sparkPoints(dailyFailRate(visibleSessions, days)),
           sub: `${failCur.failed} failed of ${failCur.decided} decided (merged+failed)`,
-          hint: "failed ÷ (merged + failed) among sessions created in range, GET /api/sessions — a snapshot reading, not a history",
+          hint: "failed ÷ (merged + failed) in range, GET /api/sessions — merged by merge date, failed by created date: a snapshot reading, not a history",
         },
     { label: "CI PASS RATE", value: "—", emptyNote: "no data source yet", hint: "checks on colony PRs: no CI data is served" },
     {
@@ -386,7 +391,7 @@ export function OverviewView({
         <div className="flex flex-wrap gap-3.5">
           <DashPanel
             title="MERGED PRS PER DAY · BY WORKSPACE"
-            sub={`${mergedCur.length} merged in ${range}d${compare ? ` · dashed line is the previous ${range}d` : ""} · by created_at, no merge date`}
+            sub={`${mergedCur.length} merged in ${range}d${compare ? ` · dashed line is the previous ${range}d` : ""} · by merge date`}
             legend={<DashLegend items={mergedSeries.map((s) => ({ label: s.label, color: s.color }))} />}
             className="min-w-0 flex-[2_1_560px]"
           >
@@ -684,7 +689,7 @@ export function OverviewView({
 
         <FleetPanel hosts={fleetHosts} />
 
-        <StoragePanel onOpenColony={onOpenColony} />
+        <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} />
 
         <RedTeamCard runs={runs} sessions={sessions} onStart={onStart} onStop={onStop} onOpenColony={onOpenColony} />
       </div>

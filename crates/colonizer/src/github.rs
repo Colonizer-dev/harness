@@ -16,6 +16,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -840,13 +841,16 @@ pub struct PrInfo {
     pub mergeability: Mergeability,
     /// The raw `mergeStateStatus`, uppercased and trimmed; `"UNKNOWN"` when `gh` left it out.
     pub merge_state_status: String,
+    /// When GitHub merged the pull request, `None` when it says nothing usable: absent, empty or
+    /// unparsable all read as unknown, never as an error — the colony still flips to merged.
+    pub merged_at: Option<DateTime<Utc>>,
 }
 
 /// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
 /// the struct and a test holds the two together.
-const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus";
+const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt";
 
 /// Unknown fields are refused so the test below catches a requested field this struct would ignore;
 /// `gh --json` prints only the fields it was asked for, so real output never trips it. The
@@ -860,6 +864,8 @@ struct PrView {
     mergeable: Option<String>,
     #[serde(rename = "mergeStateStatus", default)]
     merge_state_status: Option<String>,
+    #[serde(rename = "mergedAt", default)]
+    merged_at: Option<String>,
 }
 
 /// Asks GitHub for one pull request's state, mergeability and merge-state status through the user's
@@ -891,7 +897,24 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         state,
         mergeability: mergeability_from(view.mergeable.as_deref(), Some(&merge_state_status)),
         merge_state_status,
+        merged_at: view.merged_at.as_deref().and_then(parse_merged_at),
     })
+}
+
+/// Reads `gh pr view`'s `mergedAt` into a timestamp: absent, empty, unparsable and the zero
+/// time all read as unknown, so a colony still flips to merged — only without a merge time.
+fn parse_merged_at(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = DateTime::parse_from_rfc3339(raw).ok().map(|t| t.with_timezone(&Utc))?;
+    // An unmerged PR's `mergedAt` may surface as the zero time `0001-01-01T00:00:00Z` instead of
+    // null — no real merge predates the epoch, so anything at or before it reads as unknown.
+    if parsed.timestamp() <= 0 {
+        return None;
+    }
+    Some(parsed)
 }
 
 /// Points an open pull request at a different base branch: the moment a colony's stack resolves. A
@@ -2220,6 +2243,7 @@ mod tests {
                 state: PrState::Open,
                 mergeability: Mergeability::Behind,
                 merge_state_status: "BEHIND".to_string(),
+                merged_at: None,
             }
         );
         assert_eq!(
@@ -2228,6 +2252,7 @@ mod tests {
                 state: PrState::Open,
                 mergeability: Mergeability::Conflicted,
                 merge_state_status: "DIRTY".to_string(),
+                merged_at: None,
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -2237,6 +2262,7 @@ mod tests {
                 state: PrState::Merged,
                 mergeability: Mergeability::Unknown,
                 merge_state_status: "UNKNOWN".to_string(),
+                merged_at: None,
             }
         );
         // The raw status rides along uppercased, so the automerge can tell a clean-but-held
@@ -2248,6 +2274,27 @@ mod tests {
             "BLOCKED"
         );
         assert!(pr_info_from_json(r#"{"state":"DRAFT","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#).is_err());
+        // `mergedAt` rides along when GitHub reports one; an absent, empty, unparsable or
+        // zero-time value reads as unknown, so the colony still flips to merged — only
+        // without a merge time.
+        use chrono::{DateTime, Utc};
+        let merged_at = DateTime::parse_from_rfc3339("2026-09-01T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            pr_info_from_json(r#"{"state":"MERGED","mergedAt":"2026-09-01T12:34:56Z"}"#)
+                .unwrap()
+                .merged_at,
+            Some(merged_at)
+        );
+        for raw in [
+            r#"{"state":"MERGED"}"#,
+            r#"{"state":"MERGED","mergedAt":""}"#,
+            r#"{"state":"MERGED","mergedAt":"none"}"#,
+            r#"{"state":"MERGED","mergedAt":"0001-01-01T00:00:00Z"}"#,
+        ] {
+            assert_eq!(pr_info_from_json(raw).unwrap().merged_at, None, "{raw}");
+        }
     }
 
     #[test]
@@ -2264,6 +2311,7 @@ mod tests {
         assert_eq!(view.state, "MERGED");
         assert_eq!(view.mergeable.as_deref(), Some("MERGED"));
         assert_eq!(view.merge_state_status.as_deref(), Some("MERGED"));
+        assert_eq!(view.merged_at.as_deref(), Some("MERGED"));
     }
 
     #[test]

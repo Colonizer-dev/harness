@@ -31,7 +31,6 @@ const SUMMARY: StorageSummary = {
 
 const markup = (summary: StorageSummary = SUMMARY) =>
   renderToStaticMarkup(<StoragePanelView summary={summary} onOpenColony={() => {}} onCleanup={() => {}} cleaningId={null} />);
-
 describe("StoragePanel", () => {
   it("renders usage by category and free space against the warn and floor thresholds", () => {
     const out = markup();
@@ -70,5 +69,13 @@ describe("StoragePanel", () => {
 
   it("reads no disk reading yet when the mothership has none", () => {
     expect(markup({ ...SUMMARY, free_bytes: null })).toContain("no disk reading yet");
+  });
+
+  it("shows the storage-settings gear only when an opener is given", () => {
+    expect(markup()).not.toContain("Storage settings");
+    const out = renderToStaticMarkup(
+      <StoragePanelView summary={SUMMARY} onOpenColony={() => {}} onCleanup={() => {}} cleaningId={null} onOpenSettings={() => {}} />,
+    );
+    expect(out).toContain('aria-label="Storage settings"');
   });
 });

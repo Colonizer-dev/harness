@@ -4,10 +4,15 @@ import { describe, expect, it } from "vitest";
 
 import type { Session, SpendDay, SpendHistory } from "../types";
 import {
+  changeFailRate,
   costPerMerged,
   dailyCosts,
+  dailyFailRate,
+  dailyMerged,
   formatDelta,
   funnelFor,
+  mergedAtOf,
+  mergedInWindow,
   providerSnapshots,
   relDelta,
   repoRows,
@@ -94,6 +99,50 @@ describe("funnelFor and repoRows", () => {
     expect(costPerMerged(2, 1)).toBe(2);
     expect(costPerMerged(null, 1)).toBeNull();
     expect(costPerMerged(2, 0)).toBeNull();
+  });
+});
+
+describe("merged_at bucketing", () => {
+  const from = Date.parse("2026-09-10T00:00:00Z");
+  const to = Date.parse("2026-09-11T00:00:00Z");
+  // Created a month ago but merged today: the merge date decides, not the creation date.
+  const lateMerge = session({ id: "late", status: "merged", created_at: "2026-08-10T09:00:00Z", updated_at: "2026-09-10T09:00:00Z", merged_at: "2026-09-10T09:00:00Z" });
+
+  it("mergedAtOf prefers merged_at and falls back to created_at", () => {
+    expect(mergedAtOf(lateMerge)).toBe("2026-09-10T09:00:00Z");
+    expect(mergedAtOf(session({ status: "merged" }))).toBe("2026-09-18T09:00:00Z");
+    expect(mergedAtOf(session({ status: "merged", merged_at: null }))).toBe("2026-09-18T09:00:00Z");
+  });
+
+  it("mergedInWindow counts by merge date: created long ago but merged today counts today", () => {
+    expect(mergedInWindow([lateMerge], from, to).map((s) => s.id)).toEqual(["late"]);
+    expect(mergedInWindow([lateMerge], Date.parse("2026-08-10T00:00:00Z"), Date.parse("2026-08-11T00:00:00Z"))).toEqual([]);
+  });
+
+  it("falls back to created_at when merged_at is absent", () => {
+    const noStamp = session({ id: "old", status: "merged", created_at: "2026-09-10T09:00:00Z", updated_at: "2026-09-10T09:00:00Z" });
+    expect(mergedInWindow([noStamp], from, to).map((s) => s.id)).toEqual(["old"]);
+  });
+
+  it("dailyMerged buckets merged sessions by merge day", () => {
+    expect(dailyMerged([lateMerge], ["2026-08-10", "2026-09-10"])).toEqual([0, 1]);
+  });
+
+  it("per-day rate is the in-range merged count divided by days in range", () => {
+    const days = ["2026-09-10", "2026-09-11", "2026-09-12"];
+    const inRange = mergedInWindow([lateMerge], Date.parse("2026-09-10T00:00:00Z"), Date.parse("2026-09-13T00:00:00Z"));
+    expect(inRange.length / days.length).toBeCloseTo(1 / 3);
+  });
+
+  it("changeFailRate reads merged by merge date and failed by created date", () => {
+    const failed = session({ id: "f1", status: "failed", created_at: "2026-09-10T09:00:00Z", updated_at: "2026-09-10T09:00:00Z" });
+    const rate = changeFailRate([lateMerge, failed], from, to);
+    expect(rate).toMatchObject({ failed: 1, decided: 2 });
+    expect(rate.rate).toBeCloseTo(0.5);
+    // A merge outside the window leaves only the failure decided.
+    const staleMerge = session({ id: "m2", status: "merged", created_at: "2026-09-10T09:00:00Z", updated_at: "2026-09-12T09:00:00Z", merged_at: "2026-09-12T09:00:00Z" });
+    expect(changeFailRate([staleMerge, failed], from, to)).toMatchObject({ failed: 1, decided: 1 });
+    expect(dailyFailRate([lateMerge, failed], ["2026-09-10"])).toEqual([0.5]);
   });
 });
 

@@ -10,6 +10,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Utc};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -112,6 +113,71 @@ pub async fn publish_session(app: Shared, id: String) {
 /// so `closed` keeps being watched.
 pub(crate) fn pr_watched(status: SessionStatus, has_pr: bool) -> bool {
     has_pr && matches!(status, SessionStatus::PrOpened | SessionStatus::Closed)
+}
+
+/// Which merge time a colony flipping to `merged` keeps: the one it already has, else GitHub's
+/// `mergedAt`, else the moment the flip was seen. A merge observed twice keeps the first time.
+pub(crate) fn resolve_merged_at(
+    existing: Option<DateTime<Utc>>,
+    from_github: Option<DateTime<Utc>>,
+    flip_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    existing.or(from_github).or(Some(flip_at))
+}
+
+/// Whether the startup backfill still wants this colony: merged, with a pull request to ask about,
+/// and no merge time yet.
+fn wants_merged_at(s: &Session) -> bool {
+    s.status == SessionStatus::Merged && s.merged_at.is_none() && s.pr_url.is_some()
+}
+
+/// The colonies the startup backfill asks GitHub about, as `(id, pr_url)`.
+pub(crate) fn merged_at_backfill_targets(sessions: &[Session]) -> Vec<(String, String)> {
+    sessions
+        .iter()
+        .filter(|s| wants_merged_at(s))
+        .filter_map(|s| s.pr_url.clone().map(|url| (s.id.clone(), url)))
+        .collect()
+}
+
+/// Stamps a backfilled merge time; true when it did. Never touches `updated_at` — the backfill
+/// persists through `record_measurement`, so old colonies keep their place in every list.
+pub(crate) fn apply_merged_at(s: &mut Session, merged_at: DateTime<Utc>) -> bool {
+    if !wants_merged_at(s) {
+        return false;
+    }
+    s.merged_at = Some(merged_at);
+    true
+}
+
+/// One-off backfill for `merged_at`: colonies already merged before the field existed gain GitHub's
+/// `mergedAt` where it still reports one. Best effort — a `gh` failure or a missing timestamp skips
+/// the colony, which keeps `None` and reads as before. Runs once at startup, off the serving path.
+pub async fn backfill_merged_at(app: Shared) {
+    let targets = merged_at_backfill_targets(&app.sessions.read().await);
+    let mut filled = 0usize;
+    for (id, pr_url) in targets {
+        let merged_at = match github::pr_info(&app, &pr_url).await {
+            Ok(info) => match info.merged_at {
+                Some(at) => at,
+                None => continue,
+            },
+            Err(_) => continue,
+        };
+        // Re-checked at apply time: the colony may have changed while `gh` was running.
+        if !app.session(&id).await.is_some_and(|s| wants_merged_at(&s)) {
+            continue;
+        }
+        // A measurement, not activity: `record_measurement` leaves `updated_at` alone.
+        app.record_measurement(&id, |s| {
+            apply_merged_at(s, merged_at);
+        })
+        .await;
+        filled += 1;
+    }
+    if filled > 0 {
+        println!("sessions: backfilled merged_at for {filled} merged colonies");
+    }
 }
 
 /// Whether a pull request is due for its next check.
@@ -222,7 +288,7 @@ pub async fn watch_pull_requests(app: Shared) {
             poll.last_checked = now;
             match github::pr_info(&app, &url).await {
                 Ok(info) => {
-                    let (state, mergeability) = (info.state, info.mergeability);
+                    let (state, mergeability, pr_merged_at) = (info.state, info.mergeability, info.merged_at);
                     poll.failing = false;
                     let target = match state {
                         github::PrState::Open => SessionStatus::PrOpened, // also picks a reopened PR back up
@@ -233,6 +299,7 @@ pub async fn watch_pull_requests(app: Shared) {
                     // browser even when the closure changes nothing.
                     let mut changed = false;
                     if s.status != target {
+                        let flip_at = Utc::now();
                         changed = app
                             .update_session(&s.id, |x| {
                                 // Re-checked under the write lock: the colony may have been deleted or
@@ -240,6 +307,9 @@ pub async fn watch_pull_requests(app: Shared) {
                                 let apply = pr_watched(x.status, x.pr_url.is_some()) && x.status != target;
                                 if apply {
                                     x.status = target;
+                                    if target == SessionStatus::Merged {
+                                        x.merged_at = resolve_merged_at(x.merged_at, pr_merged_at, flip_at);
+                                    }
                                 }
                                 apply
                             })
@@ -615,6 +685,67 @@ mod tests {
         assert!(!pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(59)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(60)));
         assert!(pr_due(checked, Duration::from_secs(60), checked + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn the_merge_time_is_githubs_first_the_flips_second_and_never_rewritten() {
+        let github_time = Utc::now() - chrono::Duration::hours(2);
+        let flip_at = Utc::now();
+        // GitHub's time wins over the moment the flip was seen.
+        assert_eq!(resolve_merged_at(None, Some(github_time), flip_at), Some(github_time));
+        // Without one from GitHub, the flip time is the merge time.
+        assert_eq!(resolve_merged_at(None, None, flip_at), Some(flip_at));
+        // A merge observed twice keeps the first time, whatever GitHub says now.
+        assert_eq!(
+            resolve_merged_at(Some(github_time), Some(flip_at), flip_at),
+            Some(github_time)
+        );
+        assert_eq!(resolve_merged_at(Some(github_time), None, flip_at), Some(github_time));
+    }
+
+    #[test]
+    fn only_merged_colonies_missing_a_merge_time_are_backfill_candidates() {
+        let mut merged = colony("acme", SessionStatus::Merged);
+        merged.pr_url = Some("https://github.com/acme/repo/pull/7".into());
+        let mut stamped = merged.clone();
+        stamped.merged_at = Some(Utc::now());
+        let mut no_pr = colony("acme", SessionStatus::Merged);
+        no_pr.merged_at = None;
+        let mut open = colony("acme", SessionStatus::PrOpened);
+        open.pr_url = Some("https://github.com/acme/repo/pull/8".into());
+        let sessions = vec![merged.clone(), stamped, no_pr, open];
+        assert_eq!(
+            merged_at_backfill_targets(&sessions),
+            vec![(merged.id.clone(), merged.pr_url.clone().unwrap())],
+            "only the merged colony with a PR and no merge time is asked about"
+        );
+    }
+
+    #[test]
+    fn the_backfill_fill_stamps_merged_at_and_leaves_updated_at_alone() {
+        let mut s = colony("acme", SessionStatus::Merged);
+        s.pr_url = Some("https://github.com/acme/repo/pull/7".into());
+        let before = s.updated_at;
+        let merged_at = Utc::now();
+        assert!(apply_merged_at(&mut s, merged_at), "a candidate is stamped");
+        assert_eq!(s.merged_at, Some(merged_at));
+        assert_eq!(
+            s.updated_at, before,
+            "a backfill is not activity: old colonies keep their list order"
+        );
+        // Anything but a candidate is left alone.
+        for status in [SessionStatus::PrOpened, SessionStatus::Closed, SessionStatus::Stopped] {
+            let mut other = colony("acme", status);
+            other.pr_url = Some("https://github.com/acme/repo/pull/9".into());
+            assert!(!apply_merged_at(&mut other, merged_at), "{status:?} is not a candidate");
+            assert_eq!(other.merged_at, None);
+        }
+        let mut stamped = s.clone();
+        assert!(
+            !apply_merged_at(&mut stamped, Utc::now()),
+            "an existing merge time is never rewritten"
+        );
+        assert_eq!(stamped.merged_at, Some(merged_at));
     }
 
     #[test]

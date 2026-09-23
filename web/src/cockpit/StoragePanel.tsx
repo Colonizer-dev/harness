@@ -4,8 +4,9 @@
 // image cache, so it is never offered for cleanup. The pure view is what the tests render.
 import { useEffect, useState, type ReactElement } from "react";
 
-import { IconExternal, IconTrash } from "../components/icons";
+import { IconExternal, IconSettings, IconTrash } from "../components/icons";
 import { diskSize } from "../components/SessionView";
+import type { SectionId } from "../components/SettingsDialog";
 import { Button, SESSION_STATUS, Spinner, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
 import type { StorageSummary } from "../types";
@@ -25,6 +26,7 @@ export function StoragePanelView({
   onOpenColony,
   onCleanup,
   cleaningId,
+  onOpenSettings,
 }: {
   summary: StorageSummary;
   /** Jumps to the colony, the same navigation the overview's colony rows use. */
@@ -32,6 +34,8 @@ export function StoragePanelView({
   onCleanup: (id: string) => void;
   /** The colony whose cleanup is in flight, if any; its button spins while the rest wait. */
   cleaningId: string | null;
+  /** Opens settings at a section; the header gear shows only when given. */
+  onOpenSettings?: (section: SectionId) => void;
 }): ReactElement {
   const pr = prReclaimable(summary);
   const noChanges = summary.reclaimable.filter((row) => row.pr_url == null);
@@ -48,7 +52,20 @@ export function StoragePanelView({
   ].filter((part): part is string => part !== null);
   return (
     <section aria-label="Storage" className="flex flex-col overflow-hidden rounded-xl border border-border bg-panel">
-      <div className="border-b border-border px-3.5 py-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">STORAGE</div>
+      <div className="flex items-center justify-between border-b border-border px-3.5 py-2">
+        <span className="font-mono text-[10.5px] tracking-[0.12em] text-faint">STORAGE</span>
+        {onOpenSettings && (
+          <button
+            type="button"
+            aria-label="Storage settings"
+            title="Storage settings (warn and floor thresholds)"
+            onClick={() => onOpenSettings("module:sandbox")}
+            className="cursor-pointer rounded-md p-1 text-faint transition-colors hover:bg-panel-2 hover:text-text"
+          >
+            <IconSettings size={14} />
+          </button>
+        )}
+      </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3.5 py-2 font-mono text-[11px] text-faint">
         {categories.map((category) => (
           <span key={category.label} title={category.note ?? `bytes under ${category.label}`}>
@@ -116,7 +133,7 @@ export function StoragePanelView({
   );
 }
 
-export function StoragePanel({ onOpenColony }: { onOpenColony: (id: string) => void }): ReactElement | null {
+export function StoragePanel({ onOpenColony, onOpenSettings }: { onOpenColony: (id: string) => void; onOpenSettings?: (section: SectionId) => void }): ReactElement | null {
   const api = useApi();
   const toast = useToast();
   const [summary, setSummary] = useState<StorageSummary | null>(null);
@@ -162,6 +179,7 @@ export function StoragePanel({ onOpenColony }: { onOpenColony: (id: string) => v
       onOpenColony={onOpenColony}
       onCleanup={(id) => void cleanup(id)}
       cleaningId={cleaningId}
+      onOpenSettings={onOpenSettings}
     />
   );
 }

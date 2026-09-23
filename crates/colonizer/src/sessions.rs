@@ -276,6 +276,11 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix_for: Option<FixFor>,
     pub pr_url: Option<String>,
+    /// When the pull request merged: GitHub's `mergedAt` when it reported one, else the moment the
+    /// watcher saw the merge. `None` until a merge is observed; colonies merged before the field
+    /// existed gain it from the startup backfill, best effort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<DateTime<Utc>>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
@@ -376,6 +381,7 @@ impl Default for Session {
             automerge: None,
             fix_for: None,
             pr_url: None,
+            merged_at: None,
             publish_stage: None,
             publishing_holds_slot: false,
             error: None,
@@ -1179,6 +1185,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         automerge: req.automerge,
         fix_for: None,
         pr_url: None,
+        merged_at: None,
         publish_stage: None,
         // A fresh colony is starting or queued, never publishing: the flag is inert.
         publishing_holds_slot: false,
@@ -2855,6 +2862,7 @@ pub(crate) mod tests {
             automerge: None,
             fix_for: None,
             pr_url: None,
+            merged_at: None,
             publish_stage: None,
             // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
             // a stopped-origin publish flip this off.

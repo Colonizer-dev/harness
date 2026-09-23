@@ -1391,6 +1391,7 @@ export function createMockApi(): Api {
     pr_url: "https://github.com/acme/design-system/pull/18",
     cost_usd: 0.87,
     created_at: ago(240),
+    merged_at: ago(238),
   });
   merged.session.updated_at = ago(238);
   sessions.set(merged.session.id, merged);
@@ -1408,8 +1409,8 @@ export function createMockApi(): Api {
   // Overview dashboard seeds (issue #398): merged PRs spread over the last month so the
   // merged-per-day chart has something honest to stack, a few failures for the change-failure
   // reading, and colonies waiting on answers at staggered waits so the needs-you queue's
-  // oldest-first order is visible. There is no merge timestamp on the mothership, so the
-  // overview buckets merged PRs by created_at — these seeds spread that field, not updated_at.
+  // oldest-first order is visible. Merged seeds carry a merged_at shortly after created_at,
+  // so the demo buckets them by merge date.
   const HOUR = 60;
   const DAY = 24 * HOUR;
   const mergedSeeds: Array<{ id: string; repo: string; issue: number; title: string; daysAgo: number; cost: number; pr: number }> = [
@@ -1444,6 +1445,7 @@ export function createMockApi(): Api {
       pr_url: `https://github.com/${seed.repo}/pull/${seed.pr}`,
       cost_usd: seed.cost,
       created_at: ago(seed.daysAgo * DAY),
+      merged_at: ago(Math.max(0, seed.daysAgo * DAY - 300)),
       updated_at: ago(Math.max(0, seed.daysAgo * DAY - 300)),
     });
     sessions.set(merged.session.id, merged);
