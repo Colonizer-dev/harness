@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use axum::{Json, extract::State};
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::sync::atomic::Ordering;
+use std::{sync::atomic::Ordering, time::Duration};
 
 /// How much of a fix colony's diff the reviewer is asked to judge. A fix colony is told to keep the
 /// change small, so a diff that still overruns this bound is itself a sign it did not.
@@ -80,6 +80,51 @@ pub(crate) fn parse_verdict(text: &str) -> Option<Verdict> {
         return None;
     }
     Some(Verdict { vote, body })
+}
+
+/// Whether a passing fix may be merged now, judged from GitHub's own mergeability before `gh pr merge`
+/// is tried, so a pull request that cannot merge is minuted as blocked with the reason instead of as
+/// a failed merge.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MergePreflight {
+    Merge,
+    Skip(String),
+}
+
+/// How often, and how far apart, mergeability is read again while GitHub still reports it `UNKNOWN`.
+const MERGEABILITY_POLLS: u32 = 5;
+const MERGEABILITY_POLL_GAP: Duration = Duration::from_secs(3);
+
+/// Whether GitHub has not yet computed the pull request's mergeability, in either field.
+pub(crate) fn mergeability_unknown(mergeable: &str, merge_state_status: &str) -> bool {
+    [mergeable, merge_state_status]
+        .iter()
+        .any(|field| field.trim().eq_ignore_ascii_case("UNKNOWN"))
+}
+
+/// Reads `gh pr view --json mergeable,mergeStateStatus`. Case is tolerated, as `pr_state_from` does.
+///
+/// `BEHIND` merges: a squash merge of a branch behind its base is fine unless branch protection
+/// requires an up-to-date branch, and then GitHub reports `BLOCKED` rather than `BEHIND`. `BLOCKED`
+/// itself — required checks or reviews not yet satisfied — is skipped: the review runs the moment the
+/// pull request opens and nothing here waits for checks, so a plain `gh pr merge --squash` would only
+/// be refused, and the change is left open for a person exactly as when automerge is off. `UNSTABLE`
+/// (a non-required check failing) and `HAS_HOOKS` merge, as GitHub itself allows.
+pub(crate) fn merge_preflight(mergeable: &str, merge_state_status: &str) -> MergePreflight {
+    let mergeable = mergeable.trim().to_ascii_uppercase();
+    let status = merge_state_status.trim().to_ascii_uppercase();
+    let reason = if mergeable == "CONFLICTING" || status == "DIRTY" {
+        "the pull request conflicts with its base branch"
+    } else if mergeability_unknown(&mergeable, &status) {
+        "GitHub has not yet computed whether the pull request can merge"
+    } else if status == "BLOCKED" {
+        "the base branch's required checks or reviews are not yet satisfied"
+    } else if status == "DRAFT" {
+        "the pull request is still a draft"
+    } else {
+        return MergePreflight::Merge;
+    };
+    MergePreflight::Skip(format!("{reason} (mergeable {mergeable}, merge state {status})"))
 }
 
 /// The hard invariant of autofix: the reviewing conversation must be a fresh, independent session,
@@ -369,6 +414,31 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
     }
 
     if verdict.vote == "pass" && automerge_enabled(app, &fix).await {
+        let mut polls = 1;
+        let (mut mergeable, mut status) = mergeability(app, &pr_url).await?;
+        // GitHub computes mergeability lazily and this runs as the PR opens, so UNKNOWN is usually just "not yet".
+        while mergeability_unknown(&mergeable, &status) && polls < MERGEABILITY_POLLS {
+            tokio::time::sleep(MERGEABILITY_POLL_GAP).await;
+            (mergeable, status) = mergeability(app, &pr_url).await?;
+            polls += 1;
+        }
+        if let MergePreflight::Skip(reason) = merge_preflight(&mergeable, &status) {
+            app.session_log(
+                fix_id,
+                "warn",
+                format!("the independent review of {pr_url} passed, but it was not merged: {reason}"),
+            )
+            .await;
+            if app.session(&hunter).await.is_some() {
+                record(
+                    app,
+                    &hunter,
+                    &json!({"title": fix_for.title.clone(), "state": "blocked", "reason": reason, "pr": pr_url}),
+                )
+                .await;
+            }
+            return Ok(());
+        }
         app.session_log(fix_id, "info", format!("the independent review of {pr_url} passed; merging"))
             .await;
         crate::util::exec(&mut app.gh(["pr", "merge", pr_url.as_str(), "--squash"]))
@@ -414,6 +484,17 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
         .await;
     }
     Ok(())
+}
+
+/// One read of a pull request's `mergeable` and `mergeStateStatus` through the user's `gh` login.
+async fn mergeability(app: &App, pr_url: &str) -> Result<(String, String)> {
+    let out = crate::util::exec(&mut app.gh(["pr", "view", pr_url, "--json", "mergeable,mergeStateStatus"]))
+        .await
+        .context("the review passed, but the pull request's mergeability could not be read")?;
+    let view: Value = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
+    // A field gh left out is read as not yet computed, never as a licence to merge.
+    let field = |key: &str| view[key].as_str().unwrap_or("UNKNOWN").to_string();
+    Ok((field("mergeable"), field("mergeStateStatus")))
 }
 
 #[cfg(test)]
@@ -469,6 +550,54 @@ mod tests {
         assert!(parse_verdict(r#"{"verdict":"maybe","body":"hmm"}"#).is_none());
         assert!(parse_verdict(r#"{"verdict":"pass"}"#).is_none(), "a review says something");
         assert!(parse_verdict("looks good to me").is_none());
+    }
+
+    /// What GitHub's mergeability licenses, and what each blocker leaves open with its reason.
+    #[test]
+    fn merge_preflight_is_a_table_of_merges_and_blockers() {
+        for (mergeable, status, blocked_by) in [
+            ("MERGEABLE", "CLEAN", None),
+            ("mergeable", "clean", None),
+            ("MERGEABLE", "BEHIND", None),
+            ("MERGEABLE", "UNSTABLE", None),
+            ("MERGEABLE", "HAS_HOOKS", None),
+            ("CONFLICTING", "DIRTY", Some("conflicts with its base branch")),
+            ("CONFLICTING", "CLEAN", Some("conflicts with its base branch")),
+            ("MERGEABLE", "DIRTY", Some("conflicts with its base branch")),
+            ("UNKNOWN", "UNKNOWN", Some("not yet computed")),
+            ("MERGEABLE", "UNKNOWN", Some("not yet computed")),
+            ("UNKNOWN", "CLEAN", Some("not yet computed")),
+            ("MERGEABLE", "BLOCKED", Some("required checks or reviews")),
+            ("MERGEABLE", "DRAFT", Some("still a draft")),
+        ] {
+            match (merge_preflight(mergeable, status), blocked_by) {
+                (MergePreflight::Merge, None) => {}
+                (MergePreflight::Skip(reason), Some(want)) => {
+                    assert!(reason.contains(want), "{mergeable}/{status}: {reason}");
+                    assert!(
+                        reason.contains(&status.to_ascii_uppercase()),
+                        "the reason names the state: {reason}"
+                    );
+                }
+                (got, want) => panic!("{mergeable}/{status}: got {got:?}, wanted blocker {want:?}"),
+            }
+        }
+    }
+
+    /// Only a mergeability GitHub has not computed yet is read again; every settled answer is final.
+    #[test]
+    fn only_an_unknown_mergeability_is_polled_again() {
+        assert!(mergeability_unknown("UNKNOWN", "UNKNOWN"));
+        assert!(mergeability_unknown("MERGEABLE", "unknown"));
+        assert!(mergeability_unknown("UNKNOWN", "CLEAN"));
+        for (mergeable, status) in [
+            ("MERGEABLE", "CLEAN"),
+            ("CONFLICTING", "DIRTY"),
+            ("MERGEABLE", "BLOCKED"),
+            ("MERGEABLE", "BEHIND"),
+        ] {
+            assert!(!mergeability_unknown(mergeable, status), "{mergeable}/{status}");
+        }
     }
 
     #[test]

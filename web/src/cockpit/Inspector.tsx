@@ -109,6 +109,7 @@ const STAGE_ORDER: FindingRecord["state"][] = [
   "fix_colony",
   "review",
   "merged",
+  "blocked",
   "duplicate",
   "rejected",
   "error",
@@ -121,6 +122,7 @@ const STAGE_LABEL: Record<FindingRecord["state"], string> = {
   fix_colony: "fix",
   review: "review",
   merged: "merged",
+  blocked: "merge blocked",
   duplicate: "duplicate",
   rejected: "rejected",
   error: "error",
@@ -140,7 +142,7 @@ function trail(chain: FindingChain): FindingStage[] {
       tone = chain.verdict === "fail" ? "err" : "neutral";
     }
     if (state === "merged") tone = "ok";
-    if (state === "duplicate" || state === "rejected") tone = "warn";
+    if (state === "blocked" || state === "duplicate" || state === "rejected") tone = "warn";
     if (state === "error") tone = "err";
     stages.push({ label, tone });
   }
@@ -149,10 +151,11 @@ function trail(chain: FindingChain): FindingStage[] {
 
 const isUrl = (value: string) => /^https?:\/\//.test(value);
 
-/** The one line under the trail that explains a terminal: why it was rejected, the error, or the finding it duplicated. */
+/** The one line under the trail that explains a terminal: why it was rejected or its merge blocked, the error, or the finding it duplicated. */
 function noteFor(chain: FindingChain): { text: string; tone: Tone; href: string | null } | null {
   const states = new Set(chain.records.map((r) => r.state));
   if (states.has("rejected") && chain.reason) return { text: chain.reason, tone: "warn", href: null };
+  if (states.has("blocked") && chain.reason) return { text: chain.reason, tone: "warn", href: null };
   if (states.has("error") && chain.reason) return { text: chain.reason, tone: "err", href: null };
   if (states.has("duplicate") && chain.duplicate_of)
     return { text: chain.duplicate_of, tone: "warn", href: isUrl(chain.duplicate_of) ? chain.duplicate_of : null };
