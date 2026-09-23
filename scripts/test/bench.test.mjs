@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatComparison, scoreTask, summarizeRun } from '../bench.mjs';
+import { formatComparison, outsideTask, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const TASKS = JSON.parse(readFileSync(join(ROOT, 'scripts/bench/tasks.json'), 'utf8'));
@@ -89,6 +90,30 @@ test('every task names a check that exists, and the fixture is there', () => {
     assert.equal(typeof t.expect.questions, 'number', `${t.id} needs how many questions it should ask`);
   }
 });
+
+// A check that passes on the untouched fixture scores every colony as right, and one that fails on a correct
+// fix scores every colony as wrong. Each task's reference solution holds the files its fix changes.
+for (const t of TASKS.tasks) {
+  test(`${t.id}: the check fails on the bare fixture and passes on the reference solution`, (ctx) => {
+    const reference = join(ROOT, 'scripts/bench/reference', t.id);
+    assert.ok(existsSync(reference), `${t.id} has no reference solution: add the fixed files under scripts/bench/reference/${t.id}/`);
+    const files = readdirSync(reference, { recursive: true, withFileTypes: true })
+      .filter((e) => !e.isDirectory())
+      .map((e) => relative(reference, join(e.parentPath, e.name)));
+    assert.ok(files.length > 0, `${t.id}'s reference solution is empty`);
+    assert.deepEqual(outsideTask(t, files), [], `${t.id}'s reference touches files outside its changed_within`);
+
+    const dir = mkdtempSync(join(tmpdir(), 'colonizer-bench-reference-'));
+    ctx.after(() => rmSync(dir, { recursive: true, force: true }));
+    cpSync(join(ROOT, TASKS.fixture), dir, { recursive: true });
+    assert.equal(runCheck(t, dir).passed, false, `${t.id}'s check passes on the untouched fixture, so it cannot tell a fix from none`);
+
+    cpSync(reference, dir, { recursive: true });
+    const fixed = runCheck(t, dir);
+    assert.ok(fixed.passed, `${t.id}'s check fails on the reference solution:\n${fixed.output}`);
+    assert.ok(runOwnTests(dir), `the fixture's own tests fail with ${t.id}'s reference solution applied`);
+  });
+}
 
 test('routed cost is recorded per task and counted in the run and the comparison', () => {
   const plain = scoreTask({ task, session, answers: [], timed_out: false, branchScore: clean, colony });
