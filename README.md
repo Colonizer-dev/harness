@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/LANGUAGE-RUST-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Language: Rust">
   <img src="https://img.shields.io/badge/SANDBOX-KVM%20MICROVMS-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Sandbox: KVM microVMs">
   <img src="https://img.shields.io/badge/MESH-HEADSCALE%20%C2%B7%20WIREGUARD-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Mesh: Headscale and WireGuard">
-  <img src="https://img.shields.io/badge/AGENT-CLAUDE%20CODE%20NOW%20%C2%B7%20MORE%20LATER-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Agent: Claude Code now, more later">
+  <img src="https://img.shields.io/badge/AGENT-CLAUDE%20CODE%20%C2%B7%20CODEX%20%C2%B7%20MORE%20LATER-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Agent: Claude Code, Codex, more later">
   <img src="https://img.shields.io/badge/LICENSE-MIT-FF6B35?style=flat-square&labelColor=0A0A0B" alt="License: MIT">
 </p>
 
@@ -80,7 +80,7 @@ for the [usage data](docs/usage-data.md) switch, and `--version`.
 
 | | What it is | Status |
 | :--- | :--- | :--- |
-| **Harness** | This repository: the mothership, the in-VM daemon, the agent module, the web UI, the bundled mesh. Runnable today on your own machine. | `SHIPPING` |
+| **Harness** | This repository: the mothership, the in-VM daemon, the agent modules, the web UI, the bundled mesh. Runnable today on your own machine. | `SHIPPING` |
 | **Colonizer** | Anything beyond one machine: remote outposts, a fleet view, a hosted offering. | `PLANNED` |
 
 Two labels are used everywhere below, and they set the tense of the sentence around them:
@@ -200,6 +200,7 @@ mothership also tells you when a newer release is out, and can install it.
 | [`crates/colonizer`](crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
 | [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
+| [`modules/agents/codex`](modules/agents/codex) | OpenAI Codex through the Codex SDK, speaking the runner protocol | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) with a snapshot of its built-in subagents (`claude-code-builtins.json`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
@@ -211,7 +212,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code, with the orchestrator or its subagents on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code or Codex, picked globally or per org; Claude Code runs the orchestrator or its subagents on any Anthropic-compatible provider (DeepSeek, a local model), Codex on `openai/<model>` | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
@@ -220,7 +221,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
 | `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](docs/burn-down.md)) | — |
 
-Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
+Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for the agent, models, the
 parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
 notifications. An org is offered the first time the account shows it — you choose which become workspaces;
 a first install adopts the ones it already had ([#176](https://github.com/Colonizer-dev/harness/issues/176)).
@@ -246,7 +247,7 @@ Stated here rather than buried.
 - **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
   Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
   publishes no macOS build of it.
-- **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
+- **Two agents, one forge.** Claude Code and Codex are the agent modules, chosen globally or per org, and GitHub is the only source and publisher.
 - **The cockpit needs its per-install token.** Startup prints a sign-in link and opens it
   (`colonizer open` reprints it later; `COLONIZER_NO_BROWSER=1` skips the auto-open). The token is
   kept in `~/.config/colonizer/api-token`. The server binds to `127.0.0.1`, checks `Host` and
@@ -306,7 +307,7 @@ Stated here rather than buried.
 | Token savings: Headroom compacting tool results, its bundle downloaded when switched on ([#53](https://github.com/Colonizer-dev/harness/issues/53)) | `SHIPPING` |
 | Live map of motherships, off until you switch it on: the heartbeat and its receiver | `SHIPPING` |
 | Release provenance: every release artifact attested, colony images and the guest agent pinned, SBOMs and dependency audits, pins proposed by pull request ([#89](https://github.com/Colonizer-dev/harness/issues/89)) | `SHIPPING` |
-| More agent modules behind the runner protocol | `PLANNED` |
+| More agent modules behind the runner protocol (OpenCode next) | `PLANNED` |
 | GitLab, Linear and Jira sources; review comments as follow-up tasks | `PLANNED` |
 | Remote outposts: other machines joining the mesh to host colonies | `PLANNED` |
 | Per-colony budgets and host-disk quotas ([#86](https://github.com/Colonizer-dev/harness/issues/86)) | `SHIPPING` |
@@ -326,6 +327,7 @@ sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 | :--- | :--- |
 | GitHub token | Mothership only. Commit, push and `gh pr create` run on the host after the colony is gone. |
 | Claude token | Mothership only (0600). The colony sees a placeholder; microsandbox's TLS proxy substitutes the real value for `api.anthropic.com` only. |
+| OpenAI API key | Mothership only (0600). The colony sees a placeholder; microsandbox's TLS proxy substitutes the real value for `api.openai.com` only. |
 | Model provider keys | Mothership only (0600). Colonies send provider requests to the gateway with a per-colony token; the gateway adds the key. |
 | Worktree | Mounted read-write at `/workspace`. |
 | Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |

@@ -189,9 +189,19 @@ for module in "$root"/modules/agents/*/; do
     # (pathToClaudeCodeExecutable in the runner), so the platform packages are left out, and the SDK is
     # recorded in fetch-at-install for scripts/install-release.sh to fetch from the npm registry.
     (cd "$target" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
-    (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
+    if [ "$id" = "claude-code" ]; then
+      (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
+    fi
   elif [ -f "$target/package.json" ]; then
     (cd "$target" && npm ci --omit=dev --no-audit --no-fund --silent)
+  fi
+  if [ "$id" = "codex" ] && [ -f "$target/package.json" ]; then
+    # Colonies are always Linux, so the Codex platform binary must be the Linux one: a macOS host's
+    # plain npm ci takes the darwin binary, and bundle builds omit optional dependencies entirely.
+    # npm filters them with --os/--cpu; the guest arch is the host arch. (Apache-2.0, so bundles
+    # ship it as is, with no fetch-at-install recording.)
+    case "$(uname -m)" in arm64 | aarch64) codex_cpu=arm64 ;; *) codex_cpu=x64 ;; esac
+    (cd "$target" && npm ci --omit=dev --os=linux --cpu="$codex_cpu" --no-audit --no-fund --silent)
   fi
   echo "installed agent module $id"
 done

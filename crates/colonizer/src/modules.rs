@@ -4,6 +4,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     config::{ModuleChoice, ModulesConfig, Settings},
+    sandbox::Secret,
 };
 use axum::{
     Json,
@@ -37,7 +38,18 @@ pub struct AgentModule {
     pub dir: PathBuf,
     pub entry: Vec<String>,
     pub needs_claude: bool,
+    /// Manifest-declared secrets (`[{env, hosts}]`) for non-Claude agents: host-held env vars scoped
+    /// to the hosts each may be sent to. A Claude agent's credentials come from the accounts store.
+    pub secrets: Vec<AgentSecret>,
     pub schema: Value,
+}
+
+/// One manifest `secrets` entry: env vars naming the same credential in preference order, and the
+/// hosts the value may be sent to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentSecret {
+    pub env: Vec<String>,
+    pub hosts: Vec<String>,
 }
 
 impl AgentModule {
@@ -104,9 +116,59 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         description: manifest["description"].as_str().unwrap_or_default().to_string(),
         entry: entry_cmd,
         needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        secrets: parse_secrets(&manifest)?,
         schema: normalize_schema(&manifest["settings"]),
         dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
     })
+}
+
+/// Parses the manifest's `secrets` array, if any. Absent means the agent needs no host-held
+/// credentials; a malformed entry is a misconfiguration, so it is an error like a bad `entry`.
+fn parse_secrets(manifest: &Value) -> Result<Vec<AgentSecret>, String> {
+    let Some(items) = manifest.get("secrets") else {
+        return Ok(Vec::new());
+    };
+    let items = items.as_array().ok_or("\"secrets\" must be an array of {env, hosts}")?;
+    let strings = |item: &Value, key: &str| {
+        item[key]
+            .as_array()
+            .and_then(|names| names.iter().map(|n| n.as_str().map(String::from)).collect::<Option<Vec<_>>>())
+            .filter(|names| !names.is_empty())
+            .ok_or(format!("each \"secrets\" entry needs a non-empty array of \"{key}\" strings"))
+    };
+    items
+        .iter()
+        .map(|item| {
+            Ok(AgentSecret {
+                env: strings(item, "env")?,
+                hosts: strings(item, "hosts")?,
+            })
+        })
+        .collect()
+}
+
+/// Resolves manifest `secrets` against the mothership's environment: each entry yields its first env
+/// with a non-empty value plus the first env name of every entry nothing was found for. The lookup
+/// is a closure so tests cover this without touching process env.
+pub fn resolve_agent_secrets(secrets: &[AgentSecret], lookup: impl Fn(&str) -> Option<String>) -> (Vec<Secret>, Vec<String>) {
+    let mut resolved = Vec::new();
+    let mut missing = Vec::new();
+    for entry in secrets {
+        let found = entry
+            .env
+            .iter()
+            .find_map(|name| lookup(name).filter(|value| !value.is_empty()).map(|value| (name, value)));
+        match found {
+            Some((name, value)) => resolved.push(Secret {
+                env: name.clone(),
+                value,
+                hosts: entry.hosts.clone(),
+            }),
+            // Parse guarantees at least one env name per entry; an empty one never resolves anyway.
+            None => missing.push(entry.env.first().cloned().unwrap_or_default()),
+        }
+    }
+    (resolved, missing)
 }
 
 /// Accepts either a full `{type: object, properties}` schema or a bare properties map.
@@ -470,6 +532,7 @@ mod tests {
             dir,
             entry: vec!["node".into(), "runner.mjs".into()],
             needs_claude: true,
+            secrets: Vec::new(),
             schema: Value::Null,
         };
         let command = module.vm_command();
@@ -540,6 +603,7 @@ mod tests {
             dir: root.clone(),
             entry: vec!["node".into()],
             needs_claude: true,
+            secrets: Vec::new(),
             schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
@@ -675,6 +739,31 @@ mod tests {
     fn schemas_are_normalized() {
         assert!(normalize_schema(&json!({"model": {"type": "string"}}))["properties"]["model"].is_object());
         assert!(normalize_schema(&Value::Null)["properties"].is_object());
+    }
+
+    #[test]
+    fn the_claude_code_manifest_parses_its_secrets_and_the_first_set_env_wins() {
+        // The real manifest, so a drift in its shape breaks here rather than in a colony boot.
+        let manifest = include_str!("../../../modules/agents/claude-code/module.json");
+        let root = std::env::temp_dir().join(format!("colonizer-secrets-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("agent")).unwrap();
+        std::fs::write(root.join("agent").join("module.json"), manifest).unwrap();
+        let module = read_agent(&root.join("agent").join("module.json")).unwrap();
+        assert!(module.needs_claude);
+        assert_eq!(module.secrets[0].env, ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+        assert_eq!(module.secrets[1].hosts, ["api.typesafe.ai"]);
+        // The first env var with a value wins; an empty one counts as missing.
+        let lookup = |name: &str| match name {
+            "ANTHROPIC_API_KEY" => Some("sk-live".into()),
+            "JEV_API_KEY" => Some(String::new()),
+            _ => None,
+        };
+        let (resolved, missing) = resolve_agent_secrets(&module.secrets, lookup);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].env, "ANTHROPIC_API_KEY");
+        assert_eq!(resolved[0].value, "sk-live");
+        assert_eq!(missing, ["JEV_API_KEY".to_string()]);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

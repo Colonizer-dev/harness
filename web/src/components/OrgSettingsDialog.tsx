@@ -244,6 +244,24 @@ function globalSkillsets(modules: ModuleInfo[] | null): string[] | null {
   return pluginNames(agent.settings?.plugins ?? agent.schema?.properties?.plugins?.default);
 }
 
+/** The installed agent modules, from Settings → Modules' own listing. */
+function agentChoices(modules: ModuleInfo[] | null): { id: string; name: string }[] {
+  return modules?.find((m) => m.kind === "agent")?.providers ?? [];
+}
+
+/** The global agent module: its id, and the name an inheriting org shows. */
+function globalAgent(modules: ModuleInfo[] | null): { id: string; name: string } {
+  const agent = modules?.find((m) => m.kind === "agent");
+  const id = agent?.provider ?? "";
+  return { id, name: agent?.providers.find((p) => p.id === id)?.name ?? id };
+}
+
+/** The org's agent choice rides in the same payload: null inherits, an id overrides. */
+function withAgentProvider(settings: OrgSettings, provider: string | null): OrgSettings {
+  const id = provider?.trim() ? provider : null;
+  return { ...settings, agent: { ...settings.agent, provider: id } };
+}
+
 export function OrgSettingsDialog({
   org,
   info,
@@ -298,6 +316,8 @@ function OrgSettingsForm({
   const { listing } = usePlugins();
   const [draft, setDraft] = useState<Draft>(() => toDraft(info?.settings ?? {}, null));
   const [skillsets, setSkillsets] = useState(() => sortedSkillsets(info?.settings?.agent?.skillsets));
+  // The org's agent module: null inherits the global one, an id overrides it.
+  const [agentProvider, setAgentProvider] = useState<string | null>(() => info?.settings?.agent?.provider ?? null);
   // Absent and null mean on; only an explicit false opens with the switch off.
   const [enabled, setEnabled] = useState(() => orgEnabled(info?.settings));
   // The workspace-wide "hide orgs with no colonies" toggle also lives here, persisted
@@ -309,9 +329,12 @@ function OrgSettingsForm({
   };
   const [initial, setInitial] = useState(() =>
     JSON.stringify(
-      withEnabled(
-        withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
-        orgEnabled(info?.settings),
+      withAgentProvider(
+        withEnabled(
+          withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
+          orgEnabled(info?.settings),
+        ),
+        info?.settings?.agent?.provider ?? null,
       ),
     ),
   );
@@ -340,9 +363,11 @@ function OrgSettingsForm({
   }, [api]);
 
   const { settings: fields, error } = fromDraft(draft);
-  const settings = withEnabled(withSkillsets(fields, skillsets), enabled);
-  const overrides = FIELDS.filter((spec) => draft[spec.key].override).length + Object.keys(skillsets).length;
+  const settings = withAgentProvider(withEnabled(withSkillsets(fields, skillsets), enabled), agentProvider);
+  const overrides = FIELDS.filter((spec) => draft[spec.key].override).length + Object.keys(skillsets).length + (agentProvider !== null ? 1 : 0);
   const inheritedSkillsets = globalSkillsets(modules);
+  const providers = agentChoices(modules);
+  const global = globalAgent(modules);
   // Every installed skillset, plus any this org still names that is no longer installed.
   const skillsetRows = listing
     ? [
@@ -440,6 +465,31 @@ function OrgSettingsForm({
             <section className="border-b border-border py-3 last:border-b-0">
               <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">{group}</h3>
               <div className="divide-y divide-border">
+                {group === "Models" && (
+                  <OverrideRow
+                    label="Agent"
+                    hint="The agent module this org's colonies run on"
+                    override={agentProvider !== null}
+                    inherited={global.name === "" ? "global default" : global.name}
+                    onOverride={(override) => setAgentProvider(override ? global.id : null)}
+                  >
+                    <select
+                      value={agentProvider ?? ""}
+                      onChange={(e) => setAgentProvider(e.target.value)}
+                      aria-label={`Agent for ${org}`}
+                      className={cx(inputClass, "w-40")}
+                    >
+                      {providers.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                      {agentProvider !== null && !providers.some((p) => p.id === agentProvider) && (
+                        <option value={agentProvider}>{agentProvider} (not installed)</option>
+                      )}
+                    </select>
+                  </OverrideRow>
+                )}
                 {FIELDS.filter((f) => f.group === group).map((spec) => (
                   <OverrideRow
                     key={spec.key}
@@ -564,6 +614,7 @@ function OrgSettingsForm({
             onClick={() => {
               setDraft((d) => Object.fromEntries(FIELDS.map((f) => [f.key, { ...d[f.key], override: false }])) as Draft);
               setSkillsets({});
+              setAgentProvider(null);
             }}
           >
             Inherit all

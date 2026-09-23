@@ -1018,11 +1018,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         ));
     }
     let modules = app.modules.read().await.clone();
-    let agent = app
-        .agents
-        .iter()
-        .find(|a| a.id == modules.agent.provider)
-        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "the selected agent module is not installed"))?;
+    // The org's own agent choice wins over the global one; naming another provider starts from
+    // empty settings, because the global settings belong to the other provider's schema.
+    let agent_provider = orgs::effective_agent(&modules, &app.org_settings(owner)).provider;
+    let agent = app.agents.iter().find(|a| a.id == agent_provider).ok_or_else(|| {
+        client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("the {agent_provider} agent module is not installed"),
+        )
+    })?;
     // The colony's account: the request's explicit choice, else the org's override, else the
     // install default. Resolved before the gate so the refusal can name the account that is missing.
     let claude_account = crate::claude_accounts::resolve_account(
@@ -1038,6 +1042,21 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             StatusCode::BAD_REQUEST,
             &format!("log in with Claude in Settings first (account '{claude_account}')"),
         ));
+    }
+    // A non-Claude agent's manifest secrets must be on the mothership before the launch — the guest
+    // only holds a placeholder — refused here, naming what to set, like the Claude login above.
+    if !agent.needs_claude {
+        let (_, missing) = crate::modules::resolve_agent_secrets(&agent.secrets, |name| std::env::var(name).ok());
+        if !missing.is_empty() {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "the {} agent needs {} set to a non-empty value on the mothership to start a colony",
+                    agent.id,
+                    missing.join(", ")
+                ),
+            ));
+        }
     }
     if let Err(e) = app.cfg.linux_binary("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
@@ -1485,7 +1504,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let siblings = github::siblings_of(&colonies, &s, &touched);
     let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
-    let agent_choice = orgs::effective_agent(&modules, &org_settings);
+    // The session pins its agent at launch: build the choice for it, not the org's current provider.
+    let agent_choice = orgs::effective_agent_for(&modules, &org_settings, &agent.id);
     let mut runner_env = agent_env(&agent, &agent_choice);
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
@@ -1891,6 +1911,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             value: cred.value,
             hosts: vec![CLAUDE_API_HOST.into()],
         });
+    }
+    if !agent.needs_claude {
+        // Manifest-declared secrets for a non-Claude agent, each scoped to its entry's hosts. The
+        // launch already refused a missing key; an entry with nothing to send leaves no secret.
+        let (resolved, _) = crate::modules::resolve_agent_secrets(&agent.secrets, |name| std::env::var(name).ok());
+        secrets.extend(resolved);
     }
     if let Some(key) = jev_key {
         // The hook reads TYPESAFE_API_KEY; the guest sees only msb's placeholder for it.
@@ -3533,6 +3559,7 @@ pub(crate) mod tests {
             dir,
             entry: vec!["run".into()],
             needs_claude: false,
+            secrets: Vec::new(),
             schema: json!({}),
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
@@ -3652,6 +3679,7 @@ pub(crate) mod tests {
             dir,
             entry: vec!["run".into()],
             needs_claude: false,
+            secrets: Vec::new(),
             schema: json!({}),
         };
         crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))

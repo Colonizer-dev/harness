@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -23,6 +23,10 @@ use std::{
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct AgentOverrides {
+    /// The agent module id this org's colonies run on. `None` inherits the global module; another id
+    /// starts from empty settings — the global settings belong to the other provider's schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -295,9 +299,28 @@ pub(crate) fn parse_org_line(line: &str) -> Option<(String, Option<String>)> {
     Some((login.to_string(), v["avatar_url"].as_str().map(String::from)))
 }
 
-/// The agent module choice with the org's model and skillset overrides applied.
+/// The provider id this org names, if it names one. A blank string is no choice, like a blank stack.
+fn org_provider(org: &OrgSettings) -> Option<&String> {
+    org.agent
+        .as_ref()
+        .and_then(|agent| agent.provider.as_ref())
+        .filter(|p| !p.trim().is_empty())
+}
+
+/// The agent module choice with the org's model and skillset overrides applied. An org naming a
+/// different provider than the global one starts from empty settings, which the same overrides are
+/// then applied to: the global settings belong to the other provider's schema.
 pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoice {
-    let mut choice = modules.agent.clone();
+    let provider = org_provider(org).unwrap_or(&modules.agent.provider);
+    let mut choice = if provider == &modules.agent.provider {
+        modules.agent.clone()
+    } else {
+        ModuleChoice {
+            provider: provider.clone(),
+            enabled: true,
+            settings: Map::new(),
+        }
+    };
     if let Some(agent) = &org.agent {
         for (key, value) in [
             ("model", &agent.model),
@@ -320,6 +343,20 @@ pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoi
             }
             choice.settings.insert("plugins".into(), Value::String(names.join(",")));
         }
+    }
+    choice
+}
+
+/// The agent choice for one pinned agent module: the org-effective choice while the pinned agent is
+/// the effective provider, else empty settings plus the org's model overrides — a colony pins its
+/// agent at launch, so a later provider switch must not push another schema through it.
+pub fn effective_agent_for(modules: &ModulesConfig, org: &OrgSettings, agent_id: &str) -> ModuleChoice {
+    let mut choice = effective_agent(modules, org);
+    if choice.provider != agent_id {
+        choice.provider = agent_id.into();
+        choice
+            .settings
+            .retain(|key, _| matches!(key.as_str(), "model" | "subagent_model" | "background_model"));
     }
     choice
 }
@@ -496,6 +533,18 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
     }
 }
 
+/// A named org agent choice must be installed, refused like an unknown skillset is, so a typo
+/// can't park an org on an agent that will never boot. A blank name is no choice at all.
+fn validate_agent_provider(provider: Option<&str>, installed: &[&str]) -> Result<(), String> {
+    match provider.filter(|p| !p.trim().is_empty()) {
+        Some(name) if !installed.contains(&name) => Err(format!(
+            "unknown agent \"{name}\"; installed agents: {}",
+            installed.join(", ")
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn validate(settings: &OrgSettings) -> Result<(), String> {
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
@@ -643,10 +692,14 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("agent") {
         incoming.agent = saved.agent.clone();
-    } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut())
-        && unnamed_sub("agent", "skillsets")
-    {
-        agent.skillsets = saved_agent.skillsets.clone();
+    } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut()) {
+        if unnamed_sub("agent", "skillsets") {
+            agent.skillsets = saved_agent.skillsets.clone();
+        }
+        // An old web build never names the provider: its saves must not clear the org's own.
+        if unnamed_sub("agent", "provider") {
+            agent.provider = saved_agent.provider.clone();
+        }
     }
     if !named("max_parallel") {
         incoming.max_parallel = saved.max_parallel;
@@ -688,6 +741,11 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     let req: PutOrg =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("invalid org settings: {e}")))?;
     validate(&req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    validate_agent_provider(
+        org_provider(&req.settings).map(String::as_str),
+        &app.agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+    )
+    .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
     let mut all = app.all_org_settings();
     // A skillset switched on must exist, or boot fails. One switched off must exist only when this save
     // adds the switch, which catches a misspelt disable; an off override already saved for a skillset
@@ -770,6 +828,78 @@ mod tests {
             ..Default::default()
         };
         assert!(!effective_memory_enabled(&modules, &disabled));
+    }
+
+    #[test]
+    fn an_org_agent_choice_starts_from_empty_settings_with_the_orgs_models() {
+        let mut modules = ModulesConfig::default();
+        modules.agent.provider = "claude-code".into();
+        modules.agent.settings.insert("model".into(), json!("opus"));
+        modules.agent.settings.insert("plugins".into(), json!("ecc"));
+        // No override reads the global choice untouched.
+        let inherit = effective_agent(&modules, &OrgSettings::default());
+        assert_eq!(inherit.provider, modules.agent.provider);
+        assert_eq!(inherit.settings, modules.agent.settings);
+
+        let org = OrgSettings {
+            agent: Some(AgentOverrides {
+                provider: Some("codex".into()),
+                model: Some("gpt-5".into()),
+                skillsets: Some(BTreeMap::from([("ecc".to_string(), false)])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let choice = effective_agent(&modules, &org);
+        assert_eq!(choice.provider, "codex");
+        assert_eq!(choice.settings.get("model"), Some(&json!("gpt-5")));
+        assert!(!choice.settings.contains_key("subagent_model"), "{choice:?}");
+        assert_eq!(choice.settings.get("plugins"), Some(&json!("")), "{choice:?}");
+
+        // The boot's pinned-agent choice: the same provider reads the effective choice, another one
+        // gets empty settings plus the org's models, never the other schema's settings.
+        let same = effective_agent_for(&modules, &org, "codex");
+        assert_eq!(same.provider, choice.provider);
+        assert_eq!(same.settings, choice.settings);
+        let pinned = effective_agent_for(&modules, &org, "claude-code");
+        assert_eq!(pinned.provider, "claude-code");
+        assert_eq!(pinned.settings.get("model"), Some(&json!("gpt-5")));
+        assert!(!pinned.settings.contains_key("plugins"));
+    }
+
+    #[test]
+    fn an_unknown_agent_provider_is_refused() {
+        let installed = ["claude-code"];
+        assert!(validate_agent_provider(None, &installed).is_ok());
+        assert!(validate_agent_provider(Some("claude-code"), &installed).is_ok());
+        assert!(validate_agent_provider(Some("  "), &installed).is_ok());
+        assert_eq!(
+            validate_agent_provider(Some("nope"), &installed).unwrap_err(),
+            "unknown agent \"nope\"; installed agents: claude-code"
+        );
+    }
+
+    #[test]
+    fn a_settings_save_from_before_the_agent_choice_keeps_the_orgs_own() {
+        let saved = OrgSettings {
+            agent: Some(AgentOverrides {
+                provider: Some("codex".into()),
+                model: Some("opus".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // A web build from before the per-org agent choice never names the provider: its saves must
+        // not wipe the org's agent, while a named provider wins, null included.
+        for (body, provider) in [
+            (json!({"agent": {"model": null, "skillsets": null}}), Some("codex")),
+            (json!({"agent": {"provider": "claude-code"}}), Some("claude-code")),
+            (json!({"agent": {"provider": null}}), None),
+        ] {
+            let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+            keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+            assert_eq!(incoming.agent.and_then(|a| a.provider).as_deref(), provider);
+        }
     }
 
     #[test]

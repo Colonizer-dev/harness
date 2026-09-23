@@ -1,0 +1,55 @@
+{
+  "kind": "agent",
+  "id": "codex",
+  "name": "Codex",
+  "description": "OpenAI's Codex agent via the Codex SDK. Questions to the user are multiple choice, asked at the end of a turn.",
+  "protocol": "colonizer-runner/1",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "codex"
+    ],
+    "image": "glibc + node >= 20"
+  },
+  "secrets": [
+    {
+      "env": [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY"
+      ],
+      "hosts": [
+        "api.openai.com"
+      ]
+    }
+  ],
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "<provider>/<model> where provider must be openai, or a bare model name. Empty uses Codex's default.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "effort": {
+        "type": "string",
+        "title": "Reasoning effort",
+        "description": "Reasoning effort for the agent (Codex modelReasoningEffort). Empty uses the model default.",
+        "enum": [
+          "",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default": "",
+        "env": "COLONIZER_EFFORT"
+      }
+    }
+  }
+}

@@ -68,9 +68,12 @@ jobs:
   runner:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      matrix:
+        module: [claude-code, codex]
     defaults:
       run:
-        working-directory: modules/agents/claude-code
+        working-directory: modules/agents/${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,7 +81,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: modules/agents/claude-code/package-lock.json
+          cache-dependency-path: modules/agents/${{ matrix.module }}/package-lock.json
 
       - name: Install dependencies
         run: npm ci
