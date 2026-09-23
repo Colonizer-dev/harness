@@ -837,6 +837,10 @@ fn pr_state_from_json(out: &str) -> Result<PrState> {
 /// only when the base branch is deleted, which never happens here, so the watcher calls this
 /// explicitly.
 pub async fn retarget_pr(app: &App, pr_url: &str, base: &str) -> Result<()> {
+    // Issue #84: a base edit is a write on GitHub, so the kill-switch refuses it before `gh` runs.
+    if crate::authority::external_writes_blocked() {
+        bail!("refusing to retarget {pr_url}: {}", crate::publish::RETARGET_BLOCKED);
+    }
     tokio::time::timeout(
         Duration::from_secs(20),
         exec(&mut app.gh(["pr", "edit", pr_url, "--base", base])),
@@ -917,6 +921,8 @@ trait PublishOps {
 /// again — the commit, the push and the pull request each happen at most once. "Nothing staged" alone is
 /// never a no-op: it is exactly what a retry after a failed push looks like.
 async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
+    // Issue #84: refused before anything is staged, so a blocked publish leaves the worktree untouched.
+    refuse_if_writes_blocked("publish")?;
     let (title, body) = ops.description();
     let trailer = ops.trailer();
 
@@ -941,6 +947,8 @@ async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
         ops.push().await?;
     }
     ops.checkpoint(PublishStage::Pushed).await;
+    // The pull request is bound to the exact tree that was pushed: a branch that moved since is refused.
+    verify_tree_binding(&local, &ops.local_head().await?)?;
 
     if let Some(url) = ops.existing_pr().await? {
         ops.note(format!("a pull request is already open for this branch: {url}"))
@@ -951,6 +959,27 @@ async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
     ops.checkpoint(PublishStage::PrOpened).await;
     ops.note(format!("opened pull request {url}")).await;
     Ok(Published::PullRequest(url))
+}
+
+/// Fails closed while the operator's kill-switch is on (issue #84). Checked by the runner and again by
+/// each real write below, so no path to a commit, push or pull request skips it.
+fn refuse_if_writes_blocked(what: &str) -> Result<()> {
+    if crate::authority::external_writes_blocked() {
+        bail!("refusing to {what}: {}", crate::publish::BLOCKED);
+    }
+    Ok(())
+}
+
+/// The pull request must describe the head that was pushed: fail closed if the branch moved between
+/// the push and the PR, rather than open a PR for a tree that was never pushed.
+fn verify_tree_binding(pushed: &str, current: &str) -> Result<()> {
+    if pushed != current {
+        bail!(
+            "the branch moved during publish (pushed {pushed}, now at {current}); refusing to open a PR for a tree that \
+             was not pushed"
+        );
+    }
+    Ok(())
 }
 
 /// The real publish operations: host-side git on the worktree and the `gh` CLI through the hardened
@@ -993,6 +1022,7 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     async fn commit(&self, title: &str, trailer: &str) -> Result<()> {
+        refuse_if_writes_blocked("commit")?;
         let v = viewer(self.app).await?;
         let login = v["login"].as_str().unwrap_or("colonizer");
         let name = v["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
@@ -1043,6 +1073,7 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     async fn push(&self) -> Result<()> {
+        refuse_if_writes_blocked("push")?;
         self.log
             .info(format!("pushing {} to github.com/{}", self.s.branch, self.s.repo))
             .await;
@@ -1076,12 +1107,16 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     async fn create_pr(&self, title: &str, body: &str) -> Result<String> {
+        refuse_if_writes_blocked("open a pull request")?;
         // Best effort: a fresh origin makes the behind count below current, and a fetch failure
         // leaves the pull request without its staleness note rather than failing the publish.
         let _ = exec(self.app.git(&self.bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
         let behind = count_behind(self.app, &self.bare, &self.s.branch, &self.base).await;
         let body_path = self.session_dir.join("pr-body.md");
         let body = compose_pr_body(body, self.s.issue, behind, &self.base);
+        // The audit trail names the exact body that goes out (`publish_candidate_hash`, issue #98).
+        let bound = crate::publish::publish_candidate_hash(body.as_bytes());
+        self.log.info(format!("opening the pull request; body sha256 {bound}")).await;
         tokio::fs::write(&body_path, body).await?;
         let draft = self
             .app
@@ -1162,6 +1197,9 @@ fn parse_ls_remote(out: &str, branch: &str) -> Option<String> {
 /// and skipped, so retrying after a failure never duplicates work. The microVM must already be gone:
 /// everything it left behind is treated as untrusted data.
 pub async fn publish(app: &App, s: &Session, log: &SessionLogger) -> Result<Published> {
+    // Issue #84: refused before `restore_gitfile`/`strip_nested_git` touch the worktree, so a blocked
+    // publish leaves it exactly as the VM left it. `run_publish` checks again for any other `PublishOps`.
+    refuse_if_writes_blocked("publish")?;
     let admin = PathBuf::from(s.git_admin_dir.as_deref().context("session has no worktree yet")?);
     let base = s.base.clone().context("session has no base branch")?;
     check_publish_branch(&s.branch, &base)?;
@@ -2360,6 +2398,58 @@ mod tests {
         assert_eq!(repo.count("commit"), 0);
         assert_eq!(repo.count("push"), 0);
         assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    /// Issue #84: with external writes blocked, the runner refuses before staging anything.
+    #[tokio::test]
+    async fn blocked_external_writes_refuse_the_publish_before_anything_is_staged() {
+        let _blocked = crate::authority::test_block_external_writes();
+        let repo = FakeRepo::new(true, false, None, None);
+        let Err(err) = run_publish(&repo).await else {
+            panic!("a blocked publish must fail");
+        };
+        assert!(format!("{err:#}").contains("external writes are blocked"), "{err:#}");
+        for call in ["stage_all", "commit", "push", "existing_pr", "create_pr"] {
+            assert_eq!(repo.count(call), 0, "{call} must not run");
+        }
+        assert!(repo.checkpoints().is_empty());
+    }
+
+    /// Issue #84: the real `publish` refuses before `restore_gitfile` and `strip_nested_git` run, so a
+    /// blocked publish leaves the worktree exactly as the VM left it.
+    #[tokio::test]
+    async fn a_blocked_publish_leaves_the_worktree_untouched() {
+        let root = std::env::temp_dir().join(format!("colonizer-github-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let wt = root.join("wt");
+        std::fs::create_dir_all(wt.join("sub/.git")).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /somewhere/the/vm/chose\n").unwrap();
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.id = "blocked".into();
+        s.branch = "colonizer/issue-84-blocked".into();
+        s.base = Some("main".into());
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(root.join("admin").display().to_string());
+
+        let _blocked = crate::authority::test_block_external_writes();
+        let Err(err) = publish(&app, &s, &app.logger(&s.id)).await else {
+            panic!("a blocked publish must fail");
+        };
+        assert!(format!("{err:#}").contains("external writes are blocked"), "{err:#}");
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".git")).unwrap(),
+            "gitdir: /somewhere/the/vm/chose\n",
+            "the .git file must not be rewritten"
+        );
+        assert!(wt.join("sub/.git").is_dir(), "nested git metadata must not be stripped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pull_request_is_refused_when_the_branch_moved_after_the_push() {
+        assert!(verify_tree_binding(LOCAL, LOCAL).is_ok());
+        let err = verify_tree_binding(LOCAL, PARENT).unwrap_err();
+        assert!(format!("{err:#}").contains("refusing to open a PR"), "{err:#}");
     }
 
     // ----- ls-remote parsing -----

@@ -15,38 +15,59 @@ use tokio::sync::RwLock;
 #[allow(unused_imports)]
 use crate::{events::*, lifecycle::*, publish::*, sessions::*};
 
-/// Whether another colony can start right now. A queued colony holds no microVM, so it counts towards
-/// neither the global limit nor the org's — and neither does a publish claimed from a stopped, failed
-/// or no-changes colony, which boots nothing (`Session::holds_slot`).
-pub(crate) fn has_room(sessions: &[Session], org: &str, max_parallel: usize, org_limit: Option<u64>) -> bool {
-    let busy = |s: &&Session| s.holds_slot();
-    if sessions.iter().filter(busy).count() >= max_parallel {
+/// Whether another colony of `repo` (in `org`) can start right now. Three limits apply together and the
+/// tightest wins: the global one, the org's own if it sets one, and the per-repository one. A queued
+/// colony holds no microVM, so it counts towards none of them — and neither does a publish claimed from
+/// a stopped, failed or no-changes colony, which boots nothing (`Session::holds_slot`).
+pub(crate) fn has_room(
+    sessions: &[Session],
+    org: &str,
+    repo: &str,
+    max_parallel: usize,
+    org_limit: Option<u64>,
+    repo_limit: u64,
+) -> bool {
+    let busy = || sessions.iter().filter(|s| s.holds_slot());
+    if busy().count() >= max_parallel {
         return false;
     }
-    match org_limit {
-        Some(limit) => (sessions.iter().filter(busy).filter(|s| s.org == org).count() as u64) < limit,
-        None => true,
+    if org_limit.is_some_and(|limit| busy().filter(|s| s.org == org).count() as u64 >= limit) {
+        return false;
     }
+    (busy().filter(|s| s.repo == repo).count() as u64) < repo_limit
+}
+
+/// The per-repository limit for a colony of an org whose settings are `org`: its own, else the global.
+pub(crate) fn repo_limit(modules: &crate::config::ModulesConfig, org: &orgs::OrgSettings) -> u64 {
+    orgs::repo_max_parallel(org).unwrap_or_else(|| orgs::global_repo_max_parallel(modules))
+}
+
+/// How a queued colony's log line names the limits it is waiting on.
+pub(crate) fn limits_message(max_parallel: usize, org_limit: Option<u64>, repo_limit: u64) -> String {
+    let org = org_limit.map(|n| format!(", {n} for this org")).unwrap_or_default();
+    format!("the parallel limit is {max_parallel}{org}, {repo_limit} per repository")
 }
 
 /// Check for a free slot and claim it without letting go of the lock in between: `claim` runs while the
 /// write guard is still held, so nothing can slip between the check and the claim and two launches can
-/// never both take the last free slot. `max_parallel` and `org_limit` must be resolved before calling this
-/// (`org_settings` does blocking file IO), and `claim` must not `.await` anything.
+/// never both take the last free slot. The limits must be resolved before calling this (`org_settings`
+/// does blocking file IO), and `claim` must not `.await` anything.
 pub(crate) async fn with_slot<T>(
     sessions: &RwLock<Vec<Session>>,
     org: &str,
+    repo: &str,
     max_parallel: usize,
     org_limit: Option<u64>,
+    repo_limit: u64,
     claim: impl FnOnce(&mut Vec<Session>, bool) -> T,
 ) -> T {
     let mut guard = sessions.write().await;
-    let room = has_room(&guard, org, max_parallel, org_limit);
+    let room = has_room(&guard, org, repo, max_parallel, org_limit, repo_limit);
     claim(&mut guard, room)
 }
 
-/// Starts queued colonies as slots free up, oldest first. A colony whose org is at its own limit
-/// doesn't hold up the ones behind it, and neither does one waiting for the branch of the colony it
+/// Starts queued colonies as slots free up, oldest first. A colony whose org or repository is at its own
+/// limit doesn't hold up the ones behind it, and neither does one waiting for the branch of the colony it
 /// is stacked on.
 pub async fn run_queue(app: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -129,6 +150,8 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         return Some(Claim::Retire(s.clone(), message));
     }
     s.status = SessionStatus::Starting;
+    // A colony re-queued after a boot that died part way still carries that boot's phases.
+    s.boot_timing = None;
     s.updated_at = Utc::now();
     Some(Claim::Start(s.clone()))
 }
@@ -193,27 +216,34 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
         let sessions = app.sessions.read().await.clone();
+        let limits = |org: &str| {
+            let settings = app.org_settings(org);
+            (orgs::org_max_parallel(&settings), repo_limit(&modules, &settings))
+        };
         let Some((next, refuse)) = next_queued(&sessions, |s| {
-            !paused
-                && has_room(
-                    &sessions,
-                    &s.org,
-                    max_parallel,
-                    orgs::org_max_parallel(&app.org_settings(&s.org)),
-                )
+            let (org_limit, repo_limit) = limits(&s.org);
+            !paused && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
         }) else {
             return;
         };
         // Re-checked and claimed under one write lock, so neither another tick nor a concurrent create or
         // resume can take the slot in between.
-        let org_limit = orgs::org_max_parallel(&app.org_settings(&next.org));
-        let claimed = with_slot(&app.sessions, &next.org, max_parallel, org_limit, |sessions, room| {
-            let s = sessions.iter_mut().find(|s| s.id == next.id)?;
-            match refuse.as_deref() {
-                Some(reason) => claim_refused(s, reason),
-                None => claim_queued(s, room),
-            }
-        })
+        let (org_limit, repo_limit) = limits(&next.org);
+        let claimed = with_slot(
+            &app.sessions,
+            &next.org,
+            &next.repo,
+            max_parallel,
+            org_limit,
+            repo_limit,
+            |sessions, room| {
+                let s = sessions.iter_mut().find(|s| s.id == next.id)?;
+                match refuse.as_deref() {
+                    Some(reason) => claim_refused(s, reason),
+                    None => claim_queued(s, room),
+                }
+            },
+        )
         .await;
         match claimed {
             None => return,
@@ -300,7 +330,7 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::tests::{admit_create, admit_resume, colony, stopped_colony_with_worktree};
+    use crate::sessions::tests::{admit_create, admit_create_in, admit_resume, colony, stopped_colony_with_worktree};
     use serde_json::{Value, json};
     use std::sync::Arc;
 
@@ -316,13 +346,19 @@ mod tests {
     #[test]
     fn parked_colonies_hold_no_slots() {
         let mut live: Vec<Session> = (0..14).map(|_| colony("acme", SessionStatus::Running)).collect();
-        assert!(!has_room(&live, "acme", 14, None), "14 live colonies fill 14 slots");
+        assert!(
+            !has_room(&live, "acme", "acme/repo", 14, None, 32),
+            "14 live colonies fill 14 slots"
+        );
         // Parking flips live colonies to Stopped, which holds nothing.
         for s in &mut live {
             s.status = SessionStatus::Stopped;
         }
         assert_eq!(live.iter().filter(|s| s.status.busy()).count(), 0, "no parked colony is busy");
-        assert!(has_room(&live, "acme", 14, None), "14 parked colonies hold no slots");
+        assert!(
+            has_room(&live, "acme", "acme/repo", 14, None, 32),
+            "14 parked colonies hold no slots"
+        );
     }
 
     #[test]
@@ -332,8 +368,11 @@ mod tests {
             colony("acme", SessionStatus::Idle),
             colony("acme", SessionStatus::Publishing),
         ];
-        assert!(!has_room(&running, "acme", 3, None), "publishing still holds its slot");
-        assert!(has_room(&running, "acme", 4, None));
+        assert!(
+            !has_room(&running, "acme", "acme/repo", 3, None, 32),
+            "publishing still holds its slot"
+        );
+        assert!(has_room(&running, "acme", "acme/repo", 4, None, 32));
 
         // Queued and finished colonies are not occupying anything.
         let waiting = vec![
@@ -343,15 +382,50 @@ mod tests {
             colony("acme", SessionStatus::Stopped),
             colony("acme", SessionStatus::Failed),
         ];
-        assert!(has_room(&waiting, "acme", 1, None), "a queue of five holds no slots");
+        assert!(
+            has_room(&waiting, "acme", "acme/repo", 1, None, 32),
+            "a queue of five holds no slots"
+        );
 
         // An org limit applies on top of the global one, and only to that org.
         let mixed = vec![
             colony("acme", SessionStatus::Running),
             colony("other", SessionStatus::Running),
         ];
-        assert!(!has_room(&mixed, "acme", 5, Some(1)), "acme is at its own limit");
-        assert!(has_room(&mixed, "third", 5, Some(1)), "another org still has room");
+        assert!(
+            !has_room(&mixed, "acme", "acme/repo", 5, Some(1), 32),
+            "acme is at its own limit"
+        );
+        assert!(
+            has_room(&mixed, "third", "third/repo", 5, Some(1), 32),
+            "another org still has room"
+        );
+
+        // A repository limit applies on top of both, only to that repository, and whatever the org's.
+        let mut same_org = colony("acme", SessionStatus::Running);
+        same_org.repo = "acme/api".into();
+        let repos = vec![colony("acme", SessionStatus::Running), same_org];
+        assert!(
+            !has_room(&repos, "acme", "acme/repo", 5, None, 1),
+            "acme/repo is at its own limit"
+        );
+        assert!(
+            !has_room(&repos, "acme", "acme/api", 5, Some(10), 1),
+            "so is acme/api, under a roomy org"
+        );
+        assert!(
+            has_room(&repos, "acme", "acme/web", 5, None, 1),
+            "another repository still has room"
+        );
+        assert!(has_room(&repos, "acme", "acme/repo", 5, None, 2));
+        assert!(
+            !has_room(&repos, "acme", "acme/web", 5, Some(2), 3),
+            "the org limit still binds first"
+        );
+        assert!(
+            !has_room(&repos, "acme", "acme/web", 2, None, 3),
+            "and so does the global one"
+        );
     }
 
     #[test]
@@ -362,16 +436,16 @@ mod tests {
         stopped_origin.publishing_holds_slot = false;
         let live_origin = colony("acme", SessionStatus::Publishing);
         assert!(
-            has_room(&[stopped_origin.clone()], "acme", 1, None),
+            has_room(&[stopped_origin.clone()], "acme", "acme/repo", 1, None, 32),
             "a stopped colony's publish holds no slot"
         );
         assert!(
-            !has_room(&[live_origin], "acme", 1, None),
+            !has_room(&[live_origin], "acme", "acme/repo", 1, None, 32),
             "a live colony's publish keeps its slot"
         );
         // The org limit counts the same way.
         assert!(
-            has_room(&[stopped_origin], "acme", 5, Some(1)),
+            has_room(&[stopped_origin], "acme", "acme/repo", 5, Some(1), 32),
             "a stopped colony's publish counts against neither limit"
         );
     }
@@ -597,6 +671,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A restart must not resume a parked colony into a plan that is still out: the record the last
+    /// run wrote is what the fresh gateway reads.
+    #[tokio::test]
+    async fn quota_resume_after_a_restart_keeps_a_colony_parked_while_the_saved_record_holds() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-restart-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        crate::gateway::Gateway::new(&root.join("data"))
+            .unwrap()
+            .mark_quota_exhausted("bailian", Some("09-23 07:54 UTC".into()), Some(Utc::now().timestamp() + 3600));
+        let app = crate::tests::test_app(&root);
+        *app.sessions.write().await = vec![quota_parked(
+            "parked",
+            "provider quota exhausted (bailian, resets 09-23 07:54 UTC)",
+        )];
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
+        assert_eq!(parked.status, SessionStatus::Stopped, "the saved record still holds");
+        assert!(parked.attention.is_some(), "the attention stays until recovery");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn the_queue_holds_a_waiting_child_and_retires_one_whose_parent_is_gone() {
         let root = std::env::temp_dir().join(format!("colonizer-queue-{}", crate::util::short_id()));
@@ -656,6 +753,49 @@ mod tests {
             done.iter().filter(|s| s.status == SessionStatus::Queued).count(),
             attempts - max_parallel,
             "every colony past the limit queued instead"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_rush_of_creates_across_repositories_respects_the_per_repository_limit() {
+        // The global limit is 8 and the org sets none, but each repository is held to 2: a batch of 13
+        // on one repository (the rush that prompted the limit) starts only 2, and the others still start.
+        let (max_parallel, repo_limit) = (8, 2);
+        let batches = [("acme/api", 13), ("acme/web", 3), ("other/app", 1)];
+        let attempts: usize = batches.iter().map(|(_, n)| n).sum();
+        let sessions = Arc::new(RwLock::new(Vec::new()));
+        let barrier = Arc::new(tokio::sync::Barrier::new(attempts));
+        let mut tasks = Vec::new();
+        for (repo, count) in batches {
+            for i in 0..count {
+                let (sessions, barrier) = (sessions.clone(), barrier.clone());
+                tasks.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    let id = format!("{repo}-{i}");
+                    admit_create_in(&sessions, repo, max_parallel, None, repo_limit, id).await;
+                }));
+            }
+        }
+        for task in tasks {
+            task.await.expect("create task joined");
+        }
+        let done = sessions.read().await;
+        let starting = |repo: &str| {
+            done.iter()
+                .filter(|s| s.repo == repo && s.status == SessionStatus::Starting)
+                .count() as u64
+        };
+        assert_eq!(
+            starting("acme/api"),
+            repo_limit,
+            "the batch never passes its repository's limit"
+        );
+        assert_eq!(starting("acme/web"), repo_limit, "a sibling repository has its own");
+        assert_eq!(starting("other/app"), 1, "and another org's repository is untouched");
+        assert_eq!(
+            done.iter().filter(|s| s.status == SessionStatus::Queued).count() as u64,
+            attempts as u64 - 2 * repo_limit - 1,
+            "every colony past a limit queued instead"
         );
     }
 

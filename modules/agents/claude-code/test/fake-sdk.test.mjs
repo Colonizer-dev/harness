@@ -424,9 +424,9 @@ test('subagent effort redefines the built-in agents the orchestrator delegates t
   }
   assert.equal(options.env.CLAUDE_CODE_SUBAGENT_MODEL, 'claude-opus-5-5');
   // Explore stays read-only: the prompt says so and the deny list enforces it. The list must never be
-  // narrower than the built-in's, read from the Claude Code 2.1.280 binary vendor/claude-code.lock pins.
-  const builtInExploreDenies = ['Agent', 'Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'ExitPlanMode', 'Edit', 'Write', 'NotebookEdit'];
-  for (const tool of builtInExploreDenies) assert.ok(options.agents.Explore.disallowedTools.includes(tool), tool);
+  // narrower than the built-in's, extracted from the Claude Code build vendor/claude-code.lock pins.
+  const builtIns = JSON.parse(readFileSync(new URL('../../../../vendor/claude-code-builtins.json', import.meta.url), 'utf8'));
+  for (const tool of builtIns.Explore.disallowedTools) assert.ok(options.agents.Explore.disallowedTools.includes(tool), tool);
   assert.equal(options.agents['general-purpose'].disallowedTools, undefined);
 
   const bad = buildOptions({ COLONIZER_SUBAGENT_EFFORT: 'extreme' });
@@ -489,6 +489,31 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
     assert.equal(options.hooks, undefined);
 
     assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a migrated skill pack (root plugin.json beside the legacy manifest) loads and bootstraps', () => {
+  const root = mkdtempSync(join(tmpdir(), 'colonizer-pack-'));
+  try {
+    const pack = join(root, 'superpowers');
+    mkdirSync(join(pack, 'skills/using-superpowers'), { recursive: true });
+    mkdirSync(join(pack, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(pack, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'superpowers', version: '6.4.1' }));
+    writeFileSync(join(pack, 'plugin.json'), JSON.stringify({
+      name: 'superpowers',
+      version: '6.4.1',
+      description: 'Core skills library',
+      skills: ['using-superpowers'],
+    }));
+    writeFileSync(join(pack, SUPERPOWERS_SKILL), '---\nname: using-superpowers\n---\n\nCheck for a skill before any response.\n\n');
+
+    // The migrated layout boots exactly like the legacy one: one local plugin
+    // entry, and the bootstrap text in the system prompt.
+    const { options } = buildOptions({ COLONIZER_PLUGIN_DIRS: pack });
+    assert.deepEqual(options.plugins, [{ type: 'local', path: pack }]);
+    assert.ok(options.systemPrompt.append.includes('Check for a skill before any response.'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -225,6 +225,24 @@ describe("setupRows", () => {
       expect(row(recovered, "machine").state).toBe("done");
     });
 
+    it("does not block on colony records lost at startup: writes are going through (issue #371)", () => {
+      const damaged = input({
+        status: status({
+          storage: {
+            ok: true,
+            kind: "load_damage",
+            message: "/data/sessions.json could not be parsed (EOF while parsing) and was saved as /data/sessions.json.corrupt-1790000000",
+            ts: "2026-09-20T23:00:00Z",
+            failures: 1,
+            recovered_at: null,
+          },
+        }),
+      });
+      const machine = row(damaged, "machine");
+      expect(machine.state).toBe("done");
+      expect(machine.error).toBeUndefined();
+    });
+
     it("invents no failures for an older mothership that sends no runtime", () => {
       const payload = status();
       const { runtime: _runtime, ...withoutRuntime } = payload; // the key is simply absent

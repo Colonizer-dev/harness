@@ -67,3 +67,23 @@ describe("mock startRedTeamRun", () => {
     );
   });
 });
+
+describe("mock stopSession (issue #361)", () => {
+  it("answers a second stop with already_stopped, like the server, instead of an error", async () => {
+    const api = createMockApi();
+    const first = await api.stopSession("demo1234");
+    expect(first.result).toBe("stopped");
+    expect(first.status).toBe("stopped");
+    const second = await api.stopSession("demo1234");
+    expect(second.result).toBe("already_stopped");
+    expect(second.status).toBe("stopped");
+  });
+
+  it("leaves a finished colony's status alone and takes a queued one out of the queue", async () => {
+    const api = createMockApi();
+    const done = await api.stopSession("old98765");
+    expect(done).toMatchObject({ result: "already_stopped", status: "pr_opened" });
+    const queued = await api.stopSession("queue1357");
+    expect(queued).toMatchObject({ result: "stopped", status: "stopped" });
+  });
+});

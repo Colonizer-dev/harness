@@ -6,7 +6,8 @@
 #
 # The update lands on the runtime/pin-updates branch. The workflow then opens a pull request, or,
 # while the repository doesn't allow GitHub Actions to create pull requests (Settings → Actions →
-# General), keeps an issue open with the same description and a link to open the pull request.
+# General), keeps an issue open with the same description and a link to open the pull request, and
+# closes the issue once a run finds nothing to change.
 name: Runtime pin updates
 
 on:
@@ -42,6 +43,13 @@ jobs:
         id: check
         run: node scripts/update-runtime-pins.mjs --write --summary "$RUNNER_TEMP/summary.md"
 
+      # A run with nothing to propose closes the stand-in issue, if one is open. That covers two
+      # cases: upstream hasn't moved, or someone merged the update branch ($BRANCH) by hand, after
+      # which the next run finds the lock matching upstream and has nothing to change either.
+      - name: Close the stale issue
+        if: steps.check.outputs.changed != 'true'
+        run: sh scripts/tracking-issue.sh close "$TITLE" "Runtime pins are current as of $(date -u +%Y-%m-%d)."
+
       # The Claude Code rows get the check a real install does: fetch-agent-binary.sh downloads the
       # newly pinned build and verifies it against the new checksum, so an update that fails that
       # never becomes a proposal. The image digests were already checked by the script itself — it
@@ -49,6 +57,23 @@ jobs:
       - name: Stage the new Claude Code pin
         if: steps.check.outputs.changed == 'true'
         run: sh scripts/fetch-agent-binary.sh
+
+      # subagents.mjs redefines two built-in agents with verbatim copies: when the Claude Code pin
+      # moved, re-extract them from the staged build into vendor/claude-code-builtins.json and put any
+      # diff in the description. A failure here (stale copies, or a binary the script can no longer
+      # read) doesn't hold the pin back: the snapshot or the copies then disagree with the lock and fail
+      # CI on the pull request. The script runs some of the new build's JavaScript before anyone has
+      # reviewed it, so it gets no environment (no GH_TOKEN) and, under Node's permission model, only
+      # the files it needs — not the checkout's credentials in .git/config.
+      - name: Check the built-in subagents
+        if: steps.check.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          git diff --quiet vendor/claude-code.lock || env -i PATH="$PATH" node --permission \
+            --allow-fs-read=scripts/builtin-subagents.mjs --allow-fs-read=modules/agents/claude-code/subagents.mjs \
+            --allow-fs-read=vendor/claude-code.lock --allow-fs-read=dist/bin/claude-guest \
+            --allow-fs-write=vendor/claude-code-builtins.json --allow-fs-write="$RUNNER_TEMP/summary.md" \
+            scripts/builtin-subagents.mjs --write --summary "$RUNNER_TEMP/summary.md" dist/bin/claude-guest
 
       # The Node runtime gets the same real-install check: fetch-node-binary.sh downloads the
       # pinned tarball and verifies it against node.lock, so a broken node pin never rides along.
@@ -62,7 +87,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add crates/colonizer/images.lock vendor/claude-code.lock vendor/node.lock
+          git add crates/colonizer/images.lock vendor/claude-code.lock vendor/node.lock vendor/claude-code-builtins.json
           git commit -m "$TITLE" -m "$(cat "$RUNNER_TEMP/summary.md")"
           git push --force origin "$BRANCH"
 
@@ -85,10 +110,4 @@ jobs:
             echo
             cat "$RUNNER_TEMP/summary.md"
           } > "$RUNNER_TEMP/issue.md"
-          issue=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -1)
-          if [ -n "$issue" ]; then
-            gh issue edit "$issue" --body-file "$RUNNER_TEMP/issue.md"
-            echo "Updated issue #$issue"
-          else
-            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md"
-          fi
+          sh scripts/tracking-issue.sh update "$TITLE" "$RUNNER_TEMP/issue.md"

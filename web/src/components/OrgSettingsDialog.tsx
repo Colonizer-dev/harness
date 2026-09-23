@@ -13,6 +13,7 @@ type FieldKey =
   | "subagent_model"
   | "background_model"
   | "max_parallel"
+  | "repo_max_parallel"
   | "budget_usd"
   | "host_disk"
   | "stack"
@@ -40,6 +41,7 @@ const FIELDS: FieldSpec[] = [
   { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
   { key: "stack", group: "Colonies", label: "Stack", hint: "The sandbox stack for this org's colonies; Automatic reads each repository's own", kind: "choice" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
+  { key: "repo_max_parallel", group: "Colonies", label: "Per repository", hint: "Live colonies in any one of this org's repositories at once", kind: "number", min: 1, max: 32 },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
@@ -58,7 +60,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "background_model":
       return settings.agent?.[key];
     case "max_parallel":
-      return settings.max_parallel;
+    case "repo_max_parallel":
+      return settings[key];
     case "budget_usd":
       return settings.budget_usd;
     case "host_disk":
@@ -94,7 +97,8 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "background_model":
       return setting("agent", key);
     case "max_parallel":
-      return setting("sandbox", "max_parallel");
+    case "repo_max_parallel":
+      return setting("sandbox", key);
     case "budget_usd":
       return setting("sandbox", "budget_usd");
     case "host_disk":
@@ -183,6 +187,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       background_model: pick("background_model") as string | null,
     },
     max_parallel: pick("max_parallel") as number | null,
+    repo_max_parallel: pick("repo_max_parallel") as number | null,
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,

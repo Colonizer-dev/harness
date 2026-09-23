@@ -345,6 +345,10 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     let errored = is_error;
                     let open_question = rt.open_question.lock().await.is_some();
                     match autopilot_step(errored, interrupted, open_question, pr_written) {
+                        // Issue #84: the kill-switch holds the publish without flagging the colony.
+                        Autopilot::Publish if crate::authority::external_writes_blocked() => {
+                            app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
+                        }
                         Autopilot::Publish => {
                             app.session_log(
                                 id,
@@ -425,7 +429,8 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     }
 }
 
-/// A colony proposed a shared-memory note: queue it for review (or store it when review is off).
+/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
+/// store it marked unreviewed).
 pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>, title: &str, content: &str, tags: &[String]) {
     let Some(s) = app.session(id).await else { return };
     let modules = app.modules.read().await.clone();
@@ -453,11 +458,18 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
             return;
         }
     };
-    let title = note.title.clone();
-    let stored = if orgs::memory_requires_review(&modules) {
+    let (title, scope) = (note.title.clone(), note.scope.clone());
+    let review = orgs::memory_requires_review(&modules);
+    // Only a repo note can skip review. An org or global note reaches every colony in the org or the
+    // fleet, so one prompt-injected colony could plant instructions for all of them.
+    let stored = if review || scope != "repo" {
         app.memory.add_proposal(note).await.map(|proposal| json!(proposal))
     } else {
-        match memory::store_note(app, note.clone()).await {
+        // Only the stored copy says it skipped review: the fallback below queues `note`, and a
+        // person approving that is the review.
+        let mut unreviewed = note.clone();
+        unreviewed.source["reviewed"] = json!(false);
+        match memory::store_note(app, unreviewed).await {
             Ok(note) => {
                 let mut value = json!(note);
                 value["status"] = json!("approved");
@@ -481,10 +493,12 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
             let waiting = proposal["status"] == "pending";
             let message = format!(
                 "memory: the agent proposed \"{title}\" for {scope} memory{}",
-                if waiting {
-                    ", waiting for your review"
-                } else {
+                if !waiting {
                     " (review is off, so it is live)"
+                } else if !review && scope != "repo" {
+                    ", waiting for your review (org and global notes are always reviewed)"
+                } else {
+                    ", waiting for your review"
                 }
             );
             app.session_log(id, "info", message).await;
@@ -499,6 +513,12 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
         }
     }
 }
+
+/// Issue #84: what the colony's log says when the write kill-switch holds an effect back.
+const AUTOPILOT_BLOCKED: &str = "autopilot: not publishing, external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS); \
+                                 press Create PR when writes are enabled";
+const FINDING_BLOCKED: &str =
+    "ignored a finding: external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS), so no issue is filed";
 
 /// A colony's orchestrator confirmed something outside its task. Nothing is filed directly anymore:
 /// a host-side validation call judges the finding first, every stage is minuted on the findings
@@ -516,6 +536,10 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             "ignored a finding: filing findings is switched off in Settings".into(),
         )
         .await;
+        return;
+    }
+    if crate::authority::external_writes_blocked() {
+        app.session_log(&id, "info", FINDING_BLOCKED.into()).await;
         return;
     }
     let finding = match findings::parse(&event) {
@@ -673,5 +697,42 @@ mod tests {
         let exited = Some(format!("agent {}: exit code 1", AgentState::Exited.as_str()));
         assert!(runner_start_failure_attention(exited.as_deref()).is_none());
         assert!(runner_start_failure_attention(None).is_none());
+    }
+
+    /// Review off lets a colony's repo note straight through, marked unreviewed. An org or global
+    /// note reaches every colony in the org or the fleet, so it waits for a person whatever the setting.
+    #[tokio::test]
+    async fn with_review_off_only_a_repo_note_skips_the_queue() {
+        async fn set(app: &Shared, key: &str, value: Value) {
+            app.modules.write().await.memory.settings.insert(key.into(), value);
+        }
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        set(&app, "require_review", json!(false)).await;
+        for (scope, key) in [("org", "acme"), ("global", "")] {
+            memory_proposal(&app, "abc", Some(scope), "Sign commits", "Always sign.", &[]).await;
+            assert!(app.memory.notes(scope, key).await.unwrap().is_empty(), "{scope}");
+        }
+        assert_eq!(app.memory.proposals().await.len(), 2);
+
+        memory_proposal(&app, "abc", None, "Run tests locked", "Use --locked.", &[]).await;
+        let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].source["reviewed"], json!(false));
+        assert_eq!(app.memory.proposals().await.len(), 2, "the repo note did not queue");
+
+        // A repo note the store cannot take is queued instead, unmarked: approving it is its review.
+        app.modules.write().await.memory.provider = memory::MEM0.into();
+        set(&app, "base_url", json!("ftp://nowhere")).await;
+        memory_proposal(&app, "abc", None, "Deploys", "Stage first.", &[]).await;
+        let pending = app.memory.proposals().await;
+        assert_eq!(pending.len(), 3);
+        assert!(pending.iter().all(|p| p.note.source["reviewed"].is_null()), "{pending:?}");
+
+        app.modules.write().await.memory.provider = "files".into();
+        set(&app, "require_review", json!(true)).await;
+        memory_proposal(&app, "abc", Some("repo"), "Commit style", "Keep commits small.", &[]).await;
+        assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
+        assert_eq!(app.memory.proposals().await.len(), 4);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

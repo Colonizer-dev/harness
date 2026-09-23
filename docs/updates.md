@@ -76,14 +76,16 @@ What happens, in order:
    update: its microVM is already gone and the host is committing and pushing,
    and interrupting that leaves a colony `failed` with its pull request
    unopened. The pane says which colony, and you try again when it is done.
-2. **The colony list is copied aside**, to `sessions.json.pre-update-<unix-timestamp>`
-   next to `sessions.json`. If the copy cannot be made, nothing is installed.
-3. **The release is unpacked beside the running app**, into whichever of the two
+   As the install starts, `sessions.json` is copied to
+   `sessions.json.pre-update-<unix-timestamp>` beside it; if that copy fails,
+   the update is marked failed and nothing is installed. The copies are not
+   pruned, and are safe to delete.
+2. **The release is unpacked beside the running app**, into whichever of the two
    slots — `app-a`, `app-b` — the running version is not using. A failure
    part-way leaves the running version exactly as it was.
-4. **The `app` symlink is moved with one rename.** There is no moment at which
+3. **The `app` symlink is moved with one rename.** There is no moment at which
    it points at half an install.
-5. **The process replaces itself** with the new binary. Colonies are detached
+4. **The process replaces itself** with the new binary. Colonies are detached
    microVMs, so each live one is reconnected and its event stream carries on
    from the sequence number it had. The pane lists every colony and what
    happened to it.
@@ -113,10 +115,10 @@ the same reason:
 
 | Reason | What to do |
 | :--- | :--- |
-| This is a development build — commits after a tag, a modified tree, or no tag | Update it from source: `git pull && scripts/install.sh --install` |
 | This install has no `scripts/install-release.sh` — it did not come from a release | Update the way you installed: `git pull && scripts/install.sh` for a checkout |
 | The app path is not the symlink the installer maintains | Install once from a release, or set `COLONIZER_APP` to the symlink |
 | Running without an installed app directory | Same |
+| This is a development build (`v0.1.5-60-gd62bfb2`, a modified tree, or no tag): a release would replace work it does not contain | Update it from its checkout: `git pull && scripts/install.sh --install` |
 
 A source checkout is meant to be updated with git. Saying so is better than
 half-applying something.

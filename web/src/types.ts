@@ -65,8 +65,16 @@ export interface Session {
   boot_cpus?: number | null;
   /** `8G`-shaped, like the sandbox's `memory` setting. Absent on a colony booted before this change. */
   boot_memory?: string | null;
-  /** Where the last launch's time went, filled in when the colony finished booting (docs/protocol.md §4). */
-  boot_timing?: { total_ms: number; phases?: { name: string; ms: number }[] } | null;
+  /**
+   * Where the last launch's time went (docs/protocol.md §4): phases back to back in boot order, their
+   * sum at most `total_ms`. While `starting` it holds the phases finished so far; a failed boot keeps
+   * the ones it got through.
+   */
+  boot_timing?: {
+    /** Present only once the boot finished: a boot under way or stopped part way has no total. */
+    total_ms?: number;
+    phases: { name: string; ms: number }[];
+  } | null;
   cleaned_up: boolean;
   /** True opts this colony's worktree out of automatic reclamation (issue #223). */
   keep_worktree: boolean;
@@ -161,7 +169,7 @@ export interface HarnessStatus {
     detail?: string | null;
     error?: string | null;
   } | null;
-  /** Set by the first failed disk write and sticky until the mothership restarts; older mothership builds omit it. */
+  /** `{ ok: true }` alone until there is a storage alert: a failed disk write, which can recover, or colony records lost at startup, which cannot (see `StorageHealth.kind`). Sticky server-side; older mothership builds omit it. */
   storage?: StorageHealth;
   /** Aggregate reclamation counts from the same poll (issue #223); older mothership builds omit it. */
   reclaim?: { reclaimable: number; unpushed: number };
@@ -273,13 +281,20 @@ export interface FleetHost {
 
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
 export interface StorageHealth {
-  /** False while writes are failing; true when every write was confirmed, or once one succeeds after a failure (then `recovered_at` is set). */
+  /** False while writes are failing; true when every write was confirmed, or once one succeeds after a failure (then `recovered_at` is set). Always true for load damage. */
   ok: boolean;
-  /** The underlying write error, for showing verbatim. Kept after a recovery: the gap it reports still happened. */
+  /**
+   * Which alert this is (issue #371). `write`: a disk write failed; it recovers once one goes through.
+   * `load_damage`: sessions.json was unreadable or partly damaged at startup, so colony records were
+   * lost; `ok` only says writes work, it never recovers, and `message` names the `.corrupt-` copy.
+   * Older motherships omit it: read a missing kind as `write`.
+   */
+  kind?: "write" | "load_damage" | null;
+  /** The underlying write error (for load damage: what was lost and where the original went), for showing verbatim. Kept after a recovery: the gap it reports still happened. */
   message?: string | null;
-  /** When the latest failure was recorded; same representation as a harness_log `ts`. */
+  /** When the latest failure was recorded (for load damage: when startup found it); same representation as a harness_log `ts`. */
   ts?: string | null;
-  /** Failed writes since the mothership started; a recovery does not reset it. */
+  /** Failed writes since the mothership started; a recovery does not reset it. A load_damage alert always carries 1, which is not a write count. */
   failures?: number | null;
   /** When a write first succeeded after the latest failure; null while writes are still failing. Absent from older motherships, whose alert stays until a restart. */
   recovered_at?: string | null;
@@ -612,6 +627,8 @@ export interface ProviderHealth {
   latency_ms: number | null;
   models: string[];
   error: string | null;
+  /** Set when the probe answered in a way that is still healthy — an anthropic-wire endpoint that serves no /v1/models ("no model list"). */
+  note: string | null;
   checked_at: string;
 }
 
@@ -659,6 +676,8 @@ export interface OrgSettings {
     skillsets?: Record<string, boolean> | null;
   } | null;
   max_parallel?: number | null;
+  /** Live colonies one repository of this org may run at once; null inherits the global per-repository limit. */
+  repo_max_parallel?: number | null;
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
@@ -907,7 +926,7 @@ export interface FindingRecord {
   session: string;
   repo?: string;
   title: string;
-  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "error";
+  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
   ts?: string;
   reason?: string;
   severity?: "low" | "medium" | "high" | "critical";

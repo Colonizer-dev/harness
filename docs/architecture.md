@@ -105,11 +105,11 @@ stateDiagram-v2
   Publish --> [*]: VM removed, then the host publishes the branch
 ```
 
-0. **Queued** – a colony launched past the parallel limit (global, or the org's own) is created
+0. **Queued** – a colony launched past the parallel limit (global, the org's own, or per repository) is created
    `queued`: no worktree, no microVM, nothing claimed. A resume that lands on a full limit queues too,
    keeping its worktree while it waits. Every five seconds the harness starts the oldest
    queued colony that fits, so a queue drains on its own as colonies finish.
-   An org at its own limit doesn't hold up the colonies behind it, and leaving the queue is just Stop.
+   An org or repository at its own limit doesn't hold up the colonies behind it, and leaving the queue is just Stop.
 1. **Create** – source module fetches the issue; the host creates a bare clone + git worktree on a
    `colonizer/issue-<n>-<id>` branch; the harness writes the session directory (`session.json`, `token`,
    `prompt.md`, `boot.sh`, mesh auth key).
@@ -140,9 +140,11 @@ stateDiagram-v2
 
 ## Per-colony limits
 
-Three sandbox module settings bound one colony, each with a per-org override that shadows the default:
+Four sandbox module settings bound colonies, each with a per-org override:
 
-- `max_parallel` caps colonies live at once, global or per org, which is the queue above.
+- `max_parallel` caps colonies live at once, global or per org, which is the queue above. Beside it,
+  `repo_max_parallel` (default 3, overridable per org) caps colonies live at once in one repository. The
+  parallel limits layer instead of shadowing: global, org and repository must all have room, so the tightest wins.
 - `budget_usd` caps a colony's whole model spend. The provider gateway counts the usage of every response
   it routes, prices it with the provider's `pricing`, and adds it to the colony's `routed_cost_usd`; the
   budget answers to that plus Claude's own `cost_usd`. Past it, a routed request is refused with `403` and
@@ -151,12 +153,12 @@ Three sandbox module settings bound one colony, each with a per-org override tha
   every five minutes. It does not cover the microVM's root filesystem, which `root_disk` bounds. A colony
   past the quota is stopped and its worktree kept: removing a colony's work is the operator's call.
 
-A fourth sandbox setting carries a per-org override without bounding anything: the org's `stack` pins the
+A fifth sandbox setting carries a per-org override without bounding anything: the org's `stack` pins the
 sandbox stack for its colonies, shadowing what the global `preset` would otherwise choose — `auto` by
 default, which reads each repository's marker files at boot. `null` inherits.
 
-`max_parallel` defaults to 3. The other two default to unlimited: there is no dollar figure or byte
-count that suits every deployment, and a default that silently stopped running colonies on upgrade would
+`max_parallel` and `repo_max_parallel` default to 3. The other two default to unlimited: there is no
+dollar figure or byte count that suits every deployment, and a default that silently stopped running colonies on upgrade would
 be a surprise. When the host stops a colony, the only stop it decides on its own, the
 microVM is torn down, the status goes to `stopped` with the reason in the colony log, and the worktree is
 kept: Resume continues once the limit is raised, queued if the parallel limit is full.
@@ -164,7 +166,9 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 ## Mesh design
 
 - Headscale listens on `127.0.0.1`; VMs reach it as `http://host.microsandbox.internal:<port>`
-  (microsandbox `host` network profile).
+  through a single scoped `allow@host:tcp:<control-port>` rule, not the broad `host` profile
+  (which would open every host-loopback port to the untrusted colony; see
+  [sandbox-network.md](sandbox-network.md)).
 - The harness node is a separate userspace `tailscaled` (own state dir, socket under
   `/run/user/<uid>/colonizer/`, fixed UDP port, `--no-logs-no-support`). It never touches the
   system tailscaled or the user's tailnet. Tailscale publishes no macOS `tailscaled`, so on a Mac the
@@ -186,6 +190,8 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 - Git objects and worktree metadata are mounted read-only; publish treats VM output as untrusted.
 - agentd requires a per-session bearer token even inside the private mesh.
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
+- Network: what a colony's microsandbox profiles allow and deny is in
+  [sandbox-network.md](sandbox-network.md).
 
 The external audit of v0.1.3 checked these boundaries against the code; its findings and the
 release checkpoints are in [audit.md](audit.md).
