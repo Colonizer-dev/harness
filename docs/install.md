@@ -158,8 +158,9 @@ Every setting is listed under [Configuration](https://github.com/Colonizer-dev/h
 ## Updating
 
 A running mothership can update itself: Settings offers the newer release, installs it and restarts into
-it without losing colonies, and `colonizer update` does the same from a terminal. That, and the version
-check behind it, is [docs/updates.md](updates.md).
+it without losing colonies, and `colonizer update` does the same from a terminal. A development build is
+refused: update it from its checkout with `git pull && scripts/install.sh --install`. That, and the
+version check behind it, is [docs/updates.md](updates.md).
 
 By hand: for a release, run the install command again. For a build from source:
 
