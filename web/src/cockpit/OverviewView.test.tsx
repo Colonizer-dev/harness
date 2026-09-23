@@ -17,7 +17,7 @@ import { createMockApi } from "../mock";
 import type { OrgEntry } from "../orgs";
 import type { Session } from "../types";
 import { OverviewView } from "./OverviewView";
-import { changeFailRate, dailyMerged, formatWait, mergedInWindow, shortDayLabel } from "./dash";
+import { changeFailRate, dailyMerged, formatWait, mergedInWindow, orgColorFor, shortDayLabel } from "./dash";
 import type { OverviewFilter } from "./feed";
 
 const api = createMockApi();
@@ -411,5 +411,47 @@ describe("OverviewView held slots and stalled queue", () => {
     const html = renderOverview([idleHeld("h1"), session({ id: "r1", status: "running" }), session({ id: "q1", status: "queued" })], [ACME]);
     expect(html).not.toContain("stalled");
     expect(html).toContain("1 held");
+  });
+});
+
+// Org avatars (issue #445): every tile that names an org shows its image when /api/orgs knows
+// one — workspace cards, the needs-you rows, the compared table, the legend and the filter
+// chips — and falls back to the coloured lettermark when there is none.
+describe("OverviewView org avatars", () => {
+  const AVATAR = "https://example.com/avatars/acme.png";
+  const withAvatar: OrgEntry = { ...ACME, avatar: AVATAR };
+  const waiting = (): Session =>
+    session({
+      id: "w1",
+      status: "waiting_for_answer",
+      attention: { reason: "waiting_for_answer", since: "2026-09-18T09:00:00Z", nudges: 0 },
+      updated_at: "2026-09-18T09:00:00Z",
+    });
+
+  it("renders the avatar image on cards, queue rows, the compared table, the legend and the chips", () => {
+    const html = renderOverview([waiting()], [withAvatar]);
+    // Card + legend icon + compared row + org chip + needs-you row.
+    expect(html.match(new RegExp(`src="${AVATAR}"`, "g"))?.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("falls back to the coloured lettermark when no avatar is known", () => {
+    const html = renderOverview([waiting()], [ACME]);
+    expect(html).not.toContain("<img");
+    expect(html).toContain(orgColorFor("acme"));
+    expect(html).toContain(">A<");
+  });
+
+  it("paints org series with the ramp, not org hues", () => {
+    // With an avatar known, no lettermark fallback renders — any oklch hue left would be a chart series.
+    const html = renderOverview([session()], [{ ...ACME, avatar: "https://example.com/avatars/acme.png" }]);
+    expect(html).toContain("var(--chart-1)");
+    expect(html).not.toContain("oklch(0.72");
+  });
+
+  it("stands main charts 170px tall on narrow screens and 240px at desktop widths", () => {
+    const recent = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const html = renderOverview([session({ id: "m1", status: "merged", created_at: recent, updated_at: recent })], [ACME]);
+    expect(html).toContain("h-[170px]");
+    expect(html).toContain("md:h-[240px]");
   });
 });

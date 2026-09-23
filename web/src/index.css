@@ -40,6 +40,14 @@
   --model-spark: oklch(0.68 0.18 295);
   --lat-p50: oklch(0.74 0.14 210);
   --lat-p95: oklch(0.7 0.19 340);
+  /* Multi-series chart ramp (issue #445): alternating deep/bright orange-amber steps, each
+     clearly lighter or darker than its neighbours and every step dark enough to read as a
+     line on the white panel. The dark theme carries brighter counterparts below. */
+  --chart-1: #9a3412;
+  --chart-2: #c2410c;
+  --chart-3: #92400e;
+  --chart-4: #b45309;
+  --chart-5: #7c2d12;
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
   color-scheme: light;
@@ -82,6 +90,11 @@
     --model-spark: oklch(0.68 0.18 295);
     --lat-p50: oklch(0.74 0.14 210);
     --lat-p95: oklch(0.7 0.19 340);
+    --chart-1: #ff6b35;
+    --chart-2: #ffa63d;
+    --chart-3: #ff7a1a;
+    --chart-4: #ffd08a;
+    --chart-5: #f76707;
     color-scheme: dark;
   }
 }
@@ -1062,6 +1075,14 @@ body {
   --model-spark: oklch(0.68 0.18 295);
   --lat-p50: oklch(0.74 0.14 210);
   --lat-p95: oklch(0.7 0.19 340);
+  /* Multi-series chart ramp (issue #445): alternating deep/bright orange-amber steps, each
+     clearly lighter or darker than its neighbours and every step dark enough to read as a
+     line on the white panel. The dark theme carries brighter counterparts below. */
+  --chart-1: #9a3412;
+  --chart-2: #c2410c;
+  --chart-3: #92400e;
+  --chart-4: #b45309;
+  --chart-5: #7c2d12;
   color-scheme: light;
 }
 
@@ -1107,6 +1128,11 @@ body {
   --model-spark: oklch(0.68 0.18 295);
   --lat-p50: oklch(0.74 0.14 210);
   --lat-p95: oklch(0.7 0.19 340);
+  --chart-1: #ff6b35;
+  --chart-2: #ffa63d;
+  --chart-3: #ff7a1a;
+  --chart-4: #ffd08a;
+  --chart-5: #f76707;
   color-scheme: dark;
 }
 
@@ -1143,6 +1169,75 @@ body {
 @keyframes rt-march { 0% { left: -4%; opacity: 0; transform: translateY(0); } 8% { opacity: 0.9; } 25% { transform: translateY(-4px) rotate(2deg); } 50% { transform: translateY(3px) rotate(-2deg); } 75% { transform: translateY(-2px) rotate(2deg); } 92% { opacity: 0.9; } 100% { left: 58%; opacity: 0.9; transform: translateY(0); } }
 @keyframes rt-twitch { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
 @keyframes rt-pulse { 0%, 100% { opacity: 0.9; transform: scale(0.88); } 50% { opacity: 0.3; transform: scale(1.12); } }
+
+/* Dashboard charts (issue #445): a draw-in for smoothed lines, grow-ins for bars and share
+   strips, and a soft ring pulse for the leading dot. Data changes re-key the animated element
+   so the motion replays; identical data keeps its key and stays put. The .cockpit guard below
+   already freezes these under reduced motion wherever they render in the cockpit; the extra
+   global rule covers any chart rendered outside it. */
+.dash-draw {
+  stroke-dasharray: 1;
+  animation: dash-draw 0.9s ease-out both;
+}
+@keyframes dash-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.dash-grow-y {
+  transform-origin: bottom;
+  animation: dash-grow-y 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes dash-grow-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+.dash-grow-x {
+  transform-origin: left center;
+  animation: dash-grow-x 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes dash-grow-x {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.dash-pulse {
+  animation: dash-pulse 2.2s ease-out infinite;
+}
+@keyframes dash-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-ring);
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-draw,
+  .dash-grow-y,
+  .dash-grow-x,
+  .dash-pulse {
+    animation: none !important;
+  }
+  /* Tooltip/crosshair fades and bar height glides freeze too — values stay readable. */
+  .dash-overlay,
+  .dash-overlay * {
+    transition: none !important;
+  }
+}
 
 /* The ck-* animations are applied inline or as arbitrary utilities (durations and offsets are computed
    per colony), so there is no per-animation class to switch off. The guard works off the cockpit root

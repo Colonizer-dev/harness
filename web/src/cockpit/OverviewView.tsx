@@ -16,7 +16,7 @@
 // - "Manage workspaces": this view receives no settings opener, so the buttons are omitted.
 import { useMemo, useState, type ReactElement } from "react";
 
-import { initialOf } from "../components/Avatar";
+import { Avatar, initialOf } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
@@ -25,7 +25,7 @@ import { HIDE_EMPTY_ORGS_KEY, hideEmptyOrgEntries, parseHideEmptyOrgs } from "..
 import { formatCost, formatTokens, modelMix, orgCost, sessionCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
-import { DashBars, DashLegend, DashPanel, Eyebrow, FilterChip, KpiTile, RangePicker, ShareBar, StatusChip, type KpiDef } from "./DashChart";
+import { DashBars, DashLegend, DashPanel, Eyebrow, FilterChip, KpiTile, RangePicker, ShareBar, Sparkline, StatusChip, type KpiDef } from "./DashChart";
 import { FleetPanel } from "./FleetPanel";
 import { LiveCost, LiveIndicator } from "./Live";
 import { OrgDashboard } from "./OrgDashboard";
@@ -35,6 +35,7 @@ import {
   dailyFailRate,
   dailyMerged,
   dayKeyOfDate,
+  chartColor,
   deltaTone,
   formatDelta,
   formatPts,
@@ -90,17 +91,27 @@ function sortColonies(list: Session[]): Session[] {
   });
 }
 
-/** An org's initial on its deterministic colour. The tile hue is theme-independent (like the
- *  reference), so the near-black token reads on it in both themes. */
-function OrgTile({ org, size = 22 }: { org: string; size?: number }): ReactElement {
+/** An org's avatar when /api/orgs knows one, else its initial on its deterministic colour —
+ *  the same tile everywhere (cards, queue, table, legends, chips), so the hue fallback reads as
+ *  one identity. A broken image falls back to the lettermark too, via Avatar's fallback. */
+function OrgTile({ org, avatar, size = 22 }: { org: string; avatar?: string | null; size?: number }): ReactElement {
+  const radius = size <= 22 ? 6 : 8;
   return (
-    <span
-      aria-hidden="true"
-      className="grid shrink-0 select-none place-items-center font-bold"
-      style={{ width: size, height: size, borderRadius: size <= 22 ? 6 : 8, fontSize: Math.max(10, Math.round(size * 0.42)), background: orgColorFor(org), color: "var(--term-bg)" }}
-    >
-      {initialOf(org)}
-    </span>
+    <Avatar
+      name={org}
+      src={avatar ?? undefined}
+      size={size}
+      rounded={size <= 22 ? "md" : "lg"}
+      fallback={
+        <span
+          aria-hidden="true"
+          className="grid shrink-0 select-none place-items-center font-bold"
+          style={{ width: size, height: size, borderRadius: radius, fontSize: Math.max(10, Math.round(size * 0.42)), background: orgColorFor(org), color: "var(--term-bg)" }}
+        >
+          {initialOf(org)}
+        </span>
+      }
+    />
   );
 }
 
@@ -270,17 +281,20 @@ export function OverviewView({
     },
   ];
 
-  // Merged per day, stacked by workspace in deterministic org colours; the ghost is the previous
-  // period's daily total when compare is on.
-  const mergedSeries = workspaces.map((o) => ({ label: o.org, color: orgColorFor(o.org), values: dailyMerged(visibleSessions, days, o.org) }));
+  // Merged per day, stacked by workspace in ramp order (org identity rides on the avatars in
+  // the legend, chips and cards now, never on hue); the ghost is the previous period's daily
+  // total when compare is on.
+  const avatarByOrg = new Map(orgs.map((o) => [o.org.toLowerCase(), o.avatar]));
+  const avatarOf = (org: string): string | null => avatarByOrg.get(org.toLowerCase()) ?? null;
+  const mergedSeries = workspaces.map((o, i) => ({ label: o.org, color: chartColor(i), values: dailyMerged(visibleSessions, days, o.org) }));
   const ghostTotals = prevDays.map((day) => dailyMerged(visibleSessions, [day]).reduce((t, v) => t + v, 0));
   const ghost = compare && ghostTotals.some((v) => v > 0) ? ghostTotals.map((v) => (v > 0 ? v : null)) : undefined;
 
   // Workspaces compared: merged share plus the in-range failure reading and the measured rollup.
-  const compared = workspaces.map((o) => {
+  const compared = workspaces.map((o, i) => {
     const merged = mergedInWindow(visibleSessions.filter((s) => sameOrg(orgOf(s), o.org)), fromMs, nowMs).length;
     const fail = changeFailRate(visibleSessions, fromMs, nowMs, o.org);
-    return { org: o.org, merged, fail, spend: orgCost(o.spend) };
+    return { org: o.org, avatar: o.avatar, color: chartColor(i), merged, fail, spend: orgCost(o.spend) };
   });
   const mergedAll = compared.reduce((t, c) => t + c.merged, 0);
 
@@ -379,7 +393,7 @@ export function OverviewView({
               const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
               return (
                 <div key={session.id} className="grid grid-cols-[22px_minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-border px-4 py-2.5 first:border-t-0">
-                  <OrgTile org={org} />
+                  <OrgTile org={org} avatar={avatarOf(org)} />
                   <span className="min-w-0">
                     <span className="block truncate text-[13px]">
                       {short} <span className="text-muted">· {session.issue_title || short}</span>
@@ -407,7 +421,7 @@ export function OverviewView({
           <DashPanel
             title="MERGED PRS PER DAY · BY WORKSPACE"
             sub={`${mergedCur.length} merged in ${range}d${compare ? ` · dashed line is the previous ${range}d` : ""} · by merge date`}
-            legend={<DashLegend items={mergedSeries.map((s) => ({ label: s.label, color: s.color }))} />}
+            legend={<DashLegend items={workspaces.map((o, i) => ({ label: o.org, color: chartColor(i), icon: <OrgTile org={o.org} avatar={o.avatar} size={16} /> }))} />}
             className="min-w-0 flex-[2_1_560px]"
           >
             {mergedAll > 0 || mergedSeries.some((s) => s.values.some((v) => v > 0)) ? (
@@ -435,9 +449,12 @@ export function OverviewView({
                 className="grid cursor-pointer grid-cols-[minmax(0,1fr)_58px_62px_70px] items-center gap-2 border-b border-border px-4 py-2.5 text-left tabular-nums last:border-b-0 hover:bg-panel-2"
               >
                 <span className="min-w-0">
-                  <span className="block truncate text-[13px] font-semibold">{c.org}</span>
+                  <span className="flex min-w-0 items-center gap-2">
+                    <OrgTile org={c.org} avatar={c.avatar} size={20} />
+                    <span className="block truncate text-[13px] font-semibold">{c.org}</span>
+                  </span>
                   <span className="mt-1.5 block h-1 overflow-hidden rounded-full bg-panel-3">
-                    <span className="block h-full rounded-full" style={{ width: `${mergedAll > 0 ? (c.merged / mergedAll) * 100 : 0}%`, background: orgColorFor(c.org) }} title={`share of merged: ${c.merged} of ${mergedAll}`} />
+                    <span className="block h-full rounded-full" style={{ width: `${mergedAll > 0 ? (c.merged / mergedAll) * 100 : 0}%`, background: c.color }} title={`share of merged: ${c.merged} of ${mergedAll}`} />
                   </span>
                 </span>
                 <span className="text-right font-mono text-xs">{c.merged}</span>
@@ -474,7 +491,7 @@ export function OverviewView({
                   onClick={() => setDashOrg(org.org)}
                   className="grid cursor-pointer grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 px-4 pb-3 pt-3.5 text-left hover:bg-panel-2"
                 >
-                  <OrgTile org={org.org} size={30} />
+                  <OrgTile org={org.org} avatar={org.avatar} size={30} />
                   <span className="min-w-0">
                     <span className="block truncate font-semibold">{org.org}</span>
                     <span className="block font-mono text-[11px] text-faint">
@@ -521,10 +538,7 @@ export function OverviewView({
                   ))}
                 </div>
                 <div className="px-4 pb-3">
-                  <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="block h-[30px] w-full" aria-hidden="true">
-                    <polygon points={`0,30 ${sparkPoints(dailyCosts(current, org.org))} 100,30`} fill={orgColorFor(org.org)} opacity={0.16} />
-                    <polyline points={sparkPoints(dailyCosts(current, org.org))} fill="none" stroke={orgColorFor(org.org)} strokeWidth={1.5} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-                  </svg>
+                  <Sparkline points={sparkPoints(dailyCosts(current, org.org))} color="var(--accent)" />
                   <div className="mt-1 flex justify-between font-mono text-[10px] text-faint">
                     <span>daily spend · {range}d</span>
                     <span>{formatTokens(tokens)} tokens</span>
@@ -574,7 +588,7 @@ export function OverviewView({
                 );
               })}
               <span aria-hidden="true" className="mx-1 h-4 w-px bg-border" />
-              {[{ label: "All orgs", org: null as string | null }, ...workspaces.map((o) => ({ label: o.org, org: o.org as string | null }))].map((chip) => {
+              {[{ label: "All orgs", org: null as string | null, avatar: null as string | null }, ...workspaces.map((o) => ({ label: o.org, org: o.org as string | null, avatar: o.avatar as string | null }))].map((chip) => {
                 const active = orgFilter === chip.org;
                 return (
                   <button
@@ -582,10 +596,11 @@ export function OverviewView({
                     type="button"
                     aria-pressed={active}
                     onClick={() => { setOrgFilter(active ? null : chip.org); setShowAll(false); }}
-                    className={`cursor-pointer whitespace-nowrap rounded-full border px-2.5 py-1 text-[11.5px] ${
+                    className={`inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[11.5px] ${
                       active ? "border-accent bg-accent-soft text-text" : "border-border text-muted hover:border-accent hover:text-text"
                     }`}
                   >
+                    {chip.org != null && <OrgTile org={chip.org} avatar={chip.avatar} size={14} />}
                     {chip.label}
                   </button>
                 );

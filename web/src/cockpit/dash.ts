@@ -167,6 +167,122 @@ export function orgColorFor(name: string): string {
   return `oklch(0.72 0.17 ${orgHue(name)})`;
 }
 
+/** Orange ramp slot for a multi-series chart (issue #445): series take `var(--chart-N)` by
+ *  series index, so org identity is carried by the avatar in legends/chips — never by hue.
+ *  Per-theme values live in index.css, readable in light and dark. */
+export function chartColor(index: number): string {
+  return `var(--chart-${(index % 5) + 1})`;
+}
+
+/** A point in chart viewBox units: x spans 0..100 across the series, y spans 0..100 top to
+ *  bottom (an SVG-native frame, so % overlays and the SVG agree without measuring). */
+export interface ChartPoint {
+  x: number;
+  y: number;
+}
+
+/** ViewBox y for a value on a 0..max scale: the max sits `topPad` off the top edge, zero on
+ *  the baseline at 100. Values below zero clamp to the frame instead of escaping it (bars
+ *  ignore non-positive segments outright); a non-positive max collapses to the baseline. */
+export function chartY(v: number, max: number, topPad = 2): number {
+  if (!(max > 0)) return 100;
+  return Math.min(100, Math.max(0, 100 - (v / max) * (100 - topPad)));
+}
+
+/** Splits a gappy series into drawable runs of viewBox points: null/NaN/unmeasured days end
+ *  the current run, so the line breaks rather than zeroing through a gap. `topPad` keeps the
+ *  max value off the frame's top edge; the baseline sits at y=100. */
+export function chartRuns(values: (number | null)[], max: number, topPad = 2): ChartPoint[][] {
+  const runs: ChartPoint[][] = [];
+  let run: ChartPoint[] = [];
+  const n = values.length;
+  values.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v) || max <= 0 || n === 0) {
+      if (run.length > 0) runs.push(run);
+      run = [];
+      return;
+    }
+    run.push({
+      x: ((i + 0.5) / n) * 100,
+      y: chartY(v, max, topPad),
+    });
+  });
+  if (run.length > 0) runs.push(run);
+  return runs;
+}
+
+/** The previous period's points with gaps joined, not split: the ghost dashed line connects
+ *  across unmeasured days exactly like the old polyline did, so sparse history still draws a
+ *  visible line instead of vanishing one-point subpaths. */
+export function joinedPoints(values: (number | null)[], max: number, topPad = 2): ChartPoint[] {
+  const pts: ChartPoint[] = [];
+  const n = values.length;
+  values.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) return;
+    pts.push({ x: ((i + 0.5) / n) * 100, y: chartY(v, max, topPad) });
+  });
+  return pts;
+}
+
+const coord = (v: number): string => (Math.round(v * 10) / 10).toString();
+
+/** Monotone cubic (Fritsch–Carlson) SVG path through the points: the curve passes through
+ *  every point and never overshoots monotone data, unlike straight polylines or Catmull-Rom.
+ *  Single points emit a bare moveto (the caller dots them); pairs emit a straight segment. */
+export function monotonePath(pts: ChartPoint[]): string {
+  if (pts.length === 0) return "";
+  if (pts.length === 1) return `M${coord(pts[0].x)},${coord(pts[0].y)}`;
+  if (pts.length === 2) return `M${coord(pts[0].x)},${coord(pts[0].y)}L${coord(pts[1].x)},${coord(pts[1].y)}`;
+  const n = pts.length;
+  const h: number[] = [];
+  const m: number[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const dx = pts[i + 1].x - pts[i].x;
+    h.push(dx);
+    m.push(dx === 0 ? 0 : (pts[i + 1].y - pts[i].y) / dx);
+  }
+  const t: number[] = new Array(n);
+  t[0] = m[0];
+  t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    if (m[i - 1] === 0 || m[i] === 0 || (m[i - 1] < 0) !== (m[i] < 0)) t[i] = 0;
+    else {
+      // Weighted harmonic mean of the neighbouring secants, then the Carlson limiter so a
+      // steep jump beside a flat stretch cannot bow the curve past either endpoint.
+      const w1 = 2 * h[i] + h[i - 1];
+      const w2 = h[i] + 2 * h[i - 1];
+      t[i] = (w1 + w2) / (w1 / m[i - 1] + w2 / m[i]);
+    }
+  }
+  for (let i = 0; i < n - 1; i++) {
+    if (m[i] === 0) continue;
+    const a = t[i] / m[i];
+    const b = t[i + 1] / m[i];
+    const s = a * a + b * b;
+    if (s > 9) {
+      const tau = 3 / Math.sqrt(s);
+      t[i] = tau * a * m[i];
+      t[i + 1] = tau * b * m[i];
+    }
+  }
+  let d = `M${coord(pts[0].x)},${coord(pts[0].y)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const c1x = pts[i].x + h[i] / 3;
+    const c1y = pts[i].y + t[i] * h[i] / 3;
+    const c2x = pts[i + 1].x - h[i] / 3;
+    const c2y = pts[i + 1].y - t[i + 1] * h[i] / 3;
+    d += `C${coord(c1x)},${coord(c1y)} ${coord(c2x)},${coord(c2y)} ${coord(pts[i + 1].x)},${coord(pts[i + 1].y)}`;
+  }
+  return d;
+}
+
+/** The gradient area under a smoothed run: the line path closed down to the baseline. */
+export function monotoneArea(pts: ChartPoint[], baseline = 100): string {
+  const line = monotonePath(pts);
+  if (!line || pts.length < 2) return "";
+  return `${line}L${coord(pts[pts.length - 1].x)},${baseline}L${coord(pts[0].x)},${baseline}Z`;
+}
+
 /** Per-model colour: the design's three pinned hues by name fragment, anything else hashed
  *  like an org so a new model still draws deterministically. */
 export function modelColorFor(model: string): string {
