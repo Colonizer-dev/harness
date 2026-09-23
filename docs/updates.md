@@ -19,7 +19,10 @@ v0.1.4 (1367191, built 2026-09-17T17:21:32Z)
 The same three facts — the tag, the commit and the build time — are in
 **Settings → Updates**, and at `GET /api/version`. They are stamped into the
 binary at build time from git, not read from a file next to it, so a binary
-cannot be made to claim a version it is not.
+cannot be made to claim a version it is not. The release workflow passes the
+tag and commit in as `COLONIZER_DESCRIBE` and `COLONIZER_COMMIT`, because the
+Linux harness is built in a container without git; a build that sets them is
+stamped with them rather than asking git.
 
 A build that is not a release says so:
 
