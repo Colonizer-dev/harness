@@ -3,7 +3,7 @@
 // counts, and the prompt asks for pending orgs one at a time in a stable order.
 import { describe, expect, it } from "vitest";
 
-import { orgEnabled, orgEntries, pendingOrgPrompt } from "./orgs";
+import { memoryBadge, orgEnabled, orgEntries, pendingOrgPrompt, reconcileSelectedOrg, toggledOrg, viewAfterOrgSwitch } from "./orgs";
 import type { OrgInfo, Session } from "./types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -144,5 +144,78 @@ describe("orgEnabled", () => {
     expect(orgEnabled({ enabled: null })).toBe(true);
     expect(orgEnabled({ enabled: true })).toBe(true);
     expect(orgEnabled({ enabled: false })).toBe(false);
+  });
+});
+
+// The cockpit's org selection (issue #411): the way back to every workspace, a stored choice that
+// no longer names a workspace, the memory badge, and which view survives a switch.
+describe("toggledOrg", () => {
+  it("selects an org that is not the current one", () => {
+    expect(toggledOrg(null, "acme")).toBe("acme");
+    expect(toggledOrg("octo", "acme")).toBe("acme");
+  });
+
+  it("clears the filter on a second click on the chosen org, whatever the case", () => {
+    expect(toggledOrg("acme", "acme")).toBeNull();
+    expect(toggledOrg("Acme", "acme")).toBeNull();
+  });
+
+  it("clears the filter for the All workspaces choice", () => {
+    expect(toggledOrg("acme", null)).toBeNull();
+  });
+});
+
+describe("reconcileSelectedOrg", () => {
+  const entries = orgEntries([org("Acme"), org("octo", { settings: { enabled: false } })], [session({ repo: "globex/site", org: "globex" })]);
+
+  it("keeps no selection as no selection", () => {
+    expect(reconcileSelectedOrg(null, entries, false)).toBeNull();
+  });
+
+  it("keeps a workspace, in the list's own spelling", () => {
+    expect(reconcileSelectedOrg("acme", entries, false)).toBe("Acme");
+    expect(reconcileSelectedOrg("globex", entries, false)).toBe("globex");
+  });
+
+  it("clears an org that has gone from both lists", () => {
+    expect(reconcileSelectedOrg("initech", entries, false)).toBeNull();
+    expect(reconcileSelectedOrg("initech", entries, true)).toBeNull();
+  });
+
+  it("clears a switched-off org in the cockpit, and keeps it where the sidebar can show it", () => {
+    expect(reconcileSelectedOrg("octo", entries, false)).toBeNull();
+    expect(reconcileSelectedOrg("octo", entries, true)).toBe("octo");
+  });
+
+  it("clears an org still awaiting a decision: it is not a workspace yet", () => {
+    const pending = orgEntries([org("acme", { awaiting_decision: true })], []);
+    expect(reconcileSelectedOrg("acme", pending, true)).toBeNull();
+  });
+});
+
+describe("memoryBadge", () => {
+  const { visible } = orgEntries([org("acme", { pending_memory: 2 }), org("octo", { pending_memory: 0 })], []);
+
+  it("is the global count across every workspace, org-less proposals included", () => {
+    expect(memoryBadge(null, visible, 5)).toBe(5);
+  });
+
+  it("is the chosen org's own count, matched case-insensitively", () => {
+    expect(memoryBadge("ACME", visible, 5)).toBe(2);
+    expect(memoryBadge("octo", visible, 5)).toBe(0);
+  });
+
+  it("is 0 for an org the list does not know", () => {
+    expect(memoryBadge("initech", visible, 5)).toBe(0);
+  });
+});
+
+describe("viewAfterOrgSwitch", () => {
+  it("keeps the views that read the chosen org", () => {
+    for (const view of ["home", "history", "launch", "memory"] as const) expect(viewAfterOrgSwitch(view)).toBe(view);
+  });
+
+  it("falls back to the nest from views that are not about the chosen org", () => {
+    for (const view of ["overview", "colony", "inbox", "settings"] as const) expect(viewAfterOrgSwitch(view)).toBe("home");
   });
 });

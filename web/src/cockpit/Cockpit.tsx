@@ -10,7 +10,7 @@ import type { QuestionActions } from "../components/AskUserCard";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
-import { orgEntries } from "../orgs";
+import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -66,12 +66,15 @@ export function Cockpit({
   autopilotDefault,
   launchRequests,
   settingsRequests,
+  memoryRequests = 0,
+  pendingMemory = 0,
   settings,
   onSessionChanged,
   onRedStart,
   onRedStop,
   onCreated,
   onOpenSettings,
+  onOpenOrgSettings,
   onInspectorShown,
   colony,
   memory,
@@ -96,6 +99,10 @@ export function Cockpit({
   launchRequests: number;
   /** Bumped whenever something outside the cockpit asks for settings, with the section already set. */
   settingsRequests: number;
+  /** Bumped whenever something outside the cockpit asks for memory (a colony's "memory" link). */
+  memoryRequests?: number;
+  /** Memory proposals waiting for review across every org; the rail's badge narrows it to the chosen org. */
+  pendingMemory?: number;
   /** The settings body, given the way back out — the cockpit owns the view, so it owns the exit. */
   settings: (close: () => void) => ReactNode;
   onSessionChanged: (session: Session) => void;
@@ -103,6 +110,8 @@ export function Cockpit({
   onRedStop?: (id: string) => Promise<void>;
   onCreated: (session: Session) => void;
   onOpenSettings: (section?: SectionId) => void;
+  /** One org's settings dialog, which App owns; how a switched-off org gets switched back on. */
+  onOpenOrgSettings?: (org: string) => void;
   /** Told whether the inspector is on screen, so App can keep its fixed cards clear of it. */
   onInspectorShown?: (shown: boolean) => void;
   /** The open colony's own pane, wired by App (chat, terminal, publish). */
@@ -142,6 +151,10 @@ export function Cockpit({
     if (settingsRequests > 0) setView("settings");
   }, [settingsRequests]);
 
+  useEffect(() => {
+    if (memoryRequests > 0) setView("memory");
+  }, [memoryRequests]);
+
   const toggleTheme = useCallback(() => {
     setTheme((current) => {
       // The first press flips whatever the OS is showing, so the button never looks like a no-op.
@@ -168,7 +181,8 @@ export function Cockpit({
   // orgEntries decides what counts as a workspace: an org still awaiting a decision is not one yet
   // (the prompt card is where that is answered), and a switched-off one is hidden. The rail and the
   // switcher must agree with the sidebar about that, so they read the same function.
-  const workspaces = useMemo(() => orgEntries(orgs, sessions).visible, [orgs, sessions]);
+  const entries = useMemo(() => orgEntries(orgs, sessions), [orgs, sessions]);
+  const workspaces = entries.visible;
 
   const inOrg = useMemo(
     () => sortSessions(selectedOrg ? sessions.filter((s) => sameOrg(orgOf(s), selectedOrg)) : sessions),
@@ -235,6 +249,19 @@ export function Cockpit({
   }, [sessions]);
 
   const navigate = useCallback((next: CockpitView) => setView(next), []);
+
+  // The rail and the header switch org the same way. The view survives when it reads the chosen
+  // org (viewAfterOrgSwitch), and so does the inspector unless it is on a colony the new filter hides.
+  const switchOrg = useCallback(
+    (org: string | null) => {
+      onSelectOrg(org);
+      setView(viewAfterOrgSwitch);
+      setInspector((current) =>
+        current?.kind === "colony" && org !== null && !sameOrg(orgOf(current.session), org) ? null : current,
+      );
+    },
+    [onSelectOrg],
+  );
 
   const openColonyById = useCallback(
     (id: string) => {
@@ -352,27 +379,22 @@ export function Cockpit({
       <Rail
         orgs={workspaces}
         selectedOrg={selectedOrg}
-        onSelectOrg={(org) => {
-          onSelectOrg(org);
-          setView("home");
-          setInspector(null);
-        }}
+        onSelectOrg={switchOrg}
         view={view}
         onNavigate={navigate}
         needCount={needAnywhere}
         needByOrg={needByOrg}
+        pendingMemory={memoryBadge(selectedOrg, workspaces, pendingMemory)}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
       <div className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
         <Header
           orgs={workspaces}
+          hiddenOrgs={entries.hidden}
           selectedOrg={selectedOrg}
-          onSelectOrg={(org) => {
-            onSelectOrg(org);
-            setView("home");
-            setInspector(null);
-          }}
+          onSelectOrg={switchOrg}
+          onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
           needByOrg={needByOrg}
           crumb={CRUMB[view]}
           liveCount={liveCount}
