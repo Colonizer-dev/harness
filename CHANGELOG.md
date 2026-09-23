@@ -30,6 +30,9 @@ setting) is called out under **Take care** rather than left for you to find.
   pull request counts as a write too. Unset, nothing changes. ([#84])
 - A publish refuses to open or reuse a pull request if the branch head moved
   after the push, and logs the SHA-256 of the PR body it sends. ([#84])
+- **Switch a running colony's model.** A `set_model` command changes the model
+  for the colony's next turns in the same session, conversation and microVM,
+  until it is stopped. ([#240])
 
 ### Take care
 
@@ -310,6 +313,7 @@ Macs. ([#74])
 [#210]: https://github.com/Colonizer-dev/harness/issues/210
 [#212]: https://github.com/Colonizer-dev/harness/issues/212
 [#215]: https://github.com/Colonizer-dev/harness/issues/215
+[#240]: https://github.com/Colonizer-dev/harness/issues/240
 [#276]: https://github.com/Colonizer-dev/harness/pull/276
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5

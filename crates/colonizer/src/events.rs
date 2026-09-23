@@ -218,10 +218,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         .await;
     }
 
-    // Progress for the watchdog: anything but status changes and the echo of its own nudges.
+    // Progress for the watchdog: anything but status changes, the echo of its own nudges, and a
+    // `model_changed` (a user's switch, or init announcing the model, is not the agent working).
     let watchdog_echo =
         matches!(&deserialised, Ok(AgentEvent::UserMessage { id: echoed, .. }) if echoed.starts_with("watchdog-"));
-    if !matches!(&deserialised, Ok(AgentEvent::Status { .. })) && !watchdog_echo {
+    let model_changed = event["type"] == "model_changed";
+    if !matches!(&deserialised, Ok(AgentEvent::Status { .. })) && !watchdog_echo && !model_changed {
         {
             let mut activity = rt.activity.lock().await;
             activity.last = Utc::now();
@@ -733,6 +735,27 @@ mod tests {
         memory_proposal(&app, "abc", Some("repo"), "Commit style", "Keep commits small.", &[]).await;
         assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
         assert_eq!(app.memory.proposals().await.len(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A model switch is the user's doing, not the agent's: it must not clear a held colony or reset nudges.
+    #[tokio::test]
+    async fn model_changed_is_not_watchdog_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let held = json!({"reason": "autopilot_held", "nudges": 0});
+        app.update_session("abc", |x| x.attention = Some(held)).await;
+        rt.activity.lock().await.nudges = 2;
+        let switched = r#"{"seq":1,"type":"model_changed","model":"opus","previous":"sonnet"}"#;
+        handle_agent_event(&app, "abc", &rt, switched).await;
+        assert!(app.session("abc").await.unwrap().attention.is_some(), "attention survives");
+        assert_eq!(rt.activity.lock().await.nudges, 2, "nudges survive");
+
+        let progress = r#"{"seq":2,"type":"log","level":"info","message":"working"}"#;
+        handle_agent_event(&app, "abc", &rt, progress).await;
+        let attention = app.session("abc").await.unwrap().attention;
+        assert!(attention.is_none(), "real progress still clears it");
+        assert_eq!(rt.activity.lock().await.nudges, 0);
         let _ = std::fs::remove_dir_all(root);
     }
 }
