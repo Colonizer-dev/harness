@@ -86,6 +86,17 @@ export function relDelta(cur: number | null, prev: number | null): number | null
   return Number.isFinite(d) ? d : null;
 }
 
+/**
+ * The delta chip for a compared figure: the usual +/-%, or undefined when there is nothing to
+ * compare against — a previous period with nothing in it gets no chip (a percentage over zero means
+ * nothing, and the Compare switch's tooltip already says the previous period is empty).
+ */
+export function compareDelta(cur: number | null, prev: number | null): { text: string; d: number | null } | undefined {
+  if (prev == null || prev === 0) return undefined;
+  const d = relDelta(cur, prev);
+  return d == null ? undefined : { text: formatDelta(d), d };
+}
+
 export function formatDelta(d: number | null): string {
   if (d == null) return "—";
   const pct = Math.abs(d * 100);
@@ -93,9 +104,18 @@ export function formatDelta(d: number | null): string {
 }
 
 /** Sparkline points in a 100×28 box; unmeasured days sit on the baseline, never as zeroes. */
-export function sparkPoints(values: (number | null)[], w = 100, h = 28): string {
+export function sparkPoints(values: (number | null)[], w = 100, h = 28, window = 7): string {
   if (values.length === 0) return "";
-  const nums = values.map((v) => v ?? 0);
+  // A trailing rolling mean (the design's 7-day roll): per-day counts are mostly 0s and 1s, and
+  // drawn raw they read as a comb of spikes rather than a trend.
+  const raw = values.map((v) => (v != null && Number.isFinite(v) ? v : 0));
+  const span = Math.max(1, Math.min(window, raw.length));
+  const nums = raw.map((_, i) => {
+    const from = Math.max(0, i - span + 1);
+    // Divided by the full window even at the start, so the first days are not inflated by a
+    // short denominator.
+    return raw.slice(from, i + 1).reduce((a, b) => a + b, 0) / span;
+  });
   const max = Math.max(...nums);
   if (max <= 0) return values.map((_, i) => `${((i / Math.max(1, values.length - 1)) * w).toFixed(1)},${h}`).join(" ");
   return nums.map((v, i) => `${((i / Math.max(1, values.length - 1)) * w).toFixed(1)},${(h - 2 - (v / max) * (h - 4)).toFixed(1)}`).join(" ");
@@ -203,7 +223,7 @@ export function chartRuns(values: (number | null)[], max: number, topPad = 2): C
       return;
     }
     run.push({
-      x: ((i + 0.5) / n) * 100,
+      x: colX(i, n),
       y: chartY(v, max, topPad),
     });
   });
@@ -219,7 +239,7 @@ export function joinedPoints(values: (number | null)[], max: number, topPad = 2)
   const n = values.length;
   values.forEach((v, i) => {
     if (v == null || !Number.isFinite(v)) return;
-    pts.push({ x: ((i + 0.5) / n) * 100, y: chartY(v, max, topPad) });
+    pts.push({ x: colX(i, n), y: chartY(v, max, topPad) });
   });
   return pts;
 }
@@ -306,7 +326,7 @@ export function deltaTone(delta: number | null, goodWhen: "up" | "down" = "up"):
 // Overview derivations (issue #398): everything the OVERVIEW screen reads off the
 // session list. Merged PRs bucket by merged_at (falling back to created_at when the
 // mothership omits it); failed sessions bucket by created_at. Lead time / PR cycle
-// time / CI pass rate have no helper here at all, and the change-failure rate is a
+// time / CI pass rate live in delivery.ts, and the change-failure rate is a
 // snapshot reading (failed ÷ decided in the window, merged read by merge time and
 // failed by created_at), never a history.
 // ---------------------------------------------------------------------------
@@ -447,4 +467,11 @@ export function providerSnapshots(from: readonly ModelProviderStatus[] | null | 
     failures: Math.round((p.requests * (p.failure_pct ?? 0)) / 100),
     avgLatencyMs: p.avg_latency_ms > 0 ? p.avg_latency_ms : null,
   }));
+}
+
+/** Where day `i` of `n` sits across a chart, in percent: edge to edge, so the first day is on the
+ *  left edge and the last on the right edge rather than half a column in from each. A single day
+ *  sits in the middle. */
+export function colX(i: number, n: number): number {
+  return n <= 1 ? 50 : (i / (n - 1)) * 100;
 }

@@ -81,6 +81,12 @@ describe("deltas", () => {
     expect(sparkPoints([null, null])).toContain(",28");
     expect(sparkPoints([])).toBe("");
   });
+
+  it("rolls per-day values over a week, so a lone spike reads as a plateau, not a comb", () => {
+    const ys = sparkPoints([0, 0, 0, 7, 0, 0, 0, 0]).split(" ").map((p) => Number(p.split(",")[1]));
+    expect(ys.slice(0, 3)).toEqual([26, 26, 26]);
+    expect(new Set(ys.slice(3)).size).toBe(1);
+  });
 });
 
 describe("funnelFor and repoRows", () => {

@@ -24,28 +24,30 @@ export function HistoryView({
   const rows = historyRows(sessions, filter, new Date());
 
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-5 pb-10 pt-7">
-      <div className="mx-auto w-full max-w-[720px]">
-        <div className="mb-4 flex items-center gap-2.5">
-          <div className="font-mono text-[11px] tracking-[0.14em] text-faint">HISTORY · {org ?? "all workspaces"}</div>
-          <div className="flex-1" />
-          {FILTERS.map((name) => (
-            <button
-              key={name}
-              type="button"
-              aria-pressed={filter === name}
-              onClick={() => setFilter(name)}
-              className={`cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[11.5px] ${
-                filter === name ? "border-accent bg-accent-soft text-text" : "border-border text-muted hover:text-text"
-              }`}
-            >
-              {name}
-            </button>
-          ))}
+    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
+      <div className="mx-auto w-full max-w-[1080px]">
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">History</h1>
+            <div className="mt-2 text-[14px] text-muted">{org ?? "All workspaces"}</div>
+          </div>
+          <div role="group" aria-label="history filter" className="flex flex-wrap gap-0.5 rounded-lg border border-border p-0.5">
+            {FILTERS.map((name) => (
+              <button
+                key={name}
+                type="button"
+                aria-pressed={filter === name}
+                onClick={() => setFilter(name)}
+                className={`cursor-pointer rounded-md border-0 px-2.5 py-1 text-[12.5px] ${filter === name ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
         </div>
 
         {rows.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">
+          <div className="border-y border-border py-3.5 text-[13px] text-muted">
             nothing here yet under this filter
           </div>
         ) : (
@@ -54,14 +56,14 @@ export function HistoryView({
             {rows.map(({ day, entry }) => (
               <div key={entry.id}>
                 {day && (
-                  <div className="relative -ml-5.5 bg-bg pb-2 pt-3.5 font-mono text-[10.5px] tracking-[0.14em] text-faint">
+                  <div className="relative -ml-5.5 bg-bg pb-2 pt-4 text-[13px] font-medium text-muted">
                     {day}
                   </div>
                 )}
                 <button
                   type="button"
                   onClick={() => onOpenColony(entry.id)}
-                  className="relative grid w-full cursor-pointer grid-cols-[52px_minmax(0,1fr)_auto] items-baseline gap-3 rounded-[10px] py-2 pr-3 text-left hover:bg-panel"
+                  className="relative grid w-full cursor-pointer grid-cols-[52px_minmax(0,1fr)_auto] items-baseline gap-3 rounded-md border-0 bg-transparent py-2 pr-3 text-left text-text hover:bg-panel-2"
                 >
                   <span
                     aria-hidden="true"

@@ -48,6 +48,8 @@ export interface StallInfo {
   queued: number;
 }
 
+export type CiState = "success" | "failure" | "pending" | "no_checks";
+
 export interface Session {
   id: string;
   repo: string;
@@ -110,6 +112,12 @@ export interface Session {
   created_at: string;
   /** When the PR merged (GitHub mergedAt, or when the mothership saw the flip); omitted when absent. */
   merged_at?: string | null;
+  /** When the pull request was opened (GitHub's createdAt); absent until the PR watcher reads it. */
+  pr_opened_at?: string | null;
+  /** The pull request's checks in one word, as last read by the PR watcher. */
+  ci_state?: CiState | null;
+  /** The files the colony's pull request changed (first 500); absent until read from GitHub. */
+  changed_paths?: string[];
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
@@ -762,6 +770,8 @@ export interface OrgInfo {
   settings: OrgSettings;
   /** The org's GitHub avatar. Absent when unknown — an org that only appears in the colony list has none. */
   avatar_url?: string;
+  /** The org's GitHub description. Absent when it has none, or on a mothership that does not send it. */
+  description?: string;
   /**
    * True for a newly-appeared org the operator has not decided about yet; it is not a workspace
    * until then. Optional so an older mothership that never sends it simply has no pending orgs.
@@ -863,6 +873,24 @@ export interface Mem0Status {
   active: boolean;
 }
 
+/** The voice module's active speech-to-text service (GET /api/voice). Never the key. */
+export interface VoiceStatus {
+  /** `browser` is the browser's own recogniser; anything else is a service the Mothership calls. */
+  provider: string;
+  name: string;
+  model: string;
+  /** ISO-639-1, or empty for auto-detect. */
+  language: string;
+  /** The service can be used now: a key is set (or not needed) and a base URL is known. Always true for `browser`. */
+  configured: boolean;
+  has_key: boolean;
+  /** `saved`, the env var's name, or `provider:<id>` when a model provider's key is reused. */
+  source: string | null;
+  key_optional: boolean;
+  max_seconds: number;
+  max_bytes: number;
+}
+
 export interface Mem0Check {
   ok: boolean;
   error?: string;
@@ -955,7 +983,9 @@ export type ServerFrame =
   | { type: "session"; session: Session }
   | { type: "harness_log"; level: LogLevel; message: string; ts: string }
   | { type: "memory_proposed"; proposal: MemoryProposal }
-  | { type: "run_epoch"; epoch: number };
+  | { type: "run_epoch"; epoch: number }
+  /** The backlog replay is complete; everything after it is live. */
+  | { type: "replay_done"; seq: number };
 
 export type ClientCommand =
   | { type: "user_message"; text: string }
@@ -1043,6 +1073,13 @@ export interface RedTeamRun {
   ended_at: string | null;
   /** The server's reason for holding an armed run at the gate; null while none applies. */
   gate_reason: string | null;
+  /** Who hunts: `swarm` (colony hunters). Absent from runs made before hunters were named. */
+  hunter?: string;
+  /** The hunters' orchestrator / subagent models when named; null uses the agent defaults. */
+  model?: string | null;
+  subagent_model?: string | null;
+  /** The schedule that started this run, if one did. */
+  schedule_id?: string | null;
 }
 
 /** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */
@@ -1052,4 +1089,57 @@ export interface StartRedTeamRunRequest {
   modules?: string[];
   autofix?: boolean;
   arm?: boolean;
+  hunter?: string;
+  model?: string | null;
+  subagent_model?: string | null;
+}
+
+/** When a red-team schedule fires, in UTC. `weekday` 0 = Monday; a monthly `day` past the month's end fires on its last day. */
+export type RedTeamCadence =
+  | { every: "weekly"; weekday: number; hour: number; minute: number }
+  | { every: "monthly"; day: number; hour: number; minute: number };
+
+/** A recurring red-team run (GET /api/redteam/schedules). */
+export interface RedTeamSchedule {
+  id: string;
+  org: string;
+  repos: string[];
+  hunter: string;
+  swarm_size: number;
+  model: string | null;
+  subagent_model: string | null;
+  autofix: boolean;
+  cadence: RedTeamCadence;
+  enabled: boolean;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_result: string | null;
+  created_at: string;
+}
+
+/** POST /api/redteam/schedules, and PUT /api/redteam/schedules/{id} (a full replace). */
+export interface NewRedTeamSchedule {
+  org: string;
+  repos: string[];
+  hunter?: string;
+  swarm_size?: number;
+  model?: string | null;
+  subagent_model?: string | null;
+  autofix?: boolean;
+  cadence: RedTeamCadence;
+  enabled?: boolean;
+}
+
+/** GET /api/hunters/{id}/probe: whether an external hunter is installed and could run here. */
+export interface HunterProbe {
+  manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };
+  installed: string | null;
+  probe: { runtime_ok: boolean; docker_ok: boolean; ready: boolean; detail: string };
+}
+
+/** GET /api/repos/{owner}/{repo}/packages: whether the repository is a monorepo, and its packages. */
+export interface RepoPackages {
+  monorepo: boolean;
+  tool: string | null;
+  packages: { name: string; path: string }[];
 }

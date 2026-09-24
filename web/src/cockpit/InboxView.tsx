@@ -9,9 +9,11 @@ import { useState, type ReactElement } from "react";
 import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { Session } from "../types";
+import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { feedEntries, type FeedKind } from "./feed";
 
-const READ_AT = "colonizer.inboxReadAt";
+/** The local "read up to" mark, shared by the inbox and the header's notifications panel. */
+export const READ_AT = "colonizer.inboxReadAt";
 
 /** The dot beside a line. Kept in step with the timeline's, so one colony reads the same in both. */
 export const KIND_DOT: Record<FeedKind, string> = {
@@ -37,6 +39,7 @@ export function InboxView({
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
 
   const waiting = sessions.filter(needsYou);
+  const questions = useOpenQuestions(sessions);
   const entries = feedEntries(sessions);
 
   const markAllRead = () => {
@@ -46,22 +49,27 @@ export function InboxView({
   };
 
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-5 pb-10 pt-7">
-      <div className="mx-auto flex w-full max-w-[720px] flex-col gap-4">
-        <div className="flex items-center gap-2.5">
-          <div className="font-mono text-[11px] tracking-[0.14em] text-warn">NEEDS YOU · {waiting.length}</div>
-          <div className="flex-1" />
+    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
+      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-4">
+        <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Inbox</h1>
+            <div className="mt-2 text-[14px] text-muted">
+              <span className={waiting.length > 0 ? "text-warn" : undefined}>{waiting.length} need you</span> · every workspace
+            </div>
+          </div>
           <button
             type="button"
             onClick={onOpenNotificationSettings}
-            className="cursor-pointer text-[12.5px] text-muted hover:text-text"
+            className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text"
           >
             notification settings ›
           </button>
         </div>
+        <h2 className="m-0 text-[14px] font-medium">Needs you</h2>
 
         {waiting.length === 0 ? (
-          <div className="flex items-center gap-3 rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">
+          <div className="flex items-center gap-3 border-y border-border py-3.5 text-[13px] text-muted">
             <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" className="text-ok">
               <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
               <path d="m8.5 12 2.5 2.5 4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -72,7 +80,7 @@ export function InboxView({
           waiting.map((session) => (
             <div
               key={session.id}
-              className="rounded-2xl border border-warn bg-panel px-4.5 py-4"
+              className="-mt-4 border-y border-border py-4 first-of-type:mt-0"
               style={{ animation: "ck-in 0.24s ease-out both" }}
             >
               <div className="flex items-center gap-2.5 font-mono text-[11.5px] text-muted">
@@ -84,13 +92,13 @@ export function InboxView({
                 <button
                   type="button"
                   onClick={() => onOpenColony(session.id)}
-                  className="ml-auto cursor-pointer font-sans text-[12.5px] font-semibold text-accent"
+                  className="ml-auto cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 font-sans text-[13px] font-medium text-bg hover:opacity-85"
                 >
-                  open colony →
+                  Answer
                 </button>
               </div>
-              <div className="mt-2 text-[15px] font-semibold">
-                {session.attention ? "the watchdog flagged this colony" : "the colony asked you a question"}
+              <div className="mt-2 text-[15px] font-semibold [text-wrap:pretty]">
+                {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
               </div>
               <div className="mt-1 text-[13px] text-muted">{session.issue_title || "no title yet"}</div>
             </div>
@@ -98,19 +106,19 @@ export function InboxView({
         )}
 
         <div className="mt-2.5 flex items-center gap-2.5">
-          <div className="font-mono text-[11px] tracking-[0.14em] text-faint">NOTIFICATIONS</div>
+          <h2 className="m-0 text-[14px] font-medium">Notifications</h2>
           <div className="flex-1" />
-          <button type="button" onClick={markAllRead} className="cursor-pointer text-[12.5px] text-muted hover:text-text">
+          <button type="button" onClick={markAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
             mark all read
           </button>
         </div>
 
         {entries.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-panel px-4 py-3.5 text-[13px] text-muted">
+          <div className="border-y border-border py-3.5 text-[13px] text-muted">
             no colonies in this workspace yet
           </div>
         ) : (
-          <div className="overflow-hidden rounded-2xl border border-border bg-panel">
+          <div className="overflow-hidden border-y border-border">
             {entries.map((entry) => {
               const unread = Date.parse(entry.at) > readAt;
               return (
@@ -118,7 +126,7 @@ export function InboxView({
                   key={entry.id}
                   type="button"
                   onClick={() => onOpenColony(entry.id)}
-                  className={`grid w-full cursor-pointer grid-cols-[10px_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-2.5 text-left last:border-b-0 hover:bg-panel-2 ${
+                  className={`-mt-px grid w-full cursor-pointer grid-cols-[10px_minmax(0,1fr)_auto] items-center gap-3 border-0 border-t border-solid border-border bg-transparent py-3 text-left text-text hover:bg-panel-2 ${
                     unread ? "opacity-100" : "opacity-60"
                   }`}
                 >
@@ -139,7 +147,7 @@ export function InboxView({
 }
 
 /** Short enough for the right-hand column: "3m", "2h", "4d". */
-function relative(at: string): string {
+export function relative(at: string): string {
   const seconds = Math.max(0, (Date.now() - Date.parse(at)) / 1000);
   if (Number.isNaN(seconds)) return "";
   if (seconds < 60) return "now";

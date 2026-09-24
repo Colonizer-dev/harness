@@ -38,7 +38,7 @@ Elements that are easy to remember as missing, and where they are.
 | The crew strip, "3 settlers · all done" | `colonizer-website/index.html`, "01 / the colony" | `web/src/components/ChatPanel.tsx`, `CrewStrip` |
 | A question card with choices and "Other…" | `colonizer-website/index.html`, "01 / the colony" | `web/src/components/AskUserCard.tsx` |
 | Create PR, Stop, Clean up, and the activity strip | `colonizer-website/index.html`, "01 / the colony" | `web/src/components/SessionView.tsx` |
-| The sidebar: orgs, connections, colonies, memory | `colonizer-website/index.html`, "01 / the colony" | `web/src/components/Sidebar.tsx`, in windows narrower than 900px; a wider window shows the cockpit's rail instead (`web/src/App.tsx`, `web/src/cockpit/Rail.tsx`) |
+| The sidebar: orgs, connections, colonies, memory | `colonizer-website/index.html`, "01 / the colony" | `web/src/components/Sidebar.tsx`, in windows narrower than 900px; a wider window shows the cockpit's sidebar instead (`web/src/App.tsx`, `web/src/cockpit/NavRail.tsx`) |
 | Twelve settler roles | `colonizer-website/colonies.html`, "03 / settlers" | `web/src/settlers.ts`, `web/src/components/AntAvatar.tsx` |
 | Five ant states, and a stumble on a failed step | `colonizer-website/colonies.html`, "the ant shows what its settler is doing" | `web/src/components/AntAvatar.tsx`; "stopped" is its `paused` state |
 | A model for each kind of work | `colonizer-website/index.html`, "03 / the router" illustration | `web/src/components/SettingsDialog.tsx` |

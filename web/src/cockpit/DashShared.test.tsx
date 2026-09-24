@@ -1,20 +1,24 @@
-// Shared foundation (issue #398): pure colour/delta helpers and static markup for the shared
-// primitives — renderToStaticMarkup runs no effects, exactly like the existing dashboard tests.
+// Shared foundation (issue #398, v3 pass): pure colour/delta/geometry helpers and static markup
+// for the shared primitives — renderToStaticMarkup runs no effects, exactly like the existing
+// dashboard tests.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import type { Session } from "../types";
 import {
-  DashBars,
+  AreaChart,
+  ChartSection,
+  ColonyRow,
   DashLegend,
-  DashLine,
-  DashPanel,
-  Eyebrow,
-  FilterChip,
+  KpiStrip,
   KpiTile,
+  niceStep,
   RangePicker,
+  SegTabs,
   ShareBar,
   Sparkline,
   StatusChip,
+  stackAreas,
 } from "./DashChart";
 import { chartColor, chartRuns, chartY, deltaTone, joinedPoints, modelColorFor, monotonePath, orgColorFor, orgHue } from "./dash";
 
@@ -58,177 +62,241 @@ describe("deltaTone", () => {
   });
 });
 
-describe("KpiTile", () => {
-  it("renders the honest empty state in the same card shape", () => {
-    const html = renderToStaticMarkup(<KpiTile label="LEAD TIME" value="—" emptyNote="no data source yet" hint="lead time" />);
-    expect(html).toContain("LEAD TIME");
-    expect(html).toContain("—");
-    expect(html).toContain("no data source yet");
-    expect(html).not.toContain("<svg");
-    expect(html).toContain("rounded-[14px]");
-  });
-  it("colours the delta by tone and prefixes the direction glyph", () => {
-    const bad = renderToStaticMarkup(<KpiTile label="SPEND" value="$5" delta="6%" deltaTone="bad" deltaDir="up" hint="spend" />);
+describe("KpiTile / KpiStrip", () => {
+  it("reads a measured tile: label, value, coloured delta and a glowing sparkline", () => {
+    const bad = renderToStaticMarkup(<KpiTile label="Change failure rate" value="9.0%" delta="+1.2 pts" deltaTone="bad" spark="0,20 50,10 100,4" hint="h" />);
+    expect(bad).toContain("Change failure rate");
     expect(bad).toContain("text-err");
-    expect(bad).toContain("▲");
-    const good = renderToStaticMarkup(<KpiTile label="SPEND" value="$5" delta="6%" deltaTone="good" deltaDir="down" hint="spend" />);
+    expect(bad).toContain("drop-shadow");
+    expect(bad).toContain('viewBox="0 0 100 28"');
+    const good = renderToStaticMarkup(<KpiTile label="Merged PRs" value="12" delta="+20%" deltaTone="good" hint="h" />);
     expect(good).toContain("text-ok");
-    expect(good).toContain("▼");
   });
-  it("paints the sparkline area under the smoothed line with a glowing stroke", () => {
-    const html = renderToStaticMarkup(<KpiTile label="LAUNCHED" value="3" spark="0,28 50,10 100,20" hint="launched" />);
-    expect(html).toContain("linearGradient");
-    expect(html).toContain("<path");
-    expect(html).toContain("dash-draw");
-    // The historic 100×28 spark box is kept, so the org dashboard's viewBox assertion still holds.
-    expect(html).toContain('viewBox="0 0 100 28"');
+  it("shows — with the reason when a measured KPI has nothing to read", () => {
+    const html = renderToStaticMarkup(<KpiTile label="Cost per merged PR" value="—" emptyNote="nothing merged yet" hint="h" />);
+    expect(html).toContain("—");
+    expect(html).toContain("nothing merged yet");
+    expect(html).not.toContain("<path");
   });
-});
-
-describe("DashPanel / Eyebrow / DashLegend", () => {
-  it("renders the title, subtitle and legend in one card", () => {
+  it("names unmeasured KPIs once in the footnote instead of drawing empty tiles", () => {
     const html = renderToStaticMarkup(
-      <DashPanel title="SPEND PER DAY" sub="$10 over 7d" legend={<DashLegend items={[{ label: "acme", color: "red" }]} />}>
-        <div>body</div>
-      </DashPanel>,
-    );
-    expect(html).toContain("SPEND PER DAY");
-    expect(html).toContain("$10 over 7d");
-    expect(html).toContain("acme");
-    expect(html).toContain("body");
-    expect(html).toContain("rounded-2xl");
-  });
-  it("renders a caller icon in place of the colour dot when one is given", () => {
-    const html = renderToStaticMarkup(
-      <DashLegend items={[{ label: "acme", color: "red", icon: <span>AVATAR</span> }, { label: "beta", color: "blue" }]} />,
-    );
-    expect(html).toContain("AVATAR");
-    expect(html).toContain("acme");
-    // Only beta keeps the dot.
-    expect(html.match(/rounded-\[2px\]/g)).toHaveLength(1);
-  });
-  it("renders the mono eyebrow", () => {
-    expect(renderToStaticMarkup(<Eyebrow>HELLO</Eyebrow>)).toContain("tracking-[0.12em]");
-  });
-});
-
-describe("DashBars", () => {
-  const series = [
-    { label: "launched", color: "var(--info)", values: [2, 0, 3] },
-    { label: "returned", color: "var(--ok)", values: [1, 1, 0] },
-  ];
-  it("rounds only each column's top segment and gradients every segment", () => {
-    const html = renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c"]} format={(v) => String(v)} />);
-    // 4 non-zero segments, 3 of them column tops.
-    expect(html.match(/rounded-t-\[4px\]/g)).toHaveLength(3);
-    expect(html.match(/linear-gradient/g)?.length).toBeGreaterThanOrEqual(4);
-  });
-  it("draws the dashed ghost line when compare is on, and skips it otherwise", () => {
-    const ghost = [1, null, 2];
-    const withGhost = renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c"]} ghost={ghost} format={(v) => String(v)} />);
-    expect(withGhost).toContain("previous period daily total");
-    expect(withGhost).toContain("stroke-dasharray");
-    const without = renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c"]} format={(v) => String(v)} />);
-    expect(without).not.toContain("previous period daily total");
-  });
-  it("joins the ghost across gaps so sparse previous periods still draw a line", () => {
-    // Two measured days with a gap between them: one joined segment, not two
-    // invisible single-point subpaths.
-    const html = renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c", "d"]} ghost={[5, null, null, 3]} format={(v) => String(v)} />);
-    expect(html).toContain("previous period daily total");
-    expect(html).toMatch(/d="M[\d., ]+[CL]/);
-  });
-  it("dots a one-point ghost instead of vanishing it", () => {
-    const html = renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c"]} ghost={[null, 4, null]} format={(v) => String(v)} />);
-    expect(html).toContain("previous period daily total");
-    expect(html).toContain("background:var(--faint)");
-  });
-  it("makes columns keyboard-focusable with the tooltip on focus as well as hover", () => {
-    const html = renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c"]} format={(v) => String(v)} />);
-    expect(html).toContain('tabindex="0"');
-    expect(html).toContain("group-focus-within:opacity-100");
-  });
-  it("renders the y gutter and sparse x labels when asked", () => {
-    const html = renderToStaticMarkup(
-      <DashBars series={series} labels={["a", "b", "c"]} format={(v) => String(v)} formatY={(v) => `$${v}`} xLabels={["Aug 24", "Aug 25", "Aug 26"]} />,
-    );
-    expect(html).toContain("$3");
-    expect(html).toContain("Aug 24");
-    expect(html).toContain("Aug 26");
-  });
-  it("keeps the empty state", () => {
-    expect(renderToStaticMarkup(<DashBars series={[]} labels={[]} format={(v) => String(v)} />)).toContain("no data in range");
-  });
-});
-
-describe("DashLine", () => {
-  it("draws smoothed gradient lines with pulsing last dots and hover tooltips", () => {
-    const html = renderToStaticMarkup(
-      <DashLine
-        series={[
-          { label: "p50", color: "var(--lat-p50)", values: [1.2, 1.4, null, 1.1], fill: true },
-          { label: "p95", color: "var(--lat-p95)", values: [3.1, null, 3.4, 3.0] },
+      <KpiStrip
+        items={[
+          { label: "Merged PRs", value: "3", hint: "h" },
+          { label: "Lead time", value: "—", unmeasured: true, hint: "h" },
+          { label: "CI pass rate", value: "—", unmeasured: true, hint: "h" },
         ]}
-        labels={["a", "b", "c", "d"]}
-        format={(v) => `${v.toFixed(1)}s`}
+        note="API error rate 1.00%"
       />,
     );
+    expect(html).toContain("Merged PRs");
+    expect(html).toContain("Lead time and CI pass rate are not measured yet — no data source.");
+    expect(html).toContain("API error rate 1.00%");
+    expect(html.match(/text-\[28px\]/g)).toHaveLength(1);
+  });
+});
+
+describe("DashLegend", () => {
+  it("renders a square per series, a caller icon in its place, and a dashed ghost entry", () => {
+    const html = renderToStaticMarkup(
+      <DashLegend items={[{ label: "acme", color: "red" }, { label: "beta", color: "blue", icon: <i>AVATAR</i> }, { label: "prev", color: "transparent", dashed: true }]} />,
+    );
+    expect(html).toContain("acme");
+    expect(html).toContain("AVATAR");
+    expect(html).toContain("border-dashed");
+    expect(html.match(/rounded-\[2px\]/g)).toHaveLength(1);
+  });
+});
+
+describe("niceStep / stackAreas", () => {
+  it("rounds a step up to 1, 2, 2.5 or 5 × 10ⁿ", () => {
+    expect(niceStep(0.3)).toBe(0.5);
+    expect(niceStep(3)).toBe(5);
+    expect(niceStep(2.2)).toBe(2.5);
+    expect(niceStep(12)).toBe(20);
+    expect(niceStep(0)).toBe(1);
+  });
+  it("stacks each series on the one before and closes each band", () => {
+    const geo = stackAreas(
+      [
+        { label: "a", color: "red", values: [1, 2] },
+        { label: "b", color: "blue", values: [1, 2] },
+      ],
+      2,
+      4,
+    );
+    expect(geo[0].tops.map((p) => p.y)).toEqual([75, 50]);
+    expect(geo[1].tops.map((p) => p.y)).toEqual([50, 0]);
+    expect(geo[1].area.endsWith("Z")).toBe(true);
+    expect(geo[1].area).toContain(" L");
+  });
+});
+
+describe("AreaChart", () => {
+  const series = [
+    { label: "acme", color: "var(--chart-1)", values: [1, 0, 3] },
+    { label: "beta", color: "var(--chart-2)", values: [0, 2, 1] },
+  ];
+  it("draws gradient bands, lines, the now dot, axis ticks and the read-out totals", () => {
+    const html = renderToStaticMarkup(<AreaChart series={series} labels={["Sep 1", "Sep 2", "Sep 3"]} format={(v) => String(v)} readTitle="Last 3 days" />);
     expect(html).toContain("linearGradient");
-    expect(html).toContain("dash-draw");
-    // One pulsing last-point dot per solid series, as HTML so it stays circular.
-    expect(html.match(/dash-pulse/g)?.length).toBeGreaterThanOrEqual(2);
-    // Tooltip text names the day and every measured value — the accessible reading.
-    expect(html).toContain("p50:");
-    expect(html).toContain("p95:");
-    expect(html).toContain("1.1s");
+    expect(html).toContain("v3-reveal");
+    expect(html).toContain("v3-now-dot");
+    expect(html).toContain("Last 3 days");
+    expect(html).toContain("acme <span");
+    expect(html).toContain("Sep 1");
+    expect(html).toContain("h-[200px]");
   });
-  it("dots one-point runs so a lone measured day stays visible", () => {
-    const html = renderToStaticMarkup(
-      <DashLine series={[{ label: "s", color: "var(--chart-1)", values: [1, null, 2] }]} labels={["a", "b", "c"]} format={(v) => String(v)} />,
-    );
-    // The trailing lone point gets the pulsing end dot; the leading one a small static dot.
-    expect(html).toContain("dash-pulse");
-    expect(html).toContain("h-1.5 w-1.5 -translate-x-1/2");
+  it("draws the dashed ghost only when given", () => {
+    const withGhost = renderToStaticMarkup(<AreaChart series={series} labels={["a", "b", "c"]} ghost={[2, null, 1]} format={(v) => String(v)} readTitle="r" />);
+    expect(withGhost).toContain("previous period daily total");
+    expect(withGhost).toContain("stroke-dasharray");
+    const without = renderToStaticMarkup(<AreaChart series={series} labels={["a", "b", "c"]} format={(v) => String(v)} readTitle="r" />);
+    expect(without).not.toContain("previous period daily total");
   });
-  it("draws a dashed reference series and the same empty state", () => {
+  it("makes columns keyboard-focusable with a spoken summary", () => {
+    const html = renderToStaticMarkup(<AreaChart series={series} labels={["a", "b", "c"]} format={(v) => String(v)} readTitle="r" />);
+    expect(html.match(/tabindex="0"/g)).toHaveLength(3);
+    expect(html).toContain('aria-label="c: acme 3, beta 1"');
+  });
+  it("keeps an empty state", () => {
+    expect(renderToStaticMarkup(<AreaChart series={[]} labels={[]} format={String} readTitle="r" />)).toContain("no data in range");
+    expect(renderToStaticMarkup(<AreaChart series={[{ label: "a", color: "red", values: [0, 0] }]} labels={["a", "b"]} format={String} readTitle="r" emptyNote="nothing here" />)).toContain(
+      "nothing here",
+    );
+  });
+});
+
+describe("ChartSection", () => {
+  it("puts the side column beside the chart, with clickable rows when asked", () => {
     const html = renderToStaticMarkup(
-      <DashLine series={[{ label: "prev", color: "var(--faint)", values: [2, 2], dashed: true }]} labels={["a", "b"]} format={(v) => String(v)} />,
+      <ChartSection
+        title="Merged PRs per day"
+        chart={<div>CHART</div>}
+        foot="3 merged"
+        sideTitle="Share by workspace"
+        side={[
+          { label: "acme", value: 2, note: "67%", share: 67, color: "red", onClick: () => {} },
+          { label: "beta", value: 1, note: "33%", share: 33, color: "blue" },
+        ]}
+        sideFoot="All workspaces shown"
+      />,
     );
-    expect(html).toContain("stroke-dasharray");
-    expect(renderToStaticMarkup(<DashLine series={[{ label: "p50", color: "red", values: [null, null] }]} labels={["a", "b"]} format={(v) => String(v)} />)).toContain(
-      "no data in range",
+    expect(html).toContain("Merged PRs per day");
+    expect(html).toContain("CHART");
+    expect(html).toContain("Share by workspace");
+    expect(html).toContain("width:67%");
+    expect(html.match(/<button/g)).toHaveLength(1);
+    expect(html).toContain("All workspaces shown");
+  });
+
+  it("lists the first sideLimit rows with a Show all toggle, and hands the chart the hovered row", () => {
+    const side = Array.from({ length: 7 }, (_, i) => ({ label: `org${i}`, value: 7 - i, share: 10, color: "red", icon: <i>logo{i}</i> }));
+    let seen: string | null | undefined;
+    const html = renderToStaticMarkup(
+      <ChartSection
+        title="Merged PRs per day"
+        chart={(hot) => {
+          seen = hot;
+          return <div>CHART</div>;
+        }}
+        sideTitle="Share by workspace"
+        side={side}
+        sideLimit={5}
+      />,
     );
+    expect(html).toContain("org4");
+    expect(html).not.toContain("org5");
+    expect(html).toContain("logo0");
+    expect(html).toContain("Show all 7 workspaces");
+    expect(seen).toBeNull();
+  });
+
+  it("puts every series in the heading as a named, ringed logo when legendIcons is on", () => {
+    const side = Array.from({ length: 7 }, (_, i) => ({ label: `org${i}`, value: 7 - i, note: `${i}%`, share: 10, color: "rgb(1, 2, 3)", icon: <i>logo{i}</i> }));
+    const html = renderToStaticMarkup(
+      <ChartSection title="Merged PRs per day" legendIcons chart={<div>CHART</div>} sideTitle="Share by workspace" side={side} sideLimit={5} />,
+    );
+    // The legend names all seven, past the side column's limit, each with its count for a screen reader.
+    expect(html).toContain('aria-label="org6: 1 (6%)"');
+    expect(html).toContain("logo6");
+    expect(html).toContain("0 0 0 3.5px rgb(1, 2, 3)");
   });
 });
 
 describe("ShareBar", () => {
-  it("splits the strip by value with hover titles and a top-light gradient", () => {
+  it("splits the strip by value with hover titles", () => {
     const html = renderToStaticMarkup(
-      <ShareBar segments={[{ label: "a", color: "red", value: 1 }, { label: "b", color: "blue", value: 3 }]} format={(v) => String(v)} label="mix" />,
+      <ShareBar segments={[{ label: "a", color: "red", value: 3 }, { label: "b", color: "blue", value: 1 }]} format={(v) => `${v} tok`} label="mix" />,
     );
-    expect(html).toContain("25%");
-    expect(html).toContain("75%");
-    expect(html).toContain("a: 1");
-    expect(html).toContain("linear-gradient");
+    expect(html).toContain("width:75%");
+    expect(html).toContain("a: 3 tok");
   });
   it("reads empty instead of dividing by zero", () => {
-    expect(renderToStaticMarkup(<ShareBar segments={[]} format={(v) => String(v)} label="mix" />)).toContain("no data in range");
+    expect(renderToStaticMarkup(<ShareBar segments={[{ label: "a", color: "red", value: 0 }]} format={String} label="mix" />)).toContain("no data in range");
   });
 });
 
-describe("StatusChip / FilterChip / RangePicker", () => {
-  it("renders chips with tone and pressed state", () => {
-    expect(renderToStaticMarkup(<StatusChip tone="warn">1 need you</StatusChip>)).toContain("1 need you");
-    const on = renderToStaticMarkup(<FilterChip active count={4} label="need you" onClick={() => {}} />);
-    expect(on).toContain('aria-pressed="true"');
-    expect(on).toContain("bg-accent-soft");
-    const off = renderToStaticMarkup(<FilterChip active={false} count={4} label="need you" onClick={() => {}} />);
-    expect(off).toContain('aria-pressed="false"');
+describe("StatusChip / SegTabs / RangePicker", () => {
+  it("renders tone text and pressed segments with warn counts", () => {
+    expect(renderToStaticMarkup(<StatusChip tone="warn">2 need you</StatusChip>)).toContain("var(--warn)");
+    const tabs = renderToStaticMarkup(
+      <SegTabs
+        label="f"
+        items={[
+          { key: "all", label: "all", count: 4, active: true, onClick: () => {} },
+          { key: "need", label: "need you", count: 2, active: false, urgent: true, onClick: () => {} },
+        ]}
+      />,
+    );
+    expect(tabs).toMatch(/aria-pressed="true"[^>]*>all/);
+    expect(tabs).toContain("text-warn");
   });
-  it("renders the range switch and the compare toggle", () => {
+  it("renders the range segments and the compare switch", () => {
     const html = renderToStaticMarkup(<RangePicker range={30} onRange={() => {}} compare onCompare={() => {}} />);
-    expect(html).toContain('aria-label="Range"');
-    for (const text of [">7d<", ">30d<", ">90d<", "Compare to previous 30d"]) expect(html).toContain(text);
+    for (const r of ["7d", "30d", "90d"]) expect(html).toContain(r);
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('aria-checked="true"');
+    expect(html).toContain("Compare");
+  });
+});
+
+describe("Sparkline", () => {
+  it("draws one glowing smoothed line", () => {
+    const html = renderToStaticMarkup(<Sparkline points="0,20 50,10 100,4" color="red" />);
+    // Revealed by a clip: a dash-offset draw-in breaks a non-scaling stroke into segments.
+    expect(html).toContain("spark-reveal");
+    expect(html).not.toContain("stroke-dasharray");
+    expect(html).toContain("drop-shadow(0 0 2px red)");
+  });
+  it("keeps its height but draws nothing for fewer than two points", () => {
+    expect(renderToStaticMarkup(<Sparkline points="" color="red" />)).not.toContain("<svg");
+  });
+});
+
+describe("ColonyRow", () => {
+  const session = {
+    id: "s1",
+    repo: "acme/webshop",
+    org: "acme",
+    issue: 7,
+    issue_title: "Fix checkout",
+    status: "running",
+    cost_usd: 0.5,
+    routed_cost_usd: null,
+  } as unknown as Session;
+  it("pulses a working colony and flashes/highlights on request", () => {
+    const html = renderToStaticMarkup(<ColonyRow session={session} age="2m" flashed bumped />);
+    expect(html).toContain("v3-live-dot");
+    expect(html).toContain("v3-flash");
+    expect(html).toContain("text-accent");
+    expect(html).toContain("webshop#7");
+    expect(html).toContain("Working");
+  });
+  it("stays quiet when nothing moved", () => {
+    const html = renderToStaticMarkup(<ColonyRow session={{ ...session, status: "merged" } as Session} age="1d" flashed={false} bumped={false} />);
+    expect(html).not.toContain("v3-flash");
+    expect(html).not.toContain("v3-live-dot");
   });
 });
 
@@ -266,8 +334,8 @@ describe("chartRuns / monotonePath", () => {
     const runs = chartRuns([1, 2, 5, 9], 9);
     expect(runs).toHaveLength(1);
     const d = monotonePath(runs[0]);
-    expect(d.startsWith("M12.5,89.1")).toBe(true);
-    expect(d.endsWith("87.5,2")).toBe(true);
+    expect(d.startsWith("M0,89.1")).toBe(true);
+    expect(d.endsWith("100,2")).toBe(true);
   });
   it("never overshoots monotone data", () => {
     const runs = chartRuns([1, 2, 5, 9], 9);
@@ -286,31 +354,3 @@ describe("chartRuns / monotonePath", () => {
   });
 });
 
-describe("Sparkline", () => {
-  it("renders the gradient area, the glowing line and a pulsing last dot", () => {
-    const html = renderToStaticMarkup(<Sparkline points="0,28 50,10 100,20" color="var(--accent)" />);
-    expect(html).toContain("linearGradient");
-    expect(html).toContain("dash-draw");
-    expect(html).toContain("dash-pulse");
-  });
-  it("renders nothing for an empty spark", () => {
-    expect(renderToStaticMarkup(<Sparkline points="" color="var(--accent)" />)).toBe("");
-  });
-});
-
-describe("chart heights", () => {
-  const series = [{ label: "a", color: "var(--chart-1)", values: [1, 2, 1] }];
-  it("main charts stand 170px tall on narrow screens and 240px at desktop widths", () => {
-    for (const html of [
-      renderToStaticMarkup(<DashBars series={series} labels={["a", "b", "c"]} format={(v) => String(v)} />),
-      renderToStaticMarkup(<DashLine series={[{ ...series[0], values: [1, 2, 1] }]} labels={["a", "b", "c"]} format={(v) => String(v)} />),
-    ]) {
-      expect(html).toContain("h-[170px]");
-      expect(html).toContain("md:h-[240px]");
-      expect(html).toContain('role="img"');
-    }
-  });
-  it("KPI sparklines stay compact", () => {
-    expect(renderToStaticMarkup(<Sparkline points="0,28 50,10 100,20" color="red" />)).toContain("h-7");
-  });
-});

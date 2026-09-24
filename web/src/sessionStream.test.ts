@@ -1,5 +1,5 @@
 // The session stream's reducer and thread builder: what a colony's chat looks like as protocol frames arrive.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   END_OF_THREAD,
@@ -772,5 +772,59 @@ describe("run_epoch", () => {
     stream.stop();
     stream.start();
     expect(opened[opened.length - 1]).toEqual({ sessionId: "s1", since: 50, epoch: 7 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// replay hold: a long backlog renders once, on its latest messages, not frame by frame.
+// ---------------------------------------------------------------------------
+
+describe("replay hold", () => {
+  const setup = () => {
+    const sockets: { onmessage: ((event: { data: string }) => void) | null }[] = [];
+    const api = {
+      openEvents: (): SocketLike => {
+        const socket = { binaryType: "blob", readyState: 1, onopen: null, onmessage: null, onclose: null, onerror: null, send: () => {}, close: () => {} };
+        sockets.push(socket);
+        return socket as unknown as SocketLike;
+      },
+    } as unknown as Api;
+    const stream = new SessionStream(api, "s1");
+    let renders = 0;
+    stream.subscribe(() => {
+      renders += 1;
+    });
+    stream.start();
+    const deliver = (frame: ServerFrame): void => {
+      sockets[sockets.length - 1]?.onmessage?.({ data: JSON.stringify(frame) });
+    };
+    return { stream, deliver, renders: () => renders };
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("gathers the backlog silently and renders once on replay_done", () => {
+    vi.useFakeTimers();
+    const { stream, deliver, renders } = setup();
+    const before = renders();
+    for (let seq = 1; seq <= 50; seq++) deliver(event({ type: "user_message", id: `u${seq}`, text: "Hi" }, seq));
+    expect(renders()).toBe(before);
+    expect(stream.getState().messages).toHaveLength(50);
+    deliver({ type: "replay_done", seq: 50 });
+    expect(renders()).toBe(before + 1);
+    deliver(event({ type: "user_message", id: "live", text: "Hi" }, 51));
+    expect(renders()).toBe(before + 2);
+  });
+
+  it("an older mothership with no replay_done still renders after a quiet gap", () => {
+    vi.useFakeTimers();
+    const { deliver, renders } = setup();
+    const before = renders();
+    deliver(event({ type: "user_message", id: "u1", text: "Hi" }, 1));
+    expect(renders()).toBe(before);
+    vi.advanceTimersByTime(1000);
+    expect(renders()).toBe(before + 1);
   });
 });

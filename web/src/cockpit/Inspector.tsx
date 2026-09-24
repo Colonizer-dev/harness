@@ -62,9 +62,9 @@ type AskUserCardProps = Parameters<typeof AskUserCard>[0];
 
 function Fact({ label, value, className, title }: { label: string; value: string; className?: string; title?: string }): ReactElement {
   return (
-    <div className={cx("bg-panel px-3 py-2.5", className)} title={title}>
-      <div className="font-mono text-[10px] tracking-[0.1em] text-faint">{label}</div>
-      <div className="mt-0.5 truncate font-mono text-[12.5px] text-text">{value}</div>
+    <div className={cx("bg-bg px-3 py-2.5", className)} title={title}>
+      <div className="text-[12px] text-muted lowercase first-letter:uppercase">{label}</div>
+      <div className="mt-0.5 truncate text-[15px] font-semibold tracking-[-0.01em] text-text tabular-nums">{value}</div>
     </div>
   );
 }
@@ -72,7 +72,7 @@ function Fact({ label, value, className, title }: { label: string; value: string
 function Section({ title, children }: { title: string; children: ReactElement | ReactElement[] }): ReactElement {
   return (
     <div>
-      <div className="mb-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">{title}</div>
+      <div className="mb-2 text-[13px] font-medium text-text lowercase first-letter:uppercase">{title}</div>
       {children}
     </div>
   );
@@ -172,7 +172,7 @@ function FindingRow({ chain }: { chain: FindingChain }): ReactElement {
     ...(chain.pr && isUrl(chain.pr) ? [{ href: chain.pr, label: "pr" }] : []),
   ];
   return (
-    <div className="rounded-[10px] bg-panel-2 px-3 py-2">
+    <div className="rounded-md bg-panel-2 px-3 py-2">
       <div className="text-[12.5px] font-semibold leading-snug" title={chain.title}>
         {chain.title}
       </div>
@@ -274,20 +274,20 @@ export function Inspector({
   if (!target) {
     return (
       <aside
-        className="cockpit flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-panel"
+        className="cockpit nest-inspector flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-bg"
         style={{ animation: "ck-slide 0.28s cubic-bezier(.2,.7,.2,1) both" }}
         aria-label="nothing selected"
       >
         <div className="flex items-center gap-3 border-b border-border px-4 pb-3 pt-4">
           <div className="min-w-0 flex-1">
             <div className="font-mono text-[11.5px] text-muted">inspector</div>
-            <div className="mt-0.5 text-[14.5px] font-semibold leading-tight">nothing selected</div>
+            <div className="mt-0.5 text-[15px] font-semibold tracking-[-0.01em] leading-tight">nothing selected</div>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="close"
-            className="grid h-[26px] w-[26px] shrink-0 cursor-pointer place-items-center rounded-[7px] text-faint hover:bg-panel-2 hover:text-text"
+            className="grid h-[26px] w-[26px] shrink-0 cursor-pointer place-items-center rounded-full text-faint hover:bg-panel-2 hover:text-text"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
               <path d="M6 6l12 12M18 6 6 18" />
@@ -373,13 +373,13 @@ export function Inspector({
 
   return (
     <aside
-      className="cockpit flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-panel"
+      className="cockpit nest-inspector flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-bg"
       style={{ animation: "ck-slide 0.28s cubic-bezier(.2,.7,.2,1) both" }}
       aria-label={mothership ? "mothership" : session ? "colony" : "unknown target"}
     >
       <div className="flex items-start gap-3 border-b border-border px-4 pb-3 pt-4">
         {mothership ? (
-          <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[9px] bg-accent-soft text-accent">
+          <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border border-border text-accent">
             <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
               <circle cx="12" cy="12" r="2.6" fill="currentColor" />
@@ -392,7 +392,7 @@ export function Inspector({
           <div className="truncate font-mono text-[11.5px] text-muted">
             {mothership ? "mothership" : `${session?.repo}${session?.issue != null ? `#${session.issue}` : ""}`}
           </div>
-          <div className="mt-0.5 text-[14.5px] font-semibold leading-tight text-pretty">
+          <div className="mt-0.5 text-[15px] font-semibold tracking-[-0.01em] leading-tight text-pretty">
             {mothership ? "the colonizer app on this machine" : session?.issue_title || "no title yet"}
           </div>
         </div>
@@ -400,7 +400,7 @@ export function Inspector({
           type="button"
           onClick={onClose}
           aria-label="close"
-          className="grid h-[26px] w-[26px] shrink-0 cursor-pointer place-items-center rounded-[7px] text-faint hover:bg-panel-2 hover:text-text"
+          className="grid h-[26px] w-[26px] shrink-0 cursor-pointer place-items-center rounded-full text-faint hover:bg-panel-2 hover:text-text"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
             <path d="M6 6l12 12M18 6 6 18" />
@@ -411,7 +411,7 @@ export function Inspector({
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4 pt-3.5">
         {mothership ? (
           <>
-            <div className="grid shrink-0 grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
+            <div className="grid shrink-0 grid-cols-2 gap-px overflow-hidden border-y border-border bg-border">
               <Fact label="LIVE" value={maxParallel != null ? `${liveCount} / ${maxParallel}` : String(liveCount)} />
               <Fact label="QUEUED" value={String(queuedCount)} />
               <Fact label="NEED YOU" value={String(needCount)} />
@@ -426,7 +426,7 @@ export function Inspector({
                       key={row.label}
                       type="button"
                       onClick={() => onOpenSettings(row.section)}
-                      className="flex cursor-pointer items-center gap-2.5 rounded-[9px] bg-panel-2 px-2.5 py-2 text-left font-mono text-[12px] text-muted hover:text-text"
+                      className="flex cursor-pointer items-center gap-2.5 rounded-md bg-panel-2 px-2.5 py-2 text-left font-mono text-[12px] text-muted hover:text-text"
                     >
                       <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full" style={{ background: row.dot }} />
                       <span className="flex-1 truncate">{row.label}</span>
@@ -463,7 +463,7 @@ export function Inspector({
               <button
                 type="button"
                 onClick={() => onOpenSettings("updates")}
-                className={`flex cursor-pointer items-center gap-2.5 rounded-xl border bg-panel-2 px-3 py-2.5 text-left ${
+                className={`flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2.5 transition-colors hover:bg-panel-2 text-left ${
                   update.available ? "border-accent" : "border-border"
                 }`}
               >
@@ -487,8 +487,8 @@ export function Inspector({
               </div>
 
               {needsYou(session) && (
-                <div className="rounded-xl border border-warn bg-warn-soft px-3.5 py-3">
-                  <div className="font-mono text-[10.5px] tracking-[0.14em] text-warn">WAITING ON YOU</div>
+                <div className="border-y border-border border-l-2 border-l-warn bg-panel-2 px-3.5 py-3">
+                  <div className="text-[12.5px] font-medium text-warn">Waiting on you</div>
                   <div className="mt-1.5 text-[13.5px] font-semibold">
                     {session.attention ? "the watchdog flagged this colony" : "the colony is waiting on your answer"}
                   </div>
@@ -519,7 +519,7 @@ export function Inspector({
                   {/* The list says this colony needs you but the stream has not shown the question yet (or
                       anymore): name what is happening instead of leaving the box blank. */}
                   {pendingQuestions.length === 0 && (
-                    <div className="mt-3 rounded-[9px] border border-warn/30 bg-panel px-3 py-2.5 text-[12.5px] text-muted">
+                    <div className="mt-3 rounded-md border border-border bg-bg px-3 py-2.5 text-[12.5px] text-muted">
                       {questionActions.blockedBy === "disconnected" ? "loading the question…" : "this colony has no pending question"}
                     </div>
                   )}
@@ -528,7 +528,7 @@ export function Inspector({
                   <button
                     type="button"
                     onClick={() => onOpenColony(session.id)}
-                    className="mt-2.5 w-full cursor-pointer rounded-[9px] border border-border bg-panel px-3 py-2 text-left text-[12.5px] font-semibold hover:border-accent"
+                    className="mt-2.5 w-full cursor-pointer rounded-md bg-text px-3 py-2 text-left text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
                   >
                     open the colony and answer →
                   </button>
@@ -540,7 +540,7 @@ export function Inspector({
                 <Section title="STATUS">
                   <div
                     role="status"
-                    className="rounded-[9px] bg-panel-2 px-3 py-2 text-[12.5px] leading-snug [overflow-wrap:anywhere]"
+                    className="rounded-md bg-panel-2 px-3 py-2 text-[12.5px] leading-snug [overflow-wrap:anywhere]"
                   >
                     {diagnosis.text}
                   </div>
@@ -549,7 +549,7 @@ export function Inspector({
 
               {recentEvents.length > 0 && (
                 <Section title="RECENT EVENTS">
-                  <details className="rounded-[9px] bg-panel-2 px-3 py-2">
+                  <details className="rounded-md bg-panel-2 px-3 py-2">
                     <summary className="cursor-pointer text-[12px] font-semibold text-muted">
                       {recentEvents.length} recent event{recentEvents.length === 1 ? "" : "s"}
                     </summary>
@@ -565,7 +565,7 @@ export function Inspector({
                 </Section>
               )}
 
-              <div className="grid shrink-0 grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
+              <div className="grid shrink-0 grid-cols-2 gap-px overflow-hidden border-y border-border bg-border">
                 <Fact label="SETTLERS" value={settlers.length > 0 ? String(settlers.length) : "—"} />
                 <Fact label="COST" value={money(session.cost_usd)} />
                 <Fact label="MESH" value={session.mesh?.name ?? "—"} />
@@ -598,9 +598,9 @@ export function Inspector({
               {session.pr_url && (
                 // What came back. The prototype lists per-file +/- counts; the API reports no diff
                 // stats, so this carries the address and the branch it came from instead of inventing them.
-                <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
+                <div className="flex flex-col gap-1.5 border-y border-border px-0 py-3">
                   <div className="flex items-center justify-between gap-2.5">
-                    <span className="font-mono text-[10.5px] tracking-[0.12em] text-ok">PULL REQUEST</span>
+                    <span className="text-[12.5px] font-medium text-ok">Pull request</span>
                     <span className="font-mono text-[11px] text-faint">
                       {[prNumber(session.pr_url), session.publish_stage ? STAGE[session.publish_stage] : null]
                         .filter(Boolean)
@@ -631,7 +631,7 @@ export function Inspector({
                     {settlers.map((settler, i) => (
                       <div
                         key={settler.agent.id}
-                        className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-[10px] bg-panel-2 px-2 py-1.5"
+                        className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-md bg-panel-2 px-2 py-1.5"
                       >
                         <span
                           className="grid h-[30px] w-10 place-items-center rounded-lg transition-colors duration-700"
@@ -688,7 +688,7 @@ export function Inspector({
                         <span className="shrink-0 font-mono text-[11px] tabular-nums">{row.duration}</span>
                       </div>
                     ))}
-                    <div className={cx("text-[12px] text-faint", boot.rows.length === 0 && "rounded-[9px] bg-panel-2 px-3 py-2")}>
+                    <div className={cx("text-[12px] text-faint", boot.rows.length === 0 && "rounded-md bg-panel-2 px-3 py-2")}>
                       {boot.summary}
                     </div>
                   </div>
@@ -698,7 +698,7 @@ export function Inspector({
               <Section title="FINDINGS">
                 <div className="flex flex-col gap-2">
                   {findings.length === 0 ? (
-                    <div className="rounded-[9px] bg-panel-2 px-3 py-2 text-[12px] text-faint">
+                    <div className="rounded-md bg-panel-2 px-3 py-2 text-[12px] text-faint">
                       nothing validated into findings yet
                     </div>
                   ) : (
@@ -721,14 +721,14 @@ export function Inspector({
             <button
               type="button"
               onClick={onLaunch}
-              className="flex-1 cursor-pointer rounded-[10px] bg-accent px-3 py-2.5 text-[12.5px] font-semibold text-on-accent hover:brightness-110"
+              className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
             >
               launch a colony
             </button>
             <button
               type="button"
               onClick={() => onOpenSettings("setup")}
-              className="cursor-pointer rounded-[10px] border border-border-strong px-3 py-2.5 text-[12.5px] hover:border-accent"
+              className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors hover:border-border-strong"
             >
               settings
             </button>
@@ -739,7 +739,7 @@ export function Inspector({
               <button
                 type="button"
                 onClick={() => onOpenColony(session.id)}
-                className="flex-1 cursor-pointer rounded-[10px] bg-accent px-3 py-2.5 text-[12.5px] font-semibold text-on-accent hover:brightness-110"
+                className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
               >
                 open colony
               </button>
@@ -748,7 +748,7 @@ export function Inspector({
                   type="button"
                   onClick={() => onStop(session.id)}
                   title="stop the microvm; the worktree is kept"
-                  className="cursor-pointer rounded-[10px] border border-border-strong px-3 py-2.5 text-[12.5px] text-muted hover:text-text"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors text-muted hover:border-border-strong hover:text-text"
                 >
                   stop
                 </button>
@@ -759,7 +759,7 @@ export function Inspector({
                 <button
                   type="button"
                   onClick={() => onResume(session.id)}
-                  className="cursor-pointer rounded-[10px] border border-border-strong px-3 py-2.5 text-[12.5px] hover:border-accent"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors hover:border-border-strong"
                 >
                   resume
                 </button>
@@ -769,7 +769,7 @@ export function Inspector({
                   href={session.pr_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="cursor-pointer rounded-[10px] border border-border-strong px-3 py-2.5 text-[12.5px] font-semibold no-underline hover:border-accent"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors hover:border-border-strong font-medium no-underline"
                 >
                   pr ↗
                 </a>

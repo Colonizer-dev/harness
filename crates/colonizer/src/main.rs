@@ -34,6 +34,7 @@ mod modules;
 mod notify;
 mod openai;
 mod orgs;
+mod packages;
 mod plugins;
 mod presets;
 mod protocol;
@@ -60,12 +61,13 @@ mod usage;
 mod util;
 mod validation;
 mod version;
+mod voice;
 mod watchdog;
 
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
-    extract::{Extension, Query, Request, State},
+    extract::{DefaultBodyLimit, Extension, Query, Request, State},
     http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -175,10 +177,16 @@ pub struct App {
     pub gateway: gateway::Gateway,
     /// Owners seen in the repository list, so org workspaces can be offered before any colony exists.
     pub repo_owners: RwLock<BTreeSet<String>>,
+    /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
+    /// `gh` or a disk walk: see [`cached_answer`].
+    pub answer_cache: AnswerCache,
     /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
     /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
     pub new_orgs: RwLock<BTreeMap<String, Option<String>>>,
+    /// Each org's GitHub description, from the same `/user/orgs` fetch, for the workspace page.
+    /// In-memory: the first refresh after a restart fills it again.
+    pub org_descriptions: RwLock<BTreeMap<String, String>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
     /// When the last org refresh failed, so a `gh` that keeps failing is retried once a minute
@@ -949,7 +957,12 @@ async fn shutdown_signal() {
 
 fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     match assets.map(|a| a.join("web")).filter(|dir| dir.join("index.html").exists()) {
-        Some(dir) => Router::new().fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
+        // Hashed build assets 404 when missing instead of falling back to the page: a tab left open
+        // across an update asks for chunks the new build no longer has, and HTML served as a
+        // module script fails with a MIME error the page cannot tell apart from a real bug.
+        Some(dir) => Router::new()
+            .nest_service("/assets", ServeDir::new(dir.join("assets")))
+            .fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
         None => Router::new().fallback(|| async { Html(UI_MISSING_HTML) }),
     }
 }
@@ -1255,7 +1268,7 @@ async fn serve() -> Result<()> {
         agents,
         agent_problems,
         sessions: RwLock::new(sessions),
-        redteam: redteam::RedTeamStore::new(&cfg.data_dir),
+        redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
         session_persist: Mutex::new(()),
         config_write: Mutex::new(()),
         config_damage: std::sync::Mutex::new(None),
@@ -1270,7 +1283,9 @@ async fn serve() -> Result<()> {
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
         gateway: gateway::Gateway::new(&cfg.data_dir)?,
         repo_owners: RwLock::new(BTreeSet::new()),
+        answer_cache: AnswerCache::default(),
         new_orgs: RwLock::new(BTreeMap::new()),
+        org_descriptions: RwLock::new(BTreeMap::new()),
         orgs_refreshed: Mutex::new(None),
         orgs_failed_at: Mutex::new(None),
         claude_account: Mutex::new(None),
@@ -1340,8 +1355,16 @@ async fn serve() -> Result<()> {
         .route("/api/memory/mem0", get(memory::mem0_status).put(memory::put_mem0_key))
         .route("/api/memory/mem0/check", post(memory::check_mem0))
         .route("/api/notify/secret", get(notify::secret_status).put(notify::put_secret))
+        .route("/api/voice", get(voice::status))
+        .route("/api/voice/key", put(voice::put_key))
+        // A clip is larger than axum's 2 MB default body limit; the handler checks the cap itself too.
+        .route(
+            "/api/voice/transcribe",
+            post(voice::transcribe).layer(DefaultBodyLimit::max(voice::MAX_BYTES + 1)),
+        )
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
+        .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))
@@ -1360,6 +1383,14 @@ async fn serve() -> Result<()> {
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
         .route("/api/redteam/runs/{id}/stop", post(redteam::stop))
+        .route(
+            "/api/redteam/schedules",
+            get(redteam::list_schedules).post(redteam::create_schedule),
+        )
+        .route(
+            "/api/redteam/schedules/{id}",
+            put(redteam::update_schedule).delete(redteam::delete_schedule),
+        )
         .route("/api/burn-down", get(burn_down::status))
         .route("/api/burn-down/stop", post(burn_down::stop));
     let router = api
@@ -1427,6 +1458,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { queue::run_queue(queue).await });
     let redteam = app.clone();
     tokio::spawn(async move { redteam::run(redteam).await });
+    let schedules = app.clone();
+    tokio::spawn(async move { redteam::run_schedules(schedules).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
     tokio::spawn(reclaim::run(app.clone()));
@@ -1436,6 +1469,9 @@ async fn serve() -> Result<()> {
     // one; best effort, off the serving path.
     let merged_at_backfill = app.clone();
     tokio::spawn(async move { publish::backfill_merged_at(merged_at_backfill).await });
+    // Colonies whose pull request predates `changed_paths` gain its file list, for the monorepo
+    // package rows; best effort, off the serving path.
+    tokio::spawn(publish::backfill_changed_paths(app.clone()));
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(autonomy::run(app.clone()));
     tokio::spawn(burn_down::run(app.clone()));
@@ -1535,7 +1571,7 @@ pub(crate) mod tests {
             agents,
             agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
-            redteam: redteam::RedTeamStore::new(&root.join("data")),
+            redteam: redteam::RedTeamStore::new(&root.join("data"), &root.join("config")),
             session_persist: Mutex::new(()),
             config_write: Mutex::new(()),
             config_damage: std::sync::Mutex::new(None),
@@ -1561,7 +1597,9 @@ pub(crate) mod tests {
             updater: update::Updater::new(),
             gateway: gateway::Gateway::new(&root.join("data")).unwrap(),
             repo_owners: RwLock::new(BTreeSet::new()),
+            answer_cache: AnswerCache::default(),
             new_orgs: RwLock::new(BTreeMap::new()),
+            org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_refreshed: Mutex::new(None),
             orgs_failed_at: Mutex::new(None),
             pull: Mutex::new(Default::default()),
@@ -2505,6 +2543,119 @@ pub(crate) mod tests {
             "the walk answered in {:?}; the wedged probes were waited out",
             started.elapsed()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Cached answers for slow read-only endpoints, by key: when each was computed, and the value.
+#[derive(Default)]
+pub struct AnswerCache {
+    entries: std::sync::Mutex<HashMap<String, (Instant, serde_json::Value)>>,
+    refreshing: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+/// Stale-while-revalidate for a slow read-only answer. Within `fresh` the cached value is returned
+/// as is; past it the cached value is still returned at once and one background refresh is started
+/// (never two for the same key); with nothing cached the caller waits for the first computation. A
+/// failed computation keeps the last good value and reports the error only when there is none.
+pub async fn cached_answer<F, Fut>(
+    app: &Shared,
+    key: impl Into<String>,
+    fresh: Duration,
+    compute: F,
+) -> anyhow::Result<serde_json::Value>
+where
+    F: Fn(Shared) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+{
+    let key: String = key.into();
+    let hit = app
+        .answer_cache
+        .entries
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .cloned();
+    if let Some((at, value)) = hit {
+        if at.elapsed() >= fresh {
+            let first = app
+                .answer_cache
+                .refreshing
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(key.clone());
+            if first {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Ok(value) = compute(app.clone()).await {
+                        app.answer_cache
+                            .entries
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(key.clone(), (Instant::now(), value));
+                    }
+                    app.answer_cache
+                        .refreshing
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&key);
+                });
+            }
+        }
+        return Ok(value);
+    }
+    let value = compute(app.clone()).await?;
+    app.answer_cache
+        .entries
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, (Instant::now(), value.clone()));
+    Ok(value)
+}
+
+#[cfg(test)]
+mod answer_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn a_fresh_answer_is_served_from_the_cache_and_a_stale_one_refreshes_behind_it() {
+        let root = std::env::temp_dir().join(format!("colonizer-answer-cache-{}", util::short_id()));
+        let app = tests::test_app(&root);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let compute = {
+            let calls = calls.clone();
+            move |_app: Shared| {
+                let calls = calls.clone();
+                async move { Ok(serde_json::json!(calls.fetch_add(1, Ordering::SeqCst) + 1)) }
+            }
+        };
+        // Nothing cached: the caller waits for the first answer.
+        assert_eq!(
+            cached_answer(&app, "k", Duration::from_secs(60), compute.clone())
+                .await
+                .unwrap(),
+            1
+        );
+        // Fresh: no second computation.
+        assert_eq!(
+            cached_answer(&app, "k", Duration::from_secs(60), compute.clone())
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Stale: the old value comes back at once and one refresh runs behind it.
+        assert_eq!(cached_answer(&app, "k", Duration::ZERO, compute.clone()).await.unwrap(), 1);
+        for _ in 0..50 {
+            if calls.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(cached_answer(&app, "k", Duration::from_secs(60), compute).await.unwrap(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 }

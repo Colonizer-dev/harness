@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 import type { Api } from "./api";
-import { cx } from "./components/ui";
+import { ToastStack, toToast, type ToastInput, type ToastItem, type ToastKind } from "./toasts";
 
 export const ApiContext = createContext<Api | null>(null);
 
@@ -10,44 +10,29 @@ export function useApi(): Api {
   return api;
 }
 
-type ToastTone = "info" | "error";
-type PushToast = (message: string, tone?: ToastTone) => void;
+type ToastTone = "info" | "error" | ToastKind;
+/** `toast("Saved")`, `toast(message, "error")`, or the richer `toast({ title, body, kind, action })`. */
+type PushToast = (message: string | ToastInput, tone?: ToastTone) => void;
 
 const ToastContext = createContext<PushToast>(() => {});
 
-interface Toast {
-  id: number;
-  message: string;
-  tone: ToastTone;
-}
+/** How long a leaving toast plays its exit before it is removed. */
+const LEAVE_MS = 180;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const push = useCallback<PushToast>((message, tone = "info") => {
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const push = useCallback<PushToast>((message, tone) => {
     const id = Date.now() + Math.random();
-    setToasts((list) => [...list, { id, message, tone }]);
-    setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), 4500);
+    setToasts((list) => [...list, toToast(id, message, tone)]);
+  }, []);
+  const dismiss = useCallback((id: number) => {
+    setToasts((list) => list.map((t) => (t.id === id ? { ...t, leaving: true } : t)));
+    setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), LEAVE_MS);
   }, []);
   return (
     <ToastContext.Provider value={push}>
       {children}
-      <div
-        aria-live="polite"
-        className="pointer-events-none fixed inset-x-0 bottom-4 z-[60] flex flex-col items-center gap-2 px-4"
-      >
-        {toasts.map((t) => (
-          <div
-            key={t.id}
-            role="status"
-            className={cx(
-              "pointer-events-auto max-w-md rounded-lg px-3.5 py-2 text-sm shadow-[var(--shadow)]",
-              t.tone === "error" ? "bg-err text-white" : "bg-text text-bg",
-            )}
-          >
-            {t.message}
-          </div>
-        ))}
-      </div>
+      <ToastStack toasts={toasts} onDismiss={dismiss} />
     </ToastContext.Provider>
   );
 }

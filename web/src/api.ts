@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  RepoPackages,
   BurnDownStatus,
   FleetHost,
   FindingRecord,
@@ -24,6 +25,9 @@ import type {
   ProviderHealth,
   PullStatus,
   RedTeamRun,
+  RedTeamSchedule,
+  NewRedTeamSchedule,
+  HunterProbe,
   Repo,
   SaveProviderRequest,
   Session,
@@ -34,6 +38,7 @@ import type {
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
+  VoiceStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -131,6 +136,8 @@ export interface Api {
   setUsage(enabled: boolean): Promise<UsageStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
+  /** GET /api/repos/{owner}/{repo}/packages: monorepo detection. */
+  repoPackages(repo: string): Promise<RepoPackages>;
   sessions(): Promise<Session[]>;
   session(id: string): Promise<Session>;
   /** The colony's finding ledger, in the order it was written (an append-only record per finding stage). */
@@ -185,10 +192,21 @@ export interface Api {
   saveMem0Key(apiKey: string): Promise<Mem0Status>;
   /** Tries the saved key against the configured endpoint. */
   checkMem0(): Promise<Mem0Check>;
+  /** The voice module's active speech-to-text service. */
+  voice(): Promise<VoiceStatus>;
+  /** Saves a voice service's key on the Mothership; an empty string removes it. */
+  saveVoiceKey(provider: string, apiKey: string): Promise<VoiceStatus>;
+  /** Sends a recorded clip to the connected service; the Mothership adds the key. */
+  transcribe(audio: Blob): Promise<{ text: string; provider: string }>;
   /** Red-team runs: a swarm of hunter colonies raiding one repository (issue #212). 409 without `arm` when any colony is live or a run is already active for the repo. */
   redTeamRuns(): Promise<RedTeamRun[]>;
   startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
   stopRedTeamRun(id: string): Promise<RedTeamRun>;
+  redTeamSchedules(): Promise<RedTeamSchedule[]>;
+  createRedTeamSchedule(body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
+  updateRedTeamSchedule(id: string, body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
+  deleteRedTeamSchedule(id: string): Promise<void>;
+  probeHunter(id: string): Promise<HunterProbe>;
   openEvents(sessionId: string, since: number, epoch?: number): SocketLike;
   openTerminal(sessionId: string, cols: number, rows: number): SocketLike;
   /** GET /api/stream: the dashboard's realtime feed (issue #446); same-origin cookie auth, like openEvents. */
@@ -253,6 +271,10 @@ export const httpApi: Api = {
     const [owner, name] = repo.split("/");
     return request(`/api/repos/${enc(owner)}/${enc(name)}/issues`);
   },
+  repoPackages: (repo) => {
+    const [owner, name] = repo.split("/");
+    return request(`/api/repos/${enc(owner)}/${enc(name)}/packages`);
+  },
   sessions: () => request("/api/sessions"),
   session: (id) => request(`/api/sessions/${enc(id)}`),
   findings: (id) => request(`/api/sessions/${enc(id)}/findings`),
@@ -294,9 +316,19 @@ export const httpApi: Api = {
   mem0Status: () => request("/api/memory/mem0"),
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),
+  voice: () => request("/api/voice"),
+  saveVoiceKey: (provider, apiKey) => put("/api/voice/key", { provider, api_key: apiKey }),
+  transcribe: (audio) =>
+    // The raw clip as the body, typed by what MediaRecorder produced (audio/webm;codecs=opus in Chrome).
+    request("/api/voice/transcribe", { method: "POST", body: audio, headers: { "content-type": audio.type || "audio/webm" } }),
   redTeamRuns: () => request("/api/redteam/runs"),
   startRedTeamRun: (body) => post("/api/redteam/runs", body),
   stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),
+  redTeamSchedules: () => request("/api/redteam/schedules"),
+  createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),
+  updateRedTeamSchedule: (id, body) => put(`/api/redteam/schedules/${enc(id)}`, body),
+  deleteRedTeamSchedule: (id) => del(`/api/redteam/schedules/${enc(id)}`),
+  probeHunter: (id) => request(`/api/hunters/${enc(id)}/probe`),
   openEvents: (id, since, epoch = 0) => new WebSocket(wsUrl(`/api/sessions/${enc(id)}/events?since=${since}&epoch=${epoch}`)),
   openTerminal: (id, cols, rows) =>
     new WebSocket(wsUrl(`/api/sessions/${enc(id)}/terminal?cols=${cols}&rows=${rows}`)),

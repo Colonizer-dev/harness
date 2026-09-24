@@ -216,7 +216,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, autofix?, automerge?}` → `Session` (omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
+| `GET /api/repos/{owner}/{repo}/packages` | Monorepo detection: `{monorepo, tool, packages: [{name, path}]}`. `tool` is `npm-workspaces`, `pnpm`, `yarn`, `bun`, `turbo`, `nx`, `cargo`, `go-work`, `lerna` or `dirs` (no manifest declares them, but two or more `apps/*` / `packages/*` directories hold a manifest), `null` with an empty list when the repository is a single package. Read from the default branch's tree plus the root workspace manifests; served from a 10-minute stale-while-revalidate cache |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
@@ -228,7 +229,11 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
-| `POST /api/redteam/runs` | `{repo, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise). **409** when another run for the same repository is still active |
+| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise). **409** when another run for the same repository is still active |
+| `GET /api/redteam/schedules` | `[RedTeamSchedule]`: `{id, org, repos, hunter, swarm_size, model, subagent_model, autofix, cadence, enabled, next_run_at, last_run_at, last_result, created_at}`, saved in `<config_dir>/redteam-schedules.json`. `cadence` is UTC: `{"every":"weekly","weekday":0-6 (Monday=0),"hour","minute"}` or `{"every":"monthly","day":1-31,"hour","minute"}`; a monthly day past the month's end fires on its last day. Once a minute the mothership fires every enabled schedule whose `next_run_at` has passed: one `arm: true` run per repository through the same path as `POST /api/redteam/runs` (a repository with an active run is skipped), then records `last_run_at`, `last_result` (per repository: started, or why not) and the next `next_run_at` |
+| `POST /api/redteam/schedules` | `{org, repos, cadence, hunter?, swarm_size?, model?, subagent_model?, autofix?, enabled?}` → `RedTeamSchedule`, validated like a run (every repo must be in `org`; cadence ranges checked; **400** otherwise). `enabled` defaults to true |
+| `PUT /api/redteam/schedules/{id}` | Same body; replaces the settings, keeps `id`, `created_at` and the last firing, and recomputes `next_run_at`. **404** for an unknown schedule |
+| `DELETE /api/redteam/schedules/{id}` | Removes it. **404** for an unknown schedule |
 | `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
 | `GET /api/burn-down` · `POST /api/burn-down/stop` | Burn-down mode (§6.2c): the measured window and launch plan, and a stop that persistently switches the module off and halts every colony it launched |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
@@ -293,6 +298,8 @@ missing values mean the `default`.
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
+  "merged_at": null, "pr_opened_at": null, "ci_state": "success|failure|pending|no_checks",
+  "changed_paths": ["apps/pwa/src/main.ts"],
   "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_cpus": 4, "boot_memory": "8g",
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
@@ -307,6 +314,19 @@ figures are omitted rather than faked. `null` on colonies booted before these fi
 `origin` names who launched the colony when the operator did not: `"burn_down"` marks a colony the
 burn-down scheduler auto-launched (§6.2c), so the global stop can find it and the UI can label it.
 `null` (or absent) means a person started it.
+
+`merged_at`, `pr_opened_at` and `ci_state` come from the PR watcher's `gh pr view` (`mergedAt`,
+`createdAt`, `statusCheckRollup`), and for colonies merged before they existed from a best-effort
+startup backfill; each is left out until known. `ci_state` sums the head commit's checks: any failed,
+cancelled, timed-out or action-required check is `failure`, any unfinished one `pending`, all
+passing, neutral or skipped `success`, and a pull request with no checks `no_checks`. A merged
+pull request keeps its last settled verdict. The cockpit derives lead time (`merged_at` −
+`created_at`), PR cycle time (`merged_at` − `pr_opened_at`) and CI pass rate from them.
+
+`changed_paths` lists the files the colony's pull request changes (the first 500), read with
+`gh pr view --json files` when the PR opens and again when it merges, and for older colonies by a
+best-effort startup backfill; left out while empty. The cockpit maps each path to the monorepo
+package with the longest matching path to show a monorepo's packages under its repository row.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish
@@ -921,7 +941,10 @@ Server → client:
   to, with no `seq` field (old clients ignore the unknown frame). Then
   `{"type":"session","session":Session}`, then the last ≤200 harness logs as
   `{"type":"harness_log","level":"info|warn|error","message":"…","ts":"…"}`, then agent events with
-  `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then live.
+  `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then
+  `{"type":"replay_done","seq":N}` (N = the highest replayed `seq`, or the cursor when nothing was
+  replayed; like `run_epoch` it is a control frame, not an event), then live. A client may hold its
+  render until `replay_done` so a long history appears at once, on its latest messages.
 - Each resume rotates the event log aside (`events.jsonl` → `events-N.jsonl`) and bumps the epoch,
   and the new run's `seq` numbering starts from 1 again. The effective cursor is `0` when the
   client's `epoch` names a retired run — its `since` is a rank in that run's numbering, meaningless
@@ -1354,6 +1377,9 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
 | `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
+| `GET /api/voice` | `{provider, name, model, language, configured, has_key, source, key_optional, max_seconds, max_bytes}`: the voice module's active speech-to-text service. `provider` is `browser` when the module is unset or off; `source` is `saved`, the provider's env var (`OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY`) or `provider:<id>` when a model provider's key on the same host is reused. Never the key |
+| `PUT /api/voice/key` | `{provider, api_key}`: save a voice service's key on the mothership (`config/voice-keys/<provider>`, mode 0600, encrypted under `COLONIZER_MASTER_KEY` when set); an empty string removes it. Answers like `GET /api/voice` |
+| `POST /api/voice/transcribe` | Body: the raw clip, `Content-Type` `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg` or `audio/wav`, at most 25 MB. Answers `{text, provider}`. `409` when the module is `browser` or the service lacks its key/base URL, `413` too large, `415` another type, `502` when the service fails (its 401/429 said plainly; the key is never echoed). The clip is forwarded once and not stored |
 
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
 (`pending`). `source` = `{session_id, repo}` or `{user: true}`; a colony's note gains `reviewed: true`

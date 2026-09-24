@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import type { Attention, HarnessStatus, ModelOption, Session, SessionStatus } from "../types";
+import type { Attention, HarnessStatus, Session, SessionStatus } from "../types";
 import { IconAlert, IconInfo } from "./icons";
 
 export function cx(...classes: (string | false | null | undefined)[]): string {
@@ -308,49 +308,6 @@ export function minutesAgo(ts: string | null | undefined): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
   return `${Math.round(hours / 24)} d ago`;
-}
-
-/** A free-text model field with suggestions from GET /api/models. */
-export function ModelInput({
-  value,
-  onChange,
-  models,
-  placeholder,
-  ariaLabel,
-  id,
-  className,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  models: ModelOption[];
-  placeholder?: string;
-  ariaLabel?: string;
-  id?: string;
-  className?: string;
-}) {
-  const listId = useId();
-  return (
-    <>
-      <input
-        id={id}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        list={listId}
-        placeholder={placeholder ?? "opus, deepseek/deepseek-flash, …"}
-        aria-label={ariaLabel}
-        spellCheck={false}
-        autoComplete="off"
-        className={cx(inputClass, "font-mono text-[13px]", className)}
-      />
-      <datalist id={listId}>
-        {models.map((model) => (
-          <option key={model.id} value={model.id}>
-            {model.label}
-          </option>
-        ))}
-      </datalist>
-    </>
-  );
 }
 
 export function timeAgo(ts: string | null | undefined, now: Date = new Date()): string {

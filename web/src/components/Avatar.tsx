@@ -10,7 +10,7 @@ export function initialOf(name: string): string {
   return match ? match[0].toUpperCase() : "?";
 }
 
-const ROUNDING = { md: "rounded-md", lg: "rounded-lg", xl: "rounded-xl" } as const;
+const ROUNDING = { md: "rounded-md", lg: "rounded-lg", xl: "rounded-xl", full: "rounded-full" } as const;
 
 export function Avatar({
   name,

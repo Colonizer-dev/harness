@@ -240,10 +240,10 @@ describe("memoryBadge", () => {
 
 describe("viewAfterOrgSwitch", () => {
   it("keeps the views that read the chosen org", () => {
-    for (const view of ["home", "history", "launch", "memory"] as const) expect(viewAfterOrgSwitch(view)).toBe(view);
+    for (const view of ["overview", "home", "history", "launch", "memory"] as const) expect(viewAfterOrgSwitch(view)).toBe(view);
   });
 
   it("falls back to the nest from views that are not about the chosen org", () => {
-    for (const view of ["overview", "colony", "inbox", "settings"] as const) expect(viewAfterOrgSwitch(view)).toBe("home");
+    for (const view of ["colony", "inbox", "settings"] as const) expect(viewAfterOrgSwitch(view)).toBe("home");
   });
 });

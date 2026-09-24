@@ -32,18 +32,18 @@ export function LaunchView({
   onOpenSettings: () => void;
 }): ReactElement {
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-5 pb-10 pt-7">
-      <div className="mx-auto w-full max-w-[760px]">
-        <div className="font-mono text-[11px] tracking-[0.14em] text-faint">FRONTIER{org ? ` · ${org}` : ""}</div>
-        <h2 className="mt-1.5 text-[20px] font-semibold tracking-tight">send a settler out</h2>
-        <p className="mt-1.5 text-[13.5px] text-pretty text-muted">
+    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
+      <div className="mx-auto w-full max-w-[1080px]">
+        <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Launch</h1>
+        <p className="mt-2 text-[14px] text-pretty text-muted">
+          Send a settler out{org ? ` into ${org}` : ""}:
           one colony each, in its own microvm on a fresh worktree
           {maxParallel != null ? ` · queued past ${maxParallel} in parallel` : ""}.
         </p>
         <p className="mt-1 text-[12px] text-faint">
           Duplicate check is per-host; other motherships in the fleet are not consulted.
         </p>
-        <div className="mt-5 rounded-2xl border border-border bg-panel">
+        <div className="mt-8 border-y border-border">
           <NewSession
             org={org}
             githubConnected={githubConnected}

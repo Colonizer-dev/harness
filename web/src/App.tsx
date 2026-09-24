@@ -606,6 +606,18 @@ export function App() {
 
   // Same body the dialog renders, in the cockpit's own column. Keyed on the request count so an
   // external jump ("open providers") re-seeds the section; clicking around inside it does not remount.
+  /** A saved workspace, from the dialog or from Settings → Workspaces: patch it in, then refetch. */
+  const saveOrgInfo = (saved: OrgInfo) => {
+    setOrgs((list) => {
+      const index = list.findIndex((o) => sameOrg(o.org, saved.org));
+      if (index < 0) return [...list, saved];
+      const next = list.slice();
+      next[index] = saved;
+      return next;
+    });
+    void loadOrgs();
+  };
+
   const settingsPane = (close: () => void) => (
     <SettingsBody
       key={settingsRequests}
@@ -629,6 +641,9 @@ export function App() {
         close();
       }}
       onClose={close}
+      orgs={orgs}
+      onOrgSaved={saveOrgInfo}
+      sessions={sessions}
     />
   );
 
@@ -695,7 +710,7 @@ export function App() {
                 void loadOrgs();
               }}
               onOpenSettings={openSettings}
-              onOpenOrgSettings={setOrgSettingsFor}
+              onOpenOrgSettings={(org) => openSettings(`org:${org}`)}
               onInspectorShown={setInspectorShown}
               colony={colonyPane}
               memory={memoryPane}
@@ -750,16 +765,7 @@ export function App() {
         org={orgSettingsFor}
         info={orgs.find((o) => sameOrg(o.org, orgSettingsFor))}
         onClose={() => setOrgSettingsFor(null)}
-        onSaved={(saved) => {
-          setOrgs((list) => {
-            const index = list.findIndex((o) => sameOrg(o.org, saved.org));
-            if (index < 0) return [...list, saved];
-            const next = list.slice();
-            next[index] = saved;
-            return next;
-          });
-          void loadOrgs();
-        }}
+        onSaved={saveOrgInfo}
       />
     </div>
   );

@@ -437,6 +437,18 @@ pub async fn admission_paused(app: &Shared) -> bool {
 /// The microsandbox total is its home directory's size — it holds the shared
 /// image cache — informational and never reclaimed.
 pub async fn storage(State(app): State<Shared>) -> Json<Value> {
+    // Walking every worktree and session directory takes seconds on a busy host; serve the last
+    // walk at once and redo it behind the answer once it is half a minute old.
+    let value = crate::cached_answer(&app, "storage", std::time::Duration::from_secs(30), |app| async move {
+        Ok(storage_now(&app).await.0)
+    })
+    .await
+    .unwrap_or(Value::Null);
+    Json(value)
+}
+
+async fn storage_now(app: &Shared) -> Json<Value> {
+    let app = app.clone();
     let cfg = ReclaimConfig::load(&app).await;
     let now = Utc::now();
     let sessions = app.sessions.read().await.clone();

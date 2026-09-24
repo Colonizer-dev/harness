@@ -229,6 +229,10 @@ fn publishing_holds_slot_legacy() -> bool {
     true
 }
 
+/// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
+/// sweeping change cannot bloat sessions.json.
+pub const CHANGED_PATHS_CAP: usize = 500;
+
 /// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
 /// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
 /// making every existing file unparseable on upgrade. New fields need no annotation of their own.
@@ -292,6 +296,20 @@ pub struct Session {
     /// existed gain it from the startup backfill, best effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<DateTime<Utc>>,
+    /// When the pull request was opened, as GitHub reports it (`createdAt`); set by the PR watcher
+    /// and, for colonies merged before it existed, by the startup backfill. With `merged_at` it
+    /// gives the PR cycle time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_opened_at: Option<DateTime<Utc>>,
+    /// The pull request's checks in one word (`success`, `failure`, `pending`, `no_checks`), as last
+    /// read by the PR watcher; a settled verdict survives a later `pending` reading once merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_state: Option<crate::github::CiState>,
+    /// The files the colony's pull request changed (first [`CHANGED_PATHS_CAP`]), read from GitHub
+    /// once the PR is open and again when it merges; empty until then. The cockpit maps them to a
+    /// monorepo's packages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_paths: Vec<String>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
@@ -331,6 +349,13 @@ pub struct Session {
     /// The tier this colony was started on, when the operator named one instead of letting the rule choose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_tier: Option<String>,
+    /// The orchestrator model the operator named at launch (a Claude alias or ID, or
+    /// `<provider>/<model>`), replacing whatever routing would pick. A launch record, like `model_tier`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    /// The subagent model the operator named at launch, replacing the agent module's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_model_override: Option<String>,
     /// The Claude account this colony bills to (issue #95): the per-colony choice, else the org's
     /// override, else the install default, resolved at launch. Like `model_tier`, a launch record.
     #[serde(default)]
@@ -420,6 +445,9 @@ impl Default for Session {
             fix_for: None,
             pr_url: None,
             merged_at: None,
+            pr_opened_at: None,
+            changed_paths: Vec::new(),
+            ci_state: None,
             publish_stage: None,
             publishing_holds_slot: false,
             needs_rebase: false,
@@ -429,6 +457,8 @@ impl Default for Session {
             cost_usd: None,
             model_usage: None,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
@@ -871,6 +901,13 @@ pub struct NewSession {
     /// routing rule picks for the task.
     #[serde(default)]
     pub model_tier: Option<String>,
+    /// Run the orchestrator on this model (a Claude alias or ID, or `<provider>/<model>` naming a
+    /// configured provider) instead of the one routing picks. Red-team hunters use it.
+    #[serde(default)]
+    pub model_override: Option<String>,
+    /// Run the colony's subagents on this model instead of the agent module's `subagent_model`.
+    #[serde(default)]
+    pub subagent_model_override: Option<String>,
     /// Bill this colony to a named Claude account instead of the org's override or install default.
     #[serde(default)]
     pub claude_account: Option<String>,
@@ -895,6 +932,23 @@ pub struct NewSession {
     /// them up. See `overlap_queue_target`.
     #[serde(default)]
     pub serialize: Option<bool>,
+}
+
+/// A launch-time model choice, trimmed: empty is none, and a `<provider>/<model>` must name a
+/// configured provider, so a typo is refused at launch instead of failing inside the colony.
+pub(crate) fn launch_model(app: &crate::App, raw: Option<&str>, what: &str) -> Result<Option<String>, crate::AppError> {
+    let Some(model) = raw.map(str::trim).filter(|m| !m.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some((provider, name)) = model.split_once('/')
+        && (name.is_empty() || !app.providers().iter().any(|p| p.id == provider))
+    {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("the {what} {model:?} names no configured provider \"{provider}\""),
+        ));
+    }
+    Ok(Some(model.to_string()))
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -1184,6 +1238,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             }
         },
     };
+    let model_override = launch_model(&app, req.model_override.as_deref(), "model")?;
+    let subagent_model_override = launch_model(&app, req.subagent_model_override.as_deref(), "subagent model")?;
     // Relating to the parent (`after`): by default the colony queues until the parent's pull request
     // merges and then starts from the fresh default branch; `stack: true` branches from the parent's
     // branch as soon as it is pushed instead. Whitespace is refused rather than read as nothing — an
@@ -1319,6 +1375,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         fix_for: None,
         pr_url: None,
         merged_at: None,
+        pr_opened_at: None,
+        changed_paths: Vec::new(),
+        ci_state: None,
         publish_stage: None,
         // A fresh colony is starting or queued, never publishing: the flag is inert.
         publishing_holds_slot: false,
@@ -1329,6 +1388,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         cost_usd: None,
         model_usage: None,
         model_tier,
+        model_override,
+        subagent_model_override,
         claude_account: Some(claude_account),
         model_routing: None,
         // Filled in at boot, once the colony's model settings resolve to actual providers.
@@ -1762,6 +1823,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .to_string();
     if !routed_model.is_empty() {
         runner_env.insert("COLONIZER_MODEL".into(), Value::String(routed_model.into()));
+    }
+    // A model the operator named at launch beats routing: it is what they asked this colony to run.
+    if let Some(model) = s.model_override.as_deref() {
+        runner_env.insert("COLONIZER_MODEL".into(), Value::String(model.into()));
+    }
+    if let Some(model) = s.subagent_model_override.as_deref() {
+        runner_env.insert("COLONIZER_SUBAGENT_MODEL".into(), Value::String(model.into()));
     }
     // The runner reads only COLONIZER_MODEL: the tier settings are for the mothership's provider
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
@@ -2583,6 +2651,16 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, cl
         )
         .await;
     }
+    // The backlog is on the wire: the browser holds its render until this frame, so a long
+    // history opens on its latest messages instead of filling in line by line. No `seq`, like
+    // `run_epoch`, and old clients ignore the unknown frame.
+    if tx
+        .send(text(json!({"type": "replay_done", "seq": replayed}).to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
 
     loop {
         tokio::select! {
@@ -3112,6 +3190,9 @@ pub(crate) mod tests {
             fix_for: None,
             pr_url: None,
             merged_at: None,
+            pr_opened_at: None,
+            changed_paths: Vec::new(),
+            ci_state: None,
             publish_stage: None,
             // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
             // a stopped-origin publish flip this off.
@@ -3123,6 +3204,8 @@ pub(crate) mod tests {
             cost_usd: None,
             model_usage: None,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
@@ -3222,6 +3305,8 @@ pub(crate) mod tests {
             automerge: None,
             allow_duplicate: false,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             after: None,
             stack: false,
@@ -3964,6 +4049,8 @@ pub(crate) mod tests {
                 automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
+                model_override: None,
+                subagent_model_override: None,
                 claude_account: None,
                 after: None,
                 stack: false,
@@ -4044,6 +4131,8 @@ pub(crate) mod tests {
                 automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
+                model_override: None,
+                subagent_model_override: None,
                 claude_account: None,
                 after: None,
                 stack: false,
@@ -4164,6 +4253,8 @@ pub(crate) mod tests {
             automerge: None,
             allow_duplicate: false,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             after,
             stack,

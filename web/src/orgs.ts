@@ -1,7 +1,7 @@
 // The org workspace list's pure half (issue #176): which orgs are workspaces, which are switched
 // off, and which newly-appeared one the UI should be asking about. The components render; this
 // module decides what is in the list and in what order. Nothing here touches the browser.
-import type { CockpitView } from "./cockpit/Rail";
+import type { CockpitView } from "./cockpit/Header";
 import { orgOf, occupiesSlot, sameOrg } from "./components/ui";
 import type { OrgInfo, OrgSettings, OrgSpend, Session } from "./types";
 
@@ -44,6 +44,8 @@ export interface OrgEntry {
   pending: number;
   /** The org's avatar, when /api/orgs knows one; null for an org that only appears in the colony list. */
   avatar: string | null;
+  /** The org's GitHub description, when /api/orgs sends one. */
+  description?: string;
   /** The org's spend from /api/orgs; absent on a mothership that does not measure it. */
   spend?: OrgSpend;
 }
@@ -70,6 +72,7 @@ export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: Org
     const e = entry(info.org, info.avatar_url ?? null);
     e.pending = info.pending_memory ?? 0;
     if (info.spend !== undefined) e.spend = info.spend;
+    if (info.description) e.description = info.description;
     if (!orgEnabled(info.settings)) off.add(e.org.toLowerCase());
   }
   for (const session of sessions) {
@@ -142,11 +145,12 @@ export function memoryBadge(selected: string | null, workspaces: OrgEntry[], tot
 }
 
 /**
- * The cockpit view to land on after switching org. The views that read the chosen org — the nest,
- * history, launch and memory — stay put, so switching org from history shows the new org's
- * history; the others are not about any one org (the overview, the cross-workspace inbox,
- * settings) or not about this one (an open colony), so they fall back to the nest.
+ * The cockpit view to land on after switching org. The views that read the chosen org — the
+ * overview (which shows that org's dashboard), the nest, history, launch and memory — stay put, so
+ * switching org from history shows the new org's history; the others are not about any one org
+ * (the cross-workspace inbox, settings) or not about this one (an open colony), so they fall back
+ * to the nest.
  */
 export function viewAfterOrgSwitch(view: CockpitView): CockpitView {
-  return view === "home" || view === "history" || view === "launch" || view === "memory" ? view : "home";
+  return view === "overview" || view === "home" || view === "history" || view === "launch" || view === "memory" || view === "host" ? view : "home";
 }

@@ -18,7 +18,7 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -865,13 +865,68 @@ pub struct PrInfo {
     /// this to tell a stale backoff from main having moved on, without a separate `git fetch` just to
     /// find out: `None` when `gh` left it out, which reads as unknown rather than as a moved sha.
     pub base_ref_oid: Option<String>,
+    /// When the pull request was opened (`createdAt`); `None` when GitHub gave nothing usable.
+    pub created_at: Option<DateTime<Utc>>,
+    /// The checks on the head commit, summed up (see [`ci_verdict`]).
+    pub ci: CiState,
+}
+
+/// A pull request's checks in one word, from `gh pr view`'s `statusCheckRollup`: any failed check
+/// fails the lot, any unfinished one leaves it pending, and a PR with no checks at all says so
+/// rather than passing. Stored on the colony as `ci_state`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiState {
+    Success,
+    Failure,
+    Pending,
+    NoChecks,
+}
+
+impl CiState {
+    /// Success or failure: a verdict that will not change without a new push.
+    pub fn settled(self) -> bool {
+        matches!(self, CiState::Success | CiState::Failure)
+    }
+}
+
+/// Reads a `statusCheckRollup` array: `CheckRun`s carry `status` + `conclusion`, `StatusContext`s a
+/// `state`. Anything that is not an array, or an empty one, is [`CiState::NoChecks`].
+pub fn ci_verdict(rollup: Option<&Value>) -> CiState {
+    let Some(items) = rollup.and_then(Value::as_array).filter(|a| !a.is_empty()) else {
+        return CiState::NoChecks;
+    };
+    let word = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().trim().to_ascii_uppercase();
+    let mut pending = false;
+    for item in items {
+        let conclusion = word(item, "conclusion");
+        let state = word(item, "state");
+        let status = word(item, "status");
+        let verdict = if !conclusion.is_empty() {
+            conclusion
+        } else if !state.is_empty() {
+            state
+        } else if !status.is_empty() && status != "COMPLETED" {
+            "PENDING".to_string()
+        } else {
+            continue;
+        };
+        match verdict.as_str() {
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => {
+                return CiState::Failure;
+            }
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" | "STALE" => {}
+            _ => pending = true,
+        }
+    }
+    if pending { CiState::Pending } else { CiState::Success }
 }
 
 /// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
 /// the struct and a test holds the two together.
-const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid";
+const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid,createdAt,statusCheckRollup";
 
 /// Unknown fields are refused so the test below catches a requested field this struct would ignore;
 /// `gh --json` prints only the fields it was asked for, so real output never trips it. The
@@ -889,6 +944,11 @@ struct PrView {
     merged_at: Option<String>,
     #[serde(rename = "baseRefOid", default)]
     base_ref_oid: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
+    /// Kept as raw JSON: its items come in two shapes, and [`ci_verdict`] reads both.
+    #[serde(rename = "statusCheckRollup", default)]
+    status_check_rollup: Option<Value>,
 }
 
 /// Asks GitHub for one pull request's state, mergeability and merge-state status through the user's
@@ -902,6 +962,28 @@ pub async fn pr_info(app: &App, url: &str) -> Result<PrInfo> {
     .await
     .context("GitHub API timed out")??;
     pr_info_from_json(&out)
+}
+
+/// The paths a pull request changes, from `gh pr view --json files`, capped at
+/// [`crate::sessions::CHANGED_PATHS_CAP`]. Its own call, not a `PR_VIEW_FIELDS` field: the file list
+/// is read twice per PR (opened, merged), not on every watch tick.
+pub async fn pr_files(app: &App, url: &str) -> Result<Vec<String>> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "files", "--jq", ".files[].path"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    Ok(pr_file_paths(&out))
+}
+
+fn pr_file_paths(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(crate::sessions::CHANGED_PATHS_CAP)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Reads `gh pr view --json` output into a [`PrInfo`], split from `pr_info` so it is tested
@@ -922,6 +1004,8 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         merge_state_status,
         merged_at: view.merged_at.as_deref().and_then(parse_merged_at),
         base_ref_oid: view.base_ref_oid,
+        created_at: view.created_at.as_deref().and_then(parse_merged_at),
+        ci: ci_verdict(view.status_check_rollup.as_ref()),
     })
 }
 
@@ -1779,6 +1863,16 @@ pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
 }
 
 pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
+    // `gh api --paginate` takes seconds; the cockpit asks on every load, so serve the last list at
+    // once and refresh it behind the answer once it is a minute old.
+    let value = crate::cached_answer(&app, "repos", Duration::from_secs(60), |app| async move {
+        fetch_repos(&app).await.map(Value::Array)
+    })
+    .await?;
+    Ok(Json(serde_json::from_value(value)?))
+}
+
+async fn fetch_repos(app: &Shared) -> anyhow::Result<Vec<Value>> {
     let out = exec(&mut app.gh([
         "api",
         "--paginate",
@@ -1792,7 +1886,7 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
         .iter()
         .filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
     app.repo_owners.write().await.extend(owners);
-    Ok(Json(repos))
+    Ok(repos)
 }
 
 /// A successful org refresh serves every workspace poll for five minutes.
@@ -1833,7 +1927,7 @@ pub async fn refresh_orgs(app: &App) {
             "--paginate",
             "/user/orgs?per_page=100",
             "--jq",
-            ".[] | {login, avatar_url}",
+            ".[] | {login, avatar_url, description}",
         ]),
     )
     .await
@@ -1848,6 +1942,9 @@ pub async fn refresh_orgs(app: &App) {
         }
     };
     let mut fetched: BTreeMap<String, Option<String>> = out.lines().filter_map(orgs::parse_org_line).collect();
+    // Descriptions ride the same fetch; a successful one replaces the cache, so a cleared
+    // description on GitHub clears here too.
+    *app.org_descriptions.write().await = out.lines().filter_map(orgs::parse_org_description).collect();
     // The signed-in login comes from the cached viewer — its TTL is the point, one `gh api user`
     // serving every poll — with a plain lookup as the fallback, and neither failing aborts the
     // refresh; it just proceeds without a login of its own.
@@ -1930,11 +2027,105 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         "number,title,body,labels,author,updatedAt,url",
     ]))
     .await?;
-    Ok(Json(serde_json::from_str(&out)?))
+    let issues: Value = serde_json::from_str(&out)?;
+    let filter = {
+        let modules = app.modules.read().await;
+        LabelFilter::from_source(modules.get("source"), &app.agents)
+    };
+    Ok(Json(filter.apply(issues)))
+}
+
+/// The Source module's label filter: which open issues are offered for a colony. Labels compare
+/// case-insensitively; an empty include list offers everything, and an exclude always wins.
+#[derive(Debug, Default, PartialEq)]
+pub struct LabelFilter {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl LabelFilter {
+    pub fn new(include: &str, exclude: &str) -> Self {
+        let list = |s: &str| {
+            s.split(',')
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+        };
+        Self {
+            include: list(include),
+            exclude: list(exclude),
+        }
+    }
+
+    fn from_source(choice: Option<&crate::config::ModuleChoice>, agents: &[crate::modules::AgentModule]) -> Self {
+        let Some(choice) = choice else { return Self::default() };
+        let schema = crate::modules::schema_for("source", &choice.provider, agents);
+        Self::new(
+            &crate::config::setting_str(choice, &schema, "include_labels"),
+            &crate::config::setting_str(choice, &schema, "exclude_labels"),
+        )
+    }
+
+    /// Whether an issue with these label names is offered.
+    pub fn admits<'a>(&self, labels: impl IntoIterator<Item = &'a str>) -> bool {
+        let labels: Vec<String> = labels.into_iter().map(str::to_lowercase).collect();
+        if labels.iter().any(|l| self.exclude.contains(l)) {
+            return false;
+        }
+        self.include.is_empty() || labels.iter().any(|l| self.include.contains(l))
+    }
+
+    /// Keeps the issues of a `gh issue list --json labels,…` array that pass; anything that is not
+    /// an array passes through untouched.
+    fn apply(&self, issues: Value) -> Value {
+        if self.include.is_empty() && self.exclude.is_empty() {
+            return issues;
+        }
+        match issues {
+            Value::Array(list) => Value::Array(
+                list.into_iter()
+                    .filter(|issue| {
+                        let names = issue["labels"]
+                            .as_array()
+                            .map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        self.admits(names)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn label_filter_includes_any_and_excludes_win() {
+        use super::LabelFilter;
+        use serde_json::json;
+        let open = LabelFilter::new("", "");
+        assert!(open.admits([]), "no filter offers every issue");
+        let f = LabelFilter::new(" Ready, colonize ", "blocked");
+        assert!(f.admits(["ready"]));
+        assert!(f.admits(["bug", "COLONIZE"]), "case-insensitive, any one include is enough");
+        assert!(!f.admits(["bug"]), "an include list needs one of its labels");
+        assert!(!f.admits(["ready", "Blocked"]), "an exclude always wins");
+        let issues = json!([
+            {"number": 1, "labels": [{"name": "ready"}]},
+            {"number": 2, "labels": []},
+            {"number": 3, "labels": [{"name": "ready"}, {"name": "blocked"}]}
+        ]);
+        assert_eq!(f.apply(issues), json!([{"number": 1, "labels": [{"name": "ready"}]}]));
+    }
+
+    #[test]
+    fn pr_file_paths_are_trimmed_and_capped() {
+        assert_eq!(super::pr_file_paths("a/b.rs\n\n  c.md \n"), vec!["a/b.rs", "c.md"]);
+        let many: String = (0..600).map(|i| format!("f{i}\n")).collect();
+        assert_eq!(super::pr_file_paths(&many).len(), crate::sessions::CHANGED_PATHS_CAP);
+    }
+
     #[test]
     fn gh_failures_are_classified_by_what_the_user_can_do() {
         use super::{Denial, classify};
@@ -2595,6 +2786,8 @@ mod tests {
                 merge_state_status: "BEHIND".to_string(),
                 merged_at: None,
                 base_ref_oid: None,
+                created_at: None,
+                ci: CiState::NoChecks,
             }
         );
         assert_eq!(
@@ -2605,6 +2798,8 @@ mod tests {
                 merge_state_status: "DIRTY".to_string(),
                 merged_at: None,
                 base_ref_oid: None,
+                created_at: None,
+                ci: CiState::NoChecks,
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -2616,6 +2811,8 @@ mod tests {
                 merge_state_status: "UNKNOWN".to_string(),
                 merged_at: None,
                 base_ref_oid: None,
+                created_at: None,
+                ci: CiState::NoChecks,
             }
         );
         // `baseRefOid` rides along when GitHub reports one, for the auto-rebase backoff (issue
@@ -2675,6 +2872,47 @@ mod tests {
         assert_eq!(view.merge_state_status.as_deref(), Some("MERGED"));
         assert_eq!(view.merged_at.as_deref(), Some("MERGED"));
         assert_eq!(view.base_ref_oid.as_deref(), Some("MERGED"));
+        assert_eq!(view.created_at.as_deref(), Some("MERGED"));
+        assert!(view.status_check_rollup.is_some());
+    }
+
+    #[test]
+    fn ci_verdict_fails_on_any_failure_waits_on_any_pending() {
+        use super::{CiState, ci_verdict};
+        let v = |j: Value| ci_verdict(Some(&j));
+        assert_eq!(ci_verdict(None), CiState::NoChecks);
+        assert_eq!(v(json!([])), CiState::NoChecks);
+        assert_eq!(v(json!("MERGED")), CiState::NoChecks, "not an array reads as no checks");
+        let ok = json!({"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"});
+        let skipped = json!({"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SKIPPED"});
+        let running = json!({"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": ""});
+        let failed = json!({"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "failure"});
+        let ctx_ok = json!({"__typename": "StatusContext", "state": "SUCCESS"});
+        let ctx_pending = json!({"__typename": "StatusContext", "state": "PENDING"});
+        let ctx_error = json!({"__typename": "StatusContext", "state": "ERROR"});
+        assert_eq!(v(json!([ok, skipped, ctx_ok])), CiState::Success);
+        assert_eq!(v(json!([ok, running])), CiState::Pending);
+        assert_eq!(v(json!([ok, ctx_pending])), CiState::Pending);
+        assert_eq!(
+            v(json!([running, failed])),
+            CiState::Failure,
+            "a failure beats anything unfinished"
+        );
+        assert_eq!(v(json!([ctx_ok, ctx_error])), CiState::Failure);
+    }
+
+    #[test]
+    fn pr_info_reads_created_at_and_checks() {
+        use super::CiState;
+        let raw = r#"{"state":"OPEN","createdAt":"2026-09-01T10:00:00Z","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}"#;
+        let info = pr_info_from_json(raw).unwrap();
+        assert_eq!(
+            info.created_at.map(|t| t.to_rfc3339()),
+            Some("2026-09-01T10:00:00+00:00".into())
+        );
+        assert_eq!(info.ci, CiState::Success);
+        let bare = pr_info_from_json(r#"{"state":"OPEN"}"#).unwrap();
+        assert_eq!((bare.created_at, bare.ci), (None, CiState::NoChecks));
     }
 
     #[test]

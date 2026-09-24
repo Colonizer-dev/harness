@@ -1,10 +1,11 @@
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useRef,
   useState,
-  type ComponentType,
   type Dispatch,
   type FormEvent,
   type KeyboardEvent,
@@ -23,6 +24,8 @@ import type {
   ModelProvider,
   ModelSetting,
   ModuleInfo,
+  OrgInfo,
+  Session,
   ProviderAuth,
   ProviderHealth,
   ProviderLimits,
@@ -33,48 +36,44 @@ import type {
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
+  VoiceStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
 import { useModels } from "../useModels";
 import { type ImagePull } from "../useImagePull";
 import { setupTone, type SetupView } from "../setup";
+import { canRecord, keySourceLabel, startRecording } from "../voiceRecorder";
 import {
-  BrandAlibabaCloud,
-  BrandClaude,
-  BrandDeepSeek,
-  BrandGitHubCopilot,
-  BrandKimi,
-  BrandMiniMax,
-  BrandModelScope,
-  BrandNvidia,
-  BrandOpenRouter,
-  BrandXai,
-  BrandXiaomi,
   IconCheck,
   IconChevron,
   IconExternal,
   IconNetwork,
   IconPencil,
-  IconPlug,
   IconPlus,
-  IconServer,
   IconX,
-  type IconProps,
 } from "./icons";
+import { ModelPicker, SettingsNavContext } from "./ModelPicker";
+import { ProviderMark } from "./providerMark";
 import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
+import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
+import { orgEnabled } from "../orgs";
+import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
-// Shell: a section list on the left, the selected section on the right.
+// Shell: the sections across the top (groups as tabs, sections as chips), the page beneath.
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
+
+/** The page's hero card (settingsGuide.tsx), which every Pane shows at the top of its body. */
+const HeroContext = createContext<ReactNode>(null);
 
 const KIND_INFO: Record<string, { title: string; description: string }> = {
   source: { title: "Source", description: "Where tasks come from" },
@@ -87,6 +86,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   watchdog: { title: "Watchdog", description: "Notices stalled colonies and nudges them" },
   autonomy: { title: "Autonomy", description: "Who answers a colony's questions when you are not there" },
   burn_down: { title: "Burn-down", description: "Spend the weekly token plan down to a reserve before it resets" },
+  voice: { title: "Voice", description: "Speech-to-text for the composer's microphone" },
 };
 
 const kindInfo = (kind: string) => KIND_INFO[kind] ?? { title: kind, description: "" };
@@ -204,6 +204,9 @@ export function SettingsBody({
   onSetupShown,
   onSetupDismissed,
   onClose,
+  orgs,
+  onOrgSaved,
+  sessions,
 }: {
   /** Rendered inside the cockpit rather than a dialog: no title bar of its own, and it fills its column. */
   embedded?: boolean;
@@ -224,6 +227,11 @@ export function SettingsBody({
   onSetupShown: () => void;
   onSetupDismissed: () => void;
   onClose: () => void;
+  /** The workspaces, for a Workspaces group of per-org settings; the cockpit passes them, the old dialog does not. */
+  orgs?: OrgInfo[];
+  onOrgSaved?: (saved: OrgInfo) => void;
+  /** The colony list, for the live counts in the Source page's picture. */
+  sessions?: Session[];
 }) {
   const api = useApi();
   const narrow = useMediaQuery("(max-width: 699px)");
@@ -231,6 +239,12 @@ export function SettingsBody({
   const [section, setSection] = useState<SectionId | null>(() => initialSection ?? (narrow ? null : "connections"));
   // Where focus returns when a narrow window goes back to the section list.
   const lastSection = useRef<SectionId>(initialSection ?? "connections");
+  // "Set key" in a model picker: Model providers, opened on that provider's editor.
+  const [focusProvider, setFocusProvider] = useState<string | undefined>(undefined);
+  const openAt = (section: "providers", providerId?: string) => {
+    setFocusProvider(providerId);
+    select(section);
+  };
   const select = (id: SectionId) => {
     lastSection.current = id;
     setSection(id);
@@ -368,9 +382,95 @@ export function SettingsBody({
         dirty: isDirty(m, drafts[m.kind]),
       })),
     },
+    ...(orgs && orgs.length > 0
+      ? [
+          {
+            label: "Workspaces",
+            items: orgs
+              .filter((o) => !o.awaiting_decision)
+              .map((o) => ({
+                id: `org:${o.org}` as const,
+                label: o.org,
+                hint: `${o.colonies.live} live · ${o.colonies.total} ${o.colonies.total === 1 ? "colony" : "colonies"}`,
+                badge: orgEnabled(o.settings) ? undefined : "Off",
+              })),
+          },
+        ]
+      : []),
   ];
 
   const back = narrow ? () => setSection(null) : undefined;
+
+  /** Two or three facts for the hero card, from what this screen already has loaded. */
+  const heroStats = (id: SectionId): HeroStat[] => {
+    const onOff = (on: boolean | null | undefined): HeroStat["tone"] => (on ? "ok" : undefined);
+    switch (id) {
+      case "setup":
+        return setup && setupToneValue ? [{ label: "Status", value: setupToneValue === "ok" ? "All set" : "Not finished", tone: setupToneValue }] : [];
+      case "connections":
+        return status
+          ? [
+              { label: "GitHub", value: github?.connected ? (github.login ?? "Connected") : "Not connected", tone: github?.connected ? "ok" : "err" },
+              { label: "Claude", value: claude?.configured ? "Connected" : "Not connected", tone: claude?.configured ? "ok" : "err" },
+            ]
+          : [];
+      case "providers":
+        return providers ? [{ label: "Providers", value: String(providers.length + 1) }] : [];
+      case "runtime":
+        return status
+          ? [
+              { label: "microsandbox", value: status.sandbox.msb_version ?? "missing", tone: status.sandbox.msb_version ? "ok" : "err" },
+              { label: "Mesh", value: meshBroken(status.mesh) ? "Needs attention" : "Healthy", tone: meshBroken(status.mesh) ? "err" : "ok" },
+            ]
+          : [];
+      case "live-map":
+        return telemetry ? [{ label: "Live map", value: telemetry.enabled ? "On" : "Off", tone: onOff(telemetry.enabled) }] : [];
+      case "updates":
+        return update
+          ? [
+              { label: "Installed", value: update.installed.version },
+              ...(update.available && update.latest ? [{ label: "Available", value: update.latest.version, tone: "ok" as const }] : []),
+            ]
+          : [];
+      case "usage":
+        return usage ? [{ label: "Usage data", value: usage.enabled ? "On" : "Off", tone: onOff(usage.enabled) }] : [];
+      case "notifications":
+        return [
+          { label: "In tab", value: notifications.inTab ? "On" : "Off", tone: onOff(notifications.inTab) },
+          { label: "Sound", value: notifications.sound ? "On" : "Off", tone: onOff(notifications.sound) },
+          { label: "Browser", value: notifications.browser ? "On" : "Off", tone: onOff(notifications.browser) },
+        ];
+    }
+    if (id.startsWith("org:")) {
+      const o = orgs?.find((x) => sameOrg(x.org, id.slice("org:".length)));
+      return o
+        ? [
+            { label: "Live", value: String(o.colonies.live), tone: o.colonies.live > 0 ? "ok" : undefined },
+            { label: "Colonies", value: String(o.colonies.total) },
+            { label: "Workspace", value: orgEnabled(o.settings) ? "On" : "Off", tone: onOff(orgEnabled(o.settings)) },
+          ]
+        : [];
+    }
+    if (id.startsWith("module:")) {
+      const kind = id.slice("module:".length);
+      const m = modules?.find((x) => x.kind === kind);
+      const d = drafts[kind];
+      if (!m || !d) return [];
+      const stats: HeroStat[] = [{ label: "Module", value: d.enabled ? "On" : "Off", tone: onOff(d.enabled) }];
+      const provider = m.providers.find((x) => x.id === d.provider);
+      if (m.providers.length > 1 && provider) stats.push({ label: "Provider", value: provider.name });
+      // One or two short, essential values: a model, a count, a mode.
+      for (const [key, field] of Object.entries(m.schema?.properties ?? {})) {
+        if (stats.length >= 3) break;
+        if (isAdvancedField(key, field) || field.type === "boolean" || field.format) continue;
+        const v = d.settings[key];
+        if (v === undefined || v === null || v === "" || String(v).length > 22) continue;
+        stats.push({ label: field.title ?? key, value: String(v) });
+      }
+      return stats;
+    }
+    return [];
+  };
 
   let pane: ReactNode = null;
   if (active === "setup") {
@@ -407,7 +507,20 @@ export function SettingsBody({
         claude={claude ?? null}
         models={models}
         onOpenConnections={() => select("connections")}
+        focusId={focusProvider}
         back={back}
+      />
+    );
+  } else if (active?.startsWith("org:")) {
+    const org = active.slice("org:".length);
+    pane = (
+      <OrgSettingsForm
+        key={org}
+        embedded
+        org={org}
+        info={orgs?.find((o) => sameOrg(o.org, org))}
+        onClose={() => {}}
+        onSaved={(saved) => onOrgSaved?.(saved)}
       />
     );
   } else if (active?.startsWith("module:")) {
@@ -436,6 +549,25 @@ export function SettingsBody({
       );
   }
 
+  // What the page is for, as a card: Pane shows it at the top of its body; Setup and a workspace
+  // draw their own frame, so for them it sits above the pane instead.
+  const hero = active ? <SectionHero guide={guideFor(active)} stats={heroStats(active)} flow={active === "module:source" ? sourceFlow(drafts.source?.settings, sessions) : undefined} /> : null;
+  const ownFrame = active === "setup" || Boolean(active?.startsWith("org:"));
+  const framed = (
+    <SettingsNavContext.Provider value={openAt}>
+      <HeroContext.Provider value={ownFrame ? null : hero}>
+        {ownFrame ? (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="shrink-0 px-5 pt-4">{hero}</div>
+            {pane}
+          </div>
+        ) : (
+          pane
+        )}
+      </HeroContext.Provider>
+    </SettingsNavContext.Provider>
+  );
+
   return (
     <div className={cx("flex flex-col", embedded ? "h-full min-h-0" : "h-[min(680px,calc(100dvh-24px))]")}>
       {/* The cockpit has its own header and crumb, so the embedded frame does not repeat them. */}
@@ -458,13 +590,13 @@ export function SettingsBody({
         active === null ? (
           <SectionNav layout="list" groups={groups} active={null} onSelect={select} initialFocus={lastSection.current} />
         ) : (
-          pane
+          framed
         )
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <SectionNav layout="side" groups={groups} active={active} onSelect={select} />
-          {pane}
-        </div>
+        <>
+          <TopNav groups={groups} active={active} onSelect={select} />
+          <div className="flex min-h-0 flex-1">{framed}</div>
+        </>
       )}
     </div>
   );
@@ -595,6 +727,117 @@ function SectionNav({
   );
 }
 
+/**
+ * The wide layout's nav, across the top: the groups as tabs, and the chosen group's sections as
+ * chips beneath, each with its icon. The chip row is one Tab stop; the arrows move along it.
+ */
+function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; active: SectionId | null; onSelect: (id: SectionId) => void }) {
+  const owner = groups.find((g) => g.items.some((item) => item.id === active)) ?? groups[0];
+  const [groupLabel, setGroupLabel] = useState(owner?.label);
+  // Following the page: a section opened from elsewhere (a link, a deep link) brings its group along.
+  const [lastActive, setLastActive] = useState(active);
+  if (active !== lastActive) {
+    setLastActive(active);
+    if (owner) setGroupLabel(owner.label);
+  }
+  const group = groups.find((g) => g.label === groupLabel) ?? owner;
+  const refs = useRef<Partial<Record<SectionId, HTMLButtonElement | null>>>({});
+  const items = group?.items ?? [];
+
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key) || items.length === 0) return;
+    const index = Math.max(0, items.findIndex((item) => item.id === active));
+    const next =
+      e.key === "ArrowRight" ? (index + 1) % items.length
+      : e.key === "ArrowLeft" ? (index - 1 + items.length) % items.length
+      : e.key === "Home" ? 0
+      : items.length - 1;
+    e.preventDefault();
+    onSelect(items[next].id);
+    refs.current[items[next].id]?.focus();
+  };
+
+  return (
+    <nav aria-label="Settings sections" className="shrink-0 border-b border-border">
+      <div role="tablist" aria-label="Settings groups" className="flex gap-1 px-4 pt-2.5">
+        {groups.map((g) => {
+          const current = g.label === group?.label;
+          return (
+            <button
+              key={g.label}
+              type="button"
+              role="tab"
+              aria-selected={current}
+              onClick={() => {
+                setGroupLabel(g.label);
+                if (g.items[0] && !g.items.some((item) => item.id === active)) onSelect(g.items[0].id);
+              }}
+              className={cx(
+                "relative cursor-pointer rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
+                current ? "text-text" : "text-muted hover:bg-panel-2 hover:text-text",
+              )}
+            >
+              {g.label}
+              <span className="ml-1.5 text-[11.5px] font-normal tabular-nums text-faint">{g.items.length || ""}</span>
+              {current && <span aria-hidden="true" className="absolute inset-x-2 -bottom-[1px] h-0.5 rounded-full bg-accent" />}
+            </button>
+          );
+        })}
+      </div>
+      <div className="border-t border-border">
+        {group?.loading && (
+          <p className="flex items-center gap-2 px-5 py-2.5 text-[12.5px] text-muted">
+            <Spinner className="size-3" /> Loading…
+          </p>
+        )}
+        {group?.error && <p className="px-5 py-2.5 text-[12.5px] text-err">{group.error}</p>}
+        <ul onKeyDown={onKeyDown} className="scroll-thin flex gap-1.5 overflow-x-auto px-4 py-2.5">
+          {items.map((item) => {
+            const current = item.id === active;
+            return (
+              <li key={item.id} className="shrink-0">
+                <button
+                  type="button"
+                  ref={(el) => {
+                    refs.current[item.id] = el;
+                  }}
+                  aria-current={current ? "true" : undefined}
+                  tabIndex={current || (!items.some((i) => i.id === active) && item === items[0]) ? 0 : -1}
+                  title={item.hint}
+                  onClick={() => onSelect(item.id)}
+                  className={cx(
+                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-[13px] transition-colors",
+                    current ? "border-border-strong bg-panel-2 font-medium text-text" : "border-transparent text-muted hover:bg-panel-2 hover:text-text",
+                  )}
+                >
+                  <GuideIcon name={guideFor(item.id).icon} size={15} className={current ? "text-accent" : undefined} />
+                  <span className="whitespace-nowrap">{item.label}</span>
+                  {item.dirty && (
+                    <>
+                      <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-accent" />
+                      <span className="sr-only">unsaved changes</span>
+                    </>
+                  )}
+                  {item.badge && <span className="text-[11.5px] tabular-nums text-faint">{item.badge}</span>}
+                  {item.tone && (
+                    <>
+                      <span
+                        aria-hidden="true"
+                        className={cx("size-2 shrink-0 rounded-full", item.tone === "ok" ? "bg-ok" : item.tone === "err" ? "bg-err" : "bg-warn")}
+                      />
+                      {item.toneText && <span className="sr-only">{item.toneText}</span>}
+                    </>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </nav>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Pane and row layout shared by every section
 // ---------------------------------------------------------------------------
@@ -618,6 +861,7 @@ function Pane({
   children: ReactNode;
 }) {
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const hero = useContext(HeroContext);
   const stacked = Boolean(back);
   // In the narrow, back-navigable layout the pane replaces the list, so focus must follow.
   useEffect(() => {
@@ -651,7 +895,10 @@ function Pane({
         </div>
         {aside && <div className="flex shrink-0 items-center leading-8">{aside}</div>}
       </div>
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {hero}
+        {children}
+      </div>
       {footer && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">{footer}</div>}
     </section>
   );
@@ -1655,6 +1902,45 @@ function ModulePane({
 
   const setField = (key: string, value: unknown) => onDraft({ settings: { ...draft.settings, [key]: value } });
 
+  // Ports, timers and paths fold under Advanced; what most people change stays on the page.
+  const essentials = fields.filter(([key, field]) => !isAdvancedField(key, field));
+  const advanced = fields.filter(([key, field]) => isAdvancedField(key, field));
+  const renderField = ([key, field]: [string, SchemaField]) => {
+    // Jev's tunables only mean anything with the switch on.
+    if (
+      module.kind === "agent" &&
+      (key === "jev_keep_threshold" || key === "jev_preserve_recent") &&
+      draft.settings.jev_compaction !== true
+    )
+      return null;
+    const setting = (
+      <SettingField
+        key={key}
+        name={key}
+        field={field}
+        value={valueOf(draft.settings, key, field)}
+        onChange={(v) => setField(key, v)}
+        models={models && MODEL_KEYS.has(key) ? models : undefined}
+      />
+    );
+    // The download sits under the switch that asks for it, one divider group with it.
+    const showHeadroom =
+      module.kind === "agent" &&
+      key === "headroom" &&
+      (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
+    // The data-egress warning sits under the switch that asks for it, one divider group with it.
+    const showJevWarning = module.kind === "agent" && key === "jev_compaction" && draft.settings.jev_compaction === true;
+    return showHeadroom || showJevWarning ? (
+      <div key={key} className="pb-2.5">
+        {setting}
+        {showHeadroom && <HeadroomRow headroom={headroom} />}
+        {showJevWarning && <JevCompactionNotice />}
+      </div>
+    ) : (
+      setting
+    );
+  };
+
   return (
     <Pane
       title={info.title}
@@ -1685,7 +1971,8 @@ function ModulePane({
           <ImagePullRow pull={pull} />
         </div>
       )}
-      <div className={cx("divide-y divide-border", !draft.enabled && "opacity-60")}>
+      <div className={cx(!draft.enabled && "opacity-60")}>
+      <div className="divide-y divide-border rounded-xl border border-border bg-panel px-4">
         <Row id={providerId} label="Provider" info={providerInfo?.description ? <p>{providerInfo.description}</p> : undefined}>
           {module.providers.length > 1 ? (
             <select id={providerId} value={draft.provider} onChange={(e) => onDraft({ provider: e.target.value })} className={inputClass}>
@@ -1696,8 +1983,8 @@ function ModulePane({
               ))}
             </select>
           ) : (
-            <span id={providerId} className="block text-[13.5px]">
-              {providerInfo?.name ?? draft.provider}
+            <span id={providerId} className="block">
+              <ModuleProviderMark id={draft.provider} name={providerInfo?.name ?? draft.provider} />
             </span>
           )}
         </Row>
@@ -1706,45 +1993,28 @@ function ModulePane({
           <p className="py-2.5 text-[12.5px] text-warn">These fields belong to the current provider. Save to switch.</p>
         )}
 
-        {fields.map(([key, field]) => {
-          // Jev's tunables only mean anything with the switch on.
-          if (
-            module.kind === "agent" &&
-            (key === "jev_keep_threshold" || key === "jev_preserve_recent") &&
-            draft.settings.jev_compaction !== true
-          )
-            return null;
-          const setting = (
-            <SettingField
-              key={key}
-              name={key}
-              field={field}
-              value={valueOf(draft.settings, key, field)}
-              onChange={(v) => setField(key, v)}
-              models={models && MODEL_KEYS.has(key) ? models : undefined}
-            />
-          );
-          // The download sits under the switch that asks for it, one divider group with it.
-          const showHeadroom =
-            module.kind === "agent" &&
-            key === "headroom" &&
-            (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
-          // The data-egress warning sits under the switch that asks for it, one divider group with it.
-          const showJevWarning = module.kind === "agent" && key === "jev_compaction" && draft.settings.jev_compaction === true;
-          return showHeadroom || showJevWarning ? (
-            <div key={key} className="pb-2.5">
-              {setting}
-              {showHeadroom && <HeadroomRow headroom={headroom} />}
-              {showJevWarning && <JevCompactionNotice />}
-            </div>
-          ) : (
-            setting
-          );
-        })}
+        {essentials.map(renderField)}
 
         {module.kind === "memory" && draft.provider === "mem0" && <Mem0KeyRow />}
 
+        {module.kind === "voice" && draft.provider !== "browser" && <VoiceKeyRow provider={draft.provider} name={providerInfo?.name ?? draft.provider} />}
+        {module.kind === "voice" && <VoiceTestRow unsaved={dirty} />}
+
         {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
+      </div>
+      {advanced.length > 0 && (
+        <details className="group mt-3 rounded-xl border border-border bg-panel-2/40 [&_summary::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-4 py-2.5 text-[13px] font-medium text-muted hover:text-text">
+            <IconChevron size={14} className="transition-transform group-open:rotate-90" />
+            Advanced
+            <span className="font-normal text-faint">
+              · {advanced.length} {advanced.length === 1 ? "setting" : "settings"}
+            </span>
+            <span className="ml-auto text-[12px] font-normal text-faint">Ports, timers and paths — the defaults suit most setups</span>
+          </summary>
+          <div className="divide-y divide-border border-t border-border px-4">{advanced.map(renderField)}</div>
+        </details>
+      )}
       </div>
     </Pane>
   );
@@ -1844,6 +2114,140 @@ function Mem0KeyRow() {
   );
 }
 
+/**
+ * A voice service's key, beside the module like mem0's: write-only, saved on the Mothership, never
+ * in modules.json and never shown again. The status line says where the active key comes from — a
+ * key already set on a matching model provider (OpenAI, Groq) is reused, so there may be nothing to add.
+ */
+export function VoiceKeyRow({ provider, name }: { provider: string; name: string }) {
+  const api = useApi();
+  const toast = useToast();
+  const id = useId();
+  const [status, setStatus] = useState<VoiceStatus | null>(null);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<"save" | "remove" | null>(null);
+
+  useEffect(() => {
+    api.voice().then(setStatus, () => setStatus(null));
+  }, [api, provider]);
+
+  const saveKey = async (value: string, kind: "save" | "remove") => {
+    setBusy(kind);
+    try {
+      setStatus(await api.saveVoiceKey(provider, value));
+      setKey("");
+      toast(kind === "save" ? `${name} key saved` : `${name} key removed`);
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // The status describes the saved (active) provider; while another one is picked but unsaved,
+  // its key state is unknown until the module is saved.
+  const same = status?.provider === provider;
+  const state = !status ? "Checking…" : !same ? "Save the module to see this service's key." : keySourceLabel(status.source, status.key_optional);
+
+  return (
+    <div className="space-y-2 py-2.5">
+      <label htmlFor={id} className="block text-[13px] font-medium">
+        {name} API key
+      </label>
+      <p className="text-[12.5px] text-muted">{state} It stays on the Mothership: the browser sends audio there, never the key.</p>
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (key.trim()) void saveKey(key.trim(), "save");
+        }}
+      >
+        <input
+          id={id}
+          type="password"
+          autoComplete="off"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder={same && status?.has_key ? "Replace the key" : "Paste the key"}
+          className={cx(inputClass, "min-w-48 flex-1")}
+        />
+        <Button type="submit" variant="primary" disabled={!key.trim() || busy !== null}>
+          {busy === "save" && <Spinner />} Save
+        </Button>
+        {same && status?.source === "saved" && (
+          <Button disabled={busy !== null} onClick={() => void saveKey("", "remove")}>
+            {busy === "remove" && <Spinner />} Remove
+          </Button>
+        )}
+      </form>
+    </div>
+  );
+}
+
+/** Records three seconds and runs them through the saved voice service, so a key and a microphone
+ *  are proven together before the composer relies on them. */
+export function VoiceTestRow({ unsaved }: { unsaved: boolean }) {
+  const api = useApi();
+  const [state, setState] = useState<{ phase: "idle" | "recording" | "transcribing" } | { phase: "done"; text: string } | { phase: "failed"; error: string }>({
+    phase: "idle",
+  });
+
+  const run = async () => {
+    try {
+      const status = await api.voice();
+      if (status.provider === "browser") {
+        setState({ phase: "failed", error: "The browser recognises speech itself; there is no service to test. Pick one and save first." });
+        return;
+      }
+      if (!status.configured) {
+        setState({ phase: "failed", error: `${status.name} is not ready: add its key${status.key_optional ? " or base URL" : ""} first.` });
+        return;
+      }
+      setState({ phase: "recording" });
+      const recording = await startRecording();
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const clip = await recording.stop();
+      setState({ phase: "transcribing" });
+      const { text } = await api.transcribe(clip);
+      setState({ phase: "done", text });
+    } catch (error) {
+      setState({ phase: "failed", error: error instanceof DOMException && error.name === "NotAllowedError" ? "Microphone access was blocked" : errorMessage(error) });
+    }
+  };
+
+  const busy = state.phase === "recording" || state.phase === "transcribing";
+  return (
+    <div className="space-y-2 py-2.5">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button disabled={busy || unsaved || !canRecord()} onClick={() => void run()}>
+          {busy && <Spinner />} Test microphone
+        </Button>
+        <span className="text-[12.5px] text-muted">
+          {unsaved
+            ? "Save first: the test uses the saved service."
+            : state.phase === "recording"
+              ? "Recording 3 seconds — say something…"
+              : state.phase === "transcribing"
+                ? "Transcribing…"
+                : !canRecord()
+                  ? "This browser can't record audio."
+                  : "Records 3 seconds and transcribes them with the saved service."}
+        </span>
+      </div>
+      {state.phase === "done" && (
+        <p role="status" className="text-[13px] text-ok">
+          {state.text ? `Heard: “${state.text}”` : "The service answered, but heard nothing."}
+        </p>
+      )}
+      {state.phase === "failed" && (
+        <p role="status" className="text-[12.5px] text-err">
+          {state.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SettingField({
   name,
   field,
@@ -1877,12 +2281,13 @@ function SettingField({
   if (models && !field.enum) {
     return (
       <Row id={id} label={label} info={info}>
-        <ModelInput
+        <ModelPicker
           id={id}
           value={text}
           onChange={onChange}
           models={models}
-          placeholder={name === "subagent_model" ? "Same as orchestrator" : "Claude Code default"}
+          ariaLabel={label}
+          emptyLabel={name === "subagent_model" || name === "model_low" ? "Same as orchestrator" : "Claude Code default"}
         />
       </Row>
     );
@@ -2074,55 +2479,6 @@ const PRESET_LABEL: Record<ProviderPreset, string> = {
   custom: "Custom",
 };
 
-/**
- * What sits in a provider's tile. Vendors with a CC0 mark in the icon set get it;
- * `local` and `custom` are not brands and keep a plain glyph. Anything else,
- * including OpenAI and Z.AI (no CC0 artwork exists for them) and every preset
- * added later, falls through to a lettermark built from the provider's name.
- */
-const PRESET_MARK: Partial<Record<ProviderPreset | "anthropic", ComponentType<IconProps>>> = {
-  anthropic: BrandClaude,
-  deepseek: BrandDeepSeek,
-  alibaba: BrandAlibabaCloud,
-  local: IconServer,
-  custom: IconPlug,
-  // Catalogue vendors whose mark exists under CC0; the rest fall back to initials.
-  kimi: BrandKimi,
-  "kimi-for-coding": BrandKimi,
-  minimax: BrandMiniMax,
-  modelscope: BrandModelScope,
-  openrouter: BrandOpenRouter,
-  "github-copilot": BrandGitHubCopilot,
-  "xai-grok": BrandXai,
-  nvidia: BrandNvidia,
-  xiaomi: BrandXiaomi,
-};
-
-/** One or two initials: the capitals of the name ("OpenAI" gives OA, "Z.AI" gives ZA), else the first letters of its words. */
-function initialsOf(name: string): string {
-  const capitals = name.replace(/[^A-Z]/g, "");
-  if (capitals.length >= 2) return capitals.slice(0, 2);
-  const words = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  const letters = words.map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-  return letters || capitals || "?";
-}
-
-/**
- * The tile at the start of a provider row or add button. Decorative: the vendor's
- * name is always beside it as text, so the tile is hidden from assistive tech.
- */
-function ProviderMark({ preset, name, size = "row" }: { preset?: ProviderPreset | "anthropic"; name: string; size?: "row" | "button" | "tile" }) {
-  const Mark = preset ? PRESET_MARK[preset] : undefined;
-  const box = { tile: "size-11 rounded-xl", row: "size-8 rounded-lg", button: "size-[18px] rounded-[5px]" }[size];
-  const glyph = { tile: 24, row: 18, button: 12 }[size];
-  // Initials carry the whole tile when a vendor has no mark, so they scale with it.
-  const initials = { tile: "text-[15px] font-semibold tracking-tight", row: "text-[11.5px] font-semibold tracking-tight", button: "text-[8.5px] font-bold" }[size];
-  return (
-    <span aria-hidden="true" className={cx("grid shrink-0 select-none place-items-center bg-panel-2 text-text", box, !Mark && initials)}>
-      {Mark ? <Mark size={glyph} strokeWidth={size === "button" ? 2 : 1.75} /> : initialsOf(name)}
-    </span>
-  );
-}
 
 /** Shown while adding a provider, where the base URL is the thing people get wrong. */
 const PRESET_HINT: Partial<Record<ProviderPreset, string>> = {
@@ -2194,6 +2550,7 @@ function ProvidersPane({
   claude,
   models,
   onOpenConnections,
+  focusId,
   back,
 }: {
   providers: ModelProvider[] | null;
@@ -2203,11 +2560,16 @@ function ProvidersPane({
   claude: HarnessStatus["claude"] | null;
   models: ModelOption[];
   onOpenConnections: () => void;
+  /** Opens this provider's editor when the pane appears — where a model picker's "Set key" lands. */
+  focusId?: string;
   back?: () => void;
 }) {
   const api = useApi();
   const addLabelId = useId();
-  const [editing, setEditing] = useState<Editing>(null);
+  const [editing, setEditing] = useState<Editing>(() => (focusId ? { mode: "edit", id: focusId } : null));
+  useEffect(() => {
+    if (focusId) setEditing({ mode: "edit", id: focusId });
+  }, [focusId]);
   const [browsing, setBrowsing] = useState(false);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [health, setHealth] = useState<Record<string, HealthView>>({});
@@ -3312,4 +3674,33 @@ function ChipsInput({
       />
     </div>
   );
+}
+
+/** Splits a comma-separated label setting into its labels. */
+function labelList(value: unknown): string[] {
+  return typeof value === "string" ? value.split(",").map((l) => l.trim()).filter(Boolean) : [];
+}
+
+/**
+ * The Source page's picture, live: issues pass the label filter (as typed, before saving), wait in
+ * the queue, run as colonies and come out as pull requests, each step with its count right now.
+ */
+function sourceFlow(settings: Record<string, unknown> | undefined, sessions: Session[] = []): FlowNode[] {
+  const include = labelList(settings?.include_labels);
+  const exclude = labelList(settings?.exclude_labels);
+  const count = (...statuses: string[]) => sessions.filter((s) => statuses.includes(s.status)).length;
+  const queued = count("queued");
+  const live = count("starting", "running", "waiting_for_answer", "idle", "publishing");
+  const prs = count("pr_opened");
+  const chips: FlowChip[] =
+    include.length + exclude.length === 0
+      ? [{ text: "every open issue", kind: "note" }]
+      : [...include.map((text) => ({ text, kind: "in" as const })), ...exclude.map((text) => ({ text, kind: "out" as const }))];
+  return [
+    { icon: "github", label: "Open issues", metric: "GitHub" },
+    { icon: "filter", label: "Label filter", chips, active: include.length + exclude.length > 0 },
+    { icon: "queue", label: "Queue", metric: `${queued} waiting`, active: queued > 0 },
+    { icon: "ant", label: "Colonies", metric: `${live} running`, active: live > 0 },
+    { icon: "pr", label: "Pull requests", metric: `${prs} open` },
+  ];
 }

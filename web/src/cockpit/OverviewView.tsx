@@ -1,33 +1,33 @@
 // Overview: every workspace and every colony on one page, for when the question is "what is going on
-// everywhere" rather than "what is this nest doing". Follows the Claude Design "Cockpit Dashboards"
-// reference (docs/design/cockpit-dashboards/, issue #398): headline, six KPI tiles, the needs-you
-// queue, merged-per-day bars beside the workspaces-compared table, workspace cards, the colonies
-// table and the system strip.
+// everywhere" rather than "what is this nest doing". Follows the Claude Design "Cockpit Dashboards
+// v3" reference: title and meta line, the KPI strip, the needs-you queue, merged-per-day as stacked
+// areas beside each workspace's share, the workspaces table, the colonies table, and the system
+// strip — flat sections between hairlines, no cards.
 //
 // Design elements with NO data source behind them (reported, never faked):
-// - "Auto-answer with Jev" toggle and "Let Jev answer" buttons: no auto-answer backend exists.
-//   Omitted; "Answer →" deep-links to the colony through the existing onOpenColony path.
-// - Lead time, PR cycle time, CI pass rate KPIs: no PR-opened timestamps, no CI data. KpiTile empty states.
 // - Change failure rate: no failure history — derived from current session statuses as
 //   failed ÷ (merged + failed) in the window (merged by merge date, failed by created
 //   date), with the basis in the sub-line.
-// - Merged PRs (count, per-day bars, compared table): bucketed by merged_at, falling
+// - Merged PRs (count, per-day areas, workspaces table): bucketed by merged_at, falling
 //   back to created_at when the mothership omits it, said out loud in the sub-lines.
-// - "Manage workspaces": this view receives no settings opener, so the buttons are omitted.
+// - "Manage workspaces": lives in the header's switcher (it opens org settings); this view has no
+//   org-settings opener of its own.
+// - "Answer": deep-links to the colony through onOpenColony; no inline answering backend here.
+import { HackerIcon } from "./HackerIcon";
 import { useMemo, useState, type ReactElement } from "react";
 
-import { Avatar, initialOf } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
-import { SESSION_STATUS, formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
+import { formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { HIDE_EMPTY_ORGS_KEY, hideEmptyOrgEntries, parseHideEmptyOrgs } from "../orgs";
-import { formatCost, formatTokens, modelMix, orgCost, sessionCost, sumCosts } from "../spend";
+import { formatCost, formatTokens, orgCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
-import { DashBars, DashLegend, DashPanel, Eyebrow, FilterChip, KpiTile, RangePicker, ShareBar, Sparkline, StatusChip, type KpiDef } from "./DashChart";
+import { AreaChart, ChartSection, COLONY_GRID, ColonyRow, KpiStrip, OrgTile, RangePicker, Rules, Section, SegTabs, TrendLine, type KpiDef } from "./DashChart";
+import { deliveryKpis } from "./delivery";
 import { FleetPanel } from "./FleetPanel";
-import { LiveCost, LiveIndicator } from "./Live";
+import { isBumped, isFlashed, useLiveEvents } from "./liveEvents";
 import { OrgDashboard } from "./OrgDashboard";
 import {
   changeFailRate,
@@ -37,30 +37,29 @@ import {
   dayKeyOfDate,
   chartColor,
   deltaTone,
-  formatDelta,
   formatPts,
   formatWait,
   mergedInWindow,
-  orgColorFor,
-  orgRepos,
-  relDelta,
+  compareDelta,
   shortDayLabel,
   slicePeriods,
   sparkPoints,
   sumHistoryCost,
   sumTokens,
-  TONE_VAR,
   waitingMs,
   waitingSince,
   type ProviderErrorSnapshot,
   type RangeDays,
 } from "./dash";
-import { headlineFor, OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
+import { OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
 import { hostFacts } from "./host";
-import { RedTeamCard } from "./RedTeamCard";
+import { RedTeamWizard } from "./RedTeamWizard";
+import { RedTeamHistory } from "./RedTeamHistory";
 import { StoragePanel } from "./StoragePanel";
+import { useOpenQuestions } from "./questions";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
 import type { LiveConnection } from "../liveStream";
+import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
 
 /** The last `range` local-calendar days, ascending — the x axis of every per-day series.
  *  Walks the calendar (not fixed 24h steps) so a DST transition cannot duplicate or skip a day. */
@@ -91,29 +90,6 @@ function sortColonies(list: Session[]): Session[] {
   });
 }
 
-/** An org's avatar when /api/orgs knows one, else its initial on its deterministic colour —
- *  the same tile everywhere (cards, queue, table, legends, chips), so the hue fallback reads as
- *  one identity. A broken image falls back to the lettermark too, via Avatar's fallback. */
-function OrgTile({ org, avatar, size = 22 }: { org: string; avatar?: string | null; size?: number }): ReactElement {
-  const radius = size <= 22 ? 6 : 8;
-  return (
-    <Avatar
-      name={org}
-      src={avatar ?? undefined}
-      size={size}
-      rounded={size <= 22 ? "md" : "lg"}
-      fallback={
-        <span
-          aria-hidden="true"
-          className="grid shrink-0 select-none place-items-center font-bold"
-          style={{ width: size, height: size, borderRadius: radius, fontSize: Math.max(10, Math.round(size * 0.42)), background: orgColorFor(org), color: "var(--term-bg)" }}
-        >
-          {initialOf(org)}
-        </span>
-      }
-    />
-  );
-}
 
 const COLONY_LIMIT = 10;
 
@@ -128,12 +104,14 @@ export function OverviewView({
   quota = null,
   quotaBannerVisible = false,
   providers = [],
-  connection,
   liveStorage = null,
   onStart,
   onStop,
   onOpenColony,
   onOpenSettings,
+  scopeOrg,
+  onScopeOrg,
+  issues,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -143,7 +121,7 @@ export function OverviewView({
   host?: HostInfo | null;
   /** Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); absent or empty renders no fleet panel. */
   fleet?: FleetHost[];
-  /** Red-team runs (issue #212): the card lists them. */
+  /** Red-team runs (issue #212): each workspace row's history lists its own. */
   runs?: RedTeamRun[];
   /** The bucket filter to start on. Null in production — the tests pin the filtered states through it because static markup cannot click. */
   initialFilter?: OverviewFilter | null;
@@ -156,7 +134,7 @@ export function OverviewView({
   /** Cumulative provider tallies, mapped from GET /api/status `model_providers` by the caller;
    *  passed through to the in-place org dashboard. Empty stays empty, never zero. */
   providers?: ProviderErrorSnapshot[];
-  /** The realtime feed's connection (issue #446); absent renders the indicator as reconnecting. */
+  /** The realtime feed's connection (issue #446); the header shows it, the org dashboard too. */
   connection?: LiveConnection;
   /** A storage frame the stream pushed; the storage panel shows it instead of its own fetch. */
   liveStorage?: StorageSummary | null;
@@ -165,22 +143,33 @@ export function OverviewView({
   onOpenColony: (id: string) => void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
+  /** The GitHub issues hand-off, shown as a button above the range toolbar; absent in tests. */
+  issues?: IssuesActions;
+  /** The cockpit's workspace scope: set, it opens that org's dashboard in place; null is the
+   *  overview. Omitted (tests), the page keeps the choice itself. */
+  scopeOrg?: string | null;
+  /** Changes the cockpit's scope — the sidebar's switcher and this page stay one control. */
+  onScopeOrg?: (org: string | null) => void;
 }): ReactElement {
   // Dashboard toolbar state (issue #398): the range scopes the history-backed KPIs and charts;
   // the compare toggle adds previous-period deltas and the ghost line. Client state, per visit.
   const [range, setRange] = useState<RangeDays>(30);
   const [compare, setCompare] = useState(true);
   // The org whose dashboard replaces the overview body in place; null is the overview itself.
-  // Local state, so Cockpit.tsx stays untouched.
-  const [dashOrg, setDashOrg] = useState<string | null>(null);
+  const [localDashOrg, setLocalDashOrg] = useState<string | null>(null);
+  const dashOrg = scopeOrg !== undefined ? scopeOrg : localDashOrg;
+  const setDashOrg = onScopeOrg ?? setLocalDashOrg;
   // The colonies table's own filters: one status bucket plus one org. Null is unfiltered.
   const [colonyFilter, setColonyFilter] = useState<OverviewFilter | null>(initialFilter ?? null);
   const [orgFilter, setOrgFilter] = useState<string | null>(null);
+  // The red-team wizard or history open for one workspace row; null is neither.
+  const [redTeam, setRedTeam] = useState<{ org: string; view: "wizard" | "history" } | null>(null);
   const [showAll, setShowAll] = useState(false);
-  // The page renders one card per entry of `orgs` (the visible workspaces), so the counters cover
-  // exactly that set — never the whole list. Counting switched-off orgs in the chips while their
-  // colonies have no card is the divergence behind issue #246: bare global numbers over a list
-  // that cannot show them.
+  // What moved since the last push: flashes the row whose status changed, lights a risen cost.
+  const events = useLiveEvents(sessions);
+  const questions = useOpenQuestions(sessions);
+  // The page covers exactly the visible workspaces — never the whole list. Counting switched-off
+  // orgs while their colonies have no row is the divergence behind issue #246.
   const visibleSessions = overviewVisibleSessions(sessions, orgs);
   const counts = overviewCounts(visibleSessions);
   // The Workspace-settings "hide orgs with no colonies" toggle is client-side state: read it on
@@ -188,11 +177,11 @@ export function OverviewView({
   const workspaces = hideEmptyOrgEntries(orgs, parseHideEmptyOrgs(stored(HIDE_EMPTY_ORGS_KEY)));
   // Held slots (issue #217): idle colonies whose PR autopilot holds occupy parallel slots without
   // doing work. When every slot-occupying colony is held and something queues, nothing can drain
-  // until a hold times out — the queued chip must read as stalled, never as a healthy busy queue.
+  // until a hold times out — the queued tab must read as stalled, never as a healthy busy queue.
   const held = heldSlots(visibleSessions);
   const stalled = queueStalled(visibleSessions);
-  // Colonies the chips deliberately do not count: their org is switched off, so no card can show
-  // them. They are named in the scope line below instead of being silently hidden.
+  // Colonies the counts deliberately do not include: their org is switched off. They are named
+  // in the scope line below instead of being silently hidden.
   const hiddenSessions = sessions.filter((session) => !visibleSessions.includes(session));
   const hiddenCounts = overviewCounts(hiddenSessions);
   const hiddenOrgs = [...new Set(
@@ -210,7 +199,7 @@ export function OverviewView({
   const spendHistory = useSpendHistory(range * 2);
   const { current, previous } = useMemo(() => slicePeriods(spendHistory, range), [spendHistory, range]);
 
-  // Prefer the server's per-org rollups when it reports them, so the header can never disagree with
+  // Prefer the server's per-org rollups when it reports them, so the total can never disagree with
   // the rows it sits above; only fall back to the sessions-derived `cost` while any org carries no
   // server spend — an older mothership, or an org the rollup has never measured a dollar for.
   const headerCost =
@@ -225,76 +214,80 @@ export function OverviewView({
   const prevFromMs = fromMs - range * 86_400_000;
   const days = rangeDays(range, nowMs);
   const prevDays = rangeDays(range, fromMs - 1);
-  const xLabels = days.map(shortDayLabel);
+  const dayLabels = days.map(shortDayLabel);
 
   const needList = visibleSessions.filter(needsYou).sort((a, b) => waitingMs(b) - waitingMs(a) || a.id.localeCompare(b.id));
-  const working = visibleSessions.filter((s) => s.status === "running" || s.status === "starting").length;
 
-  // Six KPI tiles: merged and spend are real, change-failure is a snapshot reading, and lead
-  // time / PR cycle time / CI pass rate have no data source — honest empty states, same card shape.
+  // The KPI strip: merged, change failure and spend are measured; live colonies is the moment's
+  // count; lead time, PR cycle time and CI pass rate come from the PR watcher's timestamps and checks.
   const mergedCur = mergedInWindow(visibleSessions, fromMs, nowMs);
   const mergedPrev = mergedInWindow(visibleSessions, prevFromMs, fromMs);
-  const mergedDelta = compare ? relDelta(mergedCur.length, mergedPrev.length) : null;
+  const mergedCmp = compare ? compareDelta(mergedCur.length, mergedPrev.length) : undefined;
+  const mergedDelta = mergedCmp?.d ?? null;
   const failCur = changeFailRate(visibleSessions, fromMs, nowMs);
   const failPrev = changeFailRate(visibleSessions, prevFromMs, fromMs);
   const failDelta = compare && failCur.rate != null && failPrev.rate != null ? failCur.rate - failPrev.rate : null;
   const periodSpend = sumHistoryCost(current);
-  const spendDelta = compare ? relDelta(periodSpend, sumHistoryCost(previous)) : null;
+  const spendCmp = compare ? compareDelta(periodSpend, sumHistoryCost(previous)) : undefined;
+  const spendDelta = spendCmp?.d ?? null;
   const kpis: KpiDef[] = [
     {
-      label: "MERGED PRS",
+      label: "Merged PRs",
       value: String(mergedCur.length),
       valueNum: mergedCur.length,
-      delta: mergedDelta != null ? formatDelta(mergedDelta) : undefined,
+      delta: mergedCmp?.text,
       deltaTone: deltaTone(mergedDelta),
-      deltaDir: (mergedDelta ?? 0) < 0 ? "down" : "up",
       spark: sparkPoints(dailyMerged(visibleSessions, days)),
       sub: `${(mergedCur.length / range).toFixed(1)} per day · by merge date`,
       hint: "sessions with status merged in range, GET /api/sessions — bucketed by merged_at, falling back to created_at when absent",
     },
-    { label: "LEAD TIME", value: "—", emptyNote: "no data source yet", hint: "issue picked up → PR opened: the API serves neither timestamp" },
-    { label: "PR CYCLE TIME", value: "—", emptyNote: "no data source yet", hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
     failCur.rate == null
-      ? { label: "CHANGE FAILURE RATE", value: "—", emptyNote: "nothing decided in range", hint: "failed ÷ (merged + failed) in range, GET /api/sessions" }
+      ? { label: "Change failure rate", value: "—", emptyNote: "nothing decided in range", hint: "failed ÷ (merged + failed) in range, GET /api/sessions" }
       : {
-          label: "CHANGE FAILURE RATE",
+          label: "Change failure rate",
           value: `${(failCur.rate * 100).toFixed(1)}%`,
           delta: failDelta != null ? formatPts(failDelta) : undefined,
           deltaTone: deltaTone(failDelta, "down"),
-          deltaDir: (failDelta ?? 0) < 0 ? "down" : "up",
           spark: sparkPoints(dailyFailRate(visibleSessions, days)),
           sub: `${failCur.failed} failed of ${failCur.decided} decided (merged+failed)`,
           hint: "failed ÷ (merged + failed) in range, GET /api/sessions — merged by merge date, failed by created date: a snapshot reading, not a history",
         },
-    { label: "CI PASS RATE", value: "—", emptyNote: "no data source yet", hint: "checks on colony PRs: no CI data is served" },
     {
-      label: "SPEND",
+      label: "Spend",
       value: formatCost(periodSpend),
       valueNum: periodSpend ?? undefined,
       formatNum: (n) => formatCost(n),
-      delta: spendDelta != null ? formatDelta(spendDelta) : undefined,
+      delta: spendCmp?.text,
       deltaTone: deltaTone(spendDelta, "down"),
-      deltaDir: (spendDelta ?? 0) < 0 ? "down" : "up",
       spark: sparkPoints(dailyCosts(current)),
       sub: `${formatTokens(sumTokens(current))} tokens`,
       hint: "measured spend in range, GET /api/spend/history",
     },
+    {
+      label: "Live colonies",
+      value: String(counts.live),
+      valueNum: counts.live,
+      sub: `${counts.queued} queued${held.count > 0 ? ` · ${held.count} held` : ""}`,
+      hint: "starting, working, idle or waiting on you, right now",
+    },
+    ...deliveryKpis(visibleSessions, { from: fromMs, to: nowMs }, { from: prevFromMs, to: fromMs }, days, compare),
   ];
 
-  // Merged per day, stacked by workspace in ramp order (org identity rides on the avatars in
-  // the legend, chips and cards now, never on hue); the ghost is the previous period's daily
-  // total when compare is on.
-  const avatarByOrg = new Map(orgs.map((o) => [o.org.toLowerCase(), o.avatar]));
-  const avatarOf = (org: string): string | null => avatarByOrg.get(org.toLowerCase()) ?? null;
+  // Merged per day, stacked by workspace in ramp order (org identity rides on the avatars, never
+  // on hue alone); the ghost is the previous period's daily total when compare is on.
   const mergedSeries = workspaces.map((o, i) => ({ label: o.org, color: chartColor(i), values: dailyMerged(visibleSessions, days, o.org) }));
   const ghostTotals = prevDays.map((day) => dailyMerged(visibleSessions, [day]).reduce((t, v) => t + v, 0));
-  const ghost = compare && ghostTotals.some((v) => v > 0) ? ghostTotals.map((v) => (v > 0 ? v : null)) : undefined;
+  // Compare on with an empty previous period still draws: a flat dashed zero line, labelled as such,
+  // so the switch visibly does something instead of silently showing nothing.
+  const prevEmpty = ghostTotals.every((v) => v === 0) && (sumHistoryCost(previous) ?? 0) === 0;
+  const ghost = compare ? ghostTotals : undefined;
 
-  // Workspaces compared: merged share plus the in-range failure reading and the measured rollup.
+  // Per workspace: merged share, the in-range failure reading and the measured rollup.
   const compared = workspaces.map((o, i) => {
-    const merged = mergedInWindow(visibleSessions.filter((s) => sameOrg(orgOf(s), o.org)), fromMs, nowMs).length;
+    const mine = visibleSessions.filter((s) => sameOrg(orgOf(s), o.org));
+    const merged = mergedInWindow(mine, fromMs, nowMs).length;
     const fail = changeFailRate(visibleSessions, fromMs, nowMs, o.org);
-    return { org: o.org, avatar: o.avatar, color: chartColor(i), merged, fail, spend: orgCost(o.spend) };
+    return { org: o.org, avatar: o.avatar, color: chartColor(i), mine, merged, fail, spend: orgCost(o.spend), need: mine.filter(needsYou).length };
   });
   const mergedAll = compared.reduce((t, c) => t + c.merged, 0);
 
@@ -305,14 +298,25 @@ export function OverviewView({
     ),
   );
   const tableShown = showAll ? tableSessions : tableSessions.slice(0, COLONY_LIMIT);
+  const rangePicker = (
+    <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} emptyPrevious={prevEmpty} />
+  );
+  // The issues hand-off sits above the range controls, at the title row's right.
+  const toolbar = issues ? (
+    <div className="flex flex-col items-end gap-2.5">
+      <IssuesButton variant="header" {...issues} />
+      {rangePicker}
+    </div>
+  ) : (
+    rangePicker
+  );
 
   // An org dashboard replaces the overview body in place; the header above stays put.
   const dashEntry = dashOrg ? workspaces.find((o) => sameOrg(o.org, dashOrg)) : undefined;
   if (dashEntry) {
     return (
-      <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
-        <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-5">
-          <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} />
+      <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
+        <div className="mx-auto w-full max-w-[1080px]">
           <OrgDashboard
             org={dashEntry}
             sessions={visibleSessions.filter((s) => sameOrg(orgOf(s), dashEntry.org))}
@@ -320,7 +324,9 @@ export function OverviewView({
             range={range}
             compare={compare}
             providers={providers}
-            connection={connection}
+            toolbar={toolbar}
+            events={events}
+            onOpenColony={onOpenColony}
             onBack={() => setDashOrg(null)}
           />
         </div>
@@ -330,36 +336,39 @@ export function OverviewView({
 
   const fleetHosts = fleet ?? [];
   const fleetOnline = fleetHosts.filter((h) => h.health === "online").length;
+  const clearFilters = () => {
+    setColonyFilter(null);
+    setOrgFilter(null);
+    setShowAll(false);
+  };
 
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-10 pt-7">
-      <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-5">
+    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
+      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-10">
         {quota?.paused && !quotaBannerVisible ? (
-          <div role="status" className="rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn">
+          <div role="status" className="-mb-4 border-y border-warn/40 py-2.5 text-[13px] text-warn">
             Queue paused — {quota.reason ?? "every provider's quota is exhausted"}
           </div>
         ) : null}
+
         <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="mb-1.5 flex items-center gap-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">
-              <span>OVERVIEW · {workspaces.length} WORKSPACES</span>
-              <LiveIndicator connection={connection} />
+          <div className="min-w-0">
+            <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Overview</h1>
+            <div className="mt-2 text-[14px] text-muted">
+              {needList.length} {needList.length === 1 ? "colony needs" : "colonies need"} you · {counts.live} live · {counts.queued} queued across {workspaces.length}{" "}
+              {workspaces.length === 1 ? "workspace" : "workspaces"}
+              {headerCost !== null && <> · {formatCost(headerCost)} spent</>}
             </div>
-            <div className="text-[22px] font-semibold tracking-tight">{headlineFor(needList.length, working)}</div>
           </div>
-          <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} />
+          {toolbar}
         </div>
 
         {(colonyFilter || orgFilter || hiddenOrgs.length > 0) && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11.5px] text-muted" role="status">
+          <div className="-mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint" role="status">
             {(colonyFilter || orgFilter) && (
               <span>
                 filter {colonyFilter ? `"${colonyFilter}"` : ""}{colonyFilter && orgFilter ? " · " : ""}{orgFilter ? `org "${orgFilter}"` : ""} · showing {tableSessions.length} of {visibleSessions.length}
-                <button
-                  type="button"
-                  onClick={() => { setColonyFilter(null); setOrgFilter(null); setShowAll(false); }}
-                  className="ml-2 cursor-pointer text-accent hover:underline"
-                >
+                <button type="button" onClick={clearFilters} className="ml-2 cursor-pointer border-0 bg-transparent p-0 text-muted underline underline-offset-[3px] hover:text-text">
                   clear ×
                 </button>
               </span>
@@ -373,221 +382,192 @@ export function OverviewView({
           </div>
         )}
 
-        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
-          {kpis.map((k) => (
-            <KpiTile key={k.label} {...k} />
-          ))}
-        </div>
+        <KpiStrip items={kpis} />
 
         {needList.length > 0 && (
-          <section className="overflow-hidden rounded-2xl border border-border bg-panel">
-            <div className="flex items-center gap-2.5 border-b border-border bg-warn-soft px-4 py-3">
-              <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full bg-warn" />
-              <span className="font-mono text-[10.5px] tracking-[0.12em] text-warn">NEEDS YOU · {needList.length}</span>
-              <span className="text-xs text-muted">colonies paused on a question, oldest first</span>
-            </div>
-            {needList.map((session) => {
-              const org = orgOf(session);
-              const waitMs = waitingMs(session, nowMs);
-              const wait = formatWait(waitMs);
-              const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
-              return (
-                <div key={session.id} className="grid grid-cols-[22px_minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-border px-4 py-2.5 first:border-t-0">
-                  <OrgTile org={org} avatar={avatarOf(org)} />
-                  <span className="min-w-0">
-                    <span className="block truncate text-[13px]">
-                      {short} <span className="text-muted">· {session.issue_title || short}</span>
-                    </span>
-                    <span className="block font-mono text-[11px] text-faint">
-                      {org} · waiting {wait}
-                    </span>
-                  </span>
-                  <span className={`font-mono text-[11px] ${waitMs > 2 * 3_600_000 ? "text-err" : "text-warn"}`}>{wait}</span>
-                  <button
-                    type="button"
-                    onClick={() => onOpenColony(session.id)}
-                    title={waitingSince(session)}
-                    className="cursor-pointer whitespace-nowrap rounded-lg border border-accent bg-accent-soft px-2.5 py-[5px] text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent"
+          <Section id="sec-inbox" title="Needs you" meta={`${needList.length} waiting · oldest first`}>
+            <Rules>
+              {needList.map((session) => {
+                const org = orgOf(session);
+                const waitMs = waitingMs(session, nowMs);
+                const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
+                return (
+                  <div
+                    key={session.id}
+                    className={`-mt-px grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 border-t border-border py-3 transition-colors duration-[1200ms] ${isFlashed(events, session.id, nowMs) ? "v3-flash" : ""}`}
                   >
-                    Answer →
-                  </button>
-                </div>
-              );
-            })}
-          </section>
-        )}
-
-        <div className="flex flex-wrap gap-3.5">
-          <DashPanel
-            title="MERGED PRS PER DAY · BY WORKSPACE"
-            sub={`${mergedCur.length} merged in ${range}d${compare ? ` · dashed line is the previous ${range}d` : ""} · by merge date`}
-            legend={<DashLegend items={workspaces.map((o, i) => ({ label: o.org, color: chartColor(i), icon: <OrgTile org={o.org} avatar={o.avatar} size={16} /> }))} />}
-            className="min-w-0 flex-[2_1_560px]"
-          >
-            {mergedAll > 0 || mergedSeries.some((s) => s.values.some((v) => v > 0)) ? (
-              <DashBars series={mergedSeries} labels={days} ghost={ghost} format={(v) => String(Math.round(v))} formatY={(v) => (Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : "")} xLabels={xLabels} />
-            ) : (
-              <div className="py-6 text-center font-mono text-[11px] text-faint">no merged PRs in range</div>
-            )}
-          </DashPanel>
-          <section className="flex min-w-0 flex-[1_1_320px] flex-col overflow-hidden rounded-2xl border border-border bg-panel">
-            <div className="px-4 pb-1 pt-4">
-              <Eyebrow>WORKSPACES COMPARED</Eyebrow>
-              <div className="mt-1 text-[13px] text-muted">Share of merged PRs, {range}d</div>
-            </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_58px_62px_70px] gap-2 border-b border-border px-4 py-1.5 font-mono text-[10px] tracking-[0.08em] text-faint">
-              <span>ORG</span>
-              <span className="text-right">MERGED</span>
-              <span className="text-right">FAIL %</span>
-              <span className="text-right">SPEND</span>
-            </div>
-            {compared.map((c) => (
-              <button
-                key={c.org}
-                type="button"
-                onClick={() => setDashOrg(c.org)}
-                className="grid cursor-pointer grid-cols-[minmax(0,1fr)_58px_62px_70px] items-center gap-2 border-b border-border px-4 py-2.5 text-left tabular-nums last:border-b-0 hover:bg-panel-2"
-              >
-                <span className="min-w-0">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <OrgTile org={c.org} avatar={c.avatar} size={20} />
-                    <span className="block truncate text-[13px] font-semibold">{c.org}</span>
-                  </span>
-                  <span className="mt-1.5 block h-1 overflow-hidden rounded-full bg-panel-3">
-                    <span className="block h-full rounded-full" style={{ width: `${mergedAll > 0 ? (c.merged / mergedAll) * 100 : 0}%`, background: c.color }} title={`share of merged: ${c.merged} of ${mergedAll}`} />
-                  </span>
-                </span>
-                <span className="text-right font-mono text-xs">{c.merged}</span>
-                <span className={`text-right font-mono text-xs ${c.fail.rate != null && c.fail.rate > 0.08 ? "text-err" : "text-muted"}`} title={c.fail.rate != null ? `${c.fail.failed} failed of ${c.fail.decided} decided (merged+failed)` : "nothing decided in range"}>
-                  {c.fail.rate != null ? `${(c.fail.rate * 100).toFixed(1)}%` : "—"}
-                </span>
-                <span className="text-right font-mono text-xs">{formatCost(c.spend)}</span>
-              </button>
-            ))}
-            <div className="mt-auto px-4 py-2.5 font-mono text-[11px] text-faint">
-              {hiddenOrgs.length > 0 ? `+ ${hiddenOrgs.length} hidden ${hiddenOrgs.length === 1 ? "org" : "orgs"} not counted` : "All workspaces shown"}
-            </div>
-          </section>
-        </div>
-
-        <div className="mt-1 font-mono text-[10.5px] tracking-[0.12em] text-faint">WORKSPACES</div>
-        <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr))]">
-          {workspaces.map((org) => {
-            const mine = visibleSessions.filter((s) => sameOrg(orgOf(s), org.org));
-            const need = mine.filter(needsYou).length;
-            const live = mine.filter((s) => isLive(s.status)).length;
-            const queued = mine.filter((s) => s.status === "queued").length;
-            const returned = mine.filter((s) => ["pr_opened", "merged", "closed", "no_changes"].includes(s.status)).length;
-            const merged = mergedInWindow(mine, fromMs, nowMs).length;
-            const fail = changeFailRate(mine, fromMs, nowMs);
-            const spend = orgCost(org.spend);
-            const tokens = sumTokens(current, org.org);
-            const mix = modelMix(org.spend?.models, 1);
-            const topModel = mix.shown.length > 0 ? `${mix.shown[0].model} ${formatTokens(mix.shown[0].tokens)}` : "no model usage";
-            return (
-              <section key={org.org} className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-panel">
-                <button
-                  type="button"
-                  onClick={() => setDashOrg(org.org)}
-                  className="grid cursor-pointer grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 px-4 pb-3 pt-3.5 text-left hover:bg-panel-2"
-                >
-                  <OrgTile org={org.org} avatar={org.avatar} size={30} />
-                  <span className="min-w-0">
-                    <span className="block truncate font-semibold">{org.org}</span>
-                    <span className="block font-mono text-[11px] text-faint">
-                      {mine.length} {mine.length === 1 ? "colony" : "colonies"} · {live} live · {orgRepos(mine, org.org)} {orgRepos(mine, org.org) === 1 ? "repo" : "repos"}
-                    </span>
-                  </span>
-                  {need > 0 && <StatusChip tone="warn">{need} need you</StatusChip>}
-                </button>
-                <div className="px-4">
-                  <ShareBar
-                    segments={[
-                      { label: `${need} need you`, color: "var(--warn)", value: need },
-                      { label: `${live - need} working`, color: "var(--info)", value: Math.max(0, live - need) },
-                      { label: `${queued} queued`, color: "var(--faint)", value: queued },
-                      { label: `${returned} returned`, color: "var(--ok)", value: returned },
-                    ]}
-                    format={(v) => String(v)}
-                    label={`${org.org} colonies by status`}
-                  />
-                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 pt-2 font-mono text-[10.5px] text-faint">
-                    {[
-                      { label: `${need} need you`, color: "var(--warn)", show: need > 0 },
-                      { label: `${Math.max(0, live - need)} working`, color: "var(--info)", show: live - need > 0 },
-                      { label: `${queued} queued`, color: "var(--faint)", show: queued > 0 },
-                      { label: `${returned} returned`, color: "var(--ok)", show: returned > 0 },
-                    ].filter((e) => e.show).map((e) => (
-                      <span key={e.label} className="inline-flex items-center gap-1.5">
-                        <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full" style={{ background: e.color }} />
-                        {e.label}
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className="truncate text-[14px]">{session.issue_title || short}</span>
+                      {questions[session.id] && <span className="line-clamp-2 text-[13px] text-warn [text-wrap:pretty]">{questions[session.id]}</span>}
+                      <span className="text-[12.5px] text-faint">
+                        <span className="font-mono text-[12px]">{short}</span> · {org}
                       </span>
-                    ))}
+                    </span>
+                    <span className={`text-[13px] tabular-nums ${waitMs > 2 * 3_600_000 ? "text-err" : "text-warn"}`} title={waitingSince(session)}>
+                      {formatWait(waitMs)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onOpenColony(session.id)}
+                      className="cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 text-[13px] font-medium text-bg hover:opacity-85"
+                    >
+                      Answer
+                    </button>
                   </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2.5 px-4 py-3.5">
-                  {[
-                    { label: "MERGED", value: String(merged) },
-                    { label: "SPEND", value: formatCost(spend) },
-                    { label: "FAIL %", value: fail.rate != null ? `${(fail.rate * 100).toFixed(1)}%` : "—" },
-                  ].map((stat) => (
-                    <div key={stat.label} className="min-w-0">
-                      <div className="font-mono text-[10px] tracking-[0.1em] text-faint">{stat.label}</div>
-                      <div className="mt-0.5 truncate text-[16px] font-semibold tabular-nums">{stat.value}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="px-4 pb-3">
-                  <Sparkline points={sparkPoints(dailyCosts(current, org.org))} color="var(--accent)" />
-                  <div className="mt-1 flex justify-between font-mono text-[10px] text-faint">
-                    <span>daily spend · {range}d</span>
-                    <span>{formatTokens(tokens)} tokens</span>
-                  </div>
-                </div>
-                <div className="mt-auto flex items-center justify-between gap-2 border-t border-border px-4 py-2.5 font-mono text-[11px]">
-                  <span className="min-w-0 truncate text-faint">{topModel}</span>
-                  <button type="button" onClick={() => setDashOrg(org.org)} className="cursor-pointer whitespace-nowrap text-accent hover:underline">
-                    dashboard →
-                  </button>
-                </div>
-              </section>
-            );
-          })}
-        </div>
-
-        <section className="overflow-hidden rounded-2xl border border-border bg-panel">
-          <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border px-4 py-3.5">
-            <span className="font-mono text-[10.5px] tracking-[0.12em] text-faint">COLONIES · {tableSessions.length}</span>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {OVERVIEW_FILTERS.map((name) => {
-                const count = counts[name];
-                const active = colonyFilter === name;
-                const stalledQueue = name === "queued" && stalled;
-                const pick = () => { setColonyFilter(active ? null : name); setShowAll(false); };
-                // A stalled queue keeps the warn-bordered treatment the header chips always had —
-                // FilterChip has no tone, so this one stays a bespoke button in the same shape.
-                return stalledQueue ? (
-                  <button
-                    key={name}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={pick}
-                    title="every slot-occupying colony is held — the queue cannot drain until a hold times out"
-                    className="cursor-pointer whitespace-nowrap rounded-full border border-warn bg-warn-soft px-2.5 py-1 text-[11.5px] font-medium text-warn"
-                  >
-                    <span className="text-warn">{count}</span> queued · stalled
-                  </button>
-                ) : (
-                  <FilterChip
-                    key={name}
-                    active={active}
-                    count={count}
-                    label={name}
-                    onClick={pick}
-                  />
                 );
               })}
-              <span aria-hidden="true" className="mx-1 h-4 w-px bg-border" />
+            </Rules>
+          </Section>
+        )}
+
+        <ChartSection
+          title="Merged PRs per day"
+          legend={
+            ghost ? (
+              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted">
+                <span aria-hidden="true" className="h-0 w-3 border-t border-dashed border-muted" />
+                prev {range}d{prevEmpty ? " · no activity" : ""}
+              </span>
+            ) : undefined
+          }
+          legendIcons
+          chart={(hot) => (
+            <AreaChart
+              highlight={hot}
+              seriesReadout={false}
+              series={mergedSeries}
+              labels={dayLabels}
+              ghost={ghost}
+              format={(v) => String(Math.round(v))}
+              formatY={(v) => (Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : v.toFixed(1))}
+              readTitle={`Last ${range} days`}
+              emptyNote="no merged PRs in range"
+            />
+          )}
+          foot={`${mergedCur.length} merged in ${range}d · by merge date${ghost ? ` · dashed: previous ${range}d${prevEmpty ? " (no activity)" : ""}` : ""}`}
+          sideTitle="Share by workspace"
+          sideLimit={SHARE_LIMIT}
+          side={[...compared]
+            .sort((a, b) => b.merged - a.merged)
+            .map((c) => {
+              const share = mergedAll > 0 ? (c.merged / mergedAll) * 100 : 0;
+              const entry = workspaces.find((o) => sameOrg(o.org, c.org));
+              return {
+                label: c.org,
+                value: c.merged,
+                note: mergedAll > 0 ? `${Math.round(share)}%` : "—",
+                share,
+                color: c.color,
+                title: `open the ${c.org} dashboard`,
+                onClick: () => setDashOrg(c.org),
+                icon: <OrgTile org={c.org} avatar={c.avatar} size={18} />,
+                card: (
+                  <ShareCard
+                    org={c.org}
+                    avatar={c.avatar}
+                    color={c.color}
+                    description={entry?.description}
+                    merged={c.merged}
+                    share={mergedAll > 0 ? share : null}
+                    range={range}
+                    live={entry?.live ?? 0}
+                    total={entry?.total ?? 0}
+                    need={c.need}
+                  />
+                ),
+              };
+            })}
+          sideFoot={hiddenOrgs.length > 0 ? `+ ${hiddenOrgs.length} hidden ${hiddenOrgs.length === 1 ? "org" : "orgs"} not counted` : "All workspaces shown"}
+        />
+
+        <Section title="Workspaces" meta={String(workspaces.length)}>
+          <Rules>
+            <div className="overflow-x-auto">
+              <div className="min-w-[760px]">
+                <div className={`${WS_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
+                  <span>Name</span>
+                  <span className="text-right">Colonies</span>
+                  <span className="text-right">Need</span>
+                  <span className="text-right">Merged</span>
+                  <span className="text-right">Fail</span>
+                  <span className="text-right">Spend</span>
+                  <span>Trend</span>
+                  <span className="sr-only">Actions</span>
+                </div>
+                {compared.map((c) => (
+                  <div
+                    key={c.org}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setDashOrg(c.org)}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setDashOrg(c.org);
+                      }
+                    }}
+                    title={`open the ${c.org} dashboard`}
+                    className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent`}
+                  >
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      <OrgTile org={c.org} avatar={c.avatar} size={22} />
+                      <span className="truncate font-medium">{c.org}</span>
+                    </span>
+                    <span className="text-right text-muted">{c.mine.length}</span>
+                    <span className={`text-right ${c.need > 0 ? "text-warn" : "text-faint"}`}>{c.need > 0 ? `${c.need} need you` : "—"}</span>
+                    <span className="text-right">{c.merged}</span>
+                    <span
+                      className={`text-right ${c.fail.rate != null && c.fail.rate > 0.08 ? "text-err" : "text-muted"}`}
+                      title={c.fail.rate != null ? `${c.fail.failed} failed of ${c.fail.decided} decided (merged+failed)` : "nothing decided in range"}
+                    >
+                      {c.fail.rate != null ? `${(c.fail.rate * 100).toFixed(1)}%` : "—"}
+                    </span>
+                    <span className="text-right">{formatCost(c.spend)}</span>
+                    <TrendLine values={dailyCosts(current, c.org)} />
+                    <RedTeamActions
+                      org={c.org}
+                      live={runs.filter((r) => sameOrg(r.org, c.org) && ["armed", "waiting", "running", "draining"].includes(r.state)).length}
+                      onStart={() => setRedTeam({ org: c.org, view: "wizard" })}
+                      onHistory={() => setRedTeam({ org: c.org, view: "history" })}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Rules>
+        </Section>
+
+        <Section
+          id="sec-colonies"
+          title="Colonies"
+          meta={String(tableSessions.length)}
+          right={
+            <SegTabs
+              label="colony filter"
+              items={[
+                { key: "all", label: "all", count: visibleSessions.length, active: colonyFilter === null, onClick: () => { setColonyFilter(null); setShowAll(false); } },
+                ...OVERVIEW_FILTERS.map((name) => {
+                  const stalledQueue = name === "queued" && stalled;
+                  return {
+                    key: name,
+                    label: stalledQueue ? "queued · stalled" : name,
+                    count: counts[name],
+                    active: colonyFilter === name,
+                    urgent: name === "need you" || stalledQueue,
+                    title: stalledQueue ? "every slot-occupying colony is held — the queue cannot drain until a hold times out" : undefined,
+                    onClick: () => {
+                      setColonyFilter(colonyFilter === name ? null : name);
+                      setShowAll(false);
+                    },
+                  };
+                }),
+              ]}
+            />
+          }
+        >
+          {workspaces.length > 1 && (
+            <div className="mb-3 flex flex-wrap items-center gap-1.5">
               {[{ label: "All orgs", org: null as string | null, avatar: null as string | null }, ...workspaces.map((o) => ({ label: o.org, org: o.org as string | null, avatar: o.avatar as string | null }))].map((chip) => {
                 const active = orgFilter === chip.org;
                 return (
@@ -596,9 +576,7 @@ export function OverviewView({
                     type="button"
                     aria-pressed={active}
                     onClick={() => { setOrgFilter(active ? null : chip.org); setShowAll(false); }}
-                    className={`inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[11.5px] ${
-                      active ? "border-accent bg-accent-soft text-text" : "border-border text-muted hover:border-accent hover:text-text"
-                    }`}
+                    className={`inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[12.5px] ${active ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text"}`}
                   >
                     {chip.org != null && <OrgTile org={chip.org} avatar={chip.avatar} size={14} />}
                     {chip.label}
@@ -606,125 +584,220 @@ export function OverviewView({
                 );
               })}
               {held.count > 0 && (
-                <span
-                  role="status"
-                  title="idle colonies holding parallel slots while autopilot holds their pull request"
-                  className="whitespace-nowrap px-1 font-mono text-[11px] text-muted"
-                >
+                <span role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`whitespace-nowrap px-1 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
                   {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
                 </span>
               )}
-              {headerCost !== null && (
-                <span className="whitespace-nowrap px-1 font-mono text-[11px] tabular-nums text-muted" title="what every colony has spent in total">
-                  {formatCost(headerCost)} spent
-                </span>
-              )}
             </div>
-          </div>
-          {tableSessions.length === 0 ? (
-            colonyFilter || orgFilter ? (
-            <div className="px-4 py-3.5 text-[13px] text-muted">
-              <div>
-                nothing under {colonyFilter ? `"${colonyFilter}"` : "this filter"}
-                {visibleSessions.length > 0 && (
-                  <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>
-                )}
-                {hiddenOrgs.length > 0 && (
-                  <> · + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")})</>
-                )}
+          )}
+          {workspaces.length <= 1 && held.count > 0 && (
+            <div role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`mb-3 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
+              {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
+            </div>
+          )}
+          <Rules>
+            {tableSessions.length === 0 ? (
+              colonyFilter || orgFilter ? (
+                <div className="py-3.5 text-[13px] text-muted">
+                  <div>
+                    nothing under {colonyFilter ? `"${colonyFilter}"` : "this filter"}
+                    {visibleSessions.length > 0 && <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>}
+                    {hiddenOrgs.length > 0 && <> · + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")})</>}
+                  </div>
+                  <button type="button" onClick={clearFilters} className="mt-1.5 cursor-pointer border-0 bg-transparent p-0 font-medium text-text underline underline-offset-[3px]">
+                    clear filter ×
+                  </button>
+                </div>
+              ) : (
+                <div className="py-3.5 text-[13px] text-faint">No colonies in these workspaces yet.</div>
+              )
+            ) : (
+              <div className="overflow-x-auto">
+                <div className="min-w-[680px]">
+                  <div className={`${COLONY_GRID} py-2.5 text-[12.5px] text-muted`}>
+                    <span />
+                    <span>Colony</span>
+                    <span>Org</span>
+                    <span>Status</span>
+                    <span className="text-right">Updated</span>
+                    <span className="text-right">Spent</span>
+                  </div>
+                  {tableShown.map((session) => (
+                    <ColonyRow
+                      key={session.id}
+                      session={session}
+                      age={session.status === "queued" ? `queued ${formatWait(nowMs - Date.parse(session.created_at))}` : timeAgo(session.last_activity_at ?? session.updated_at)}
+                      flashed={isFlashed(events, session.id, nowMs)}
+                      bumped={isBumped(events, session.id, nowMs)}
+                      onOpen={onOpenColony}
+                    />
+                  ))}
+                </div>
               </div>
+            )}
+            {tableSessions.length > COLONY_LIMIT && (
               <button
                 type="button"
-                onClick={() => { setColonyFilter(null); setOrgFilter(null); setShowAll(false); }}
-                className="mt-1.5 cursor-pointer font-semibold text-accent hover:underline"
+                onClick={() => setShowAll((v) => !v)}
+                className="w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-text"
               >
-                clear filter ×
+                {showAll ? "Show fewer" : `Show all ${tableSessions.length} colonies`}
               </button>
-            </div>
-            ) : (
-              <div className="px-4 py-3.5 text-[13px] text-faint">No colonies in these workspaces yet.</div>
-            )
-          ) : (
-            <div className="overflow-x-auto">
-              <div className="min-w-[720px]">
-                <div className="grid grid-cols-[10px_minmax(0,2.6fr)_minmax(0,1.1fr)_150px_80px_72px] gap-3 border-b border-border px-4 py-2 font-mono text-[10px] tracking-[0.08em] text-faint">
-                  <span />
-                  <span>COLONY</span>
-                  <span>ORG</span>
-                  <span>STATUS</span>
-                  <span className="text-right">UPDATED</span>
-                  <span className="text-right">SPENT</span>
-                </div>
-                {tableShown.map((session) => {
-                  const tone = SESSION_STATUS[session.status]?.tone ?? "neutral";
-                  const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
-                  return (
-                    <div key={session.id} className="grid grid-cols-[10px_minmax(0,2.6fr)_minmax(0,1.1fr)_150px_80px_72px] items-center gap-3 border-b border-border px-4 py-[9px] text-[13px] last:border-b-0">
-                      <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: TONE_VAR[tone] }} />
-                      <button type="button" onClick={() => onOpenColony(session.id)} className="min-w-0 cursor-pointer truncate text-left hover:text-accent" title={session.issue_title || short}>
-                        <span className="font-medium">{short}</span> <span className="text-faint">{session.issue_title}</span>
-                      </button>
-                      <span className="min-w-0 truncate text-muted">{orgOf(session)}</span>
-                      <span className="truncate font-mono text-[11px]" style={{ color: TONE_VAR[tone] }}>
-                        {SESSION_STATUS[session.status]?.label ?? session.status}
-                      </span>
-                      <span className="text-right font-mono text-[11px] text-faint">
-                        {session.status === "queued" ? `queued ${formatWait(nowMs - Date.parse(session.created_at))}` : timeAgo(session.last_activity_at ?? session.updated_at)}
-                      </span>
-                      <span className="text-right font-mono text-[11px] tabular-nums">
-                        <LiveCost value={sessionCost(session)} />
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {tableSessions.length > COLONY_LIMIT && (
-            <button
-              type="button"
-              onClick={() => setShowAll((v) => !v)}
-              className="w-full cursor-pointer border-0 bg-transparent px-4 py-2.5 text-[12.5px] font-semibold text-accent hover:bg-panel-2"
-            >
-              {showAll ? "Show fewer" : `Show all ${tableSessions.length} colonies`}
-            </button>
-          )}
-        </section>
+            )}
+          </Rules>
+        </Section>
 
-        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr))]">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-[12.5px] text-faint">
           {host && (
-            <div className="flex flex-col gap-1 rounded-xl border border-border bg-panel px-3.5 py-2.5">
-              <Eyebrow>HOST</Eyebrow>
-              <div className="font-mono text-[11.5px] text-muted">
-                <span className="font-semibold text-text">{host.hostname || host.id.slice(0, 8)}</span>
-                {hostFacts(host).slice(1).map((fact, i) => (
-                  <span key={i} title={fact.title}> · {fact.value}</span>
-                ))}
-              </div>
-            </div>
+            <span title="the machine every listed colony boots on">
+              Host {host.hostname || host.id.slice(0, 8)}
+              {hostFacts(host).slice(1).map((fact, i) => (
+                <span key={i} title={fact.title}> · {fact.value}</span>
+              ))}
+            </span>
           )}
-          <div className="flex flex-col gap-1 rounded-xl border border-border bg-panel px-3.5 py-2.5">
-            <Eyebrow>FLEET</Eyebrow>
-            <div className="font-mono text-[11.5px] text-muted">
-              {fleetHosts.length === 0 ? (
-                "no fleet data"
-              ) : (
-                <span className="inline-flex items-center gap-1.5">
-                  <span aria-hidden="true" className={`h-[7px] w-[7px] rounded-full ${fleetOnline === fleetHosts.length ? "bg-ok" : "bg-err"}`} />
-                  {fleetHosts.length === 1 ? "1 host online · no peers configured" : `${fleetOnline} of ${fleetHosts.length} hosts online`}
-                </span>
-              )}
-            </div>
-          </div>
-          <BurnDownCard />
+          <span className="inline-flex items-center gap-1.5">
+            {fleetHosts.length === 0 ? (
+              "no fleet data"
+            ) : (
+              <>
+                <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${fleetOnline === fleetHosts.length ? "bg-ok" : "bg-err"}`} />
+                {fleetHosts.length === 1 ? "1 host online · no peers configured" : `${fleetOnline} of ${fleetHosts.length} hosts online`}
+              </>
+            )}
+          </span>
         </div>
 
-        <FleetPanel hosts={fleetHosts} />
-
-        <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
-
-        <RedTeamCard runs={runs} sessions={sessions} onStart={onStart} onStop={onStop} onOpenColony={onOpenColony} />
+        <div className="flex flex-col gap-4">
+          <BurnDownCard />
+          <FleetPanel hosts={fleetHosts} />
+          <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
+        </div>
       </div>
+      <RedTeamWizard
+        org={redTeam?.org ?? null}
+        open={redTeam?.view === "wizard"}
+        sessions={sessions}
+        runs={runs}
+        onStart={onStart}
+        onClose={() => setRedTeam((r) => (r?.view === "wizard" ? null : r))}
+        onDone={() => {}}
+        onOpenHistory={(org) => setRedTeam({ org, view: "history" })}
+      />
+      <RedTeamHistory
+        org={redTeam?.org ?? null}
+        open={redTeam?.view === "history"}
+        sessions={sessions}
+        runs={runs}
+        onStop={onStop}
+        onOpenColony={onOpenColony}
+        onClose={() => setRedTeam((r) => (r?.view === "history" ? null : r))}
+        onNew={(org) => setRedTeam({ org, view: "wizard" })}
+      />
     </main>
+  );
+}
+
+/** A workspace row's red-team buttons: start one (the wizard), or see what ran (the history). */
+function RedTeamActions({ org, live, onStart, onHistory }: { org: string; live: number; onStart: () => void; onHistory: () => void }): ReactElement {
+  const stop = (fn: () => void) => (e: React.MouseEvent | React.KeyboardEvent) => {
+    e.stopPropagation();
+    fn();
+  };
+  return (
+    <span className="flex items-center justify-end gap-1" onKeyDown={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        onClick={stop(onStart)}
+        aria-label={`start a red team on ${org}`}
+        title="Hunt for bugs with a red-team swarm"
+        className="inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-panel px-2 py-1 text-[12px] text-text hover:border-border-strong hover:bg-panel-2"
+      >
+        <HackerIcon size={14} />
+        Red team
+        {live > 0 && <span className="rounded-full bg-accent px-1.5 text-[10.5px] tabular-nums text-on-accent">{live}</span>}
+      </button>
+      <button
+        type="button"
+        onClick={stop(onHistory)}
+        aria-label={`red-team history for ${org}`}
+        title="Red-team history and schedules"
+        className="grid size-7 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-muted hover:bg-panel-3 hover:text-text"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+          <path d="M3.5 4.5v4h4" />
+          <path d="M12 7.5V12l3 2" />
+        </svg>
+      </button>
+    </span>
+  );
+}
+
+/** The workspaces table's grid, shared by its header and rows. */
+const WS_GRID = "grid grid-cols-[minmax(0,1.6fr)_64px_84px_64px_64px_84px_minmax(48px,1fr)_auto] items-center gap-4";
+
+/** How many workspaces "Share by workspace" lists before "Show all". */
+const SHARE_LIMIT = 5;
+
+/** The hover card on a "Share by workspace" row: who the org is and what its number means. */
+function ShareCard({
+  org,
+  avatar,
+  color,
+  description,
+  merged,
+  share,
+  range,
+  live,
+  total,
+  need,
+}: {
+  org: string;
+  avatar: string | null;
+  color: string;
+  description?: string;
+  merged: number;
+  share: number | null;
+  range: number;
+  live: number;
+  total: number;
+  need: number;
+}): ReactElement {
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-2.5">
+        <OrgTile org={org} avatar={avatar} size={32} />
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] font-semibold text-text">{org}</div>
+          {description ? (
+            <div className="line-clamp-2 text-[12px] leading-snug text-muted">{description}</div>
+          ) : (
+            <div className="text-[12px] text-faint">No GitHub description</div>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-2 border-t border-border pt-2.5 tabular-nums">
+        <div>
+          <div className="text-[15px] font-semibold text-text">{merged}</div>
+          <div className="text-[11px] text-faint">merged · {range}d</div>
+        </div>
+        <div>
+          <div className="text-[15px] font-semibold" style={{ color }}>
+            {share == null ? "—" : `${Math.round(share)}%`}
+          </div>
+          <div className="text-[11px] text-faint">of all merged</div>
+        </div>
+        <div>
+          <div className="text-[15px] font-semibold text-text">
+            {live}
+            <span className="text-[12px] font-normal text-faint">/{total}</span>
+          </div>
+          <div className="text-[11px] text-faint">live / colonies</div>
+        </div>
+      </div>
+      {need > 0 && <div className="text-[12px] text-warn">{need} need you</div>}
+      <div className="text-[11.5px] text-faint">Click to open the {org} dashboard</div>
+    </div>
   );
 }

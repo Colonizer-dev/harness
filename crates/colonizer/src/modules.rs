@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     "source",
     "sandbox",
     "mesh",
@@ -26,6 +26,7 @@ pub const KINDS: [&str; 11] = [
     "autonomy",
     "notify",
     "burn_down",
+    "voice",
 ];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
@@ -139,7 +140,18 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             "github",
             "GitHub",
             "Issues from repositories your GitHub account can access",
-            json!({"type":"object","properties":{}}),
+            json!({"type":"object","properties":{
+                "include_labels": {
+                    "type": "string", "title": "Only issues labelled",
+                    "description": "Comma-separated labels, e.g. 'ready, colonize'. An issue is offered for a colony only if it carries at least one of them. Empty offers every open issue.",
+                    "default": ""
+                },
+                "exclude_labels": {
+                    "type": "string", "title": "Never issues labelled",
+                    "description": "Comma-separated labels, e.g. 'blocked, wontfix'. An issue carrying any of them is never offered, whatever else it carries.",
+                    "default": ""
+                }
+            }}),
         )],
         "sandbox" => vec![p(
             "microsandbox",
@@ -294,6 +306,10 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "instructions": {"type": "string", "title": "Custom hunt instructions", "description": "When empty, a built-in bug-hunt prompt is used", "default": ""}
             }}),
         )],
+        "voice" => crate::voice::module_providers()
+            .into_iter()
+            .map(|(id, name, description, schema)| p(id, name, description, schema))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -329,10 +345,20 @@ fn describe_kind(kind: &str, choice: &ModuleChoice, app: &App) -> Value {
 
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     let modules = app.modules.read().await;
+    // Voice is listed even before it is saved, as the browser it reads as: its settings are the only
+    // way to connect a service, so hiding it until then would leave nothing to click.
+    let voice_default = ModuleChoice {
+        provider: crate::voice::BROWSER.into(),
+        enabled: true,
+        settings: Map::new(),
+    };
     Json(
         KINDS
             .iter()
-            .filter_map(|k| modules.get(k).map(|c| describe_kind(k, c, &app)))
+            .filter_map(|k| {
+                let choice = modules.get(k).or((*k == "voice").then_some(&voice_default));
+                choice.map(|c| describe_kind(k, c, &app))
+            })
             .collect(),
     )
 }
@@ -454,6 +480,7 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModulesConfig;
     use std::sync::Arc;
 
     #[test]
@@ -712,6 +739,22 @@ mod tests {
     fn schemas_are_normalized() {
         assert!(normalize_schema(&json!({"model": {"type": "string"}}))["properties"]["model"].is_object());
         assert!(normalize_schema(&Value::Null)["properties"].is_object());
+    }
+
+    #[test]
+    fn voice_is_a_kind_whose_services_follow_the_browser() {
+        assert!(KINDS.contains(&"voice"));
+        let ids: Vec<_> = providers("voice", &[]).into_iter().map(|p| p.id).collect();
+        assert_eq!(ids.first().map(String::as_str), Some("browser"));
+        assert!(ids.iter().any(|id| id == "openai_compatible"));
+        assert!(schema_for("voice", "openai_compatible", &[])["properties"]["base_url"].is_object());
+        assert!(
+            schema_for("voice", "openai", &[])["properties"]["base_url"].is_null(),
+            "a hosted service's URL is not a setting"
+        );
+        let mut modules = ModulesConfig::default();
+        assert!(modules.get("voice").is_none(), "absent until saved: the browser");
+        assert_eq!(modules.get_mut("voice").unwrap().provider, "browser");
     }
 
     #[test]

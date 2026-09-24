@@ -155,19 +155,20 @@ describe("OverviewView KPIs", () => {
     session({ id: "r1", status: "running" }),
   ];
 
-  it("renders the six tiles, with empty states where no data source exists", () => {
+  it("renders the measured tiles and names the unmeasured ones once", () => {
     const html = renderOverview(list, [ACME]);
-    for (const label of ["MERGED PRS", "LEAD TIME", "PR CYCLE TIME", "CHANGE FAILURE RATE", "CI PASS RATE", "SPEND"]) {
+    for (const label of ["Merged PRs", "Change failure rate", "Spend", "Live colonies"]) {
       expect(html).toContain(label);
     }
-    // Lead time, PR cycle time and CI pass rate have no source: honest empty states, same shape.
-    expect(html.match(/no data source yet/g)?.length).toBe(3);
+    // Lead time, PR cycle time and CI pass rate are measured tiles now, not a footnote.
+    for (const label of ["Lead time", "PR cycle time", "CI pass rate"]) expect(html).toContain(label);
+    expect(html).not.toContain("not measured yet");
   });
 
   it("counts merged PRs from sessions and says the bucket out loud", () => {
     const html = renderOverview(list, [ACME]);
     expect(html).toContain("by merge date");
-    expect(html).toContain("MERGED PRS PER DAY · BY WORKSPACE");
+    expect(html).toContain("Merged PRs per day");
   });
 
   it("labels the change-failure basis in the sub-line", () => {
@@ -197,14 +198,14 @@ describe("OverviewView needs-you queue", () => {
       [waiting("new", 2, "2026-09-18T09:00:00Z"), waiting("old", 1, "2026-09-10T09:00:00Z")],
       [ACME],
     );
-    expect(html).toContain("NEEDS YOU · 2");
-    expect(html).toContain("oldest first");
+    expect(html).toContain(">Needs you</h2>");
+    expect(html).toContain("2 waiting · oldest first");
     expect(html.indexOf("webshop#1")).toBeLessThan(html.indexOf("webshop#2"));
-    expect(html.match(/Answer →/g)?.length).toBe(2);
+    expect(html.match(/>Answer</g)?.length).toBe(2);
   });
 
   it("stays hidden when nobody waits", () => {
-    expect(renderOverview([session()], [ACME])).not.toContain("NEEDS YOU");
+    expect(renderOverview([session()], [ACME])).not.toContain(">Needs you</h2>");
   });
 });
 
@@ -229,25 +230,18 @@ describe("OverviewView workspaces", () => {
       ],
       [withModels("acme")],
     );
-    expect(html).toContain("WORKSPACES COMPARED");
-    expect(html).toContain("FAIL %");
+    expect(html).toContain("Share by workspace");
+    expect(html).toContain(">Fail</span>");
     expect(html).toContain("1 failed of 2 decided (merged+failed)");
     expect(html).toContain("$13.00");
   });
 
-  it("cards carry merged, spend and fail stats plus the top model and a dashboard way in", () => {
+  it("tables each workspace with colonies, need, merged, fail, spend and a dashboard way in", () => {
     const html = renderOverview([session({ id: "r1" }), session({ id: "w1", status: "waiting_for_answer" })], [withModels("acme")]);
-    expect(html).toContain("WORKSPACES");
-    expect(html).toContain("MERGED");
-    expect(html).toContain("FAIL %");
-    expect(html).toContain("deepseek/deepseek-flash");
-    expect(html).toContain("dashboard →");
+    expect(html).toContain(">Workspaces</h2>");
+    for (const col of [">Colonies<", ">Need<", ">Merged<", ">Fail<", ">Spend<", ">Trend<"]) expect(html).toContain(col);
+    expect(html).toContain("open the acme dashboard");
     expect(html).toContain("1 need you");
-  });
-
-  it("cards admit to no model usage instead of inventing one", () => {
-    const html = renderOverview([session()], [ACME]);
-    expect(html).toContain("no model usage");
   });
 });
 
@@ -257,7 +251,7 @@ describe("OverviewView colonies table", () => {
       [session({ id: "s1", cost_usd: 0.87 }), session({ id: "s2", repo: "acme/design-system", issue: 7, issue_title: "Bad contrast on the nav" })],
       [ACME],
     );
-    expect(html).toContain("COLONIES · 2");
+    expect(html).toMatch(/>Colonies<\/h2><span[^>]*>2</);
     expect(html).toContain("Checkout fails for guest users");
     expect(html).toContain("Bad contrast on the nav");
     expect(html).toContain("Working");
@@ -287,7 +281,7 @@ describe("OverviewView colonies table", () => {
     expect(html).toContain("beta");
     // A pinned bucket narrows the table and names the filter.
     const filtered = renderOverview([session({ id: "a1" }), session({ id: "b1", org: "beta", repo: "beta/api", status: "queued" })], [ACME, beta], "live");
-    expect(filtered).toContain("COLONIES · 1");
+    expect(filtered).toMatch(/>Colonies<\/h2><span[^>]*>1</);
     expect(filtered).toContain("showing 1 of 2");
   });
 
@@ -366,10 +360,10 @@ describe("OverviewView counters vs list", () => {
   it("scopes the counter chips to the visible workspaces and names the hidden org", () => {
     const html = renderOverview(sessions(), workspaces);
     // 14 live and 2 queued in acme/beta; gamma's 11 waiting must not reach any chip.
-    expect(html).toContain(">14</span> live");
-    expect(html).toContain(">0</span> need you");
-    expect(html).toContain(">2</span> queued");
-    expect(html).not.toContain(">11</span>");
+    expect(html).toMatch(/>live<span[^>]*> 14</);
+    expect(html).toMatch(/>need you<span[^>]*> 0</);
+    expect(html).toMatch(/>queued<span[^>]*> 2</);
+    expect(html).not.toMatch(/<span[^>]*> 11</);
     // ... but they are explained, not silently dropped: the scope line names gamma.
     expect(html).toContain("hidden org (gamma)");
     expect(html).toContain("11 need you");
@@ -402,8 +396,7 @@ describe("OverviewView held slots and stalled queue", () => {
 
   it("marks the queued counter stalled when every live colony is held", () => {
     const html = renderOverview([idleHeld("h1"), idleHeld("h2"), session({ id: "q1", status: "queued" })], [ACME]);
-    expect(html).toContain("queued · stalled");
-    expect(html).toContain("border-warn");
+    expect(html).toMatch(/queued · stalled<span class="text-warn"> 1</);
     expect(html).toContain("2 held");
   });
 
@@ -428,10 +421,10 @@ describe("OverviewView org avatars", () => {
       updated_at: "2026-09-18T09:00:00Z",
     });
 
-  it("renders the avatar image on cards, queue rows, the compared table, the legend and the chips", () => {
+  it("renders the avatar image in the legend and the workspaces table", () => {
     const html = renderOverview([waiting()], [withAvatar]);
-    // Card + legend icon + compared row + org chip + needs-you row.
-    expect(html.match(new RegExp(`src="${AVATAR}"`, "g"))?.length).toBeGreaterThanOrEqual(4);
+    // Legend icon + workspaces row (the org chips only show with more than one workspace).
+    expect(html.match(new RegExp(`src="${AVATAR}"`, "g"))?.length).toBeGreaterThanOrEqual(2);
   });
 
   it("falls back to the coloured lettermark when no avatar is known", () => {
@@ -448,10 +441,9 @@ describe("OverviewView org avatars", () => {
     expect(html).not.toContain("oklch(0.72");
   });
 
-  it("stands main charts 170px tall on narrow screens and 240px at desktop widths", () => {
+  it("stands main charts 200px tall, as the v3 render does", () => {
     const recent = new Date(Date.now() - 2 * 86_400_000).toISOString();
     const html = renderOverview([session({ id: "m1", status: "merged", created_at: recent, updated_at: recent })], [ACME]);
-    expect(html).toContain("h-[170px]");
-    expect(html).toContain("md:h-[240px]");
+    expect(html).toContain("h-[200px]");
   });
 });

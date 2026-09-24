@@ -16,21 +16,26 @@ import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
+import { Composer } from "./Composer";
 import { Header } from "./Header";
+import { HostView } from "./HostView";
+import { recordHost } from "./hostHistory";
+import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
-import { OverviewView } from "./OverviewView";import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
-import { Rail, type CockpitView } from "./Rail";
+import { OverviewView } from "./OverviewView";
+import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
 
 const VIEW_KEY = "colonizer.cockpitView";
+
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -41,17 +46,6 @@ function storedTheme(): "light" | "dark" | null {
   const saved = stored(THEME_KEY);
   return saved === "light" || saved === "dark" ? saved : null;
 }
-
-const CRUMB: Record<CockpitView, string> = {
-  overview: "overview",
-  home: "nest",
-  colony: "colony",
-  launch: "launch",
-  inbox: "inbox",
-  history: "history",
-  settings: "settings",
-  memory: "memory",
-};
 
 /** The toast for a failed inspector action: what failed, on which colony, and why. */
 export function actionError(action: "stop" | "resume", colony: string, error: unknown): string {
@@ -145,10 +139,10 @@ export function Cockpit({
     store(VIEW_KEY, view);
   }, [view]);
 
-  // The inspector renders only on the home view, whatever it is looking at.
+  // The inspector renders only on the home view, and only while something is picked.
   useEffect(() => {
-    onInspectorShown?.(view === "home");
-  }, [view, onInspectorShown]);
+    onInspectorShown?.(view === "home" && inspector !== null);
+  }, [view, inspector, onInspectorShown]);
 
   // An explicit choice is written on the root, where index.css's :root[data-theme] blocks pick it
   // up; clearing it hands the page back to prefers-color-scheme.
@@ -158,6 +152,9 @@ export function Cockpit({
     else root.removeAttribute("data-theme");
     store(THEME_KEY, theme);
   }, [theme]);
+
+  // Every host probe becomes a sample for the Host view's trend lines, whichever view is showing.
+  useEffect(() => recordHost(status?.host), [status?.host]);
 
   useEffect(() => {
     if (launchRequests > 0) setView("launch");
@@ -324,6 +321,19 @@ export function Cockpit({
       case "overview":
         return (
           <OverviewView
+            issues={{
+              repos,
+              org: selectedOrg,
+              sessions,
+              githubConnected: status?.github.connected ?? false,
+              autopilotDefault,
+              onCreated,
+              onOpenColony: openColonyById,
+            }}
+            // One control: the sidebar's workspace switcher is the overview's scope, and the page's
+            // own "open workspace" / "← All workspaces" move that same scope.
+            scopeOrg={selectedOrg}
+            onScopeOrg={switchOrg}
             sessions={sessions}
             orgs={workspaces}
             cost={sumCosts(sessions.map(sessionCost))}
@@ -358,6 +368,17 @@ export function Cockpit({
               setView("home");
             }}
             onOpenSettings={() => onOpenSettings("setup")}
+          />
+        );
+      case "host":
+        return (
+          <HostView
+            status={status}
+            fleet={fleet}
+            sessions={sessions}
+            liveStorage={liveStorage}
+            onOpenColony={openColonyById}
+            onOpenSettings={(section) => onOpenSettings(section)}
           />
         );
       case "inbox":
@@ -402,72 +423,95 @@ export function Cockpit({
   };
 
   return (
-    <div className="cockpit grid h-full min-h-0 grid-cols-[56px_minmax(0,1fr)] bg-bg text-text">
-      <Rail
+    <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] bg-bg text-text">
+      <NavRail
         orgs={workspaces}
+        hiddenOrgs={entries.hidden}
         selectedOrg={selectedOrg}
         onSelectOrg={switchOrg}
+        onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
+        needByOrg={needByOrg}
         view={view}
         onNavigate={navigate}
-        needCount={needAnywhere}
-        needByOrg={needByOrg}
+        inboxCount={needAnywhere}
+        liveCount={liveCount}
         pendingMemory={memoryBadge(selectedOrg, workspaces, pendingMemory)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        update={update}
+        onOpenUpdates={() => onOpenSettings("updates")}
       />
-      <div className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
-        <Header
-          orgs={workspaces}
-          hiddenOrgs={entries.hidden}
-          selectedOrg={selectedOrg}
-          onSelectOrg={switchOrg}
-          onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
-          needByOrg={needByOrg}
-          crumb={CRUMB[view]}
-          liveCount={liveCount}
-          needCount={needHere}
-          cost={spend != null && spend > 0 ? spend : null}
-          update={update}
-          onOpenUpdates={() => onOpenSettings("updates")}
-          statusError={statusError}
-        />
-        <div className="flex min-h-0 min-w-0">
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* The session-limit banner sits above every view, outside each view's own scroll. */}
-            {quotaBanner ? (
-              <QuotaBanner
-                quota={quotaBanner}
-                sessions={sessions}
-                onResumeAll={() => void resumeAllQuotaParked()}
-                onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
-              />
-            ) : null}
-            {body()}
-          </div>
-          {view === "home" && (
-            <Inspector
-              target={inspector}
-              avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
-              settlers={inspector?.kind === "colony" ? settlers : []}
-              pendingQuestions={pendingQuestions}
-              questionActions={questionActions}
+      <div className="relative isolate grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)]">
+      {/* The v3 halo: a faint radial glow behind the top of the page, under the glass bar. */}
+      <div aria-hidden="true" className="v3-halo" />
+      <Header
+        orgs={workspaces}
+        selectedOrg={selectedOrg}
+        onSelectOrg={switchOrg}
+        needByOrg={needByOrg}
+        statusError={statusError}
+        connection={liveConnection}
+        inbox={{
+          sessions,
+          onOpenColony: openColonyById,
+          onOpenInbox: () => navigate("inbox"),
+          onOpenNotificationSettings: () => onOpenSettings("notifications"),
+        }}
+      />
+      <div className="relative z-[1] flex min-h-0 min-w-0">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* The session-limit banner sits above every view, outside each view's own scroll. */}
+          {quotaBanner ? (
+            <QuotaBanner
+              quota={quotaBanner}
               sessions={sessions}
-              status={status}
-              liveCount={liveCount}
-              queuedCount={queuedCount}
-              needCount={needHere}
-              spend={spend != null && spend > 0 ? spend : null}
-              maxParallel={status?.sandbox.max_parallel ?? null}
-              update={update}
-              onClose={() => setInspector(null)}
-              onOpenColony={openColonyById}
-              onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
-              onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
-              onLaunch={() => setView("launch")}
-              onOpenSettings={(section) => onOpenSettings(section)}
+              onResumeAll={() => void resumeAllQuotaParked()}
+              onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
+            />
+          ) : null}
+          {body()}
+          {/* The composer floats over every overview-style view; the launch form, an open colony and
+              settings have their own inputs. */}
+          {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory" || view === "host") && (
+            <Composer
+              org={selectedOrg}
+              repos={repos}
+              githubConnected={status?.github.connected ?? false}
+              autopilotDefault={autopilotDefault}
+              sessions={sessions}
+              onCreated={(session) => {
+                onCreated(session);
+                setView("home");
+              }}
             />
           )}
         </div>
+        {/* Only while something is picked: closing it (×) gives the nest the full width back, and
+            clicking a chamber or the mothership opens it again. */}
+        {view === "home" && inspector !== null && (
+          <Inspector
+            target={inspector}
+            avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
+            settlers={inspector?.kind === "colony" ? settlers : []}
+            pendingQuestions={pendingQuestions}
+            questionActions={questionActions}
+            sessions={sessions}
+            status={status}
+            liveCount={liveCount}
+            queuedCount={queuedCount}
+            needCount={needHere}
+            spend={spend != null && spend > 0 ? spend : null}
+            maxParallel={status?.sandbox.max_parallel ?? null}
+            update={update}
+            onClose={() => setInspector(null)}
+            onOpenColony={openColonyById}
+            onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
+            onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
+            onLaunch={() => setView("launch")}
+            onOpenSettings={(section) => onOpenSettings(section)}
+          />
+        )}
+      </div>
       </div>
     </div>
   );
