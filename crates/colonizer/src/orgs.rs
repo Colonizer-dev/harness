@@ -333,10 +333,13 @@ pub fn global_repo_max_parallel(modules: &ModulesConfig) -> u64 {
 
 /// How long a colony waiting on a human (an autopilot hold) keeps its microVM slot before the queue
 /// parks it to free the slot (issue #217). A module config written before the setting existed reads
-/// the schema default of 30 minutes.
+/// the schema default of 30 minutes. Clamped where read, into the range the save path enforces:
+/// modules.json is not re-validated on load, the raw number becomes a `Duration::minutes`, which
+/// panics out of bounds, and a provider this build doesn't ship resolves to no schema at all — no
+/// bounds to read and no default — so the clamp is literal, and an absent value the minimum.
 pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
     let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
-    chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").max(1) as i64)
+    chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").clamp(1, 1440) as i64)
 }
 
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
@@ -454,11 +457,20 @@ pub fn effective_watchdog(modules: &ModulesConfig, org: &OrgSettings) -> Watchdo
             .and_then(Value::as_bool)
             .unwrap_or(true);
     let overrides = org.watchdog.clone().unwrap_or_default();
+    // Clamped where read, on the module values and the org overrides alike: neither file is
+    // re-validated on load, and these become `Duration::minutes` in the watchdog, which panics
+    // out of bounds. The ranges are the ones `validate` enforces at save.
     WatchdogSettings {
         enabled: overrides.enabled.unwrap_or(global_enabled),
-        stall_minutes: overrides.stall_minutes.unwrap_or_else(|| number("stall_minutes")).max(1),
-        max_nudges: overrides.max_nudges.unwrap_or_else(|| number("max_nudges")),
-        waiting_minutes: overrides.waiting_minutes.unwrap_or_else(|| number("waiting_minutes")).max(1),
+        stall_minutes: overrides
+            .stall_minutes
+            .unwrap_or_else(|| number("stall_minutes"))
+            .clamp(1, 1440),
+        max_nudges: overrides.max_nudges.unwrap_or_else(|| number("max_nudges")).min(20),
+        waiting_minutes: overrides
+            .waiting_minutes
+            .unwrap_or_else(|| number("waiting_minutes"))
+            .clamp(1, 10080),
     }
 }
 
@@ -952,6 +964,89 @@ mod tests {
         // A hand-edited 0 is no timeout at all, so it reads as the smallest real one.
         configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(0));
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
+    }
+
+    /// A hand-edited or restored modules.json is read as-is — `validate_settings` only guards the
+    /// API save path — and the timeout runs straight into `Duration::minutes`, which panics out of
+    /// bounds and would take the queue tick's admissions with it. `u64::MAX` is worse than a
+    /// panic: `as i64` wraps it negative, a timeout no hold ever outlives.
+    #[test]
+    fn a_hand_edited_hold_timeout_is_clamped_to_the_schema_range() {
+        let mut configured = ModulesConfig::default();
+        configured
+            .sandbox
+            .settings
+            .insert("hold_timeout_minutes".into(), json!(9223372036854775808u64));
+        assert_eq!(
+            hold_timeout(&configured),
+            chrono::Duration::minutes(1440),
+            "clamped to the schema maximum"
+        );
+        configured
+            .sandbox
+            .settings
+            .insert("hold_timeout_minutes".into(), json!(u64::MAX));
+        assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1440));
+        // A provider this build doesn't ship resolves to no schema at all — no bounds to read and
+        // no default — and the timeout must still land in range, minimum included.
+        let mut bogus = ModulesConfig::default();
+        bogus.sandbox.provider = "bogus".into();
+        bogus
+            .sandbox
+            .settings
+            .insert("hold_timeout_minutes".into(), json!(9223372036854775808u64));
+        assert_eq!(hold_timeout(&bogus), chrono::Duration::minutes(1440));
+        bogus.sandbox.settings.clear();
+        assert_eq!(
+            hold_timeout(&bogus),
+            chrono::Duration::minutes(1),
+            "the minimum, not the 0 an absent schema default reads"
+        );
+    }
+
+    /// The watchdog's minutes feed `Duration::minutes` once a minute per live colony, and come
+    /// from two files the harness does not re-validate on load: the watchdog module's settings and
+    /// the org's overrides (the latter only range-checked by the API save path). Both must read
+    /// clamped, or one absurd number in either file stops the watchdog loop.
+    #[test]
+    fn hand_edited_watchdog_minutes_are_clamped_to_the_schema_range() {
+        let mut modules = ModulesConfig::default();
+        modules.watchdog.settings.insert("stall_minutes".into(), json!(u64::MAX));
+        modules
+            .watchdog
+            .settings
+            .insert("waiting_minutes".into(), json!(9223372036854775808u64));
+        let watchdog = effective_watchdog(&modules, &OrgSettings::default());
+        // The flag decision is where the minutes become a `Duration`; run it to pin that it holds.
+        let now = chrono::Utc::now();
+        let activity = crate::watchdog::Activity::new(now);
+        assert_eq!(
+            crate::watchdog::decide(&watchdog, now, crate::watchdog::Observed::WaitingForAnswer, &activity, None),
+            crate::watchdog::Decision::Nothing
+        );
+        assert_eq!(watchdog.stall_minutes, 1440, "the stall schema maximum");
+        assert_eq!(watchdog.waiting_minutes, 10080, "the waiting schema maximum");
+        // The same bound holds an org override a hand-edited orgs.json smuggled in.
+        let org = OrgSettings {
+            watchdog: Some(WatchdogOverrides {
+                stall_minutes: Some(u64::MAX),
+                waiting_minutes: Some(9223372036854775808u64),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let watchdog = effective_watchdog(&modules, &org);
+        assert_eq!(watchdog.stall_minutes, 1440);
+        assert_eq!(watchdog.waiting_minutes, 10080);
+        // An unknown provider resolves no schema and so no default: the minimum stands in.
+        let mut bogus = ModulesConfig::default();
+        bogus.watchdog.provider = "bogus".into();
+        let watchdog = effective_watchdog(&bogus, &OrgSettings::default());
+        assert_eq!(
+            watchdog.stall_minutes, 1,
+            "the minimum, not the 0 an absent schema default reads"
+        );
+        assert_eq!(watchdog.waiting_minutes, 1);
     }
 
     #[test]

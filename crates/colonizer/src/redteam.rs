@@ -191,7 +191,7 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
         }
         Ok(data) => data,
     };
-    match serde_json::from_slice::<Vec<RedTeamRun>>(&data) {
+    let mut runs = match serde_json::from_slice::<Vec<RedTeamRun>>(&data) {
         Ok(runs) => runs,
         Err(e) => {
             eprintln!(
@@ -200,7 +200,16 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
             );
             Vec::new()
         }
+    };
+    // `create` never stores an empty module list — it coerces one to the default — but this file
+    // is trusted on load, and a run carrying an empty one would panic the tick on `i % 0` the
+    // moment it launched the swarm. Read it the way `create` would have written it.
+    for run in &mut runs {
+        if run.modules.is_empty() {
+            run.modules = vec![DEFAULT_MODULE.to_string()];
+        }
     }
+    runs
 }
 
 /// The gate: how many colonies of every org are live right now.
@@ -925,6 +934,37 @@ mod tests {
         let run = get(State(app.clone()), Path(run.id)).await.unwrap().0;
         assert_eq!(run.state, RedTeamState::Running, "a started hunter takes the run live");
         assert!(run.gate_reason.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `create` never stores an empty `modules` (it coerces the empty request field to the
+    /// default), but `redteam.json` is trusted on load, so a run written by hand or by an older
+    /// build can carry one — and the tick's launch would panic on `i % 0` before the first hunter
+    /// brief was built. It must read the way `create` would have written it.
+    #[tokio::test]
+    async fn a_persisted_run_with_no_modules_is_read_as_the_default_module() {
+        let root = temp_root();
+        let run = RedTeamRun {
+            id: "rt_mods".into(),
+            repo: "acme/repo".into(),
+            org: "acme".into(),
+            state: RedTeamState::Armed,
+            swarm_size: 3,
+            modules: Vec::new(),
+            ..RedTeamRun::default()
+        };
+        std::fs::write(
+            root.join("data").join("redteam.json"),
+            serde_json::to_vec(&vec![run]).unwrap(),
+        )
+        .unwrap();
+        let app = test_app(&root);
+        assert_eq!(app.redteam.runs.read().await.len(), 1, "the run survived the load");
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path("rt_mods".into())).await.unwrap().0;
+        assert_eq!(run.modules, vec![DEFAULT_MODULE], "read as the default module");
+        assert_eq!(run.state, RedTeamState::Running);
+        assert_eq!(run.hunters.len(), 3, "the swarm launched on the default module");
         let _ = std::fs::remove_dir_all(root);
     }
 

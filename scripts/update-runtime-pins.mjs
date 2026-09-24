@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -129,10 +129,27 @@ async function stableVersion() {
   return version;
 }
 
-/** Orders two `x.y.z` versions numerically: negative when `a` is older than `b`. */
-function compareVersions(a, b) {
-  const [x, y] = [a, b].map((v) => v.split('.').map(Number));
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+/** Orders two versions the way semver does: numerically per `.` segment (all of them, not just the
+ * first three), a pre-release like `2.1.281-rc1` sorts before its release, and `+build` metadata
+ * never decides. A NaN here would make the pinned-ahead guard in proposeAgent silently fail. */
+export function compareVersions(a, b) {
+  const segments = (v) =>
+    v.split('.').map((s) => {
+      const match = /^(\d+)([-+].*)?$/.exec(s);
+      if (!match) return [0, s];
+      const suffix = match[2] ?? '';
+      return [Number(match[1]), suffix.startsWith('+') ? '' : suffix];
+    });
+  const [x, y] = [segments(a), segments(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const [xn, xs] = x[i] ?? [0, ''];
+    const [yn, ys] = y[i] ?? [0, ''];
+    if (xn !== yn) return xn - yn;
+    if (xs !== ys) {
+      if (!xs || !ys) return xs ? -1 : 1; // the one carrying a pre-release suffix is the older
+      return xs < ys ? -1 : 1;
+    }
+  }
   return 0;
 }
 
@@ -287,7 +304,9 @@ async function main() {
   if (!changed) console.log('no updates');
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

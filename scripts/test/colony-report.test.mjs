@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { analyze, formatReport, formatTranscript, reasons, redact, summarize, totalCost } from '../colony-report.mjs';
+import { analyze, formatReport, formatTranscript, loadColonies, reasons, redact, summarize, totalCost } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -244,4 +247,27 @@ test('routed provider cost is carried beside Claude’s, and the total adds both
 test('the top-quarter cost reason counts routed spend', () => {
   const cheapClaude = { ...analyze({ session: { id: 'r', cost_usd: 0.05, routed_cost_usd: 2 }, events: [] }) };
   assert.deepEqual(reasons(cheapClaude, 1), ['cost $2.05 (top quarter)']);
+});
+
+/** A data dir whose one colony is known only from its sessions/ directory; removed after the test. */
+function dataDir(t, sessionsJson) {
+  const dir = mkdtempSync(join(tmpdir(), 'colony-report-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'sessions.json'), sessionsJson);
+  mkdirSync(join(dir, 'sessions', 'lost'), { recursive: true });
+  return dir;
+}
+
+test('a sessions.json that is valid JSON but not an array is treated as corrupt, not fatal', (t) => {
+  for (const body of ['{}', 'null', '"x"', '{broken']) {
+    const [colony] = loadColonies(dataDir(t, body), 'd');
+    assert.deepEqual(colony, { mothership: 'd', session: { id: 'lost' }, events: [], logs: [] });
+  }
+});
+
+test('a colony with more events than Math.max can take still reports its span', () => {
+  const n = 200_000;
+  const events = Array.from({ length: n }, (_, i) => ({ type: 'tool_call', tool_call_id: `t${i}`, name: 'Read', input: {}, ts: at(i) }));
+  const r = analyze({ session: { id: 'big' }, events, logs: [] });
+  assert.equal(r.wall_ms, (n - 1) * 1000);
 });

@@ -5,8 +5,8 @@
 //
 // Each failure is {file, rule, message}. Rules:
 // manifest-missing (neither plugin.json nor legacy .claude-plugin/plugin.json exists; root
-// wins when both exist) | manifest-parse | manifest-schema ($schema must be https:// or
-// absent) | manifest-name (plain name a la is_plain_name in plugins.rs; NOT required to
+// wins when both exist) | manifest-parse | manifest-shape (valid JSON but not an object) |
+// manifest-schema ($schema must be https:// or absent) | manifest-name (plain name a la is_plain_name in plugins.rs; NOT required to
 // match the dir basename, so temp/staging checkouts validate) | manifest-version (semver)
 // | manifest-description | manifest-skills (must be an array) | skill-missing (listed skill
 // lacks skills/<name>/SKILL.md) | skill-name | skill-frontmatter | skill-duplicate
@@ -81,7 +81,10 @@ export function validatePack(dir) {
     } catch (e) {
       errors.push(err(manifestFile, 'manifest-parse', `not valid JSON: ${e.message}`));
     }
-    if (parsed !== undefined) {
+    if (parsed !== undefined && (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))) {
+      // A primitive or array parses fine, but `'x' in manifest` below would throw on it.
+      errors.push(err(manifestFile, 'manifest-shape', 'must be a JSON object with name, version, description and skills'));
+    } else if (parsed !== undefined) {
       manifest = parsed;
       if ('$schema' in manifest && (typeof manifest.$schema !== 'string' || !manifest.$schema.startsWith('https://'))) {
         errors.push(err(manifestFile, 'manifest-schema', '$schema must be an https:// URL string or absent'));

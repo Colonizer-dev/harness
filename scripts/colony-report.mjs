@@ -36,7 +36,10 @@ function readJsonLines(path) {
 export function loadColonies(dataDir, label = basename(resolve(dataDir))) {
   let records = [];
   try {
-    records = JSON.parse(readFileSync(join(dataDir, 'sessions.json'), 'utf8'));
+    const parsed = JSON.parse(readFileSync(join(dataDir, 'sessions.json'), 'utf8'));
+    // Wrong-shaped JSON costs the session list no less than a parse error would; the session
+    // directories are still read below, so a damaged file loses metadata, not colonies.
+    if (Array.isArray(parsed)) records = parsed;
   } catch {
     records = [];
   }
@@ -122,7 +125,17 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
   };
 
   const times = events.map((e) => ms(e.ts)).filter(Number.isFinite);
-  if (times.length > 1) r.wall_ms = Math.max(...times) - Math.min(...times);
+  // Folded by hand rather than spread into Math.max/min: a long colony's events would overflow
+  // the argument limit and kill the whole report with a RangeError.
+  if (times.length > 1) {
+    let min = times[0];
+    let max = times[0];
+    for (const t of times) {
+      if (t < min) min = t;
+      if (t > max) max = t;
+    }
+    r.wall_ms = max - min;
+  }
 
   let state = 'idle';
   let lastTs = NaN;

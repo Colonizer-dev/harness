@@ -94,3 +94,11 @@ test('a SKILL.md without frontmatter fails with skill-frontmatter', (t) => {
   assert.equal(result.ok, false);
   assert.ok(rules(result).includes('skill-frontmatter'));
 });
+
+test('a manifest that is valid JSON but not an object fails with manifest-shape, not a throw', (t) => {
+  for (const body of ['null', '42', '"a string"', '[]']) {
+    const result = validatePack(pack(t, { 'plugin.json': body }));
+    assert.equal(result.ok, false, `${body} should not validate`);
+    assert.ok(rules(result).includes('manifest-shape'), `${body} should be a shape error, got ${rules(result)}`);
+  }
+});
