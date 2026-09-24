@@ -328,13 +328,17 @@ pull request keeps its last settled verdict. The cockpit derives lead time (`mer
 best-effort startup backfill; left out while empty. The cockpit maps each path to the monorepo
 package with the longest matching path to show a monorepo's packages under its repository row.
 
-`summary` is the task in one plain sentence (at most 120 characters), written by a cheap model —
-the agent module's `background_model` when it is a Claude model, else `claude-haiku-4-5`, with the
-mothership's own Claude credential — from the issue's title and body (or an open session's
-instructions) shortly after launch, rewritten from the pull request's title and body when it opens,
-and backfilled at startup for up to 50 live colonies that have none. Only that task text is sent.
-It is left out until written; the agent module's `summaries` setting (`COLONIZER_SUMMARIES`, on by
-default) turns it off, and a failed request leaves it out while the cockpit shows the title.
+`summary` is the task in one plain sentence (at most 120 characters), written by a cheap model
+from the issue's title and body (or an open session's instructions) shortly after launch, rewritten
+from the pull request's title and body when it opens, and backfilled at startup for up to 50 live
+colonies that have none. Only that task text is sent. The model is, in order: the agent module's
+`summary_model` (`<provider>/<model>` or a Claude model); else the first `<provider>/<model>` among
+its `subagent_model`, `model_low` and `background_model` whose provider is configured, called
+through that provider's saved config and key like the autonomy judge; else `claude-haiku-4-5` with
+an Anthropic API key (`sk-ant-api…`). The Claude subscription token is never used for summaries, so
+with nothing else configured there are none (logged once). It is left out until written; the
+`summaries` setting (`COLONIZER_SUMMARIES`, on by default) turns it off, and a failed request
+leaves it out while the cockpit shows the title.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish

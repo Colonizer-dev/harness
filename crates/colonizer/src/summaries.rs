@@ -6,6 +6,11 @@
 //! Only the task text leaves the host — the issue title and body, the instructions, or the pull
 //! request's title and body — never a secret, a path on the host, or colony output. A failure
 //! leaves `summary` unset: the cockpit falls back to the title, and nothing waits on this.
+//!
+//! The model is reached like the autonomy judge's: through a model provider the operator configured
+//! (the gateway's provider config and saved key), or with a real Anthropic API key. Never with the
+//! Claude subscription token — that is issued for Claude Code inside colonies, not for the
+//! mothership's own calls — so an install with only that token writes no summaries.
 
 use crate::{
     Shared,
@@ -89,51 +94,114 @@ pub fn clean(answer: &str) -> Option<String> {
     Some(format!("{}…", cut.trim_end()))
 }
 
-/// The model to ask: the agent module's background model when it names a Claude model (an alias or
-/// ID, no `<provider>/` prefix), else [`FALLBACK_MODEL`]. Pure, for the tests.
-pub fn model_for(background_model: &str) -> String {
-    let m = background_model.trim();
-    if m.is_empty() || m.contains('/') {
-        FALLBACK_MODEL.to_string()
-    } else {
-        m.to_string()
-    }
+/// How a summary request is sent.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Through a configured model provider, as the autonomy judge does: `<provider>/<model>`, or a
+    /// plain Claude model on the operator's Anthropic provider.
+    Provider(String),
+    /// Straight to the Anthropic API with a real API key (`sk-ant-api…`) as `x-api-key`.
+    ApiKey(String),
 }
 
-/// Whether summaries are on (the agent module's `summaries` setting, default on) and which model
-/// writes them.
-async fn settings(app: &Shared) -> (bool, String) {
+/// The Anthropic API key in a Claude credential, or `None` — a `claude setup-token` subscription
+/// token is never one, so it is never used for summaries. Pure, for the tests.
+pub fn api_key_of(credential: &str) -> Option<&str> {
+    let c = credential.trim();
+    c.starts_with("sk-ant-api").then_some(c)
+}
+
+/// Which model writes summaries, in order: the `summary_model` setting; else the first of
+/// `candidates` (the agent's subagent, low-tier and background models) that names a configured
+/// `<provider>/<model>`; else Claude Haiku with a real API key; else none. A plain Claude model in
+/// `summary_model` goes through the operator's Anthropic provider when there is one, else the API
+/// key. Pure, for the tests.
+pub fn choose(
+    summary_model: &str,
+    candidates: &[&str],
+    provider_ids: &[&str],
+    has_anthropic_provider: bool,
+    has_api_key: bool,
+) -> Option<Route> {
+    let configured = |m: &str| {
+        m.split_once('/')
+            .is_some_and(|(id, rest)| !rest.is_empty() && provider_ids.contains(&id))
+    };
+    let chosen = summary_model.trim();
+    if !chosen.is_empty() {
+        if chosen.contains('/') {
+            if configured(chosen) {
+                return Some(Route::Provider(chosen.to_string()));
+            }
+        } else if has_anthropic_provider {
+            return Some(Route::Provider(chosen.to_string()));
+        } else if has_api_key {
+            return Some(Route::ApiKey(chosen.to_string()));
+        }
+    }
+    if let Some(m) = candidates.iter().map(|m| m.trim()).find(|m| configured(m)) {
+        return Some(Route::Provider(m.to_string()));
+    }
+    has_api_key.then(|| Route::ApiKey(FALLBACK_MODEL.to_string()))
+}
+
+/// Whether summaries are on (the agent module's `summaries` setting, default on) and how they are
+/// written; `None` when no model is available.
+async fn settings(app: &Shared) -> (bool, Option<Route>) {
     if std::env::var("COLONIZER_SUMMARIES").is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off")) {
-        return (false, String::new());
+        return (false, None);
     }
     let modules = app.modules.read().await.clone();
-    let Some(choice) = modules.get("agent") else {
-        return (true, FALLBACK_MODEL.to_string());
+    let (on, summary_model, candidates) = match modules.get("agent") {
+        Some(choice) => {
+            let schema = modules::schema_for("agent", &choice.provider, &app.agents);
+            let on = setting(choice, &schema, "summaries").and_then(Value::as_bool).unwrap_or(true);
+            let candidates = ["subagent_model", "model_low", "background_model"].map(|k| setting_str(choice, &schema, k));
+            (on, setting_str(choice, &schema, "summary_model"), candidates.to_vec())
+        }
+        None => (true, String::new(), Vec::new()),
     };
-    let schema = modules::schema_for("agent", &choice.provider, &app.agents);
-    let on = setting(choice, &schema, "summaries").and_then(Value::as_bool).unwrap_or(true);
-    (on, model_for(&setting_str(choice, &schema, "background_model")))
+    if !on {
+        return (false, None);
+    }
+    let providers = app.providers();
+    let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+    let has_anthropic = providers.iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    let has_api_key = app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some());
+    let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    (true, choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key))
 }
 
-/// Asks the model for a summary of `input`, with the mothership's own Claude credential.
-async fn ask(app: &Shared, model: &str, input: &str) -> Result<String, String> {
-    let cred = app.claude_cred().ok_or("no Claude credential is configured")?;
-    let oauth = cred.env != "ANTHROPIC_API_KEY";
-    // A subscription (OAuth) token is only accepted for Claude Code's own requests, which open with
-    // its identity line; an API key takes the instruction alone.
-    let system = if oauth {
-        json!([
-            {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
-            {"type": "text", "text": SYSTEM_PROMPT},
-        ])
-    } else {
-        json!(SYSTEM_PROMPT)
-    };
+/// Asks for a summary of `input` along `route`, bounded by [`REQUEST_TIMEOUT`].
+async fn ask(app: &Shared, route: &Route, input: &str) -> Result<String, String> {
+    match route {
+        Route::Provider(model) => {
+            let prompt = format!("{SYSTEM_PROMPT}\n\nThe task:\n{input}");
+            match tokio::time::timeout(REQUEST_TIMEOUT, crate::autonomy::ask_model(app, model, &prompt)).await {
+                Ok(Ok(text)) => Ok(text),
+                Ok(Err(e)) => Err(format!("{e:#}")),
+                Err(_) => Err(format!("{model} did not answer within {}s", REQUEST_TIMEOUT.as_secs())),
+            }
+        }
+        Route::ApiKey(model) => {
+            let key = app
+                .claude_cred()
+                .and_then(|c| api_key_of(&c.value).map(str::to_string))
+                .ok_or("no Anthropic API key")?;
+            ask_with_api_key(&key, model, input).await
+        }
+    }
+}
+
+/// One request straight to the Anthropic API with a real API key.
+async fn ask_with_api_key(key: &str, model: &str, input: &str) -> Result<String, String> {
     let body = json!({
-        "model": model,
+        "model": crate::providers::api_model(model),
         "max_tokens": 60,
         "temperature": 0,
-        "system": system,
+        "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": input}],
     });
     let client = reqwest::Client::builder()
@@ -142,52 +210,58 @@ async fn ask(app: &Shared, model: &str, input: &str) -> Result<String, String> {
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("could not build an HTTP client: {e}"))?;
-    let mut request = client
+    let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("anthropic-version", "2023-06-01")
-        .json(&body);
-    request = if oauth {
-        request.bearer_auth(&cred.value).header("anthropic-beta", "oauth-2025-04-20")
-    } else {
-        request.header("x-api-key", &cred.value)
-    };
-    let response = request.send().await.map_err(|e| format!("{e}"))?;
+        .header("x-api-key", key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{e}"))?;
     let status = response.status();
     let answer: Value = response.json().await.map_err(|e| format!("unreadable answer: {e}"))?;
     if !status.is_success() {
         let message = answer["error"]["message"].as_str().unwrap_or("no message");
         return Err(format!("Anthropic answered {status}: {message}"));
     }
-    let text = answer["content"]
+    Ok(answer["content"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
-        .join("\n");
-    Ok(text)
+        .join("\n"))
+}
+
+/// Logs a summary failure once per run.
+fn log_once(message: String) {
+    if !FAILURE_LOGGED.swap(true, Ordering::SeqCst) {
+        eprintln!("summaries: {message}");
+    }
 }
 
 /// Writes (or rewrites) a colony's summary from `title` and `body`. Quiet on failure after the first.
 async fn write(app: &Shared, id: &str, title: &str, body: &str) {
-    let (on, model) = settings(app).await;
+    let (on, route) = settings(app).await;
     if !on {
         return;
     }
+    let Some(route) = route else {
+        log_once("no model for summaries: set summary_model or a provider key".into());
+        return;
+    };
     let input = build_input(title, body);
     if input.is_empty() {
         return;
     }
-    match ask(app, &model, &input).await.map(|text| clean(&text)) {
+    match ask(app, &route, &input).await.map(|text| clean(&text)) {
         Ok(Some(summary)) => {
             app.update_session(id, |x| x.summary = Some(summary)).await;
         }
         Ok(None) => {}
-        Err(reason) => {
-            if !FAILURE_LOGGED.swap(true, Ordering::SeqCst) {
-                eprintln!("summaries: could not summarize colony {id} ({reason}); colonies show their titles instead");
-            }
-        }
+        Err(reason) => log_once(format!(
+            "could not summarize colony {id} ({reason}); colonies show their titles instead"
+        )),
     }
 }
 
@@ -211,7 +285,7 @@ async fn issue_body(app: &Shared, repo: &str, issue: u64) -> String {
 /// Summarizes a colony from its issue (title and body) or, for an open session, its instructions.
 pub async fn summarize_colony(app: Shared, id: String) {
     // Nothing is fetched (not even the issue) when summaries are off or no model can be asked.
-    if !settings(&app).await.0 || app.claude_cred().is_none() {
+    if !matches!(settings(&app).await, (true, Some(_))) {
         return;
     }
     let Some(s) = app.session(&id).await else { return };
@@ -231,7 +305,7 @@ pub async fn summarize_colony(app: Shared, id: String) {
 
 /// Rewrites a colony's summary from its pull request, which says what was actually done.
 pub async fn summarize_pull_request(app: Shared, id: String, url: String) {
-    if !settings(&app).await.0 || app.claude_cred().is_none() {
+    if !matches!(settings(&app).await, (true, Some(_))) {
         return;
     }
     let mut cmd = app.gh(["pr", "view", url.as_str(), "--json", "title,body"]);
@@ -261,7 +335,7 @@ fn live(status: SessionStatus) -> bool {
 /// At startup: summarizes up to [`BACKFILL_CAP`] live colonies that have none, [`BACKFILL_PARALLEL`]
 /// at a time.
 pub async fn backfill(app: Shared) {
-    if !settings(&app).await.0 {
+    if !matches!(settings(&app).await, (true, Some(_))) {
         return;
     }
     let ids: Vec<String> = app
@@ -329,10 +403,49 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_background_model_is_used_and_anything_else_falls_back() {
-        assert_eq!(model_for("claude-haiku-4-5"), "claude-haiku-4-5");
-        assert_eq!(model_for("sonnet"), "sonnet");
-        assert_eq!(model_for("bailian/deepseek-v4-flash"), FALLBACK_MODEL);
-        assert_eq!(model_for(""), FALLBACK_MODEL);
+    fn the_summary_model_wins_then_a_routed_provider_model_then_an_api_key() {
+        let ids = ["zai", "bailian"];
+        // 1. summary_model, when it names a configured provider.
+        assert_eq!(
+            choose("bailian/qwen-flash", &["zai/glm-5.3-flash"], &ids, false, true),
+            Some(Route::Provider("bailian/qwen-flash".into()))
+        );
+        // A plain Claude model goes through the Anthropic provider, else the API key.
+        assert_eq!(
+            choose("claude-haiku-4-5", &[], &ids, true, false),
+            Some(Route::Provider("claude-haiku-4-5".into()))
+        );
+        assert_eq!(
+            choose("claude-haiku-4-5", &[], &ids, false, true),
+            Some(Route::ApiKey("claude-haiku-4-5".into()))
+        );
+        // 2. The first routed <provider>/<model> the agent already uses.
+        assert_eq!(
+            choose("", &["claude-sonnet-5", "zai/glm-5.3-flash", "bailian/x"], &ids, false, true),
+            Some(Route::Provider("zai/glm-5.3-flash".into()))
+        );
+        // An unconfigured provider is skipped.
+        assert_eq!(choose("nosuch/m", &["nosuch/m"], &ids, false, false), None);
+        // 3. A real API key with Haiku.
+        assert_eq!(
+            choose("", &["claude-sonnet-5"], &ids, false, true),
+            Some(Route::ApiKey(FALLBACK_MODEL.into()))
+        );
+        // 4. Nothing.
+        assert_eq!(choose("", &["claude-sonnet-5"], &ids, false, false), None);
+    }
+
+    #[test]
+    fn a_subscription_token_is_never_an_api_key() {
+        assert_eq!(api_key_of("sk-ant-api03-abc"), Some("sk-ant-api03-abc"));
+        assert_eq!(
+            api_key_of("sk-ant-oat01-abc"),
+            None,
+            "a claude setup-token OAuth token is never used"
+        );
+        assert_eq!(api_key_of(""), None);
+        let ids = ["zai"];
+        let has_api_key = api_key_of("sk-ant-oat01-abc").is_some();
+        assert_eq!(choose("", &["claude-sonnet-5"], &ids, false, has_api_key), None);
     }
 }
