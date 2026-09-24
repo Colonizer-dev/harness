@@ -118,6 +118,11 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
     reviews: 0,
     review_passed: 0,
     merged: 0,
+    verifications: 0,
+    contradicted_claims: 0,
+    // The last verification's verdict and wall time; a colony has at most one per publish attempt.
+    verification_verdict: null,
+    verification_ms: null,
     memory_proposals: 0,
     repeated_reads: [],
     repeated_commands: [],
@@ -232,6 +237,12 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
       case 'merged':
         r.merged += 1;
         break;
+      case 'verification':
+        r.verifications += 1;
+        if (e.verdict === 'contradicted') r.contradicted_claims += 1;
+        r.verification_verdict = e.verdict ?? null;
+        r.verification_ms = typeof e.ms === 'number' ? e.ms : null;
+        break;
       case 'memory_proposal':
         r.memory_proposals += 1;
         break;
@@ -264,6 +275,7 @@ export function reasons(r, costThreshold = Infinity) {
   if (r.status === 'no_changes') out.push('ended with no changes');
   if (r.watchdog_nudges > 0) out.push(`watchdog nudged ${r.watchdog_nudges}×`);
   if (failedReviews > 0) out.push(`${failedReviews} fix review${failedReviews === 1 ? '' : 's'} failed`);
+  if (r.contradicted_claims > 0) out.push(`${r.contradicted_claims} contradicted completion claim${r.contradicted_claims === 1 ? '' : 's'}`);
   if (r.rate_limit_hits > 0) out.push(`${r.rate_limit_hits} rate-limit hit${r.rate_limit_hits === 1 ? '' : 's'}`);
   if (r.longest_silence_ms >= 5 * 60_000) out.push(`silent ${duration(r.longest_silence_ms)} while working`);
   if (r.tool_calls >= 10 && r.tool_errors / r.tool_calls >= 0.2) out.push(`${pct(r.tool_errors / r.tool_calls)} of tool calls failed`);
@@ -323,6 +335,8 @@ export function summarize(reports) {
     reviews: sum('reviews'),
     review_passed: sum('review_passed'),
     merged: sum('merged'),
+    verifications: sum('verifications'),
+    contradicted_claims: sum('contradicted_claims'),
     memory_proposals: sum('memory_proposals'),
     subagents: sum('subagents'),
     tools: Object.entries(tools)
@@ -402,7 +416,7 @@ export function formatReport(summary, reports, worst = 10) {
   );
   out.push(`- Questions: ${summary.questions.total}, waiting ${duration(summary.answer_wait_ms.total)} in total for answers (longest ${duration(summary.answer_wait_ms.longest)}).`);
   out.push(`- Asked in plain text and re-prompted: ${summary.plain_text_reprompts}. Watchdog nudges: ${summary.watchdog_nudges}. Failed turns: ${summary.failed_turns}. Rate-limit hits: ${summary.rate_limit_hits}.`);
-  out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}${findingChain(summary)}. Memory proposals: ${summary.memory_proposals}.`);
+  out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}${findingChain(summary)}. Memory proposals: ${summary.memory_proposals}. Verifications: ${summary.verifications}${summary.contradicted_claims ? `, ${summary.contradicted_claims} contradicted` : ''}.`);
   out.push('', '## Tools', '');
   out.push(table(['Tool', 'Calls', 'Failed', 'Failure rate'], summary.tools.slice(0, 15).map((t) => [t.name, t.calls, t.errors, pct(t.error_rate)])));
   out.push('', '## Colonies', '');
@@ -443,6 +457,23 @@ function describeCall(e) {
   const input = e.input ?? {};
   const detail = input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.description ?? input.prompt ?? '';
   return `${e.name}${detail ? ` ${excerpt(detail, 140)}` : ''}`;
+}
+
+/** One verification host event as a line: the verdict, what it found, and how long the check took. */
+function verificationLine(e) {
+  if (e.by_declaration) return 'verification: unverifiable by declaration (verify: none)';
+  const verdict = String(e.verdict ?? 'unverifiable').toUpperCase();
+  const detail = [excerpt(e.summary, 200), ...(e.contradictions ?? []).map((c) => excerpt(c, 160))].filter(Boolean).join('; ');
+  // Counts come from the event's fields, and only when the claim held up: next to why a claim failed,
+  // its numbers are not worth printing.
+  const counts = [];
+  if (e.verdict !== 'contradicted') {
+    const files = e.files_changed?.length ?? 0;
+    if (files > 0) counts.push(`${files} file${files === 1 ? '' : 's'}`);
+    if (e.commits > 0) counts.push(`${e.commits} commit${e.commits === 1 ? '' : 's'}`);
+  }
+  const took = typeof e.ms === 'number' && Number.isFinite(e.ms) ? (e.ms < 60_000 ? ` (${(e.ms / 1000).toFixed(1)}s)` : ` (${duration(e.ms)})`) : '';
+  return `verification: ${verdict}${detail ? ` — ${detail}` : ''}${counts.length ? `, ${counts.join(', ')}` : ''}${took}`;
 }
 
 /** One colony, one line per step, with the time since it started and gaps worth noticing. */
@@ -524,6 +555,10 @@ export function formatTranscript({ session = {}, events = [], logs = [] }) {
         break;
       case 'merged':
         lines.push(`${at}✔ merged ${excerpt(e.pr, 120)}`);
+        break;
+      case 'verification':
+        // Right after the claim's turn ended, so the claim and its verdict read side by side.
+        lines.push(`${at}∎ ${verificationLine(e)}`);
         break;
       case 'memory_proposal':
         lines.push(`${at}◇ memory proposal (${e.scope}): ${excerpt(e.title, 160)}`);

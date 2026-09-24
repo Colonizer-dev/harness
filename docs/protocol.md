@@ -1524,7 +1524,8 @@ Every minute the mothership checks live colonies. A colony that is `running` wit
 `stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
 `nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
-autopilot colony whose turn ends with an error (not an interrupt) is not published and gets
+autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
+mothership contradicted (Autopilot, below) — is not published and gets
 `autopilot_held`. Any new agent event clears `attention`; a disabled watchdog clears only the reasons
 it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
@@ -1603,6 +1604,44 @@ log gets a `warn` line (`autopilot: not publishing, external writes are blocked
 (COLONIZER_NO_EXTERNAL_EFFECTS); press Create PR when writes are enabled`) and the colony's
 `attention` is left as it was. Opening pull requests as drafts (`publish.settings.draft`) does not
 change this: a draft PR is still an external write, refused the same way as a ready one.
+
+**Done-verification (issue #328).** Before a completion claim is published, the mothership verifies it
+on its own. It snapshots the colony's work — commits and uncommitted files — without touching the
+worktree, reads the git state directly (commits ahead of base, changed files, whether the paths the PR
+description names are on the branch), and re-runs the repository's test command in a fresh one-shot
+microVM over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
+codes. The verdict is `confirmed` (the fresh run is green and the git state matches the description),
+`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — no test
+command known, the runner unavailable — which is never treated as confirmed. The fresh run's exit
+number is the one the guest itself writes to a report file mounted for exactly that
+(`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it, so a runner that never
+reported has not verified anything. Autopilot publishes on
+`confirmed` and on `unverifiable` exactly as before; on `contradicted` the colony is held with
+`attention.reason` `autopilot_held` and the contradictions in the event below.
+
+The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
+colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
+a command), then — for `auto` — the repository's own declaration read from the **base** branch:
+package.json `scripts.test` (else `npm ci && npm test`, or `npm install && npm test` without a
+lockfile), Cargo.toml → `cargo test`, a Makefile `test:` target → `make test`. A branch that rewrote
+the entry its resolved command comes from (`scripts.test`, the Makefile) would be grading its own
+homework: the claim comes back `unverifiable` with that said plainly, and nothing runs. `verify:
+none` means
+unverifiable by declaration. The verdict is appended to the colony's `events.jsonl` as a host event
+with the usual `seq`/`ts` — host-generated the same way as the finding chain's events (§6.6), so the
+runner-event schema is unchanged — and the `Session` carries the latest one as `verification` (the
+same object minus `type`/`seq`/`ts`):
+
+```jsonc
+{"type":"verification","verdict":"confirmed","by_declaration":false,"summary":"one plain line",
+ "contradictions":[],"command":"npm test","command_source":"package.json","exit_code":0,
+ "tests_ms":8100,"commits":2,"files_changed":["src/scan.rs"],"snapshot":"<sha>|null","ms":12345}
+```
+
+`command_source` names where the command came from (`config` for an explicit command — the colony's
+`verify` or the `publish` module's setting — or the base branch file that declared it:
+`package.json`, `Cargo.toml`, `Makefile`; null when no command ran), `exit_code`/`tests_ms` are the
+fresh run's, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
 
 **No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
 in the mothership's environment to any non-empty value other than `0`, `false`, `off` or `no`
@@ -1930,7 +1969,9 @@ transcript show the whole chain:
 
 These five are host-generated: the mothership appends them to the hunter colony's events.jsonl, the
 runner never emits them, and the runner-event schema in `docs/agent-events.schema.json` is unchanged —
-the runner events stay the §2 set plus `finding`. Every transition is also one line of the ledger,
+the runner events stay the §2 set plus `finding`. The publish gate's `verification` event (§6.3,
+Autopilot) is host-generated the same way, on the writing colony's own event log. Every transition is
+also one line of the ledger,
 `sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records
 `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?,
 verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|blocked|error`. A
