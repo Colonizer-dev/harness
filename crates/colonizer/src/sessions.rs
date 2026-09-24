@@ -1918,6 +1918,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             Value::String(serde_json::to_string(&routing.routes)?),
         );
     }
+    // A `<provider>/` prefix nobody configured is a typo'd route, not a Claude model: the runner would
+    // only warn and send those requests to Anthropic (router.mjs), so the boot refuses instead — here,
+    // after tier substitution, so only the models this colony will actually run are checked.
+    if let Some((value, prefix)) = routing.unrouted_provider(&runner_env) {
+        bail!("model setting '{value}' names provider '{prefix}', which is not configured");
+    }
     let used = routing.used(&runner_env);
     // Recorded on the session because the gateway needs it long after boot: every proxied call is
     // checked against this set (issue #409), so a colony's token opens only these providers.
