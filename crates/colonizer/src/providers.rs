@@ -427,6 +427,14 @@ fn provider_prefix(model: &str) -> Option<&str> {
     rest.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)).then_some(prefix)
 }
 
+/// The pricing the gateway would actually charge for `model`, if any provider's id prefixes it in
+/// `<provider>/<model>` form and that provider has pricing configured. `None` for a bare model name
+/// (no gateway involved) or a provider with no pricing on file.
+pub(crate) fn pricing_for(providers: &[Provider], model: &str) -> Option<Pricing> {
+    let prefix = provider_prefix(model)?;
+    providers.iter().find(|p| p.id == prefix)?.pricing
+}
+
 pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
     let port = app.cfg.gateway_bind.port();
     let providers = app.providers();
@@ -928,6 +936,36 @@ mod tests {
         );
         assert_eq!(Usage::default().total_tokens(), 0);
         assert_eq!(usage.total_tokens(), 3_700_000, "thinking tokens count toward the total too");
+    }
+
+    /// The cost gate (issue #470) prices models through this lookup, so the shapes it must tell apart
+    /// matter: a routed `<provider>/<model>` reaches its provider's pricing, a bare alias reaches
+    /// nothing, and a provider with no pricing on file prices nothing either.
+    #[test]
+    fn pricing_for_resolves_a_prefixed_model_and_nothing_else() {
+        let mut priced = provider("deepseek");
+        priced.pricing = Some(Pricing {
+            input_per_mtok: 0.27,
+            output_per_mtok: 1.1,
+            ..Default::default()
+        });
+        let providers = vec![provider("strix"), priced];
+
+        // Extra slashes are the provider's model id, as in `ColonyRoutes::used`.
+        assert_eq!(
+            pricing_for(&providers, "deepseek/deepseek-ai/DeepSeek-V4.1-Flash"),
+            Some(Pricing {
+                input_per_mtok: 0.27,
+                output_per_mtok: 1.1,
+                ..Default::default()
+            })
+        );
+        // A bare alias or ID never routes through the gateway, so nothing prices it.
+        assert_eq!(pricing_for(&providers, "opus"), None);
+        // A prefix no configured provider answers to.
+        assert_eq!(pricing_for(&providers, "unknown/model"), None);
+        // The provider is found but carries no pricing on file.
+        assert_eq!(pricing_for(&providers, "strix/qwen3"), None);
     }
 
     /// providers.json on disk predates `pricing`, and a Settings save from an older web build omits it.

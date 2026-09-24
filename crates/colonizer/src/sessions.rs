@@ -797,6 +797,24 @@ impl App {
         let (returned, status_before) = returned;
         if returned {
             spend::record_returned(self, &session.org).await;
+            // The colony's actual dollar cost, next to the decision that routed it (issue #470): the
+            // estimate recorded at boot can be checked against this once the colony finishes. Guarded
+            // on `model_routing` so a future colony type that skips routing never grows a spurious
+            // actual row. A lost row is a lost measurement, not a failed finish, so a failed append
+            // only raises the storage alert — the same deal the spend journal and the boot-time
+            // decision row get.
+            if session.model_routing.is_some() {
+                let line = json!({
+                    "ts": Utc::now(),
+                    "kind": "actual",
+                    "session": session.id,
+                    "actual_cost_usd": session.total_cost_usd(),
+                })
+                .to_string();
+                if let Err(e) = append_line(&self.routing_file(), &line).await {
+                    self.storage_failed("append to the routing ledger", &e).await;
+                }
+            }
         }
         // The activity log hears the same edge, once: a write that leaves the status alone
         // (cleanup, the app slot, a restart re-marking a stopped colony) records nothing.
@@ -2687,6 +2705,38 @@ pub(crate) mod tests {
         let disk: Value = serde_json::from_str(&std::fs::read_to_string(app.sessions_file()).unwrap()).unwrap();
         let saved = disk.as_array().unwrap().iter().find(|v| v["id"] == "abc").unwrap();
         assert_eq!(saved["status"], "idle", "a real change must reach sessions.json");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The routing ledger's `actual` row (issue #470): when a routed colony crosses into a terminal
+    /// state its real dollar cost lands next to the boot-time decision, so the estimate can be
+    /// checked against reality. A colony that never went through routing gets no such row.
+    #[tokio::test]
+    async fn a_colony_crossing_to_terminal_appends_its_actual_cost_to_the_routing_ledger() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        app.update_session("abc", |s| s.model_routing = Some(json!({"tier": "low"})))
+            .await;
+        app.update_session("abc", |s| s.status = SessionStatus::Merged).await;
+        let ledger = |app: &Shared| -> Vec<Value> {
+            std::fs::read_to_string(app.routing_file())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        };
+        let rows = ledger(&app);
+        assert_eq!(rows.len(), 1, "one ledger line, the actual cost: {rows:?}");
+        assert_eq!(rows[0]["kind"], "actual");
+        assert_eq!(rows[0]["session"], "abc");
+        assert!(rows[0]["ts"].is_string(), "{}", rows[0]);
+        assert!(rows[0]["actual_cost_usd"].is_number(), "{}", rows[0]);
+
+        // No routing decision, no actual row — even though the same returned edge fires for it.
+        let mut other = colony("acme", SessionStatus::Running);
+        other.id = "def".into();
+        app.sessions.write().await.push(other);
+        app.update_session("def", |s| s.status = SessionStatus::Merged).await;
+        assert_eq!(ledger(&app).len(), 1, "a colony that skipped routing gets no actual row");
         let _ = std::fs::remove_dir_all(root);
     }
 
