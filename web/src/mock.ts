@@ -2706,6 +2706,26 @@ export function createMockApi(): Api {
       return { ...mem0 };
     },
     repoMap: (repo) => later(() => repoMap(repo)),
+    repoMapFile: (repo, path) =>
+      later(() => ({
+        repo,
+        path,
+        colonies: [
+          {
+            id: "mock-colony",
+            title: "Harden the gateway budget",
+            issue: 409,
+            status: "running" as const,
+            mode: "changing" as const,
+            activity: [
+              { ts: new Date(Date.now() - 40_000).toISOString(), tool: "Edit", summary: "Edit (\u22123 +7)", agent: "Builder Settler" },
+              { ts: new Date(Date.now() - 95_000).toISOString(), tool: "Read", summary: `Read ${path.split("/").pop()}:120-180`, agent: null },
+            ],
+            diff: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -10,4 +10,6 @@ fn reserve()\n     let a = 1;\n-    let b = 2;\n+    let b = 3;\n+    let c = 4;\n+    let d = 5;\n     done();\n`,
+            diff_truncated: false,
+          },
+        ],
+      })),
     repoMapFiles: (repo) =>
       later(() => {
         const map = repoMap(repo).map;

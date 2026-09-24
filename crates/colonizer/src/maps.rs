@@ -22,7 +22,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::Utc;
@@ -517,36 +517,285 @@ pub(crate) fn recent_reads(events: &[Value]) -> Vec<String> {
         .filter(|e| e["type"] == "tool_call")
         .take(READ_RECENT_CALLS);
     let mut out: Vec<String> = Vec::new();
+    for call in calls {
+        for rel in call_paths(&call["input"]) {
+            if !out.iter().any(|p| p == &rel) {
+                out.push(rel);
+            }
+        }
+    }
+    out.truncate(READ_LIMIT);
+    out
+}
+
+/// The repository-relative paths one tool call's input names, in order, deduplicated.
+fn call_paths(input: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     let mut push = |raw: &str| {
         let Some(rel) = workspace_relative(raw) else { return };
         if !out.iter().any(|p| p == &rel) {
             out.push(rel);
         }
     };
-    for call in calls {
-        let input = &call["input"];
-        for key in ["file_path", "notebook_path", "path"] {
-            if let Some(p) = input[key].as_str() {
-                push(p);
-            }
+    for key in ["file_path", "notebook_path", "path"] {
+        if let Some(p) = input[key].as_str() {
+            push(p);
         }
-        if let Some(cmd) = input["command"].as_str() {
-            let in_worktree = cmd.contains("/workspace");
-            for token in
-                cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '"' | '\'' | '(' | ')' | '>' | '<' | '='))
-            {
-                let token = token.trim_end_matches([':', ',']);
-                if token.starts_with("/workspace/") {
-                    push(token);
-                } else if in_worktree && looks_like_repo_path(token) {
-                    // `cd /workspace && grep -n x crates/colonizer/src/…`: relative paths count too.
-                    push(token);
-                }
+    }
+    if let Some(cmd) = input["command"].as_str() {
+        let in_worktree = cmd.contains("/workspace");
+        for token in
+            cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '"' | '\'' | '(' | ')' | '>' | '<' | '='))
+        {
+            let token = token.trim_end_matches([':', ',']);
+            if token.starts_with("/workspace/") {
+                push(token);
+            } else if in_worktree && looks_like_repo_path(token) {
+                // `cd /workspace && grep -n x crates/colonizer/src/…`: relative paths count too.
+                push(token);
             }
         }
     }
-    out.truncate(READ_LIMIT);
     out
+}
+
+/// Most activity entries a file's detail lists per colony.
+const FILE_ACTIVITY_LIMIT: usize = 15;
+/// Largest diff a file's detail sends per colony; past it the diff is cut and flagged.
+const FILE_DIFF_LIMIT: usize = 200 * 1024;
+/// How long one colony's diff may take before the detail answers without it.
+const FILE_DIFF_TIME: Duration = Duration::from_secs(5);
+
+/// A `?path=` for the file detail: repository-relative, no `..`, no leading `/`, at most 1024
+/// characters. Returns the normalised path (a leading `./` dropped), or `None` when it is refused.
+pub(crate) fn valid_file_query(raw: &str) -> Option<String> {
+    let path = raw.trim();
+    let path = path.strip_prefix("./").unwrap_or(path).trim_end_matches('/');
+    let ok = !path.is_empty()
+        && path.len() <= 1024
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|part| !part.is_empty() && part != ".." && part != ".");
+    ok.then(|| path.to_string())
+}
+
+/// The last path segment, for short summaries.
+fn base_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Counts lines the way a diff does: an empty string is none, a trailing newline adds none.
+fn line_count(text: &str) -> usize {
+    if text.is_empty() { 0 } else { text.lines().count().max(1) }
+}
+
+/// One line saying what a tool call did to `path`: "Read gateway.rs:120-180", "Edit (−3 +7)",
+/// "Grep \"reserve\" in gateway.rs", "Bash: cargo test gateway".
+fn call_summary(tool: &str, input: &Value, path: &str) -> String {
+    let file = base_name(path);
+    let short = |s: &str, n: usize| {
+        let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if s.chars().count() > n {
+            format!("{}…", s.chars().take(n).collect::<String>())
+        } else {
+            s
+        }
+    };
+    match tool {
+        "Read" => match (input["offset"].as_u64(), input["limit"].as_u64()) {
+            (Some(o), Some(l)) => format!("Read {file}:{o}-{}", o + l),
+            (Some(o), None) => format!("Read {file}:{o}-"),
+            _ => format!("Read {file}"),
+        },
+        "Edit" => format!(
+            "Edit (\u{2212}{} +{})",
+            line_count(input["old_string"].as_str().unwrap_or_default()),
+            line_count(input["new_string"].as_str().unwrap_or_default())
+        ),
+        "MultiEdit" => format!("Edit ×{}", input["edits"].as_array().map_or(0, Vec::len)),
+        "Write" => format!(
+            "Write {file} ({} lines)",
+            line_count(input["content"].as_str().unwrap_or_default())
+        ),
+        "NotebookEdit" => format!("Edit notebook {file}"),
+        "Grep" => format!(
+            "Grep \"{}\" in {file}",
+            short(input["pattern"].as_str().unwrap_or_default(), 40)
+        ),
+        "Glob" => format!("Glob {}", short(input["pattern"].as_str().unwrap_or(file), 50)),
+        "Bash" => format!(
+            "Bash: {}",
+            short(
+                input["command"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim_start_matches("cd /workspace && "),
+                70
+            )
+        ),
+        other => format!("{other} {file}"),
+    }
+}
+
+/// A colony's most recent tool calls that name `path`, newest first: `{ts, tool, summary, agent}`,
+/// where `agent` is the subagent (settler) the call ran in, when the event says. Pure over the
+/// parsed event lines, so it is tested without a colony.
+pub(crate) fn file_activity(events: &[Value], path: &str) -> Vec<Value> {
+    events
+        .iter()
+        .rev()
+        .filter(|e| e["type"] == "tool_call")
+        .filter(|e| call_paths(&e["input"]).iter().any(|p| p == path))
+        .take(FILE_ACTIVITY_LIMIT)
+        .map(|e| {
+            let tool = e["name"].as_str().unwrap_or("tool");
+            let agent = e["agent"]["description"].as_str().or_else(|| e["agent"]["name"].as_str());
+            json!({"ts": e["ts"], "tool": tool, "summary": call_summary(tool, &e["input"], path), "agent": agent})
+        })
+        .collect()
+}
+
+/// A diff cut to at most `limit` bytes, on a line boundary; the flag says whether it was cut.
+fn cap_diff(diff: String, limit: usize) -> (String, bool) {
+    if diff.len() <= limit {
+        return (diff, false);
+    }
+    let mut cut = limit;
+    while !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let end = diff[..cut].rfind('\n').map_or(cut, |i| i + 1);
+    (diff[..end].to_string(), true)
+}
+
+/// A unified "new file" diff for an untracked file's text, as `git diff` would print it.
+fn new_file_diff(path: &str, text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// What a colony changed in `path` since it branched: committed and uncommitted edits together
+/// (`git diff <merge-base>` against the work tree), or the whole file for a new untracked one.
+/// `None` when it has not changed the file, or the probe fails or times out.
+async fn file_diff(app: &App, s: &Session, path: &str) -> Option<String> {
+    let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let base = match s.base.as_deref().filter(|b| !b.is_empty()) {
+        Some(b) => format!("origin/{b}"),
+        None => "origin/HEAD".to_string(),
+    };
+    let mut merge_base = app.git(admin);
+    merge_base
+        .arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["merge-base", &base, "HEAD"]);
+    let from = exec_within(FILE_DIFF_TIME, &mut merge_base).await.ok()?.trim().to_string();
+    if from.is_empty() || !from.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut diff = app.git(admin);
+    diff.arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["diff", "--no-color", "--no-ext-diff", &from, "--", path]);
+    let out = exec_within(FILE_DIFF_TIME, &mut diff).await.ok()?;
+    if !out.trim().is_empty() {
+        return Some(out);
+    }
+    // An untracked file has no diff; show it as new. Only a regular file: the work tree is
+    // colony-written, so a symlink there must not read a host file into the cockpit.
+    let mut status = app.git(admin);
+    status
+        .arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["status", "--porcelain", "--untracked-files=all", "--", path]);
+    let porcelain = exec_within(FILE_DIFF_TIME, &mut status).await.ok()?;
+    if !porcelain.starts_with("??") {
+        return None;
+    }
+    let full = FsPath::new(&s.worktree).join(path);
+    let meta = tokio::fs::symlink_metadata(&full).await.ok()?;
+    if !meta.is_file() || meta.len() as usize > FILE_DIFF_LIMIT {
+        return None;
+    }
+    let text = tokio::fs::read_to_string(&full).await.ok()?;
+    Some(new_file_diff(path, &text))
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileQuery {
+    path: String,
+}
+
+/// `GET /api/maps/{owner}/{repo}/file?path=…`: every live colony on the repository that is changing
+/// or reading `path` — its recent tool calls on the file and its diff of it — for the map's
+/// explorer pane. Live, so not cached.
+pub async fn file(
+    State(app): State<Shared>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(query): Query<FileQuery>,
+) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let Some(path) = valid_file_query(&query.path) else {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "path must be repository-relative, without '..'",
+        ));
+    };
+    let live: Vec<Session> = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.repo == repo && (s.status.is_live() || s.status == SessionStatus::Publishing))
+        .cloned()
+        .collect();
+    let probes = live.iter().map(|s| {
+        let app = app.clone();
+        let path = path.clone();
+        async move {
+            let events =
+                crate::diagnosis::tail_events_within(&app.session_dir(&s.id).join("events.jsonl"), READ_TAIL_BYTES).await;
+            let activity = file_activity(&events, &path);
+            let diff = file_diff(&app, s, &path).await;
+            (s, activity, diff)
+        }
+    });
+    let mut colonies = Vec::new();
+    for (s, activity, diff) in futures_util::future::join_all(probes).await {
+        if activity.is_empty() && diff.is_none() {
+            continue;
+        }
+        let (diff, truncated) = match diff {
+            Some(d) => {
+                let (d, cut) = cap_diff(d, FILE_DIFF_LIMIT);
+                (Some(d), cut)
+            }
+            None => (None, false),
+        };
+        colonies.push(json!({
+            "id": s.id,
+            "title": if s.issue_title.is_empty() { "open session" } else { s.issue_title.as_str() },
+            "issue": s.issue,
+            "status": s.status.as_str(),
+            "mode": if diff.is_some() { "changing" } else { "reading" },
+            "activity": activity,
+            "diff": diff,
+            "diff_truncated": truncated,
+        }));
+    }
+    Ok(Json(json!({"repo": repo, "path": path, "colonies": colonies})))
 }
 
 /// A relative token shaped like a repository path: at least one `/`, path characters only, not a
@@ -737,6 +986,81 @@ mod tests {
             "newest first, deduplicated, the worktree root and paths outside it dropped"
         );
         assert!(recent_reads(&[]).is_empty());
+    }
+
+    #[test]
+    fn file_queries_are_repository_relative_and_never_climb_out() {
+        assert_eq!(
+            valid_file_query("crates/x/src/gateway.rs").as_deref(),
+            Some("crates/x/src/gateway.rs")
+        );
+        assert_eq!(valid_file_query("./web/src/App.tsx").as_deref(), Some("web/src/App.tsx"));
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../secret",
+            "a/../../b",
+            "a//b",
+            "a/./b",
+            "a\\b",
+            "a\u{0}b",
+        ] {
+            assert_eq!(valid_file_query(bad), None, "{bad:?}");
+        }
+        assert_eq!(valid_file_query(&"a/".repeat(600)), None, "longer than 1024 characters");
+    }
+
+    #[test]
+    fn file_activity_lists_the_calls_on_that_file_newest_first_with_their_settler() {
+        let call = |ts: &str, name: &str, input: Value| json!({"type": "tool_call", "ts": ts, "name": name, "input": input, "agent": {"description": "Hunt gateway injection", "name": "general-purpose"}});
+        let events = vec![
+            call(
+                "t1",
+                "Read",
+                json!({"file_path": "/workspace/crates/c/src/gateway.rs", "offset": 120, "limit": 60}),
+            ),
+            call(
+                "t2",
+                "Grep",
+                json!({"pattern": "reserve", "path": "/workspace/crates/c/src/gateway.rs"}),
+            ),
+            call("t3", "Read", json!({"file_path": "/workspace/crates/c/src/other.rs"})),
+            call(
+                "t4",
+                "Edit",
+                json!({"file_path": "/workspace/crates/c/src/gateway.rs", "old_string": "a\nb\nc", "new_string": "a\nb\nc\nd\ne\nf\ng"}),
+            ),
+            call(
+                "t5",
+                "Bash",
+                json!({"command": "cd /workspace && cargo test -p c crates/c/src/gateway.rs"}),
+            ),
+            json!({"type": "tool_result", "ts": "t6"}),
+        ];
+        let got = file_activity(&events, "crates/c/src/gateway.rs");
+        let summaries: Vec<&str> = got.iter().map(|a| a["summary"].as_str().unwrap()).collect();
+        assert_eq!(
+            summaries,
+            vec![
+                "Bash: cargo test -p c crates/c/src/gateway.rs",
+                "Edit (\u{2212}3 +7)",
+                "Grep \"reserve\" in gateway.rs",
+                "Read gateway.rs:120-180",
+            ]
+        );
+        assert_eq!(got[0]["ts"], "t5");
+        assert_eq!(got[0]["agent"], "Hunt gateway injection");
+        assert!(file_activity(&events, "crates/c/src/none.rs").is_empty());
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_on_a_line_and_flagged() {
+        let diff = "+line one\n+line two\n+line three\n".to_string();
+        assert_eq!(cap_diff(diff.clone(), 1000), (diff.clone(), false));
+        let (cut, flagged) = cap_diff(diff, 15);
+        assert!(flagged);
+        assert_eq!(cut, "+line one\n");
+        assert!(new_file_diff("a/b.rs", "x\ny\n").ends_with("@@ -0,0 +1,2 @@\n+x\n+y\n"));
     }
 
     #[test]

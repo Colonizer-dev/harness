@@ -14,7 +14,7 @@ import { SURFACE_Y, normalizeBox, surfaceGrass, type NestBox } from "./nest";
 import { FileTreePane } from "./FileTreePane";
 import { AntBubble } from "./AntBubble";
 import { BUBBLE_TONE, MAX_ANT_BUBBLES } from "./bubbles";
-import { antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
+import { componentForPath, antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
 
 const REPO_KEY = "colonizer.mapRepo";
 const TOUCHED_POLL_MS = 5000;
@@ -228,6 +228,7 @@ export function NestMapView({
   const openComponent = open && map ? map.components.find((c) => c.id === open) : undefined;
   const markedPaths = useMemo(() => new Set((openComponent?.sources ?? []).map((s) => s.path.replace(/\/+$/, ""))), [openComponent]);
   const changingPaths = useMemo(() => new Set(inRepo.flatMap((s) => touched[s.id] ?? [])), [inRepo, touched]);
+  const readingPaths = useMemo(() => new Set(inRepo.flatMap((s) => reading[s.id] ?? [])), [inRepo, reading]);
   const places: ReturnType<typeof colonyPlaces> = map ? colonyPlaces(inRepo, touched, map, reading) : { byChamber: new Map(), waiting: [] };
   const openChamber = open && layout ? layout.byId.get(open) : null;
 
@@ -496,6 +497,12 @@ export function NestMapView({
           title={openChamber.component.label}
           marked={markedPaths}
           changing={changingPaths}
+          reading={readingPaths}
+          componentOf={(path) => {
+            const id = map ? componentForPath(path, map.components) : null;
+            return id ? (map?.components.find((c) => c.id === id)?.label ?? null) : null;
+          }}
+          onOpenColony={onOpen}
           onClose={() => setOpen(null)}
         />
       )}

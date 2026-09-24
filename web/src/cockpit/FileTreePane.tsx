@@ -3,6 +3,7 @@
 // flagged. Paths come from GET /api/maps/{owner}/{repo}/files (the mothership's local clone).
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { cx } from "../components/ui";
+import { FileDetail } from "./FileDetail";
 
 export interface TreeNode {
   name: string;
@@ -68,6 +69,10 @@ export function FileTreePane({
   title,
   marked,
   changing,
+  reading = new Set<string>(),
+  componentOf = () => null,
+  onOpenColony = () => {},
+  initialDetail = null,
   onClose,
 }: {
   repo: string;
@@ -81,8 +86,17 @@ export function FileTreePane({
   marked: ReadonlySet<string>;
   /** Files live colonies are changing. */
   changing: ReadonlySet<string>;
+  /** Files live colonies have been reading lately. */
+  reading?: ReadonlySet<string>;
+  /** The map component a file belongs to, for the file detail's header. */
+  componentOf?: (path: string) => string | null;
+  onOpenColony?: (id: string) => void;
+  /** A file to open on; tests pin the detail view through it. */
+  initialDetail?: string | null;
   onClose: () => void;
 }): ReactElement {
+  // A clicked file opens its detail in place of the tree; the back arrow or Escape returns.
+  const [detail, setDetail] = useState<string | null>(initialDetail);
   const tree = useMemo(() => (paths ? buildTree(paths) : null), [paths]);
   const [open, setOpen] = useState<Set<string>>(() => ancestorsOf(marked));
   const [onlyMarked, setOnlyMarked] = useState(false);
@@ -120,18 +134,19 @@ export function FileTreePane({
         <div
           ref={ref}
           onClick={() =>
-            node.dir &&
-            setOpen((cur) => {
-              const next = new Set(cur);
-              if (next.has(node.path)) next.delete(node.path);
-              else next.add(node.path);
-              return next;
-            })
+            node.dir
+              ? setOpen((cur) => {
+                  const next = new Set(cur);
+                  if (next.has(node.path)) next.delete(node.path);
+                  else next.add(node.path);
+                  return next;
+                })
+              : setDetail(node.path)
           }
           title={node.path}
           className={cx(
             "flex h-[22px] items-center gap-1 whitespace-nowrap pr-2 font-mono text-[12px]",
-            node.dir ? "cursor-pointer" : "cursor-default",
+            "cursor-pointer",
             mark ? "bg-accent-soft text-accent" : holds ? "text-text" : "text-muted",
             !mark && "hover:bg-panel-2",
           )}
@@ -145,10 +160,15 @@ export function FileTreePane({
           </span>
           <span className="truncate">{node.name}</span>
           {holds && <span aria-hidden="true" className="ml-1 size-1.5 shrink-0 rounded-full bg-accent" />}
-          {change && (
-            <span className="ml-auto shrink-0 rounded px-1 text-[10px] font-semibold text-warn" title="a live colony is changing this file">
+          {change ? (
+            <span className="ml-auto shrink-0 rounded px-1 text-[10px] font-semibold text-warn" title="a live colony is changing this file — click to see the diff">
               M
             </span>
+          ) : (
+            !node.dir &&
+            reading.has(node.path) && (
+              <span aria-label="a live colony is reading this file" title="a live colony is reading this file — click to see what it does" className="ml-auto size-1.5 shrink-0 rounded-full border border-accent" />
+            )
           )}
         </div>
         {expanded && <div role="group">{node.children.map((c) => row(c, depth + 1))}</div>}
@@ -157,7 +177,20 @@ export function FileTreePane({
   };
 
   return (
-    <aside aria-label={`files · ${title}`} className="flex h-full w-[340px] shrink-0 flex-col border-l border-border bg-panel">
+    <aside
+      aria-label={`files · ${title}`}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && detail) {
+          e.stopPropagation();
+          setDetail(null);
+        }
+      }}
+      className="flex h-full w-[380px] shrink-0 flex-col border-l border-border bg-panel"
+    >
+      {detail ? (
+        <FileDetail repo={repo} path={detail} component={componentOf(detail)} onBack={() => setDetail(null)} onOpenColony={onOpenColony} />
+      ) : (
+      <>
       <div className="flex items-start gap-2 border-b border-border px-3 py-2.5">
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-semibold text-text">{title}</div>
@@ -192,6 +225,8 @@ export function FileTreePane({
           tree.children.map((c) => row(c, 0))
         )}
       </div>
+      </>
+      )}
     </aside>
   );
 }

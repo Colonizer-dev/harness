@@ -1221,6 +1221,34 @@ export interface ArchMap {
 }
 
 /** GET /api/maps/{owner}/{repo}: the stored map, if any, and the newest mapping colony, if any. */
+/** One tool call a colony made on a file (GET /api/maps/{owner}/{repo}/file). */
+export interface MapFileActivity {
+  ts: string;
+  tool: string;
+  summary: string;
+  /** The subagent (settler) the call ran in, when the event says. */
+  agent: string | null;
+}
+
+/** A live colony on one file: what it did there, and its diff of it. */
+export interface MapFileColony {
+  id: string;
+  title: string;
+  issue: number | null;
+  status: SessionStatus;
+  mode: "changing" | "reading";
+  activity: MapFileActivity[];
+  diff: string | null;
+  diff_truncated: boolean;
+}
+
+/** GET /api/maps/{owner}/{repo}/file?path=…: every live colony changing or reading one file. */
+export interface MapFileDetail {
+  repo: string;
+  path: string;
+  colonies: MapFileColony[];
+}
+
 export interface RepoMap {
   repo: string;
   map: { repo: string; revision: string | null; generated_at: string; session: string; map: ArchMap } | null;
