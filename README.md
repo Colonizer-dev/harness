@@ -209,6 +209,7 @@ mothership also tells you when a newer release is out, and can install it.
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/opencode`](modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
+| [`modules/agents/hermes`](modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) with a snapshot of its built-in subagents (`claude-code-builtins.json`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
@@ -220,7 +221,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Pi, reaching models only through the provider gateway | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Pi, reaching models only through the provider gateway; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |

@@ -111,6 +111,13 @@ jobs:
         working-directory: modules/agents/grok-build
         run: npm test
 
+      # The Hermes runner has no dependencies (its package-lock.json exists only because install.sh
+      # runs `npm ci` on every module with a package.json); its tests drive the real runner.mjs
+      # against a stub of the hermes CLI — no hermes install, no network, no microVM.
+      - name: Test the Hermes runner
+        working-directory: modules/agents/hermes
+        run: npm test
+
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
   # either, and none of the tests touch a mothership, a colony or the network; the job's one
   # network step is the staged-pack validation below, which downloads the pinned archives the

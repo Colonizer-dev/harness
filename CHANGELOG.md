@@ -32,6 +32,18 @@ setting) is called out under **Take care** rather than left for you to find.
   browser OAuth, and a fresh `GROK_HOME` plus `--sandbox off`, `--always-approve` and
   `--disable-web-search` carry the nesting decisions. Experimental and PLANNED: the mothership-side
   key push, gateway routing and question routing are follow-ups (see the module's README).
+- **A Hermes agent module, first slice.** `modules/agents/hermes` drives Nous Research's Hermes Agent
+  CLI (verified against `v2026.9.24`) headlessly on the colonizer-runner/1 protocol: one
+  `hermes chat -q --format stream-json` process per turn, resumed by session id, events mapped to the
+  runner contract, non-JSON stdout tolerated as logs. The terminal backend is pinned to local (any
+  other `TERMINAL_ENV` is refused at startup, because Hermes would fall back to local silently),
+  Hermes' memory, skills, delegation, cronjob, tts and clarify toolsets are off, models go only
+  through the provider gateway as `<provider>/<model>` with Nous Portal refused, and a per-turn
+  timeout plus SIGTERM cover what Hermes' own signals don't. Covered by tests against a CLI stub,
+  including a conformance check against `docs/agent-events.schema.json`, and verified live against
+  real Hermes v0.21.5 through a fake Anthropic-wire gateway; a colony picking it stops at the
+  runner's preflight, because nothing stages the `hermes` binary into the VM — the preflight fails
+  loudly naming the pinned install. ([#334])
 - **The nest as a map of the software.** The nest has a Map mode: a repository's
   architecture — drawn by a mapping colony with the newly vendored
   [archify](https://github.com/tt-a1i/archify) skill (MIT) and stored by the
@@ -485,6 +497,7 @@ Macs. ([#74])
 [#442]: https://github.com/Colonizer-dev/harness/issues/442
 [#367]: https://github.com/Colonizer-dev/harness/issues/367
 [#366]: https://github.com/Colonizer-dev/harness/issues/366
+[#334]: https://github.com/Colonizer-dev/harness/issues/334
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
