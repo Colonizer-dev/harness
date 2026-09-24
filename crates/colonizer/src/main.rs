@@ -10,6 +10,7 @@
 mod auth;
 mod authority;
 mod autonomy;
+mod boot;
 mod burn_down;
 mod cache_store;
 mod chat;
