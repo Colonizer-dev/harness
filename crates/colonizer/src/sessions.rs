@@ -342,6 +342,12 @@ pub struct Session {
     /// they already wait on their parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_behind: Option<String>,
+    /// Whether this colony is a waiter in the successor queue for its issue (issue #321): admitted
+    /// `Queued` behind the colony holding the issue instead of refused, it starts only when the
+    /// issue's holder is its own. False the moment it is promoted; the holder's claim on GitHub
+    /// stays the waiter's whole wait.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claim_wait: bool,
     pub error: Option<String>,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
     /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
@@ -459,6 +465,7 @@ impl Default for Session {
             needs_rebase: false,
             rebase_orphaned: false,
             queued_behind: None,
+            claim_wait: false,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -903,6 +910,12 @@ pub struct NewSession {
     /// Start a colony on an issue another colony already holds. Off by default: see `issue_held_by`.
     #[serde(default)]
     pub allow_duplicate: bool,
+    /// Wait politely for an issue another local colony holds instead of being refused: the colony
+    /// is admitted `Queued` behind the holder and starts when the issue becomes its own (issue
+    /// #321). Off by default; `allow_duplicate` wins when both are set, and a claim another
+    /// mothership holds is still refused either way.
+    #[serde(default)]
+    pub queue_behind_holder: bool,
     /// Run this colony on a named model tier — `low`, `medium` or `high` — instead of the one the
     /// routing rule picks for the task.
     #[serde(default)]
@@ -965,23 +978,33 @@ pub(crate) fn launch_model(app: &crate::App, raw: Option<&str>, what: &str) -> R
 /// working implementation of the same feature; one was merged and the rest were closed unread.
 /// Nothing here refuses the retry that matters: a colony that stopped, failed, found no changes,
 /// or whose pull request is merged or closed leaves the issue free.
-fn issue_held_by(sessions: &[Session], repo: &str, issue: u64) -> Option<Session> {
+/// Whether `s` is in one of the states that hold its issue against a second colony: still live or
+/// queued somewhere, or published with its pull request open and waiting to be read. The shared
+/// predicate behind [`issue_held_by`] and the boot-time claim reconcile (`claims.rs`).
+pub(crate) fn holds_issue(s: &Session) -> bool {
+    matches!(
+        s.status,
+        SessionStatus::Queued
+            | SessionStatus::Starting
+            | SessionStatus::Running
+            | SessionStatus::WaitingForAnswer
+            | SessionStatus::Idle
+            | SessionStatus::Publishing
+            | SessionStatus::PrOpened
+    )
+}
+
+/// The colony effectively holding `issue`: the first holding session that is not a `claim_wait`
+/// waiter, else — once the holder is gone and only waiters remain — the oldest waiter (issue #321).
+/// The oldest-first tiebreak is what keeps a waiter queue honest: a fresh launch is refused naming,
+/// or queues behind, the waiter whose turn is next, never one that arrived later, and a waiter can
+/// never be jumped by a later one.
+pub(crate) fn issue_held_by(sessions: &[Session], repo: &str, issue: u64) -> Option<Session> {
+    let holding = |s: &Session| holds_issue(s) && s.repo == repo && s.issue == Some(issue);
     sessions
         .iter()
-        .find(|s| {
-            s.repo == repo
-                && s.issue == Some(issue)
-                && matches!(
-                    s.status,
-                    SessionStatus::Queued
-                        | SessionStatus::Starting
-                        | SessionStatus::Running
-                        | SessionStatus::WaitingForAnswer
-                        | SessionStatus::Idle
-                        | SessionStatus::Publishing
-                        | SessionStatus::PrOpened
-                )
-        })
+        .find(|s| holding(s) && !s.claim_wait)
+        .or_else(|| sessions.iter().filter(|s| holding(s)).min_by_key(|s| s.created_at))
         .cloned()
 }
 
@@ -1000,8 +1023,6 @@ fn duplicate_message(held: &Session, issue: u64) -> String {
     )
 }
 
-/// The authoritative duplicate-colony claim, run while the admission write lock is held: the
-/// pre-check in `create` reads under a read lock, so two launches can both pass it before either
 /// Issue #453: the colony a fresh same-repo colony queues behind for overlap, if any — the oldest
 /// live same-repo colony that already has a worktree, and so may be touching files. Pure, so the
 /// rule is testable apart from the file scan that [`overlap_queue_target`] wraps around it.
@@ -1036,10 +1057,12 @@ async fn overlap_queue_target(sessions: &[Session], repo: &str) -> Option<String
     crate::rebase::should_queue_behind_live_colony(&live_files).then_some(holder)
 }
 
+/// The authoritative duplicate-colony claim, run while the admission write lock is held: the
+/// pre-check in `create` reads under a read lock, so two launches can both pass it before either
 /// inserts — this re-check closes that window, and the loser gets its holder back for a 409.
 /// `Ok` carries the admitted colony, whether it queued, and how many were already waiting;
 /// `Err` carries the colony already holding the issue, and nothing is inserted.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn try_claim_session(
     sessions: &mut Vec<Session>,
     room: bool,
@@ -1047,12 +1070,22 @@ fn try_claim_session(
     repo: &str,
     issue: Option<u64>,
     allow_duplicate: bool,
+    queue_behind_holder: bool,
     wait_for_parent: bool,
 ) -> Result<(Session, bool, usize), Session> {
+    // Issue #321: a launch that asked to wait its turn is not refused when the issue is held — it
+    // is admitted as a `claim_wait` waiter behind whoever effectively holds it, however full or
+    // empty the queue. The holder's mark on GitHub stays; the waiter never claims over it.
+    let mut queued_for_holder = false;
     if let (Some(number), false) = (issue, allow_duplicate)
         && let Some(held) = issue_held_by(sessions, repo, number)
     {
-        return Err(held);
+        if !queue_behind_holder {
+            return Err(held);
+        }
+        queued_for_holder = true;
+        session.claim_wait = true;
+        session.queued_behind = Some(held.id);
     }
     // A colony still waiting for its parent's branch queues even when a slot is free: booting now
     // would branch from the default branch, which is exactly what stacking exists to avoid. A
@@ -1061,15 +1094,16 @@ fn try_claim_session(
     // with a free slot, and never carries a parent — it still branches fresh from the default
     // branch when the queue starts it. A holder that finished between the scan and this lock
     // releases it at once, clearing the stale pointer.
-    let overlap_held = session.parent.is_none()
+    let overlap_held = !queued_for_holder
+        && session.parent.is_none()
         && session
             .queued_behind
             .as_deref()
             .is_some_and(|holder| sessions.iter().any(|s| s.id == holder && s.status.is_live()));
-    if !overlap_held {
+    if !overlap_held && !queued_for_holder {
         session.queued_behind = None;
     }
-    session.status = if room && !wait_for_parent && !overlap_held {
+    session.status = if room && !wait_for_parent && !overlap_held && !queued_for_holder {
         SessionStatus::Starting
     } else {
         SessionStatus::Queued
@@ -1305,10 +1339,19 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             }
         }
     };
+    // Issue #321: a launch that asks to `queue_behind_holder` waits for a local holder instead of
+    // being refused. GitHub is checked either way: a conflict attributable to one of this
+    // mothership's own colonies on the issue is the holder being queued behind, while a merged PR
+    // or a claim another mothership holds refuses the launch as ever — cross-mothership queueing
+    // is out of scope.
+    let mut queue_behind_holder = false;
     if let (Some(issue), false) = (req.issue, req.allow_duplicate)
         && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
     {
-        return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
+        if !req.queue_behind_holder {
+            return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
+        }
+        queue_behind_holder = true;
     }
     // A second mothership shares no memory with this one, so the local guard above cannot see its
     // colonies: the issue itself carries the claim (see claims.rs). A failed lookup degrades to the
@@ -1320,11 +1363,25 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         if let Err(e) = &checked {
             eprintln!("claims: remote duplicate check for #{issue} in {repo} failed ({e:#}); falling back to the local guard");
         }
-        if let Some(info) = crate::claims::remote_result_or_fallback(checked) {
-            return Err(client_error(
-                StatusCode::CONFLICT,
-                &crate::claims::remote_conflict_message(&info, issue),
-            ));
+        let conflict = if let Some(info) = crate::claims::remote_result_or_fallback(checked) {
+            if queue_behind_holder {
+                // The waiter tolerates only a claim of ours — the holder it queues behind, or
+                // another colony on this mothership; `claim_wait_conflict` refuses the rest.
+                let sessions = app.sessions.read().await;
+                let ours: Vec<&str> = sessions
+                    .iter()
+                    .filter(|s| s.repo == repo && s.issue == Some(issue))
+                    .map(|s| s.id.as_str())
+                    .collect();
+                crate::claims::claim_wait_conflict(Some(&info), issue, &ours)
+            } else {
+                Some(crate::claims::remote_conflict_message(&info, issue))
+            }
+        } else {
+            None
+        };
+        if let Some(message) = conflict {
+            return Err(client_error(StatusCode::CONFLICT, &message));
         }
     }
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
@@ -1400,6 +1457,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         needs_rebase: false,
         rebase_orphaned: false,
         queued_behind,
+        // Set by admission when the launch waits for the issue's holder (issue #321).
+        claim_wait: false,
         error: None,
         cost_usd: None,
         model_usage: None,
@@ -1447,6 +1506,10 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
                 &repo,
                 req.issue,
                 req.allow_duplicate,
+                // The request's flag, not the pre-lock reading above: a holder appearing between the
+                // two is `try_claim_session`'s call, and it refuses with the holder named if the
+                // launch never asked to queue.
+                req.queue_behind_holder,
                 wait_for_parent,
             )
         },
@@ -1487,22 +1550,24 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // `launched` edge has to survive the cleanup or delete that will forget this record.
     spend::record_launched(&app, owner).await;
     // The launch claims the issue on GitHub itself, so a second mothership sees it: best effort in
-    // the background, never failing the launch.
+    // the background, never failing the launch. A `claim_wait` waiter (issue #321) publishes
+    // nothing — the holder's mark is the issue's claim until the waiter is promoted and takes it.
     if crate::claims::should_check_remote(session.issue, req.allow_duplicate)
+        && !session.claim_wait
         && let Some(issue) = session.issue
     {
         crate::claims::spawn_publish(app.clone(), repo.clone(), issue, id.clone());
     }
     if queued {
         if let Some(holder) = session.queued_behind.as_deref() {
-            app.session_log(
-                &id,
-                "info",
+            let why = if session.claim_wait {
+                format!("queued behind colony {holder}: it holds this issue, so this colony starts once the issue is its own")
+            } else {
                 format!(
                     "queued behind colony {holder}: it is working in the same repository, so this colony starts once it finishes"
-                ),
-            )
-            .await;
+                )
+            };
+            app.session_log(&id, "info", why).await;
         } else if let (true, Some(parent_id)) = (wait_for_parent, session.parent.as_deref()) {
             let why = if session.stack {
                 format!("queued behind colony {parent_id}: it starts once that colony has pushed its branch")
@@ -3259,6 +3324,7 @@ pub(crate) mod tests {
             needs_rebase: false,
             rebase_orphaned: false,
             queued_behind: None,
+            claim_wait: false,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -3330,9 +3396,17 @@ pub(crate) mod tests {
         live_holder.repo = "acme/repo".into();
         // Room and no parent, yet queued: the live holder keeps it waiting, and the pointer stays.
         let mut sessions = vec![live_holder.clone()];
-        let (admitted, queued, _) =
-            try_claim_session(&mut sessions, true, queued_behind("holder"), "acme/repo", None, false, false)
-                .expect("no issue race");
+        let (admitted, queued, _) = try_claim_session(
+            &mut sessions,
+            true,
+            queued_behind("holder"),
+            "acme/repo",
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("no issue race");
         assert!(
             queued && admitted.status == SessionStatus::Queued,
             "held behind the live colony"
@@ -3341,9 +3415,17 @@ pub(crate) mod tests {
         // The holder published: the same pointer releases at once, pointing nowhere stale.
         live_holder.status = SessionStatus::PrOpened;
         let mut sessions = vec![live_holder];
-        let (admitted, queued, _) =
-            try_claim_session(&mut sessions, true, queued_behind("holder"), "acme/repo", None, false, false)
-                .expect("no issue race");
+        let (admitted, queued, _) = try_claim_session(
+            &mut sessions,
+            true,
+            queued_behind("holder"),
+            "acme/repo",
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("no issue race");
         assert!(
             !queued && admitted.status == SessionStatus::Starting,
             "released once the holder finished"
@@ -3363,6 +3445,7 @@ pub(crate) mod tests {
             autofix: None,
             automerge: None,
             allow_duplicate: false,
+            queue_behind_holder: false,
             model_tier: None,
             model_override: None,
             subagent_model_override: None,
@@ -3915,7 +3998,7 @@ pub(crate) mod tests {
             let mut retry = colony("acme", SessionStatus::Starting);
             retry.id = "retry".into();
             retry.issue = Some(7);
-            let claimed = try_claim_session(&mut sessions, true, retry, "acme/repo", Some(7), false, false);
+            let claimed = try_claim_session(&mut sessions, true, retry, "acme/repo", Some(7), false, false, false);
             assert!(claimed.is_ok(), "a retry after {} is admitted, not refused", status.as_str());
         }
     }
@@ -3930,7 +4013,7 @@ pub(crate) mod tests {
         let mut blocked = colony("acme", SessionStatus::Starting);
         blocked.id = "blocked".into();
         blocked.issue = Some(7);
-        let refused = try_claim_session(&mut sessions, true, blocked, "acme/repo", Some(7), false, false);
+        let refused = try_claim_session(&mut sessions, true, blocked, "acme/repo", Some(7), false, false, false);
         assert!(
             matches!(&refused, Err(held) if held.id == "first"),
             "a live holder refuses a second claim without allow_duplicate"
@@ -3940,12 +4023,122 @@ pub(crate) mod tests {
         let mut second = colony("acme", SessionStatus::Starting);
         second.id = "second".into();
         second.issue = Some(7);
-        let admitted = try_claim_session(&mut sessions, true, second, "acme/repo", Some(7), true, false);
+        let admitted = try_claim_session(&mut sessions, true, second, "acme/repo", Some(7), true, false, false);
         assert!(
             admitted.is_ok(),
             "allow_duplicate lets a second colony start on an issue another still holds"
         );
         assert_eq!(sessions.len(), 2, "the admitted duplicate is inserted alongside the holder");
+    }
+
+    /// A `claim_wait` waiter for issue 7, queued behind `holder`, created `ago_secs` ago so the
+    /// oldest-first tiebreak is deterministic.
+    fn waiter_on_issue(id: &str, holder: &str, ago_secs: i64) -> Session {
+        let mut s = colony("acme", SessionStatus::Queued);
+        s.id = id.into();
+        s.issue = Some(7);
+        s.claim_wait = true;
+        s.queued_behind = Some(holder.into());
+        s.created_at = Utc::now() - chrono::Duration::seconds(ago_secs);
+        s
+    }
+
+    #[test]
+    fn a_launch_asked_to_queue_waits_behind_the_holder_instead_of_being_refused() {
+        // Issue #321: the polite third option — the default refuses, `allow_duplicate` duplicates,
+        // `queue_behind_holder` admits the launch as a waiter behind the holder, even with a slot
+        // free: its turn comes when the queue gets to it, not before.
+        let mut sessions = vec![on_issue("holder", 7, SessionStatus::Running)];
+        let mut polite = colony("acme", SessionStatus::Starting);
+        polite.id = "polite".into();
+        polite.issue = Some(7);
+        let (admitted, queued, _) = try_claim_session(&mut sessions, true, polite, "acme/repo", Some(7), false, true, false)
+            .expect("a waiter is admitted, not refused");
+        assert!(
+            queued && admitted.status == SessionStatus::Queued,
+            "queued even with a free slot"
+        );
+        assert!(admitted.claim_wait, "the colony is a waiter for its issue");
+        assert_eq!(admitted.queued_behind.as_deref(), Some("holder"), "queued behind the holder");
+        assert_eq!(sessions.len(), 2, "the waiter is inserted");
+        // And the holder still holds the issue: the waiter claims nothing while it waits.
+        assert_eq!(
+            issue_held_by(&sessions, "acme/repo", 7).map(|s| s.id),
+            Some("holder".to_string()),
+            "the waiter does not take the hold over by waiting"
+        );
+    }
+
+    #[test]
+    fn the_default_still_refuses_and_allow_duplicate_still_wins_over_queueing() {
+        // The two existing launches are unchanged, and `allow_duplicate` takes precedence when a
+        // request sets both: it starts now, it does not wait its turn.
+        let mut sessions = vec![on_issue("holder", 7, SessionStatus::Running)];
+        let mut plain = colony("acme", SessionStatus::Starting);
+        plain.id = "plain".into();
+        plain.issue = Some(7);
+        assert!(
+            matches!(
+                try_claim_session(&mut sessions, true, plain, "acme/repo", Some(7), false, false, false),
+                Err(held) if held.id == "holder"
+            ),
+            "a launch that did not ask to queue is refused as ever"
+        );
+        let mut duplicate = colony("acme", SessionStatus::Starting);
+        duplicate.id = "duplicate".into();
+        duplicate.issue = Some(7);
+        let (admitted, queued, _) = try_claim_session(&mut sessions, true, duplicate, "acme/repo", Some(7), true, true, false)
+            .expect("allow_duplicate bypasses the hold");
+        assert!(!queued && admitted.status == SessionStatus::Starting, "starts, not waits");
+        assert!(!admitted.claim_wait, "a duplicate is no waiter");
+    }
+
+    #[test]
+    fn with_only_waiters_left_the_oldest_one_holds_the_issue() {
+        // The holder is gone; queue order decides. A fresh launch is refused naming the oldest
+        // waiter — starting ahead of it would jump the queue, and waving the newcomer through
+        // would duplicate the first waiter's work the moment its turn came.
+        let sessions = vec![
+            waiter_on_issue("first", "holder", 100),
+            waiter_on_issue("second", "holder", 50),
+        ];
+        let held = issue_held_by(&sessions, "acme/repo", 7).expect("a waiter holds the issue once the holder is gone");
+        assert_eq!(held.id, "first", "the oldest waiter holds it");
+        let message = duplicate_message(&held, 7);
+        assert!(
+            message.contains("colony first is already on #7") && message.contains("allow_duplicate"),
+            "{message}"
+        );
+        // A polite launch queues behind that same waiter, and the atomic claim refuses the
+        // default one for it.
+        let mut sessions = sessions;
+        let mut fresh = colony("acme", SessionStatus::Starting);
+        fresh.id = "fresh".into();
+        fresh.issue = Some(7);
+        assert!(
+            matches!(
+                try_claim_session(&mut sessions, true, fresh.clone(), "acme/repo", Some(7), false, false, false),
+                Err(held) if held.id == "first"
+            ),
+            "a fresh default launch is refused naming the oldest waiter"
+        );
+        let (admitted, _, _) = try_claim_session(&mut sessions, true, fresh, "acme/repo", Some(7), false, true, false)
+            .expect("a polite launch waits");
+        assert_eq!(admitted.queued_behind.as_deref(), Some("first"), "behind the oldest waiter");
+    }
+
+    #[test]
+    fn a_real_holder_outranks_the_waiters_however_young_it_is() {
+        // The first non-waiter holder wins whatever the creation order: waiters only take over
+        // once there is no holder left at all.
+        let mut holder = on_issue("holder", 7, SessionStatus::Running);
+        holder.created_at = Utc::now();
+        let sessions = vec![waiter_on_issue("old-waiter", "gone", 200), holder];
+        assert_eq!(
+            issue_held_by(&sessions, "acme/repo", 7).map(|s| s.id),
+            Some("holder".to_string()),
+            "the holder keeps the issue; the waiter keeps waiting"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -3965,7 +4158,7 @@ pub(crate) mod tests {
                 fresh.id = format!("racer-{i}");
                 fresh.issue = Some(7);
                 with_slot(&sessions, "acme", "acme/repo", 8, None, 8, |guard, room| {
-                    try_claim_session(guard, room, fresh, "acme/repo", Some(7), false, false)
+                    try_claim_session(guard, room, fresh, "acme/repo", Some(7), false, false, false)
                 })
                 .await
             }));
@@ -4107,6 +4300,7 @@ pub(crate) mod tests {
                 autofix: None,
                 automerge: None,
                 allow_duplicate: false,
+                queue_behind_holder: false,
                 model_tier: None,
                 model_override: None,
                 subagent_model_override: None,
@@ -4189,6 +4383,7 @@ pub(crate) mod tests {
                 autofix: None,
                 automerge: None,
                 allow_duplicate: false,
+                queue_behind_holder: false,
                 model_tier: None,
                 model_override: None,
                 subagent_model_override: None,
@@ -4311,6 +4506,7 @@ pub(crate) mod tests {
             autofix: None,
             automerge: None,
             allow_duplicate: false,
+            queue_behind_holder: false,
             model_tier: None,
             model_override: None,
             subagent_model_override: None,

@@ -14,6 +14,15 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+### Added
+
+- **Wait behind the holder.** A launch on an issue another colony already holds can now queue for
+  the issue instead of being refused or duplicating it: `queue_behind_holder` on `POST /api/sessions`
+  admits the colony as a `claim_wait` successor (`queued_behind` naming the holder), the oldest
+  waiter takes over when the holder releases — carrying the GitHub `colonizer:claimed` mark with
+  it — and the cockpit's launch form offers the choice beside Allow duplicate, with each waiter's
+  place in line on its Inspector card. ([#321])
+
 ## [v0.1.9] - 2026-09-24
 
 ### Added
@@ -596,6 +605,7 @@ Macs. ([#74])
 [#488]: https://github.com/Colonizer-dev/harness/pull/488
 [#489]: https://github.com/Colonizer-dev/harness/pull/489
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
+[#321]: https://github.com/Colonizer-dev/harness/issues/321
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

@@ -2,7 +2,7 @@
 // check must refuse exactly the statuses the server's 409 refuses, and free the rest for retry.
 import { describe, expect, it } from "vitest";
 
-import { heldByFor, heldInBatch, holdsIssue } from "./api";
+import { claimWaitPosition, claimWaitersFor, heldByFor, heldInBatch, holdsIssue } from "./api";
 import type { Session, SessionStatus } from "./types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -70,6 +70,37 @@ describe("heldByFor", () => {
   it("returns null for an empty list", () => {
     expect(heldByFor([], "acme/webshop", 7)).toBeNull();
   });
+
+  // Issue #321: a queued `claim_wait` successor never reads as the holder while the real holder
+  // is still live — even an older waiter listed first, as the mothership's `issue_held_by` prefers
+  // the first holding colony that is not waiting in line.
+  it("prefers the holder over an older claim_wait waiter", () => {
+    const list = [
+      session({ id: "waiter", status: "queued", claim_wait: true, created_at: "2026-09-18T09:30:00Z" }),
+      session({ id: "holder1", created_at: "2026-09-18T10:00:00Z" }),
+    ];
+    expect(heldByFor(list, "acme/webshop", 7)?.id).toBe("holder1");
+  });
+
+  it("names the oldest waiter once the holder is gone and only waiters remain", () => {
+    const list = [
+      session({ id: "later", status: "queued", claim_wait: true, created_at: "2026-09-18T10:00:00Z" }),
+      session({ id: "earliest", status: "queued", claim_wait: true, created_at: "2026-09-18T09:30:00Z" }),
+      session({ id: "stopped-holder", status: "stopped", created_at: "2026-09-18T08:00:00Z" }),
+    ];
+    expect(heldByFor(list, "acme/webshop", 7)?.id).toBe("earliest");
+  });
+
+  it("falls back to any holding waiter, not only queued ones, and breaks created_at ties by list order", () => {
+    const list = [
+      session({ id: "listed-first", claim_wait: true, created_at: "2026-09-18T09:30:00Z" }),
+      session({ id: "listed-second", claim_wait: true, created_at: "2026-09-18T09:30:00Z" }),
+    ];
+    expect(heldByFor(list, "acme/webshop", 7)?.id).toBe("listed-first");
+    expect(heldByFor([session({ id: "starting", claim_wait: true, status: "starting" })], "acme/webshop", 7)?.id).toBe(
+      "starting",
+    );
+  });
 });
 
 describe("heldInBatch", () => {
@@ -91,5 +122,37 @@ describe("heldInBatch", () => {
   it("returns nothing when no selected issue is held", () => {
     expect(heldInBatch(list, "acme/webshop", [4, 5, 6])).toEqual([]);
     expect(heldInBatch([], "acme/webshop", [3, 9])).toEqual([]);
+  });
+});
+
+// The successor queue (issue #321): queued `claim_wait` colonies line up per issue, oldest first.
+describe("claimWaitersFor and claimWaitPosition", () => {
+  const waiter = (id: string, created_at: string, overrides: Partial<Session> = {}) =>
+    session({ id, status: "queued", claim_wait: true, queued_behind: "holder1", created_at, ...overrides });
+
+  it("lists a repo+issue's waiters oldest first, and no one else", () => {
+    const list = [
+      session({ id: "holder1" }),
+      waiter("late", "2026-09-18T10:00:00Z"),
+      waiter("early", "2026-09-18T09:30:00Z"),
+      waiter("other-issue", "2026-09-18T09:00:00Z", { issue: 8 }),
+      waiter("not-queued", "2026-09-18T09:00:00Z", { status: "running" }),
+      waiter("plain-queue", "2026-09-18T09:00:00Z", { claim_wait: undefined }),
+    ];
+    expect(claimWaitersFor(list, "acme/webshop", 7).map((s) => s.id)).toEqual(["early", "late"]);
+  });
+
+  it("positions a waiter at one past the waiters created before it", () => {
+    const list = [waiter("first", "2026-09-18T09:30:00Z"), waiter("second", "2026-09-18T10:00:00Z")];
+    expect(claimWaitPosition(list, list[0])).toBe(1);
+    expect(claimWaitPosition(list, list[1])).toBe(2);
+  });
+
+  it("answers null for anything not a queued claim_wait colony", () => {
+    const list = [session({ id: "live" }), waiter("waiting", "2026-09-18T09:30:00Z")];
+    expect(claimWaitPosition(list, list[0])).toBeNull();
+    // A colony the list has lost, or an open session without an issue, has no place in line.
+    expect(claimWaitPosition(list, waiter("gone", "2026-09-18T09:30:00Z"))).toBeNull();
+    expect(claimWaitPosition(list, waiter("open", "2026-09-18T09:30:00Z", { issue: null }))).toBeNull();
   });
 });

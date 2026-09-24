@@ -686,8 +686,16 @@ export function NewSession({
   const [openIssue, setOpenIssue] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const [queueBehind, setQueueBehind] = useState(false);
   const [blockedByDuplicate, setBlockedByDuplicate] = useState(false);
   const [launching, setLaunching] = useState(false);
+
+  // The two ways past a held issue are alternatives — a duplicate, or a place in line — so picking
+  // one drops the other.
+  const pickOverride = (which: "duplicate" | "queue", on: boolean) => {
+    setAllowDuplicate(which === "duplicate" && on);
+    setQueueBehind(which === "queue" && on);
+  };
 
   const inOrg = (name: string) => !org || sameOrg(name.split("/")[0], org);
   // A remembered repository from another org doesn't belong in this workspace.
@@ -775,15 +783,17 @@ export function NewSession({
     });
 
   // Selected issues another colony already holds. They are skipped rather than sent, since the
-  // mothership would refuse each with a 409 — unless Allow duplicate says to start them anyway.
+  // mothership would refuse each with a 409 — unless Allow duplicate starts them anyway, or Wait
+  // behind the holder queues each for its issue instead.
   const heldSelected = activeRepo ? heldInBatch(sessions, activeRepo, selected) : [];
-  const launchCount = allowDuplicate ? selected.size : selected.size - heldSelected.length;
+  const overrideHeld = allowDuplicate || queueBehind;
+  const launchCount = overrideHeld ? selected.size : selected.size - heldSelected.length;
 
   // One colony per issue, launched in the order they appear. Past the parallel limit the harness
   // queues them, so a batch is a plan rather than a burst.
   const launchSelected = async () => {
     if (!activeRepo) return;
-    const held = new Set(allowDuplicate ? [] : heldInBatch(sessions, activeRepo, selected));
+    const held = new Set(overrideHeld ? [] : heldInBatch(sessions, activeRepo, selected));
     const batch = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number));
     setLaunching(true);
     setBlockedByDuplicate(false);
@@ -799,6 +809,7 @@ export function NewSession({
           title: issue.title,
           autopilot: autopilotDefault,
           allow_duplicate: allowDuplicate || undefined,
+          queue_behind_holder: queueBehind || undefined,
         });
         if (session.status === "queued") {
           queued += 1;
@@ -899,7 +910,7 @@ export function NewSession({
                   <span className="block text-[11.5px] text-faint">one colony each, queued past the limit</span>
                   {heldSelected.length > 0 && (
                     <span className="block text-[11.5px] text-warn">
-                      {heldSelected.length} already held — skipped unless Allow duplicate
+                      {heldSelected.length} already held — skipped unless Allow duplicate or Wait behind the holder
                     </span>
                   )}
                 </span>
@@ -914,11 +925,21 @@ export function NewSession({
                 <input
                   type="checkbox"
                   checked={allowDuplicate}
-                  onChange={(e) => setAllowDuplicate(e.target.checked)}
+                  onChange={(e) => pickOverride("duplicate", e.target.checked)}
                   aria-label="Allow a second colony on an issue another colony already holds"
                   className="size-3.5 cursor-pointer accent-[var(--accent)]"
                 />
                 Allow duplicate — start even where another colony already holds the issue
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 px-0.5 text-[12px] text-muted">
+                <input
+                  type="checkbox"
+                  checked={queueBehind}
+                  onChange={(e) => pickOverride("queue", e.target.checked)}
+                  aria-label="Queue held issues behind their holder instead of launching a second colony"
+                  className="size-3.5 cursor-pointer accent-[var(--accent)]"
+                />
+                Wait behind the holder — queue for the issue and start when it frees up
               </label>
               {blockedByDuplicate && !allowDuplicate && (
                 <p className="px-0.5 text-[12px] text-warn">
@@ -956,7 +977,9 @@ export function NewSession({
                 onToggle={() => setOpenIssue(openIssue === issue.number ? null : issue.number)}
                 holder={heldByFor(sessions, activeRepo, issue.number)}
                 allowDuplicate={allowDuplicate}
-                onAllowDuplicate={setAllowDuplicate}
+                onAllowDuplicate={(on) => pickOverride("duplicate", on)}
+                queueBehind={queueBehind}
+                onQueueBehind={(on) => pickOverride("queue", on)}
                 onOpenColony={onOpenColony}
                 onCreated={onCreated}
               />
@@ -1063,6 +1086,8 @@ function IssueRow({
   holder,
   allowDuplicate,
   onAllowDuplicate,
+  queueBehind,
+  onQueueBehind,
   onOpenColony,
   onCreated,
 }: {
@@ -1077,6 +1102,8 @@ function IssueRow({
   holder: Session | null;
   allowDuplicate: boolean;
   onAllowDuplicate: (on: boolean) => void;
+  queueBehind: boolean;
+  onQueueBehind: (on: boolean) => void;
   onOpenColony?: (session: Session) => void;
   onCreated: (session: Session) => void;
 }) {
@@ -1098,6 +1125,7 @@ function IssueRow({
         instructions: instructions.trim() || undefined,
         autopilot: autopilot ?? undefined,
         allow_duplicate: allowDuplicate || undefined,
+        queue_behind_holder: queueBehind || undefined,
       });
       toast(
         session.status === "queued"
@@ -1152,7 +1180,7 @@ function IssueRow({
               ))}
               <span>{timeAgo(issue.updatedAt)}</span>
               {holder && (
-                <span className="text-warn" title={`Already held by ${holder.id} (${holder.status})`}>
+                <span className="text-warn" title={`Already held by ${holder.id} (${holder.status}) — Wait behind the holder to queue for it`}>
                   held by {holder.id}
                 </span>
               )}
@@ -1194,20 +1222,34 @@ function IssueRow({
               ) : (
                 ", no PR yet"
               )}
-              ).
+              ). Check <span className="font-medium">Wait behind the holder</span> to queue for it instead.
             </p>
           )}
           {(holder || launchError) && (
-            <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
-              <input
-                type="checkbox"
-                checked={allowDuplicate}
-                onChange={(e) => onAllowDuplicate(e.target.checked)}
-                aria-label={`Allow a second colony on issue #${issue.number}`}
-                className="size-3.5 cursor-pointer accent-[var(--accent)]"
-              />
-              Allow duplicate on #{issue.number}
-            </label>
+            <>
+              <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+                <input
+                  type="checkbox"
+                  checked={allowDuplicate}
+                  onChange={(e) => onAllowDuplicate(e.target.checked)}
+                  aria-label={`Allow a second colony on issue #${issue.number}`}
+                  className="size-3.5 cursor-pointer accent-[var(--accent)]"
+                />
+                Allow duplicate on #{issue.number}
+              </label>
+              {holder && (
+                <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+                  <input
+                    type="checkbox"
+                    checked={queueBehind}
+                    onChange={(e) => onQueueBehind(e.target.checked)}
+                    aria-label={`Wait behind the holder of issue #${issue.number}`}
+                    className="size-3.5 cursor-pointer accent-[var(--accent)]"
+                  />
+                  Wait behind the holder — start when it releases #{issue.number}
+                </label>
+              )}
+            </>
           )}
           {launchError && <p className="text-[12.5px] text-err [overflow-wrap:anywhere]">{launchError}</p>}
           <textarea

@@ -694,6 +694,7 @@ mod tests {
             needs_rebase: false,
             rebase_orphaned: false,
             queued_behind: None,
+            claim_wait: false,
             app_slot: None,
             boot_attempt_started_at: None,
             mesh: None,

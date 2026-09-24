@@ -56,6 +56,7 @@ function renderInspector(props: {
   pendingQuestions?: PendingQuestion[];
   questionActions?: QuestionActions;
   session?: Session;
+  sessions?: Session[];
 }): string {
   const selected = props.session ?? session();
   return renderToStaticMarkup(
@@ -66,7 +67,7 @@ function renderInspector(props: {
         settlers={[]}
         pendingQuestions={props.pendingQuestions ?? []}
         questionActions={props.questionActions ?? CONNECTED}
-        sessions={[selected]}
+        sessions={props.sessions ?? [selected]}
         status={null}
         liveCount={0}
         queuedCount={0}
@@ -249,6 +250,28 @@ describe("Inspector diagnosis", () => {
     expect(markup).not.toContain(">STATUS<");
     expect(markup).not.toContain(">RECENT EVENTS<");
     expect(markup).not.toContain(QUOTA);
+  });
+});
+
+// The successor queue (issue #321): a queued `claim_wait` colony reads where in line it stands,
+// counted oldest-first across the waiters of its issue.
+describe("Inspector claim wait", () => {
+  const waiter = (id: string, created_at: string): Session =>
+    session({ id, status: "queued", claim_wait: true, queued_behind: "holder1", created_at });
+
+  it("a second waiter shows its position, in the status line and the queued-behind fact", () => {
+    const first = waiter("first", "2026-09-18T09:30:00Z");
+    const second = waiter("second", "2026-09-18T10:00:00Z");
+    const markup = renderInspector({ session: second, sessions: [first, second] });
+    expect(markup).toContain("Queued behind holder1 · #2 in line");
+    expect(markup).toContain("holder1 · #2 in line");
+  });
+
+  it("a plain queued colony names the colony it waits for and no line position", () => {
+    const plain = session({ id: "plain", status: "queued", queued_behind: "holder1" });
+    const markup = renderInspector({ session: plain, sessions: [plain] });
+    expect(markup).toContain("Queued behind holder1");
+    expect(markup).not.toContain("in line");
   });
 });
 

@@ -230,7 +230,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/repos/{owner}/{repo}/ask` | A quick answer about a file: body `{path, question, content, selection?: [first, last]}`; the file is sent cut to 60 KB. Answered by the summaries' model route (`summary_model`, else a routed `<provider>/<model>`, else a real Anthropic API key; never the Claude subscription token). Returns `{answer, model}` (Markdown) |
 | `GET\|PUT\|DELETE /api/repos/{owner}/{repo}/drafts` | Edits the Code editor autosaves on the mothership, never on GitHub. `GET ?ref=` → `{repo, autosave, drafts: [{ref, path, content, base_sha, saved_at}]}`; `PUT {ref, path, content, base_sha}` saves one (409 while autosave is off; at most 1 MB each and 20 MB per repository); `DELETE ?ref=&path=` removes one, or every draft on the ref without `path`. Stored in `<data>/drafts/<owner>/<repo>.json` (0600, directory 0700) |
 | `GET\|PUT /api/editor/settings` | `{autosave}`: whether the Code editor autosaves drafts on this mothership (default on). Persisted per install in `<data>/drafts/settings.json` |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set; a remote conflict (below) is a **409** either way |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
@@ -267,7 +267,7 @@ rows), broadcasts only on change, idles with no subscribers, and pings every 20 
 behind the broadcast buffer gets the full `sessions` and `orgs` lists plus the cached
 `hosts`/`storage` frames again instead of the missed deltas.
 
-### Duplicate-colony prevention
+### Duplicate-colony prevention and issue claims
 
 `POST /api/sessions` refuses a second colony on the same `(repo, issue)` while another colony
 holds it: one `queued`, live (`starting`, `running`, `waiting_for_answer`, `idle`), `publishing`,
@@ -275,10 +275,39 @@ or `pr_opened` — answered **409** naming the holder, its state, and its PR URL
 Terminal states (`stopped`, `failed`, `no_changes`, `merged`, `closed`) free the issue for a retry.
 A fast pre-check reads under a read lock and the authoritative claim re-checks while the admission
 write lock is held, so two launches racing each other cannot both slip through; the loser gets its
-holder back for the 409. `allow_duplicate: true` in the request body starts a second colony anyway. The
-cockpit warns inline before submit — "already held by `<id>`", with a link to that colony — and
-offers the override as an Allow-duplicate checkbox. Scope is per-host only: fleet peers listed by
-`GET /api/hosts` are not consulted, so two motherships can still launch on the same issue.
+holder back for the 409. The cockpit warns inline before submit — "already held by `<id>`", with a
+link to that colony — and offers the ways past it as checkboxes. Scope is per-host only: fleet
+peers listed by `GET /api/hosts` are not consulted.
+
+Three ways past a held issue:
+
+- `allow_duplicate: true` starts a second colony anyway.
+- `queue_behind_holder: true` joins the issue's successor queue instead: the colony comes back
+  `queued` with `claim_wait: true` and `queued_behind` naming the holder (`allow_duplicate` wins
+  if both are set). Once only waiters remain, the oldest counts as the holder: a fresh launch
+  without the flag is refused naming it. When the holder releases the issue — stop, failure, no
+  changes, a closed PR — the oldest waiter takes over, inheriting the claim mark below; the
+  remaining waiters re-point `queued_behind` at the new holder. Before a waiter is promoted the
+  forge is re-checked: if the holder's pull request merged, or the claim has moved to another
+  mothership, the waiter fails with the same message a fresh launch would get. The cockpit counts
+  each queued waiter's place among the waiters created before it and shows it as
+  "Queued behind `<id>` · #2 in line".
+- A remote conflict — another mothership's claim, or an open or merged pull request, or a
+  `colonizer/issue-<n>-*` branch that is not this launch's own — is a **409**. GitHub is checked
+  on the `queue_behind_holder` path too: a conflict attributable to one of this mothership's own
+  colonies on the issue is the holder being queued behind and is tolerated, while a merged PR —
+  ours included, the issue is done — or a foreign claim refuses as above.
+
+On GitHub a launch marks its claim: the `colonizer:claimed` label plus a
+`<!-- colonizer:claim host="<hostname> (<host_id>)" colony="<id>" issue="<n>" -->` comment naming
+the mothership and colony. Release removes the label and posts a release note, but only while the
+issue's latest claim is this colony's (host id and colony both match); a merged pull request keeps
+the mark on purpose, as the record of who did the work. On boot a mothership reaps the marks it
+owns — open issues whose latest claim carries its host id but whose colony no longer holds in its
+session list — and never touches another host's mark. So the worst case is a mothership that
+crashes leaving its marks until its next boot; one that never returns leaves them until a human
+removes the label. GitLab, Linear and Jira should follow the same claim shape when those forges
+land. Contested-claim detection after launch, and label repair, are not implemented yet.
 
 Module `schema` is a JSON Schema subset (also used for `settings` in agent `module.json` manifests):
 

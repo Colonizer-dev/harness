@@ -1568,6 +1568,10 @@ async fn serve() -> Result<()> {
         for gone in update::sweep_slots(recovery.cfg.assets.as_deref(), &live) {
             println!("removed the app directory left by an earlier update: {}", gone.display());
         }
+        // Issue #321: with recovery settled, drop the claims this mothership still carries for
+        // colonies it no longer holds — one that died while the harness was down never released
+        // its own. Spawned: never on the boot path, and a no-op under the kill switch.
+        crate::claims::reconcile_orphaned_claims(recovery).await;
     });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_sandboxes(sandbox_watch).await });
