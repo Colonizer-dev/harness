@@ -263,6 +263,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 && current.status.is_live()
                 && (current.status != next || error.is_some())
             {
+                let became_idle = next == SessionStatus::Idle && current.status != SessionStatus::Idle;
                 app.update_session(id, |x| {
                     x.status = next;
                     if error.is_some() {
@@ -273,6 +274,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     }
                 })
                 .await;
+                // A mapping colony that just went idle may be done: its map is picked up and it
+                // stops itself (maps.rs), so it does not hold a parallel slot. Spawned: the stop takes
+                // the colony's lifecycle lock, which this event loop must not wait on.
+                if became_idle && current.origin.as_deref() == Some(crate::maps::MAP_ORIGIN) {
+                    tokio::spawn(crate::maps::on_idle(app.clone(), id.to_string()));
+                }
             }
         }
         AgentEvent::Question {

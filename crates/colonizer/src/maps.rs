@@ -314,6 +314,70 @@ pub async fn on_colony_end(app: &App, s: &Session) {
     }
 }
 
+/// How long a mapping colony may sit idle without a valid map before it gives its slot back: the
+/// watchdog's default stall window, so an agent that ended a turn mid-fix still gets the time a stalled
+/// colony gets.
+pub(crate) const MAP_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A mapping colony's turn ended (it went idle). Its product is the map, not a pull request, so an idle
+/// mapping colony holding a parallel slot is waste: a valid `architecture.json` is stored and the
+/// colony stops itself; without one it may still be fixing the file, so it is left idle and, if it is
+/// still idle with no valid map after [`MAP_IDLE_GRACE`], stopped with an error that says so.
+pub async fn on_idle(app: Shared, id: String) {
+    on_idle_after(app, id, MAP_IDLE_GRACE).await;
+}
+
+pub(crate) async fn on_idle_after(app: Shared, id: String, grace: std::time::Duration) {
+    let Some(s) = app.session(&id).await else { return };
+    if s.origin.as_deref() != Some(MAP_ORIGIN) || s.status != SessionStatus::Idle {
+        return;
+    }
+    if finish_if_drawn(&app, &s).await {
+        return;
+    }
+    // Not drawn yet: give the colony the grace window, then take the slot back if nothing changed.
+    let idle_since = s.updated_at;
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        let Some(s) = app.session(&id).await else { return };
+        if s.status != SessionStatus::Idle || s.updated_at != idle_since {
+            return;
+        }
+        if finish_if_drawn(&app, &s).await {
+            return;
+        }
+        crate::lifecycle::stop_colony(
+            &app,
+            &s,
+            |x| x.status == SessionStatus::Idle && x.updated_at == idle_since,
+            "mapping colony went idle without a valid map".into(),
+            format!(
+                "mapping colony went idle without a valid map for {} minutes; stopping it to free its slot (Redraw map starts a new one)",
+                grace.as_secs() / 60
+            ),
+        )
+        .await;
+    });
+}
+
+/// Stores the colony's map and stops it when its `architecture.json` is valid. Returns whether it did.
+async fn finish_if_drawn(app: &Shared, s: &Session) -> bool {
+    if ingest(app, s).await.is_err() {
+        return false;
+    }
+    let idle_since = s.updated_at;
+    crate::lifecycle::finish_colony(
+        app,
+        s,
+        |x| x.status == SessionStatus::Idle && x.updated_at == idle_since,
+        format!(
+            "map drawn; stopping the mapping colony (architecture map stored for {})",
+            s.repo
+        ),
+    )
+    .await
+}
+
 fn is_ended(status: SessionStatus) -> bool {
     matches!(
         status,
@@ -880,6 +944,71 @@ pub async fn touched(State(app): State<Shared>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn idle_mapping_colony(root: &FsPath, out: Option<&[u8]>) -> Shared {
+        let app = crate::tests::test_app(root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Idle);
+        s.id = "m1".into();
+        s.origin = Some(MAP_ORIGIN.into());
+        s.sandbox = "sandbox-m1".into();
+        app.sessions.write().await.push(s);
+        let dir = app.session_dir("m1").join("out");
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(bytes) = out {
+            std::fs::write(dir.join(OUT_FILE), bytes).unwrap();
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn an_idle_mapping_colony_with_a_valid_map_stores_it_and_stops() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-idle-ok-{}", crate::util::short_id()));
+        let app = idle_mapping_colony(&root, Some(&serde_json::to_vec(&doc()).unwrap())).await;
+        on_idle_after(app.clone(), "m1".into(), std::time::Duration::from_secs(60)).await;
+        let s = app.session("m1").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped, "done, so it gives its slot back");
+        assert_eq!(s.error, None, "a finished map is not an error");
+        let stored = read_stored(&app, "acme/repo").expect("the map is stored");
+        assert_eq!(stored["session"], "m1");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_mapping_colony_without_a_valid_map_waits_then_stops_with_an_error() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-idle-bad-{}", crate::util::short_id()));
+        let app = idle_mapping_colony(&root, Some(b"{ not json")).await;
+        let grace = std::time::Duration::from_secs(60);
+        on_idle_after(app.clone(), "m1".into(), grace).await;
+        assert_eq!(
+            app.session("m1").await.unwrap().status,
+            SessionStatus::Idle,
+            "it may still be fixing the file"
+        );
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        let s = app.session("m1").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped);
+        assert_eq!(s.error.as_deref(), Some("mapping colony went idle without a valid map"));
+        assert!(read_stored(&app, "acme/repo").is_none(), "nothing invalid is stored");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_mapping_colony_that_resumes_within_the_grace_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-idle-back-{}", crate::util::short_id()));
+        let app = idle_mapping_colony(&root, None).await;
+        let grace = std::time::Duration::from_secs(60);
+        on_idle_after(app.clone(), "m1".into(), grace).await;
+        app.update_session("m1", |x| x.status = SessionStatus::Running).await;
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(app.session("m1").await.unwrap().status, SessionStatus::Running);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn doc() -> Value {
         json!({
