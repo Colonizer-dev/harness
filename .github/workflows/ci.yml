@@ -86,6 +86,12 @@ jobs:
       - name: Test
         run: npm test
 
+      # The OpenCode runner has no dependencies (its MCP server is hand-rolled), so there is
+      # nothing to install: plain `node --test` from the repository root.
+      - name: Test the OpenCode runner
+        working-directory: ${{ github.workspace }}
+        run: node --test modules/agents/opencode/test/*.test.mjs
+
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
   # either, and none of the tests touch a mothership, a colony or the network; the job's one
   # network step is the staged-pack validation below, which downloads the pinned archives the
