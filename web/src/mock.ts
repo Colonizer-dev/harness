@@ -2872,7 +2872,7 @@ export function createMockApi(): Api {
     createChat: (body) =>
       later(() => {
         const at = new Date().toISOString();
-        const meta = { id: Math.random().toString(16).slice(2, 10), title: body.title ?? "", model: body.model || "zai/glm-5.3-flash", system: body.system, max_tokens: body.max_tokens ?? 4096, workspace: body.workspace, created_at: at, updated_at: at };
+        const meta = { id: Math.random().toString(16).slice(2, 10), title: body.title ?? "", model: body.model || "zai/glm-5.3-flash", system: body.system, max_tokens: body.max_tokens ?? 4096, workspace: body.workspace, persona: body.persona || undefined, created_at: at, updated_at: at };
         mockChats.set(meta.id, { meta, messages: [] });
         return meta;
       }),

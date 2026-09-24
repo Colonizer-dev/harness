@@ -20,7 +20,8 @@ import { ChatComposer, MOD, type SendKey } from "./chat/ChatComposer";
 import { ChatSidebar } from "./chat/ChatSidebar";
 import { HandoffDialog, ImageLightbox, IssueDialog, LoopDialog } from "./chat/Dialogs";
 import { MessageRow, StreamingRow, type MessageAction, type OpenImage } from "./chat/Message";
-import { Popover, Select, type ListItem } from "./chat/Popover";
+import { Popover } from "./chat/Popover";
+import { PersonaPicker } from "./chat/PersonaPicker";
 import {
   candidatesByParent,
   estimateTokens,
@@ -32,6 +33,7 @@ import {
   legacyEntries,
   loadPersonas,
   personaEdit,
+  personaFor,
   pricingOf,
   searchMessages,
   storedImages,
@@ -688,10 +690,9 @@ export function ChatView({
   const openFile = useMemo(() => (onOpenFile && fileRepo ? (path: string) => onOpenFile(fileRepo, path) : undefined), [onOpenFile, fileRepo]);
 
   const personaName = current?.persona ?? settings.persona;
-  const personaItems = useMemo<ListItem[]>(
-    () => personas.map((p) => ({ id: p.name, label: p.name, hint: p.system ? p.system.slice(0, 70) + (p.system.length > 70 ? "…" : "") : "No system prompt" })),
-    [personas],
-  );
+  const persona = useMemo(() => personaFor(personaName, personas), [personaName, personas]);
+  // Replies are drawn as the conversation's ant; plain ones keep the provider's mark.
+  const replyAnt = persona && persona.id !== "plain" ? persona : null;
   const system = current ? current.system ?? "" : settings.system;
   const temperature = current ? current.temperature ?? null : settings.temperature;
   const maxTokens = current ? current.max_tokens : settings.max_tokens;
@@ -748,6 +749,7 @@ export function ChatView({
       note={prefs.feedback[x.id] ?? null}
       imageUrl={api.chatImageUrl}
       onOpenImage={setLightbox}
+      ant={replyAnt}
     />
   );
 
@@ -810,19 +812,7 @@ export function ChatView({
             )}
           </div>
 
-          <Select
-            value={personaName}
-            items={personaItems}
-            searchable={false}
-            ariaLabel="persona"
-            width={340}
-            className="rounded-full py-1 text-[12.5px]"
-            onChange={(i) => {
-              const p = personas.find((x) => x.name === i.id);
-              if (p) patch({ persona: p.name, system: p.system });
-            }}
-            renderValue={(item) => <span className="truncate text-muted">{item?.label ?? "Persona"}</span>}
-          />
+          <PersonaPicker personas={personas} value={persona} onPick={(p) => patch({ persona: p.name, system: p.system })} />
           <button
             ref={advancedButton}
             type="button"
@@ -868,7 +858,7 @@ export function ChatView({
               system={system}
               temperature={temperature}
               maxTokens={maxTokens}
-              persona={personas.find((p) => p.name === personaName) ?? null}
+              persona={persona}
               onSystem={(s) => patch({ system: s })}
               onTemperature={(t) => patch({ temperature: t ?? -1 })}
               onMaxTokens={(n) => patch({ max_tokens: n })}
@@ -976,7 +966,7 @@ export function ChatView({
                     {live.map((l, i) =>
                       l.done ? null : (
                         <div key={i} className={cx(live.length > 1 && "min-w-0 rounded-xl border border-border bg-panel/50")}>
-                          <StreamingRow model={l.model} text={l.text} models={models} />
+                          <StreamingRow model={l.model} text={l.text} models={models} ant={replyAnt} />
                         </div>
                       ),
                     )}

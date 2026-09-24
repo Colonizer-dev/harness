@@ -28,6 +28,7 @@ export function Popover({
   placement = "bottom-start",
   width = 320,
   label,
+  className,
   children,
 }: {
   open: boolean;
@@ -36,6 +37,8 @@ export function Popover({
   placement?: Placement;
   width?: number;
   label: string;
+  /** Extra classes on the panel (the persona picker adds `is-closing` while it eases out). */
+  className?: string;
   children: ReactNode;
 }): ReactElement | null {
   const panel = useRef<HTMLDivElement>(null);
@@ -96,7 +99,7 @@ export function Popover({
       role="dialog"
       aria-label={label}
       style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left, width: Math.min(width, window.innerWidth - 16), maxHeight: pos.maxHeight }}
-      className="chat-pop z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-panel text-text shadow-[0_12px_40px_-8px_rgba(0,0,0,0.45)]"
+      className={cx("chat-pop z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-panel text-text shadow-[0_12px_40px_-8px_rgba(0,0,0,0.45)]", className)}
     >
       {children}
     </div>,
