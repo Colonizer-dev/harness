@@ -416,7 +416,7 @@ pub async fn stop(State(app): State<Shared>) -> impl IntoResponse {
         if let Some(choice) = modules.get_mut("burn_down") {
             choice.enabled = false;
         }
-        if let Err(e) = modules.save(&app.modules_file()) {
+        if let Err(e) = modules.save(&app.modules_file()).await {
             app.storage_failed("save modules.json", &e).await;
         }
     }
@@ -903,7 +903,7 @@ mod tests {
                 "a colony the operator started is untouched"
             );
         }
-        let modules = ModulesConfig::load(&app.modules_file());
+        let (modules, _) = ModulesConfig::load(&app.modules_file()).unwrap();
         assert_eq!(
             modules.get("burn_down").map(|c| c.enabled),
             Some(false),
@@ -923,7 +923,7 @@ mod tests {
         let response = stop(State(app.clone())).await;
         assert_eq!(response.into_response().status(), StatusCode::NO_CONTENT);
         // The record is created, already off, so a later save from the UI finds it.
-        let modules = ModulesConfig::load(&app.modules_file());
+        let (modules, _) = ModulesConfig::load(&app.modules_file()).unwrap();
         assert_eq!(modules.get("burn_down").map(|c| c.enabled), Some(false));
         let _ = std::fs::remove_dir_all(root);
     }

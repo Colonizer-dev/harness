@@ -3,6 +3,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     config::{ModuleChoice, ModulesConfig, setting, setting_f64, setting_str, setting_u64},
+    config_unreadable,
     modules::schema_for,
     notify::NotifySettings,
     spend,
@@ -131,23 +132,16 @@ impl App {
     }
 
     pub fn all_org_settings(&self) -> BTreeMap<String, OrgSettings> {
-        std::fs::read(self.orgs_file())
-            .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+        self.read_config_loud(&self.orgs_file(), "org settings")
     }
 
     pub fn org_settings(&self, org: &str) -> OrgSettings {
         self.all_org_settings().remove(org).unwrap_or_default()
     }
 
-    fn save_org_settings(&self, all: &BTreeMap<String, OrgSettings>) -> anyhow::Result<()> {
+    async fn save_org_settings(&self, all: &BTreeMap<String, OrgSettings>) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
-        let path = self.orgs_file();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(all)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_atomic(&self.orgs_file(), &serde_json::to_vec_pretty(all)?).await
     }
 
     pub(crate) fn known_orgs_file(&self) -> PathBuf {
@@ -688,7 +682,13 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     let req: PutOrg =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("invalid org settings: {e}")))?;
     validate(&req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
-    let mut all = app.all_org_settings();
+    // The whole read-modify-write of orgs.json is one critical section over a strict read (#408):
+    // a file that will not parse is refused rather than silently replaced by defaults — and two
+    // saves at once cannot each lose the other's org. The guard is dropped at the save: the
+    // answer and the record-keeping below it touch other files.
+    let _config = app.config_write.lock().await;
+    let mut all: BTreeMap<String, OrgSettings> =
+        crate::util::read_json_or_default(&app.orgs_file()).map_err(|e| config_unreadable(&app.orgs_file(), &e))?;
     // A skillset switched on must exist, or boot fails. One switched off must exist only when this save
     // adds the switch, which catches a misspelt disable; an off override already saved for a skillset
     // since uninstalled is harmless and the org dialog sends it back on every save.
@@ -719,7 +719,8 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     } else {
         all.insert(org.clone(), req.settings.clone());
     }
-    app.save_org_settings(&all)?;
+    app.save_org_settings(&all).await?;
+    drop(_config);
     // Any explicit save is the answer to "do you want this org?" — "add it" and "no" alike — so the
     // org counts as seen and no pending prompt for it comes back over a decision just made. The
     // avatar from the sighting that posed the question goes with the answer: refreshes keep the
@@ -1706,6 +1707,74 @@ mod tests {
             Some("https://a/nope.png"),
             "a declined org keeps the face the prompt showed"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- the strict orgs.json rule (#408) ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_put_over_a_damaged_orgs_json_is_refused_and_leaves_the_bytes_alone() {
+        let (app, root) = org_app();
+        let path = app.cfg.config_dir.join("orgs.json");
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let damaged = b"{ not json";
+        std::fs::write(&path, damaged).unwrap();
+
+        let err = put(
+            State(app.clone()),
+            Path("acme".into()),
+            Json(json!({"settings": {"max_parallel": 2}})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(
+            err.message().contains("orgs.json") && err.message().contains("refusing to overwrite it"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "the file is not overwritten");
+
+        // The infallible reader still answers — with defaults — and the damage reaches /api/status.
+        assert!(app.all_org_settings().is_empty());
+        let alert = app.config_damage.lock().unwrap().clone().unwrap();
+        assert_eq!(alert.kind, crate::StorageAlertKind::LoadDamage);
+        assert!(alert.message.contains("orgs.json"), "{}", alert.message);
+
+        // Fix the file and the alert clears; a save goes through again.
+        std::fs::write(&path, "{}").unwrap();
+        assert!(app.all_org_settings().is_empty());
+        assert!(
+            app.config_damage.lock().unwrap().is_none(),
+            "a clean read clears the alert that named the file"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn concurrent_puts_for_distinct_orgs_all_land() {
+        let (app, root) = org_app();
+        let puts = (0..8u64).map(|i| {
+            let app = app.clone();
+            async move {
+                let _ = put(
+                    State(app),
+                    Path(format!("org-{i}")),
+                    Json(json!({"settings": {"max_parallel": i + 1}})),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+            }
+        });
+        futures_util::future::join_all(puts).await;
+        let all = app.all_org_settings();
+        for i in 0..8u64 {
+            assert_eq!(
+                all.get(&format!("org-{i}")).and_then(|s| s.max_parallel),
+                Some(i + 1),
+                "every org's save survived the others"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

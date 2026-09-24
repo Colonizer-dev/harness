@@ -31,6 +31,7 @@ setting) is called out under **Take care** rather than left for you to find.
 
 - A mothership restart no longer stops every live colony when `msb ls` fails outright. After a host reboot the microsandbox daemon can come up after the harness, and recovery read that failure as "nothing is running" and removed every live colony's microVM; it now waits — retrying with backoff — until `msb ls` answers before it decides what to tear down, so colonies that kept running across the restart are reconnected once the daemon appears. ([#407])
 - **A malformed `COLONIZER_GATEWAY_BIND` refuses startup instead of silently falling back to 41750.** The bind is parsed once as an IP:port socket address and the listener, the colony model routes and the per-colony network fence all use that port, so a typo'd bind (or a hostname like `localhost:41750`, which is no longer resolved) can no longer hand colonies an allow rule for a port nothing listens on. The fence is extracted into `colony_network` and unit-tested: a colony always boots with the `public` profile alone, and its only host allows are the mesh control port and the gateway port. ([#406])
+- **A damaged `orgs.json`, `providers.json` or `modules.json` is no longer silently replaced by defaults.** A settings save over a file that will not parse is refused with an error naming it, the cockpit's storage banner says defaults are in effect until it is fixed or removed, `modules.json` is moved aside to a `.corrupt-*` file at startup like `sessions.json`, and concurrent saves are serialised so two at once cannot lose each other's org or provider. ([#408])
 
 ## [v0.1.8] - 2026-09-23
 
@@ -417,6 +418,7 @@ Macs. ([#74])
 [#446]: https://github.com/Colonizer-dev/harness/issues/446
 [#453]: https://github.com/Colonizer-dev/harness/issues/453
 [#407]: https://github.com/Colonizer-dev/harness/issues/407
+[#408]: https://github.com/Colonizer-dev/harness/issues/408
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

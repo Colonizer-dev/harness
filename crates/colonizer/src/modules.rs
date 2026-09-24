@@ -3,7 +3,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error,
-    config::{ModuleChoice, ModulesConfig, Settings},
+    config::{ModuleChoice, Settings},
 };
 use axum::{
     Json,
@@ -381,12 +381,11 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
         settings,
     };
     let described = describe_kind(&kind, choice, &app);
-    save_modules(&app.modules_file(), &modules)?;
+    // modules.json writes are serialised by the `app.modules` write guard this handler already
+    // holds; the save itself is `write_atomic`, so the file is fsynced into place through a
+    // unique temp rather than a fixed `.json.tmp` two savers could share.
+    modules.save(&app.modules_file()).await?;
     Ok(Json(described))
-}
-
-fn save_modules(path: &FsPath, modules: &ModulesConfig) -> anyhow::Result<()> {
-    modules.save(path)
 }
 
 /// Every skillset a `plugin-dirs` setting names must resolve now, not first fail when a colony boots.

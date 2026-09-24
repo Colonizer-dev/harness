@@ -223,21 +223,51 @@ impl Default for ModulesConfig {
 }
 
 impl ModulesConfig {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+    /// Loads `modules.json` the way startup loads `sessions.json`: a missing file is the default
+    /// (a first run), and a file that cannot be read or parsed is moved aside to
+    /// `<name>.corrupt-<unix-timestamp>` — never overwritten — with the default and a sticky
+    /// `LoadDamage` alert in its place. The old silent `unwrap_or_default` meant a damaged file's
+    /// settings were quietly forgotten and the next save replaced the operator's bytes with
+    /// defaults (#408). A file that cannot even be moved aside is a hard error: the next save
+    /// would destroy it.
+    pub fn load(path: &Path) -> Result<(Self, Option<crate::StorageAlert>)> {
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Self::default(), None)),
+            Err(e) => return Self::damaged(path, format!("could not be read ({e})")),
+        };
+        match serde_json::from_slice(&data) {
+            Ok(config) => Ok((config, None)),
+            Err(e) => Self::damaged(path, format!("could not be parsed ({e})")),
+        }
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// The default config plus the alert that says where the damaged file's bytes went.
+    fn damaged(path: &Path, reason: String) -> Result<(Self, Option<crate::StorageAlert>)> {
+        let saved = crate::move_corrupt_aside(path)?;
+        let message = format!(
+            "{} {reason} and was saved as {}; module settings are back on their defaults until it is fixed or removed",
+            path.display(),
+            saved.display()
+        );
+        eprintln!("modules: {message}");
+        Ok((
+            Self::default(),
+            Some(crate::StorageAlert {
+                kind: crate::StorageAlertKind::LoadDamage,
+                message,
+                ts: chrono::Utc::now(),
+                failures: 1,
+                recovered_at: None,
+            }),
+        ))
+    }
+
+    pub async fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        crate::util::write_atomic(path, &serde_json::to_vec_pretty(self)?).await
     }
 
     pub fn get(&self, kind: &str) -> Option<&ModuleChoice> {
@@ -659,5 +689,49 @@ mod tests {
             dir.join("bin/colonizer-agentd")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_modules_json_is_moved_aside_with_an_alert_rather_than_overwritten() {
+        let dir = std::env::temp_dir().join(format!("colonizer-modules-damage-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("modules.json");
+
+        let (modules, alert) = ModulesConfig::load(&path).unwrap();
+        assert_eq!(
+            serde_json::to_string(&modules).unwrap(),
+            serde_json::to_string(&ModulesConfig::default()).unwrap(),
+            "a missing file is a first run"
+        );
+        assert!(alert.is_none());
+
+        std::fs::write(&path, "{\"source\":").unwrap();
+        let (modules, alert) = ModulesConfig::load(&path).unwrap();
+        assert_eq!(
+            serde_json::to_string(&modules).unwrap(),
+            serde_json::to_string(&ModulesConfig::default()).unwrap(),
+            "a damaged file reads as the defaults"
+        );
+        let alert = alert.expect("damage is reported");
+        assert_eq!(alert.kind, crate::StorageAlertKind::LoadDamage);
+        assert!(alert.message.contains("modules.json"), "{}", alert.message);
+        assert!(
+            alert.message.contains(".corrupt-"),
+            "the message says where the bytes went: {}",
+            alert.message
+        );
+        let aside: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(aside.len(), 1, "only the moved-aside file remains: {aside:?}");
+        assert!(aside[0].starts_with("modules.json.corrupt-"), "{aside:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&aside[0])).unwrap(),
+            "{\"source\":",
+            "the original bytes survive the move"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
