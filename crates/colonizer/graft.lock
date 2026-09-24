@@ -1,0 +1,11 @@
+# The graft skillset bundle, one per colony architecture: the plugin, a pinned Node 22 and @nanonets/graft,
+# built and smoke-tested by .github/workflows/graft-bundle.yml from scripts/graft-bundle/ and vendor/graft/.
+# It is never fetched at install time: the mothership downloads it when someone asks for the graft skillset
+# in Settings (src/graft.rs) and unpacks it to <data>/plugins/graft; the platform is the colony's (Linux,
+# the host's architecture), not the host's.
+#
+# Compiled into the mothership. Same columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
+# No bundle is published yet: push a `graft-0.19.0-1` tag to run the workflow, then pin its SHA256SUMS here
+# as two rows shaped like
+#   graft  0.19.0-1  linux-x86_64   bundle  <sha256>  https://github.com/Colonizer-dev/harness/releases/download/graft-0.19.0-1/graft-0.19.0-1-linux-x86_64.tar.gz
+#   graft  0.19.0-1  linux-aarch64  bundle  <sha256>  https://github.com/Colonizer-dev/harness/releases/download/graft-0.19.0-1/graft-0.19.0-1-linux-aarch64.tar.gz

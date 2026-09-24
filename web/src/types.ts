@@ -727,11 +727,31 @@ export interface PluginDir {
   commands: number;
 }
 
+/** Where a downloadable skillset is: `local` means the operator's own directory holds its name. */
+export type DownloadState = "idle" | "installed" | "downloading" | "unpacking" | "failed" | "unavailable" | "local";
+
+/** GET /api/plugins/graft, and one entry of GET /api/plugins `downloadable`: a skillset the mothership downloads on request. */
+export interface DownloadableSkillset {
+  name: string;
+  /** The pinned bundle release; null when this build pins none for this machine's architecture. */
+  release: string | null;
+  /** The release on disk when it differs from the pinned one. */
+  installed_release: string | null;
+  state: DownloadState;
+  bytes: number;
+  total: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 /** GET /api/plugins */
 export interface PluginListing {
   /** Where an operator puts their own plugin directories. */
   local_root: string;
   plugins: PluginDir[];
+  /** Skillsets that are downloaded on request; absent on a mothership that offers none. */
+  downloadable?: DownloadableSkillset[];
 }
 
 // ---------------------------------------------------------------------------

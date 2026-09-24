@@ -46,6 +46,7 @@ import type {
   OrgInfo,
   OrgSettings,
   PluginListing,
+  DownloadableSkillset,
   ProviderHealth,
   PullStatus,
   RedTeamRun,
@@ -199,6 +200,10 @@ export interface Api {
   claudeLoginCode(code: string): Promise<LoginView>;
   claudeLoginCancel(): Promise<LoginView>;
   plugins(): Promise<PluginListing>;
+  /** GET /api/plugins/graft */
+  graftSkillset(): Promise<DownloadableSkillset>;
+  /** POST /api/plugins/graft/download: start (or join) the download; poll graftSkillset for progress. */
+  graftDownload(): Promise<DownloadableSkillset>;
   providers(): Promise<ModelProvider[]>;
   saveProvider(id: string, body: SaveProviderRequest): Promise<ModelProvider>;
   deleteProvider(id: string): Promise<unknown>;
@@ -412,6 +417,8 @@ export const httpApi: Api = {
   claudeLoginCode: (code) => post("/api/claude-login/code", { code }),
   claudeLoginCancel: () => post("/api/claude-login/cancel"),
   plugins: () => request("/api/plugins"),
+  graftSkillset: () => request("/api/plugins/graft"),
+  graftDownload: () => post("/api/plugins/graft/download"),
   providers: () => request("/api/providers"),
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),

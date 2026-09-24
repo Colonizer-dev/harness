@@ -1,0 +1,111 @@
+# Builds and publishes the graft skillset bundles that the mothership downloads when someone adds the graft
+# skillset (docs/skill-packs.md, "Downloadable skillsets"): one per architecture, each the plugin, a pinned
+# Node 22 (vendor/graft/node.lock) and @nanonets/graft installed by `npm ci` from vendor/graft's lock.
+#
+# Each architecture builds on its own runner inside node:22-bookworm (the colony image's glibc, with the
+# toolchain node-gyp needs), because several tree-sitter grammars have no prebuild for linux-arm64, and must
+# pass scripts/graft-bundle/smoke.sh before anything is published.
+#
+# A `graft-<release>` tag builds and publishes the release crates/colonizer/graft.lock pins by sha256;
+# publishing changes nothing for an install until a pull request pins the new archives. workflow_dispatch is
+# a dry run: it builds, smoke-tests and uploads workflow artifacts, and publishes nothing.
+name: graft bundle
+
+on:
+  push:
+    tags:
+      - "graft-*"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Bundle release for the dry run, <graft version>-<build>, e.g. 0.19.0-1"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graft-bundle-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE: ${{ inputs.release || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # Pinned by digest, like headroom-bundle.yml: the archives are pinned by sha256 downstream.
+    container: node:22-bookworm@sha256:dd5847a04b0deee391fa145f1f4c6d214196668b6bcc7988ebed67249f226844
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the release name
+        run: |
+          release=${RELEASE#graft-}
+          echo "RELEASE=$release" >> "$GITHUB_ENV"
+          case "$release" in
+            [0-9]*.[0-9]*.[0-9]*-[0-9]*) ;;
+            *) echo "release must look like 0.19.0-1, got $release" >&2; exit 1 ;;
+          esac
+          locked=$(node -p 'require("./vendor/graft/package.json").dependencies["@nanonets/graft"]')
+          [ "${release%-*}" = "$locked" ] || { echo "release $release does not match the locked @nanonets/graft $locked" >&2; exit 1; }
+
+      - name: Build
+        run: TMPDIR=/var/tmp sh scripts/graft-bundle/build.sh "${{ matrix.arch }}" "$RELEASE" dist/graft
+
+      - name: Smoke test
+        run: |
+          mkdir -p /var/tmp/smoke
+          tar -xzf "dist/graft/graft-$RELEASE-linux-${{ matrix.arch }}.tar.gz" -C /var/tmp/smoke
+          git config --global user.email smoke@example.com && git config --global user.name smoke
+          TMPDIR=/var/tmp sh scripts/graft-bundle/smoke.sh /var/tmp/smoke/graft
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: graft-${{ env.RELEASE }}-linux-${{ matrix.arch }}
+          path: dist/graft/graft-${{ env.RELEASE }}-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    # Only a tag publishes; a manual run stops at the artifacts.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: bundles
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          cd bundles
+          sha256sum graft-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "graft skillset bundles: the plugin, Node 22 (\`vendor/graft/node.lock\`) and @nanonets/graft installed by \`npm ci\` from \`vendor/graft/package-lock.json\` at ${{ github.sha }}, built inside Debian bookworm and smoke-tested."
+            echo
+            echo "They take effect only once \`crates/colonizer/graft.lock\` pins them by sha256:"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "${{ github.ref_name }}" graft-*.tar.gz SHA256SUMS \
+            --repo "${{ github.repository }}" --verify-tag \
+            --title "graft skillset bundle ${{ github.ref_name }}" --notes-file notes.md

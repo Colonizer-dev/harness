@@ -373,8 +373,11 @@ pub fn available(cfg: &Settings) -> Value {
     json!({"local_root": root, "plugins": plugins.into_values().collect::<Vec<_>>()})
 }
 
+/// `GET /api/plugins`: the skillsets on disk, plus the ones that can be downloaded and where each download is.
 pub async fn list(State(app): State<Shared>) -> Json<Value> {
-    Json(available(&app.cfg))
+    let mut body = available(&app.cfg);
+    body["downloadable"] = json!([crate::graft::current(&app).await]);
+    Json(body)
 }
 
 #[cfg(test)]

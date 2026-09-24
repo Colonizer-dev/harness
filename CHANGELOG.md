@@ -18,6 +18,17 @@ setting) is called out under **Take care** rather than left for you to find.
 
 - **Loops: colonies on a schedule, like `/loop`.** A saved prompt on a repository launches a colony every N minutes (15 minutes to 7 days), daily, weekly, monthly, or self-paced, where each run names the next with a `loop_next` tool (15 minutes–24 hours). Any run can end its loop with `loop_stop`, and a loop also ends after its max runs or end date. One run at a time: a tick that finds the previous run still live skips and says so. Loops has its own page (templates, history with status, PR and cost, run now), loop colonies carry a ↻ badge, and `/loop 1h <task>` in the composer makes one. Red-team schedules now share the cadence code. See [docs/loops.md](docs/loops.md).
 - **Chat.** Talk to a model directly from the cockpit, no colony: conversations stored on the Mothership, replies streamed, stop and regenerate, a colony's summary and recent activity as optional context, and "Turn into a colony" on any reply. Any configured `<provider>/<model>`, or a Claude model with an Anthropic API key or an Anthropic provider — never the Claude subscription login. The composer's Ask mode sends a question there. The dashboard's issues button is now the orange **Send colonies** action.
+- **graft as a downloadable skillset.** Settings → Skillsets offers graft (a code
+  map of the repository: `graft ask`, `callers`, `skeleton`, `grep`) with a Download
+  button. The bundle is not shipped with the app: the mothership downloads the
+  per-architecture bundle pinned by sha256 in `crates/colonizer/graft.lock` into
+  `<data>/plugins/graft`, where it is an ordinary skillset to switch on. Each colony
+  builds its own map of its own worktree on first use, outside the worktree and
+  offline — no model key reaches graft and its telemetry stays closed. The bundle
+  carries its own Node 22, because graft's native tree-sitter core does not build
+  on the Node 24 colonies run. Bundles are built by `.github/workflows/graft-bundle.yml`
+  on `graft-*` tags; until one is published and pinned, the row says it is not
+  available yet.
 
 ## [v0.1.9] - 2026-09-24
 
