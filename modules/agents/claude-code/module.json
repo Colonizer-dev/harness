@@ -51,6 +51,13 @@
         "default": "",
         "env": "COLONIZER_SUBAGENT_MODEL"
       },
+      "summaries": {
+        "type": "boolean",
+        "title": "Task summaries",
+        "description": "Write each colony's task as one plain sentence with the background model (or Claude Haiku when that is not a Claude model), so the cockpit can say what a colony is doing. Only the issue or instructions text is sent. On by default.",
+        "default": true,
+        "env": "COLONIZER_SUMMARIES"
+      },
       "background_model": {
         "type": "string",
         "title": "Background model",

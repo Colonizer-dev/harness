@@ -270,14 +270,16 @@ describe("OverviewView colonies table", () => {
     expect(html.indexOf("Needs your answer")).toBeLessThan(html.indexOf("Working"));
   });
 
-  it("chips filter by bucket and by org", () => {
+  it("header filters narrow the table and name the filter", () => {
     const beta: OrgEntry = { org: "beta", live: 1, queued: 0, total: 1, pending: 0, avatar: null };
     const html = renderOverview(
       [session({ id: "a1" }), session({ id: "b1", org: "beta", repo: "beta/api" })],
       [ACME, beta],
     );
-    for (const label of ["live", "need you", "returned", "queued"]) expect(html).toContain(label);
-    expect(html).toContain("All orgs");
+    // The column titles are the filter controls: a search box and menus, no pill row above.
+    expect(html).toContain('placeholder="Colony"');
+    for (const label of [">Org<", ">Status<", ">Updated<", ">Spent<"]) expect(html).toContain(label);
+    expect(html).not.toContain("All orgs");
     expect(html).toContain("beta");
     // A pinned bucket narrows the table and names the filter.
     const filtered = renderOverview([session({ id: "a1" }), session({ id: "b1", org: "beta", repo: "beta/api", status: "queued" })], [ACME, beta], "live");
@@ -360,10 +362,7 @@ describe("OverviewView counters vs list", () => {
   it("scopes the counter chips to the visible workspaces and names the hidden org", () => {
     const html = renderOverview(sessions(), workspaces);
     // 14 live and 2 queued in acme/beta; gamma's 11 waiting must not reach any chip.
-    expect(html).toMatch(/>live<span[^>]*> 14</);
-    expect(html).toMatch(/>need you<span[^>]*> 0</);
-    expect(html).toMatch(/>queued<span[^>]*> 2</);
-    expect(html).not.toMatch(/<span[^>]*> 11</);
+    expect(html).toContain("0 colonies need you · 14 live · 2 queued across 2 workspaces");
     // ... but they are explained, not silently dropped: the scope line names gamma.
     expect(html).toContain("hidden org (gamma)");
     expect(html).toContain("11 need you");
@@ -373,16 +372,17 @@ describe("OverviewView counters vs list", () => {
     const html = renderOverview(sessions(), workspaces, "live");
     expect(html).toContain("showing 14 of 16");
     expect(html).toContain("clear ×");
+    expect(html).toContain("clear filters");
   });
 
   it("an empty filtered page explains where the hidden colonies are and links back", () => {
     // "returned" matches nothing anywhere, so the page is empty: the 16 visible colonies sit in
     // other buckets and gamma's 11 wait in a hidden org. Neither may read as bare numbers.
     const html = renderOverview(sessions(), workspaces, "returned");
-    expect(html).toContain("nothing under");
+    expect(html).toContain("nothing matches these filters");
     expect(html).toContain("16 in other buckets");
     expect(html).toContain("hidden org (gamma)");
-    expect(html).toContain("clear filter ×");
+    expect(html).toContain("clear filters ×");
   });
 });
 
@@ -396,7 +396,7 @@ describe("OverviewView held slots and stalled queue", () => {
 
   it("marks the queued counter stalled when every live colony is held", () => {
     const html = renderOverview([idleHeld("h1"), idleHeld("h2"), session({ id: "q1", status: "queued" })], [ACME]);
-    expect(html).toMatch(/queued · stalled<span class="text-warn"> 1</);
+    expect(html).toContain("Status · queue stalled");
     expect(html).toContain("2 held");
   });
 

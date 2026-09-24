@@ -310,6 +310,11 @@ pub struct Session {
     /// monorepo's packages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_paths: Vec<String>,
+    /// The task in one plain sentence (≤ 120 chars), written by a cheap model from the issue or
+    /// instructions after launch and again from the pull request once it opens (`summaries.rs`).
+    /// `None` until then, or when summaries are off or the model could not be reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
@@ -448,6 +453,7 @@ impl Default for Session {
             pr_opened_at: None,
             changed_paths: Vec::new(),
             ci_state: None,
+            summary: None,
             publish_stage: None,
             publishing_holds_slot: false,
             needs_rebase: false,
@@ -1387,6 +1393,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         pr_opened_at: None,
         changed_paths: Vec::new(),
         ci_state: None,
+        summary: None,
         publish_stage: None,
         // A fresh colony is starting or queued, never publishing: the flag is inert.
         publishing_holds_slot: false,
@@ -1521,6 +1528,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // initial for the minutes until the next refresh re-records it.
     let pending_avatar = app.new_orgs.read().await.get(owner).cloned().flatten();
     app.mark_org_known(owner, pending_avatar.as_deref()).await;
+    // A one-line summary of the task, written by a cheap model off the launch path (summaries.rs).
+    tokio::spawn(crate::summaries::summarize_colony(app.clone(), session.id.clone()));
     Ok(Json(session))
 }
 
@@ -3242,6 +3251,7 @@ pub(crate) mod tests {
             pr_opened_at: None,
             changed_paths: Vec::new(),
             ci_state: None,
+            summary: None,
             publish_stage: None,
             // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
             // a stopped-origin publish flip this off.

@@ -85,6 +85,8 @@ pub async fn publish_session(app: Shared, id: String) {
         }
         Ok(github::Published::PullRequest(url)) => {
             tokio::spawn(record_changed_paths(app.clone(), id.clone(), url.clone()));
+            // The pull request says what was actually done: the summary is rewritten from it.
+            tokio::spawn(crate::summaries::summarize_pull_request(app.clone(), id.clone(), url.clone()));
             app.update_session(&id, |x| {
                 x.status = SessionStatus::PrOpened;
                 x.pr_url = Some(url);

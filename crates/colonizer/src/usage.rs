@@ -708,6 +708,7 @@ mod tests {
             pr_opened_at: None,
             changed_paths: Vec::new(),
             ci_state: None,
+            summary: None,
             error: None,
             cost_usd: Some(0.42),
             routed_cost_usd: None,

@@ -57,6 +57,7 @@ mod spend;
 mod stack;
 mod stale;
 mod stream;
+mod summaries;
 mod telemetry;
 mod timing;
 mod update;
@@ -1495,6 +1496,8 @@ async fn serve() -> Result<()> {
     // Colonies whose pull request predates `changed_paths` gain its file list, for the monorepo
     // package rows; best effort, off the serving path.
     tokio::spawn(publish::backfill_changed_paths(app.clone()));
+    // One-line task summaries for live colonies that have none (summaries.rs).
+    tokio::spawn(summaries::backfill(app.clone()));
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(autonomy::run(app.clone()));
     tokio::spawn(burn_down::run(app.clone()));

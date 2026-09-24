@@ -24,7 +24,7 @@ import { HIDE_EMPTY_ORGS_KEY, hideEmptyOrgEntries, parseHideEmptyOrgs } from "..
 import { formatCost, formatTokens, orgCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
-import { AreaChart, ChartSection, COLONY_GRID, ColonyRow, KpiStrip, OrgTile, RangePicker, Rules, Section, SegTabs, TrendLine, type KpiDef } from "./DashChart";
+import { AreaChart, ChartSection, ColonyRow, KpiStrip, OrgTile, RangePicker, Rules, Section, TrendLine, type KpiDef } from "./DashChart";
 import { deliveryKpis } from "./delivery";
 import { FleetPanel } from "./FleetPanel";
 import { isBumped, isFlashed, useLiveEvents } from "./liveEvents";
@@ -51,7 +51,7 @@ import {
   type ProviderErrorSnapshot,
   type RangeDays,
 } from "./dash";
-import { OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
+import { heldSlots, matchesOverviewFilter, overviewCounts, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
 import { hostFacts } from "./host";
 import { RedTeamWizard } from "./RedTeamWizard";
 import { RedTeamHistory } from "./RedTeamHistory";
@@ -60,6 +60,8 @@ import { useOpenQuestions } from "./questions";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
+import { taskLine, taskTooltip } from "../summary";
+import { ColonyFilterHeader, NO_FILTERS, applyColonyFilters, filtersActive, type ColonyFilters } from "./ColonyFilters";
 
 /** The last `range` local-calendar days, ascending — the x axis of every per-day series.
  *  Walks the calendar (not fixed 24h steps) so a DST transition cannot duplicate or skip a day. */
@@ -160,8 +162,9 @@ export function OverviewView({
   const dashOrg = scopeOrg !== undefined ? scopeOrg : localDashOrg;
   const setDashOrg = onScopeOrg ?? setLocalDashOrg;
   // The colonies table's own filters: one status bucket plus one org. Null is unfiltered.
-  const [colonyFilter, setColonyFilter] = useState<OverviewFilter | null>(initialFilter ?? null);
-  const [orgFilter, setOrgFilter] = useState<string | null>(null);
+  // The colonies table's filters, set from its header row (ColonyFilters.tsx).
+  const [filters, setFilters] = useState<ColonyFilters>(() => ({ ...NO_FILTERS, statuses: new Set(initialFilter ? [initialFilter] : []) }));
+  const filtered = filtersActive(filters);
   // The red-team wizard or history open for one workspace row; null is neither.
   const [redTeam, setRedTeam] = useState<{ org: string; view: "wizard" | "history" } | null>(null);
   const [showAll, setShowAll] = useState(false);
@@ -291,12 +294,8 @@ export function OverviewView({
   });
   const mergedAll = compared.reduce((t, c) => t + c.merged, 0);
 
-  // The colonies table: bucket + org filters, needs-you longest-wait first, capped at ten.
-  const tableSessions = sortColonies(
-    visibleSessions.filter(
-      (s) => (!colonyFilter || matchesOverviewFilter(s, colonyFilter)) && (!orgFilter || sameOrg(orgOf(s), orgFilter)),
-    ),
-  );
+  // The colonies table: its header filters, needs-you longest-wait first, capped at ten.
+  const tableSessions = sortColonies(applyColonyFilters(visibleSessions, filters, nowMs));
   const tableShown = showAll ? tableSessions : tableSessions.slice(0, COLONY_LIMIT);
   const rangePicker = (
     <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} emptyPrevious={prevEmpty} />
@@ -337,8 +336,7 @@ export function OverviewView({
   const fleetHosts = fleet ?? [];
   const fleetOnline = fleetHosts.filter((h) => h.health === "online").length;
   const clearFilters = () => {
-    setColonyFilter(null);
-    setOrgFilter(null);
+    setFilters(NO_FILTERS);
     setShowAll(false);
   };
 
@@ -363,11 +361,11 @@ export function OverviewView({
           {toolbar}
         </div>
 
-        {(colonyFilter || orgFilter || hiddenOrgs.length > 0) && (
+        {(filtered || hiddenOrgs.length > 0) && (
           <div className="-mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint" role="status">
-            {(colonyFilter || orgFilter) && (
+            {filtered && (
               <span>
-                filter {colonyFilter ? `"${colonyFilter}"` : ""}{colonyFilter && orgFilter ? " · " : ""}{orgFilter ? `org "${orgFilter}"` : ""} · showing {tableSessions.length} of {visibleSessions.length}
+                colonies filtered · showing {tableSessions.length} of {visibleSessions.length}
                 <button type="button" onClick={clearFilters} className="ml-2 cursor-pointer border-0 bg-transparent p-0 text-muted underline underline-offset-[3px] hover:text-text">
                   clear ×
                 </button>
@@ -397,7 +395,7 @@ export function OverviewView({
                     className={`-mt-px grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 border-t border-border py-3 transition-colors duration-[1200ms] ${isFlashed(events, session.id, nowMs) ? "v3-flash" : ""}`}
                   >
                     <span className="flex min-w-0 flex-col gap-0.5">
-                      <span className="truncate text-[14px]">{session.issue_title || short}</span>
+                      <span className="truncate text-[14px]" title={taskTooltip(session)}>{taskLine(session, short)}</span>
                       {questions[session.id] && <span className="line-clamp-2 text-[13px] text-warn [text-wrap:pretty]">{questions[session.id]}</span>}
                       <span className="text-[12.5px] text-faint">
                         <span className="font-mono text-[12px]">{short}</span> · {org}
@@ -543,69 +541,46 @@ export function OverviewView({
           title="Colonies"
           meta={String(tableSessions.length)}
           right={
-            <SegTabs
-              label="colony filter"
-              items={[
-                { key: "all", label: "all", count: visibleSessions.length, active: colonyFilter === null, onClick: () => { setColonyFilter(null); setShowAll(false); } },
-                ...OVERVIEW_FILTERS.map((name) => {
-                  const stalledQueue = name === "queued" && stalled;
-                  return {
-                    key: name,
-                    label: stalledQueue ? "queued · stalled" : name,
-                    count: counts[name],
-                    active: colonyFilter === name,
-                    urgent: name === "need you" || stalledQueue,
-                    title: stalledQueue ? "every slot-occupying colony is held — the queue cannot drain until a hold times out" : undefined,
-                    onClick: () => {
-                      setColonyFilter(colonyFilter === name ? null : name);
-                      setShowAll(false);
-                    },
-                  };
-                }),
-              ]}
-            />
+            filtered ? (
+              <button type="button" onClick={clearFilters} className="cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-muted underline underline-offset-[3px] hover:text-text">
+                clear filters
+              </button>
+            ) : undefined
           }
         >
-          {workspaces.length > 1 && (
-            <div className="mb-3 flex flex-wrap items-center gap-1.5">
-              {[{ label: "All orgs", org: null as string | null, avatar: null as string | null }, ...workspaces.map((o) => ({ label: o.org, org: o.org as string | null, avatar: o.avatar as string | null }))].map((chip) => {
-                const active = orgFilter === chip.org;
-                return (
-                  <button
-                    key={chip.label}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => { setOrgFilter(active ? null : chip.org); setShowAll(false); }}
-                    className={`inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[12.5px] ${active ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text"}`}
-                  >
-                    {chip.org != null && <OrgTile org={chip.org} avatar={chip.avatar} size={14} />}
-                    {chip.label}
-                  </button>
-                );
-              })}
-              {held.count > 0 && (
-                <span role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`whitespace-nowrap px-1 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
-                  {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
-                </span>
-              )}
-            </div>
-          )}
-          {workspaces.length <= 1 && held.count > 0 && (
+          {held.count > 0 && (
             <div role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`mb-3 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
               {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
             </div>
           )}
           <Rules>
+            {visibleSessions.length > 0 && (
+              <div className="overflow-x-auto">
+                <div className="min-w-[680px]">
+                  <ColonyFilterHeader
+                    filters={filters}
+                    onChange={(next) => {
+                      setFilters(next);
+                      setShowAll(false);
+                    }}
+                    sessions={visibleSessions}
+                    workspaces={workspaces.map((w) => ({ org: w.org, avatar: w.avatar ?? null }))}
+                    counts={counts}
+                    stalledQueue={stalled}
+                  />
+                </div>
+              </div>
+            )}
             {tableSessions.length === 0 ? (
-              colonyFilter || orgFilter ? (
+              filtered ? (
                 <div className="py-3.5 text-[13px] text-muted">
                   <div>
-                    nothing under {colonyFilter ? `"${colonyFilter}"` : "this filter"}
+                    nothing matches these filters
                     {visibleSessions.length > 0 && <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>}
                     {hiddenOrgs.length > 0 && <> · + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")})</>}
                   </div>
                   <button type="button" onClick={clearFilters} className="mt-1.5 cursor-pointer border-0 bg-transparent p-0 font-medium text-text underline underline-offset-[3px]">
-                    clear filter ×
+                    clear filters ×
                   </button>
                 </div>
               ) : (
@@ -614,14 +589,6 @@ export function OverviewView({
             ) : (
               <div className="overflow-x-auto">
                 <div className="min-w-[680px]">
-                  <div className={`${COLONY_GRID} py-2.5 text-[12.5px] text-muted`}>
-                    <span />
-                    <span>Colony</span>
-                    <span>Org</span>
-                    <span>Status</span>
-                    <span className="text-right">Updated</span>
-                    <span className="text-right">Spent</span>
-                  </div>
                   {tableShown.map((session) => (
                     <ColonyRow
                       key={session.id}
@@ -630,6 +597,7 @@ export function OverviewView({
                       flashed={isFlashed(events, session.id, nowMs)}
                       bumped={isBumped(events, session.id, nowMs)}
                       onOpen={onOpenColony}
+                      orgAvatar={workspaces.find((w) => sameOrg(w.org, orgOf(session)))?.avatar ?? null}
                     />
                   ))}
                 </div>

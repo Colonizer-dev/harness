@@ -9,6 +9,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import { Spinner, Switch, cx, sameOrg } from "../components/ui";
 import type { Issue, Repo, Session } from "../types";
 import { relative } from "./InboxView";
+import { taskLine } from "../summary";
 
 /** Repositories fetched when the pane shows "all repos in scope": the most recently pushed first. */
 export const ALL_REPOS_LIMIT = 30;
@@ -439,7 +440,12 @@ function IssuesPane({
                 </label>
                 <span className="shrink-0 pt-0.5 text-[11.5px]">
                   {held ? (
-                    <button type="button" onClick={() => onOpenColony(held.id)} className="cursor-pointer border-0 bg-transparent p-0 text-accent underline-offset-2 hover:underline">
+                    <button
+                      type="button"
+                      onClick={() => onOpenColony(held.id)}
+                      title={`held by a colony: ${taskLine(held, held.id)}`}
+                      className="cursor-pointer border-0 bg-transparent p-0 text-accent underline-offset-2 hover:underline"
+                    >
                       held · open
                     </button>
                   ) : result ? (
