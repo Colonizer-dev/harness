@@ -6,7 +6,7 @@
 {"type":"assistant_text_delta","message_id":"msg_1","block_index":0,"delta":"Let me "}
 {"type":"assistant_text_delta","message_id":"msg_1","block_index":0,"delta":"ask."}
 {"type":"assistant_text","message_id":"msg_1","block_index":0,"text":"Let me ask."}
-{"type":"question","question_id":"toolu_ask","message_id":"msg_1","questions":[{"question":"Which file name?","header":"File","multi_select":false,"options":[{"label":"hello.txt","description":"Classic","preview":null},{"label":"hi.txt","description":"Short","preview":"hi"}]}]}
+{"type":"question","question_id":"toolu_ask","message_id":"msg_1","risk":"workspace_write","questions":[{"question":"Which file name?","header":"File","multi_select":false,"options":[{"label":"hello.txt","description":"Classic","preview":null},{"label":"hi.txt","description":"Short","preview":"hi"}]}]}
 {"type":"status","state":"waiting_for_answer"}
 {"type":"question_answered","question_id":"toolu_ask","answers":{"Which file name?":"hello.txt"},"response":null}
 {"type":"status","state":"working"}
