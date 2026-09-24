@@ -1,5 +1,6 @@
 // The cockpit's top bar: the workspaces that have colonies running right now, as avatars at the
-// right, each a filter, and the notifications bell (the inbox) at the far right. Navigation and the rest of the state live in the sidebar and the views;
+// right, each a filter, then the GitHub issues button (hand issues off to colonies) and the
+// notifications bell (the inbox) at the far right. Navigation and the rest of the state live in the sidebar and the views;
 // the bar only speaks up otherwise when something is wrong (the mothership unreachable, the live feed
 // down).
 import type { ReactElement } from "react";
@@ -9,6 +10,7 @@ import { sameOrg } from "../components/ui";
 import { toggledOrg, type OrgEntry } from "../orgs";
 import type { LiveConnection } from "../liveStream";
 import { needFor } from "./feed";
+import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
 import { NotificationsBell, type InboxActions } from "./NotificationsBell";
 
 export type { CockpitView } from "./NavRail";
@@ -35,8 +37,10 @@ export function Header(props: {
   connection?: LiveConnection;
   /** The inbox behind the bell; absent, the bar has no bell (static tests). */
   inbox?: InboxActions;
+  /** The issues button and its hand-off pane; absent, the bar has no button. */
+  issues?: IssuesActions;
 }): ReactElement {
-  const { orgs, selectedOrg, onSelectOrg, needByOrg, statusError, connection, inbox } = props;
+  const { orgs, selectedOrg, onSelectOrg, needByOrg, statusError, connection, inbox, issues } = props;
   const running = runningOrgs(orgs, selectedOrg);
 
   return (
@@ -87,12 +91,9 @@ export function Header(props: {
           );
         })}
       </div>
-      {inbox && (
-        <>
-          {running.length > 0 && <span aria-hidden="true" className="h-5 w-px shrink-0 bg-border" />}
-          <NotificationsBell {...inbox} />
-        </>
-      )}
+      {(issues || inbox) && running.length > 0 && <span aria-hidden="true" className="h-5 w-px shrink-0 bg-border" />}
+      {issues && <IssuesButton {...issues} />}
+      {inbox && <NotificationsBell {...inbox} />}
     </header>
   );
 }
