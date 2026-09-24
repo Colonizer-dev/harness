@@ -223,7 +223,7 @@ export function chartRuns(values: (number | null)[], max: number, topPad = 2): C
       return;
     }
     run.push({
-      x: ((i + 0.5) / n) * 100,
+      x: colX(i, n),
       y: chartY(v, max, topPad),
     });
   });
@@ -239,7 +239,7 @@ export function joinedPoints(values: (number | null)[], max: number, topPad = 2)
   const n = values.length;
   values.forEach((v, i) => {
     if (v == null || !Number.isFinite(v)) return;
-    pts.push({ x: ((i + 0.5) / n) * 100, y: chartY(v, max, topPad) });
+    pts.push({ x: colX(i, n), y: chartY(v, max, topPad) });
   });
   return pts;
 }
@@ -467,4 +467,11 @@ export function providerSnapshots(from: readonly ModelProviderStatus[] | null | 
     failures: Math.round((p.requests * (p.failure_pct ?? 0)) / 100),
     avgLatencyMs: p.avg_latency_ms > 0 ? p.avg_latency_ms : null,
   }));
+}
+
+/** Where day `i` of `n` sits across a chart, in percent: edge to edge, so the first day is on the
+ *  left edge and the last on the right edge rather than half a column in from each. A single day
+ *  sits in the middle. */
+export function colX(i: number, n: number): number {
+  return n <= 1 ? 50 : (i / (n - 1)) * 100;
 }

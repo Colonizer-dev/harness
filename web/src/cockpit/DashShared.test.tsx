@@ -334,8 +334,8 @@ describe("chartRuns / monotonePath", () => {
     const runs = chartRuns([1, 2, 5, 9], 9);
     expect(runs).toHaveLength(1);
     const d = monotonePath(runs[0]);
-    expect(d.startsWith("M12.5,89.1")).toBe(true);
-    expect(d.endsWith("87.5,2")).toBe(true);
+    expect(d.startsWith("M0,89.1")).toBe(true);
+    expect(d.endsWith("100,2")).toBe(true);
   });
   it("never overshoots monotone data", () => {
     const runs = chartRuns([1, 2, 5, 9], 9);

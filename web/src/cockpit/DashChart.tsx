@@ -14,7 +14,7 @@ import { Avatar, initialOf } from "../components/Avatar";
 import { SESSION_STATUS, isLive, orgOf, type Tone } from "../components/ui";
 import { sessionCost } from "../spend";
 import type { Session } from "../types";
-import { monotonePath, orgColorFor, RANGES, type ChartPoint, type RangeDays } from "./dash";
+import { colX, monotonePath, orgColorFor, RANGES, type ChartPoint, type RangeDays } from "./dash";
 import { LiveCost, TweenedValue } from "./Live";
 
 /** A section: the 14px heading with its faint meta, an optional right slot, and the body. */
@@ -204,7 +204,7 @@ export function niceStep(x: number): number {
 /** Stacked area geometry, in viewBox units: per series its top line and closed band, plus the
  *  column tops the hover dots sit on. Exported for the tests. */
 export function stackAreas(series: AreaSeries[], n: number, max: number): Array<{ line: string; area: string; tops: ChartPoint[] }> {
-  const X = (i: number) => ((i + 0.5) / n) * 100;
+  const X = (i: number) => colX(i, n);
   const Y = (v: number) => Math.max(0, Math.min(100, 100 - (v / max) * 100));
   const acc = Array<number>(n).fill(0);
   return series.map((s) => {
@@ -262,7 +262,7 @@ export function AreaChart({
   const step = niceStep(top / 4);
   const max = step * 4;
   const geo = stackAreas(series, n, max);
-  const X = (i: number) => ((i + 0.5) / n) * 100;
+  const X = (i: number) => colX(i, n);
   const hv = hover != null && hover < n ? hover : null;
   const fmtY = formatY ?? ((v: number) => String(Math.round(v)));
   const every = Math.ceil(n / 6);
@@ -345,16 +345,19 @@ export function AreaChart({
                 </polyline>
               </svg>
             )}
-            <div className="absolute inset-0 flex">
+            <div className="absolute inset-0">
               {Array.from({ length: n }, (_, i) => (
                 <div
                   key={i}
+                  // Each day's hover band runs from the midpoint with its left neighbour to the one on
+                  // its right, so the edge days get half bands that end at the chart's edges.
+                  style={hoverBand(i, n)}
                   tabIndex={0}
                   aria-label={`${labels[i] ?? ""}: ${series.map((s) => `${s.label} ${format(s.values[i] ?? 0)}`).join(", ")}`}
                   onMouseEnter={() => setHover(i)}
                   onFocus={() => setHover(i)}
                   onBlur={() => setHover(null)}
-                  className="h-full flex-1 focus-visible:outline-none"
+                  className="absolute inset-y-0 focus-visible:outline-none"
                 />
               ))}
             </div>
@@ -401,7 +404,11 @@ export function AreaChart({
           <div aria-hidden="true" className="relative mt-2 h-[18px] font-mono text-[11px] text-faint">
             {axis.map((label, i) =>
               i % every === 0 ? (
-                <span key={i} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${X(i)}%` }}>
+                <span
+                  key={i}
+                  className={`absolute whitespace-nowrap ${i === 0 ? "" : i === n - 1 ? "-translate-x-full" : "-translate-x-1/2"}`}
+                  style={{ left: `${X(i)}%` }}
+                >
                   {label}
                 </span>
               ) : null,
@@ -843,4 +850,13 @@ export function OrgTile({ org, avatar, size = 22 }: { org: string; avatar?: stri
       }
     />
   );
+}
+
+/** The hover band for day `i` of `n`, as absolute left/width percentages (see `colX`). */
+function hoverBand(i: number, n: number): { left: string; width: string } {
+  if (n <= 1) return { left: "0%", width: "100%" };
+  const half = 50 / (n - 1);
+  const left = Math.max(0, colX(i, n) - half);
+  const right = Math.min(100, colX(i, n) + half);
+  return { left: `${left}%`, width: `${right - left}%` };
 }
