@@ -175,6 +175,103 @@ be a surprise. When the host stops a colony, the only stop it decides on its own
 microVM is torn down, the status goes to `stopped` with the reason in the colony log, and the worktree is
 kept: Resume continues once the limit is raised, queued if the parallel limit is full.
 
+## Configuration: refuse loudly, never degrade silently
+
+Every user-facing setting validates where it is set, and every refusal names the setting, the
+offending value and the way out: `unknown model tier "soon"; use low, medium or high`, not
+"invalid tier". The alternative — accepting the bytes and reading them as a default — turns a typo
+into behaviour that looks like a decision, and the operator learns of it from a colony that runs
+wrong instead of from an error pointing at the field. So a fallback to a default is allowed only
+where it is documented per setting with the reason (the list below), and "warn and continue" needs
+the same justification.
+
+Capability-gated features — cache TTL, effort, tool availability, the model-specific fields a
+provider may not take — check support at configure or launch time, and either adapt loudly or
+refuse. Adapting loudly is the cache-TTL keep/strip decided at provider save (issue #305): the
+provider carries `normalize_cache_ttl`, and the gateway's rewrite is logged with the count of blocks
+it changed, so the downgrade is in the log, never only in the behaviour.
+
+Closed vocabularies the host decides are refused by name, listing what does exist: an unknown
+skillset name, an unknown model tier, a `<provider>/` model prefix no configured provider owns
+(issue #366 — the runner would only warn and send those requests to Anthropic), an unknown tool in
+the runner's delegation gate. The one warn-and-continue is in the guest, where refusing would leave
+no colony at all: the runner's router drops a malformed `COLONIZER_MODEL_ROUTES` entry with a
+warning and keeps the rest.
+
+Shadowing is stated precedence plus a configure-time log naming the loser: an org's `stack` wins
+over the global preset (stated under Per-colony limits), and a local plugin copy wins over the
+vendored one — logged when the skillset is saved and again at each colony boot that loads it.
+
+### Where garbage is caught
+
+| Boundary | Validator | Garbage-in test |
+| --- | --- | --- |
+| Module settings save | `modules::update` → `validate_settings` | `a_save_refuses_an_unknown_setting_by_name_but_keeps_stored_ones`, `settings_validation_names_unknown_keys_enums_and_types`, `an_enum_refusal_names_the_options` |
+| Provider save | `providers::put` | `a_put_over_a_duplicated_id_is_refused_naming_it`, `prices_must_be_amounts_never_negatives_or_infinities` |
+| Org save | `orgs::put` → `orgs::validate` | `org_settings_are_validated` |
+| Notify, voice, telemetry | notify and voice are module kinds, so the module-settings save validates them; telemetry's PUT is a typed `enabled` bool | — |
+| `modules.json` load | `ModulesConfig::load`: damaged file moved aside, sticky `LoadDamage` alert (issue #408) | `a_damaged_modules_json_is_moved_aside_with_an_alert_rather_than_overwritten` |
+| `providers.json`, `orgs.json` load | `App::read_config_loud`: defaults plus alert, saves refuse to overwrite | `a_duplicated_load_keeps_the_first_entry_and_names_the_loser`, `a_put_over_a_damaged_orgs_json_is_refused_and_leaves_the_bytes_alone` |
+| `claude-accounts.json` load | `claude_accounts::load_meta`: logs and reads empty; writers refuse (409) | `a_corrupt_record_reads_as_empty_and_refuses_to_be_overwritten` |
+| `colonizer.toml` load | `FileConfig::load`: logs file, error and fix, continues with defaults | `load_reads_colonizer_toml_from_the_config_dir` |
+| `COLONIZER_GATEWAY_BIND` | `Settings::parse_gateway_bind` refuses startup (issue #406) | `gateway_bind_defaults_unset_parses_an_ip_port_and_refuses_everything_else` |
+| Colony launch | `sessions::create`: unknown tier, a model naming no configured provider, an uninstalled agent module, missing Claude credentials | none yet (follow-up) |
+| Spawn | the boot refuses an unrouted `<provider>/` model setting (`ColonyRoutes::unrouted_provider`); the runner's router warns about malformed routes | `unrouted_providers_are_reported_with_the_value_and_prefix`; `router.test.mjs` |
+
+### Documented fallbacks
+
+The deliberate degradations, each with its reason:
+
+- An unknown sandbox `preset` id contributes no defaults, so a hand-edited `modules.json` still
+  boots on its explicit fields instead of failing the launch (presets.rs,
+  `an_unknown_preset_degrades_instead_of_failing`). An image the `images.lock` pin does not know
+  boots as the bare tag rather than not at all — a colony that cannot boot is worse than one booting
+  unpinned (`an_unpinned_image_degrades_to_the_bare_reference`).
+- The token savers — `rtk`, Headroom, caveman — warn and continue when the install lacks the piece
+  they need: saving tokens is never the reason a colony doesn't start (sessions.rs).
+- A module-settings save lets a stored key the schema no longer declares pass through. The Settings
+  UI saves back everything `modules.json` holds, and a provider switch keeps the previous provider's
+  keys, so refusing them would lock the user out of saving until the file was hand-edited
+  (`modules.rs`, `validate_settings`).
+- A `colonizer.toml` that will not parse logs its name, the error and the fix, and continues with
+  defaults: it is read per commit and per finding at runtime (`findings.rs`, `github.rs`), paths
+  that cannot refuse, and there is no startup caller that could.
+- A `claude-accounts.json` that will not parse reads as empty on the launch path, which cannot fail;
+  the writers refuse to save over it (409), so the defaults never replace the operator's bytes.
+- Duplicate provider ids in a hand-edited `providers.json`: the first entry wins, the loser is named
+  in a storage alert and a log — the alert slot is shared with the strict read's file-damage alerts,
+  which take precedence, so the duplicate warning yields rather than hiding them — and a PUT that
+  would save over the shadow is refused.
+
+### The audit
+
+What the rule found, setting by setting — the table reviewers check:
+
+| Setting | Silent behaviour before | Status |
+| --- | --- | --- |
+| Unknown module-setting key on save | dropped, so the typo read as the default | fixed: refused, naming the known settings |
+| Enum refusal | "must be one of the listed options" | fixed: names them |
+| Corrupt `colonizer.toml` | a bare "using defaults" | fixed: names file, error, fix |
+| Corrupt `claude-accounts.json` | silently reset the default-account choice | fixed: logged, and saves refuse the overwrite |
+| Local plugin shadowing vendored | no configure-time log | fixed: logged naming both paths at skillset save (colony boot already logged it) |
+| Duplicate provider ids | first wins, silently | fixed: load warning and alert naming the id; PUT refuses |
+| Wrong-typed stored module settings | read as `0` / `""` (`max_parallel` of `"eight"` reads as 1) | filed |
+| Unknown provider for a non-agent module kind | empty schema, so boot fails in `msb` with an empty image | filed |
+| Bare typo'd model ids | pass org/module save and boot; `summary_model` skips even the prefix check (absent from `MODEL_VARS`) | filed |
+
+The filed refusals will read:
+
+- `modules.json: sandbox.max_parallel is "eight" but max_parallel is a number; using the default of 3
+  until it is fixed (edit modules.json or re-save the module in Settings)`
+- `modules.json: sandbox provider "nonexistent" is not installed (installed: microsandbox); colonies
+  cannot boot — set sandbox.provider to a listed provider in Settings → Modules`
+- `org model override "claude-opus-4-999" has no provider prefix and is not a known Claude alias; it
+  will be sent to Anthropic as-is. Use "provider/model" …`
+
+Two gaps are known and not yet filed: the range and type refusals in `validate_settings` say "out of
+range" / "wrong type" without the min, max or expected type, and the launch refusals for an unknown
+tier or a bad model override have no direct unit test.
+
 ## Mesh design
 
 - Headscale listens on `127.0.0.1`; VMs reach it as `http://host.microsandbox.internal:<port>`
