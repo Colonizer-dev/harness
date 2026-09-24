@@ -29,6 +29,70 @@ use std::{
 };
 use tokio::process::Command;
 
+/// How long one conditional `gh api` request may take.
+const GH_GET_LIMIT: Duration = Duration::from_secs(30);
+
+/// `gh api <path>` as a conditional request. The last 200's body is kept in `App::http_cache` with
+/// its ETag / Last-Modified; the next request sends `If-None-Match` / `If-Modified-Since`, and a
+/// 304 — which GitHub does not count against the rate limit — answers with the kept body. Returns
+/// the status (304 when the kept body was reused) and the body; a 202/204 (GitHub still computing)
+/// comes back as is and is never kept.
+pub async fn gh_get(app: &App, path: &str, accept: Option<&str>) -> Result<(u16, String)> {
+    let key = format!("gh GET {path} {}", accept.unwrap_or_default());
+    let stored = app.http_cache.load(&key);
+    let mut args = vec!["api".to_string(), "-i".into(), path.to_string()];
+    if let Some(accept) = accept {
+        args.extend(["-H".into(), format!("Accept: {accept}")]);
+    }
+    for (name, value) in stored.iter().flat_map(crate::cache_store::conditional_headers) {
+        args.extend(["-H".into(), format!("{name}: {value}")]);
+    }
+    let (stdout, stderr) = crate::util::exec_capture(GH_GET_LIMIT, &mut app.gh(&args)).await?;
+    let res = crate::cache_store::parse_gh_include(&stdout).ok_or_else(|| anyhow!("`gh api {path}` failed: {stderr}"))?;
+    let status = res.status;
+    let (body, keep) = crate::cache_store::settle(&key, stored, res).with_context(|| format!("gh api {path}"))?;
+    if let Some(entry) = keep
+        && let Err(e) = app.http_cache.store(&entry)
+    {
+        eprintln!("gh api {path}: could not keep the response: {e:#}");
+    }
+    Ok((status, body))
+}
+
+/// [`gh_get`] parsed as JSON; an empty body (202, 204) reads as `Null`.
+pub async fn gh_get_json(app: &App, path: &str) -> Result<Value> {
+    let (_, body) = gh_get(app, path, None).await?;
+    if body.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// A paginated `gh api --paginate <path> --jq <jq>` listing, fetched in full only when its first
+/// page changed: page one is asked conditionally, and while it answers 304 the last full listing is
+/// reused — for at most `max_reuse`, since a change past page one leaves page one's ETag alone.
+pub async fn gh_list(app: &App, path: &str, jq: &str, limit: Duration, max_reuse: Duration) -> Result<String> {
+    let key = format!("gh LIST {path} {jq}");
+    let stored = app.http_cache.load(&key);
+    let probe = gh_get(app, path, None).await;
+    if let (Some(entry), Ok((304, _))) = (&stored, &probe) {
+        let age = crate::cache_store::now_ms().saturating_sub(entry.fetched_at);
+        if age < max_reuse.as_millis() as u64
+            && let Some(listing) = entry.value.as_str()
+        {
+            return Ok(listing.to_string());
+        }
+    }
+    let started = crate::cache_store::now_ms();
+    let listing = exec_within(limit, &mut app.gh(["api", "--paginate", path, "--jq", jq])).await?;
+    let mut entry = crate::cache_store::DiskEntry::new(key, Value::String(listing.clone()));
+    entry.fetched_at = started;
+    if let Err(e) = app.http_cache.store(&entry) {
+        eprintln!("gh api {path}: could not keep the listing: {e:#}");
+    }
+    Ok(listing)
+}
+
 impl App {
     pub fn github_token_file(&self) -> PathBuf {
         self.cfg.config_dir.join("github-token")
@@ -1873,13 +1937,15 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
 }
 
 async fn fetch_repos(app: &Shared) -> anyhow::Result<Vec<Value>> {
-    let out = exec(&mut app.gh([
-        "api",
-        "--paginate",
+    // Page one is asked conditionally: while it is unchanged, so is the listing (a push moves the
+    // repository to the top of it), and the full paginated fetch is skipped.
+    let out = gh_list(
+        app,
         "/user/repos?per_page=100&sort=pushed",
-        "--jq",
         ".[] | {full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}",
-    ]))
+        Duration::from_secs(120),
+        Duration::from_secs(15 * 60),
+    )
     .await?;
     let repos: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let owners = repos
@@ -1920,15 +1986,12 @@ pub async fn refresh_orgs(app: &App) {
     if !orgs_refresh_due(*refreshed, *app.orgs_failed_at.lock().await, Instant::now()) {
         return;
     }
-    let out = match exec_within(
+    let out = match gh_list(
+        app,
+        "/user/orgs?per_page=100",
+        ".[] | {login, avatar_url, description}",
         ORGS_FETCH_LIMIT,
-        &mut app.gh([
-            "api",
-            "--paginate",
-            "/user/orgs?per_page=100",
-            "--jq",
-            ".[] | {login, avatar_url, description}",
-        ]),
+        Duration::from_secs(30 * 60),
     )
     .await
     {

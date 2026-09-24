@@ -278,6 +278,15 @@ const GUIDES: Record<string, Guide> = {
       { icon: "eye", label: "You review" },
     ],
   },
+  desktop: {
+    icon: "mothership",
+    blurb: "The cockpit in its own window, and the mothership already running when you log in.",
+    flow: [
+      { icon: "user", label: "Login" },
+      { icon: "mothership", label: "Mothership" },
+      { icon: "ant", label: "Colonies" },
+    ],
+  },
   notifications: {
     icon: "bell",
     blurb: "Tells you when a colony needs an answer.",

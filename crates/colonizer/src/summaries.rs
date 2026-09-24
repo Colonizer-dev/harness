@@ -1,7 +1,8 @@
 //! One-line task summaries: a cheap model reads a colony's issue (or its instructions) and writes
 //! the task as one plain sentence, so the cockpit can say what a colony is doing where it otherwise
 //! shows "open session" or a long issue title. Written once after launch, again from the pull
-//! request when it opens, and backfilled at startup for live colonies that have none.
+//! request when it opens, and backfilled at startup for colonies that have none — live ones first, then
+//! the most recently updated ended ones, so the Overview's history reads as summaries too.
 //!
 //! Only the task text leaves the host — the issue title and body, the instructions, or the pull
 //! request's title and body — never a secret, a path on the host, or colony output. A failure
@@ -35,11 +36,12 @@ const INPUT_LIMIT: usize = 6 * 1024;
 /// The longest summary kept.
 pub const SUMMARY_LIMIT: usize = 120;
 /// A summary request never outlasts this; the cockpit falls back to the title meanwhile.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounded `gh` reads of the issue or pull request body.
 const GH_TIMEOUT: Duration = Duration::from_secs(15);
-/// How many live colonies one start backfills, and how many at once.
-const BACKFILL_CAP: usize = 50;
+/// How many colonies one start backfills (live first, then the most recent ended ones), and how
+/// many at once.
+const BACKFILL_CAP: usize = 200;
 const BACKFILL_PARALLEL: usize = 2;
 
 /// Set once the first failure is logged, so a missing credential or an unreachable API does not
@@ -174,6 +176,28 @@ async fn settings(app: &Shared) -> (bool, Option<Route>) {
     (true, choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key))
 }
 
+/// The cheap model the install would write summaries with, whether or not summaries are switched
+/// on: the default for anything else that wants a quick, inexpensive answer (the cockpit's chat).
+pub async fn cheap_route(app: &Shared) -> Option<Route> {
+    let modules = app.modules.read().await.clone();
+    let (summary_model, candidates) = match modules.get("agent") {
+        Some(choice) => {
+            let schema = modules::schema_for("agent", &choice.provider, &app.agents);
+            let candidates = ["subagent_model", "model_low", "background_model"].map(|k| setting_str(choice, &schema, k));
+            (setting_str(choice, &schema, "summary_model"), candidates.to_vec())
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let providers = app.providers();
+    let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+    let has_anthropic = providers.iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    let has_api_key = app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some());
+    let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key)
+}
+
 /// Asks for a summary of `input` along `route`, bounded by [`REQUEST_TIMEOUT`].
 async fn ask(app: &Shared, route: &Route, input: &str) -> Result<String, String> {
     match route {
@@ -207,6 +231,91 @@ async fn ask_with_api_key(key: &str, model: &str, input: &str) -> Result<String,
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(REQUEST_TIMEOUT)
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("could not build an HTTP client: {e}"))?;
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let status = response.status();
+    let answer: Value = response.json().await.map_err(|e| format!("unreadable answer: {e}"))?;
+    if !status.is_success() {
+        let message = answer["error"]["message"].as_str().unwrap_or("no message");
+        return Err(format!("Anthropic answered {status}: {message}"));
+    }
+    Ok(answer["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The model route the summaries use, whether or not summaries are switched on: for other
+/// quick answers (the Code page's "Answer here"). Never the Claude subscription token.
+async fn route_only(app: &Shared) -> Option<Route> {
+    let modules = app.modules.read().await.clone();
+    let (summary_model, candidates) = match modules.get("agent") {
+        Some(choice) => {
+            let schema = modules::schema_for("agent", &choice.provider, &app.agents);
+            let candidates = ["subagent_model", "model_low", "background_model"].map(|k| setting_str(choice, &schema, k));
+            (setting_str(choice, &schema, "summary_model"), candidates.to_vec())
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let providers = app.providers();
+    let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+    let has_anthropic = providers.iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    let has_api_key = app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some());
+    let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key)
+}
+
+/// A free-form answer to `prompt` from the cheap summary model, with the model it came from. The
+/// prompt carries its own instructions; bounded to a minute.
+pub async fn ask_freeform(app: &Shared, prompt: &str) -> Result<(String, String), String> {
+    let route = route_only(app)
+        .await
+        .ok_or("no model for quick answers: set summary_model or a provider key in Settings → Agent")?;
+    let model = match &route {
+        Route::Provider(m) | Route::ApiKey(m) => m.clone(),
+    };
+    let answer = match &route {
+        Route::Provider(m) => {
+            match tokio::time::timeout(Duration::from_secs(60), crate::autonomy::ask_model(app, m, prompt)).await {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => return Err(format!("{e:#}")),
+                Err(_) => return Err(format!("{m} did not answer within 60s")),
+            }
+        }
+        Route::ApiKey(m) => {
+            let key = app
+                .claude_cred()
+                .and_then(|c| api_key_of(&c.value).map(str::to_string))
+                .ok_or("no Anthropic API key")?;
+            ask_freeform_with_api_key(&key, m, prompt).await?
+        }
+    };
+    Ok((answer, model))
+}
+
+async fn ask_freeform_with_api_key(key: &str, model: &str, prompt: &str) -> Result<String, String> {
+    let body = json!({
+        "model": crate::providers::api_model(model),
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("could not build an HTTP client: {e}"))?;
@@ -332,21 +441,21 @@ fn live(status: SessionStatus) -> bool {
     )
 }
 
-/// At startup: summarizes up to [`BACKFILL_CAP`] live colonies that have none, [`BACKFILL_PARALLEL`]
-/// at a time.
+/// At startup: summarizes up to [`BACKFILL_CAP`] colonies that have none — live ones first, then the
+/// most recently updated ended ones — [`BACKFILL_PARALLEL`] at a time.
 pub async fn backfill(app: Shared) {
     if !matches!(settings(&app).await, (true, Some(_))) {
         return;
     }
-    let ids: Vec<String> = app
+    let mut missing: Vec<(bool, chrono::DateTime<chrono::Utc>, String)> = app
         .sessions
         .read()
         .await
         .iter()
-        .filter(|s| s.summary.is_none() && live(s.status))
-        .map(|s| s.id.clone())
-        .take(BACKFILL_CAP)
+        .filter(|s| s.summary.is_none())
+        .map(|s| (live(s.status), s.updated_at, s.id.clone()))
         .collect();
+    let ids = backfill_order(&mut missing);
     let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(BACKFILL_PARALLEL));
     let mut tasks = Vec::new();
     for id in ids {
@@ -361,6 +470,29 @@ pub async fn backfill(app: Shared) {
     }
     for task in tasks {
         let _ = task.await;
+    }
+}
+
+/// The backfill order: live colonies first, then the rest, each newest first; capped.
+fn backfill_order(missing: &mut [(bool, chrono::DateTime<chrono::Utc>, String)]) -> Vec<String> {
+    missing.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    missing.iter().take(BACKFILL_CAP).map(|(_, _, id)| id.clone()).collect()
+}
+
+#[cfg(test)]
+mod backfill_order_tests {
+    use super::*;
+
+    #[test]
+    fn live_first_then_the_newest_ended_ones() {
+        let t = |h: i64| chrono::Utc::now() - chrono::Duration::hours(h);
+        let mut m = vec![
+            (false, t(1), "ended-new".into()),
+            (true, t(5), "live-old".into()),
+            (false, t(9), "ended-old".into()),
+            (true, t(2), "live-new".into()),
+        ];
+        assert_eq!(backfill_order(&mut m), vec!["live-new", "live-old", "ended-new", "ended-old"]);
     }
 }
 

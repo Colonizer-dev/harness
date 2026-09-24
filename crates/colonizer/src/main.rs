@@ -11,11 +11,16 @@ mod auth;
 mod authority;
 mod autonomy;
 mod burn_down;
+mod cache_store;
+mod chat;
+mod chat_images;
 mod claims;
 mod claude_accounts;
 mod claude_login;
+mod code;
 mod colony_secrets;
 mod config;
+mod deps;
 mod diagnosis;
 mod events;
 mod exec_bits;
@@ -24,10 +29,14 @@ mod findings;
 mod fleet;
 mod gateway;
 mod github;
+mod graft;
 mod headroom;
 mod hunters;
+mod img_proxy;
 mod jev;
 mod lifecycle;
+mod login_item;
+mod loops;
 mod maps;
 mod mem0;
 mod memory;
@@ -52,6 +61,7 @@ mod restack;
 mod routing;
 mod runtime;
 mod sandbox;
+mod schedule;
 mod secrets;
 mod sessions;
 mod spend;
@@ -66,6 +76,7 @@ mod update;
 mod usage;
 mod util;
 mod validation;
+mod verify;
 mod version;
 mod voice;
 mod watchdog;
@@ -150,6 +161,8 @@ pub struct App {
     pub agent_problems: Vec<String>,
     pub sessions: RwLock<Vec<Session>>,
     pub redteam: redteam::RedTeamStore,
+    /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
+    pub loops: loops::LoopStore,
     session_persist: Mutex<()>,
     /// Serialises the read-modify-write of `orgs.json` and `providers.json` (`orgs::put`,
     /// `providers::put`/`delete`), of `known-orgs.json` (`orgs::record_known_sightings`, which
@@ -188,6 +201,11 @@ pub struct App {
     /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
     /// `gh` or a disk walk: see [`cached_answer`].
     pub answer_cache: AnswerCache,
+    /// Response bodies kept with their ETag / Last-Modified, so a refresh re-asks GitHub and the
+    /// registries conditionally and a 304 reuses the body (`<data_dir>/cache/http`).
+    pub http_cache: cache_store::DiskCache,
+    /// Avatars fetched by `/api/img` (`<data_dir>/cache/img`).
+    pub img_cache: cache_store::DiskCache,
     /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
     /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
@@ -230,6 +248,8 @@ pub struct App {
     pub pull: Mutex<sandbox::PullStatus>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<headroom::Status>,
+    /// The graft skillset download (graft.rs), for Settings.
+    pub graft: Mutex<graft::Status>,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: telemetry::Telemetry,
     pub updates: version::Updates,
@@ -935,6 +955,12 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
         }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
+    // The installable-app files carry no secrets, and browsers fetch the manifest without the
+    // cookie: they load before sign-in, so the locked page still installs and shows its icon.
+    if req.method() == Method::GET && is_public_app_file(&path) {
+        req.extensions_mut().insert(auth::Authenticated(false));
+        return next.run(req).await;
+    }
     if req.method() == Method::GET
         && let Some(token) = auth::query_token(req.uri().query())
         && auth::tokens_match(&token, &app.api_token)
@@ -953,6 +979,42 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
+}
+
+/// The PWA files served before sign-in: the manifest, the service worker, its routing script, the
+/// offline page and the icons. Nothing under `/assets` or `/api`.
+fn is_public_app_file(path: &str) -> bool {
+    matches!(path, "/manifest.webmanifest" | "/sw.js" | "/sw-routes.js" | "/offline.html")
+        || (path.starts_with("/icons/") && !path.contains("..") && path.len() < 64)
+}
+
+/// `GET /api/login-item`: whether the mothership starts at login.
+async fn login_item_status(State(app): State<Shared>) -> ApiResult<login_item::Status> {
+    let data_dir = app.cfg.data_dir.clone();
+    let status = tokio::task::spawn_blocking(move || login_item::status(&data_dir))
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+    Ok(Json(status))
+}
+
+#[derive(Deserialize)]
+struct LoginItemRequest {
+    enabled: bool,
+}
+
+/// `POST /api/login-item {enabled}`: the Settings switch; the same code as `colonizer login-item`.
+async fn login_item_set(State(app): State<Shared>, Json(req): Json<LoginItemRequest>) -> ApiResult<login_item::Status> {
+    let data_dir = app.cfg.data_dir.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        if req.enabled {
+            login_item::enable(&data_dir)
+        } else {
+            login_item::disable(&data_dir)
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("{e}"))??;
+    Ok(Json(status))
 }
 
 async fn shutdown_signal() {
@@ -1120,12 +1182,14 @@ const USAGE: &str = "colonizer — turn a task into a pull request; see https://
 
 usage: colonizer
        colonizer version | update | open
+       colonizer login-item enable|disable|status
        colonizer telemetry show|on|off
 
   (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
   version         print what this build is, and whether it is a release (also --version, -V)
   update [--force]  install the newest release against a running mothership and restart into it (refuses a development build, or one newer than the latest release, unless --force)
   open            print the cockpit sign-in link and open it in a browser
+  login-item enable|disable|status  start the mothership at login (macOS LaunchAgent, Linux systemd user unit); disable never stops a running one
   telemetry show  print the exact anonymous usage batch that would be sent
   telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
   telemetry off   record no to anonymous usage reporting
@@ -1144,6 +1208,7 @@ enum Args {
     Version,
     Update { force: bool },
     Open,
+    LoginItem(String),
     TelemetryShow,
     TelemetrySet(bool),
 }
@@ -1167,6 +1232,15 @@ impl Args {
                 Some(other) => return Err(format!("unknown argument: {other}")),
             },
             "open" => Self::Open,
+            "login-item" => {
+                let action = iter
+                    .next()
+                    .ok_or_else(|| "login-item needs a command: enable, disable or status".to_string())?;
+                match action.as_str() {
+                    "enable" | "disable" | "status" => Self::LoginItem(action),
+                    other => return Err(format!("unknown login-item command: {other}")),
+                }
+            }
             "telemetry" => {
                 let sub = iter
                     .next()
@@ -1196,6 +1270,10 @@ impl Args {
                 Ok(())
             }
             Self::Update { force } => update::command(force).await,
+            Self::LoginItem(action) => {
+                let cfg = Settings::from_env()?;
+                login_item::command(&action, &cfg.data_dir)
+            }
             // Reprints the sign-in link (startup prints it too) and opens it the same way.
             Self::Open => {
                 let cfg = Settings::from_env()?;
@@ -1240,6 +1318,21 @@ async fn main() -> ExitCode {
 /// background loops.
 async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
+    // The port first, before anything touches colonies: a second mothership (one started at login
+    // while another runs by hand, or the reverse) must stop here, not after running recovery,
+    // backfills or reaping against the same data directory.
+    let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("{}", login_item::already_running_message(&cfg.bind));
+            // Under launchd/systemd a clean exit keeps the agent from restarting it in a loop.
+            if login_item::started_as_login_item() {
+                std::process::exit(0);
+            }
+            bail!("{} is already in use", cfg.bind);
+        }
+        Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
+    };
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
@@ -1286,6 +1379,7 @@ async fn serve() -> Result<()> {
         agent_problems,
         sessions: RwLock::new(sessions),
         redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
+        loops: loops::LoopStore::new(&cfg.config_dir),
         session_persist: Mutex::new(()),
         config_write: Mutex::new(()),
         config_damage: std::sync::Mutex::new(None),
@@ -1300,7 +1394,9 @@ async fn serve() -> Result<()> {
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
         gateway: gateway::Gateway::new(&cfg.data_dir)?,
         repo_owners: RwLock::new(BTreeSet::new()),
-        answer_cache: AnswerCache::default(),
+        answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
+        http_cache: cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), cache_store::HTTP_MAX_BYTES),
+        img_cache: cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), cache_store::IMG_MAX_BYTES),
         new_orgs: RwLock::new(BTreeMap::new()),
         org_descriptions: RwLock::new(BTreeMap::new()),
         orgs_refreshed: Mutex::new(None),
@@ -1314,6 +1410,7 @@ async fn serve() -> Result<()> {
         fleet_cache: fleet::FleetCache::new(),
         pull: Mutex::new(Default::default()),
         headroom: Mutex::new(Default::default()),
+        graft: Mutex::new(Default::default()),
         telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
         updates: version::Updates::new(&cfg.config_dir)?,
         updater: update::Updater::new(),
@@ -1325,6 +1422,7 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/api/status", get(status))
+        .route("/api/login-item", get(login_item_status).post(login_item_set))
         .route("/api/hosts", get(fleet::list_hosts_handler))
         .route("/api/modules", get(modules::list))
         .route("/api/modules/{kind}", put(modules::update))
@@ -1353,6 +1451,8 @@ async fn serve() -> Result<()> {
         .route("/api/sandbox/pull", post(sandbox::pull_configured).get(sandbox::pull_status))
         .route("/api/headroom", get(headroom::status))
         .route("/api/headroom/download", post(headroom::download))
+        .route("/api/plugins/graft", get(graft::status))
+        .route("/api/plugins/graft/download", post(graft::download))
         .route("/api/hunters/{id}/install", post(hunters::install_handler))
         .route("/api/hunters/{id}/probe", get(hunters::probe_handler))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
@@ -1384,14 +1484,63 @@ async fn serve() -> Result<()> {
             "/api/voice/transcribe",
             post(voice::transcribe).layer(DefaultBodyLimit::max(voice::MAX_BYTES + 1)),
         )
+        .route("/api/chat", get(chat::list).post(chat::create))
+        .route("/api/chat/models", get(chat::models))
+        .route(
+            "/api/chat/attachments",
+            post(chat_images::upload).layer(DefaultBodyLimit::max(chat_images::UPLOAD_BODY_LIMIT)),
+        )
+        .route("/api/chat/attachments/{sha}", get(chat_images::serve))
+        .route("/api/chat/prefs", get(chat::prefs))
+        .route("/api/chat/prefs/personas/{id}", put(chat::put_persona))
+        .route("/api/chat/prefs/feedback/{message}", put(chat::put_feedback))
+        .route("/api/chat/{id}", get(chat::get).patch(chat::patch).delete(chat::delete))
+        .route(
+            "/api/chat/{id}/messages",
+            post(chat::send).layer(DefaultBodyLimit::max(chat::BODY_LIMIT)),
+        )
+        .route(
+            "/api/chat/{id}/compare",
+            post(chat::compare).layer(DefaultBodyLimit::max(chat::BODY_LIMIT)),
+        )
+        .route("/api/chat/{id}/pick", post(chat::pick))
+        .route("/api/chat/{id}/fork", post(chat::fork))
+        .route("/api/chat/{id}/title", post(chat::retitle))
+        .route("/api/chat/{id}/export", get(chat::export))
+        .route("/api/chat/{id}/issue", post(chat::file_issue))
         .route("/api/repos", get(github::list_repos))
+        .route("/api/img", get(img_proxy::image))
         .route("/api/maps/{owner}/{name}", get(maps::get).post(maps::create))
         .route("/api/maps/{owner}/{name}/files", get(maps::files))
         .route("/api/maps/{owner}/{name}/file", get(maps::file))
         .route("/api/touched", get(maps::touched))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
+        .route("/api/repos/{owner}/{name}/published", get(deps::repo_published))
+        .route("/api/repos/{owner}/{name}/dependencies", get(deps::repo_dependencies))
+        .route("/api/repos/{owner}/{name}/supply-chain", get(deps::repo_supply_chain))
+        .route("/api/orgs/{org}/packages/published", get(deps::org_published))
+        .route("/api/orgs/{org}/packages/dependencies", get(deps::org_dependencies))
+        .route("/api/orgs/{org}/packages/supply-chain", get(deps::org_supply_chain))
         .route("/api/repos/{owner}/{name}/meta", get(repo_meta::meta))
+        .route("/api/repos/{owner}/{name}/loc", get(code::loc))
+        .route("/api/repos/{owner}/{name}/coverage", get(code::coverage))
+        .route("/api/repos/{owner}/{name}/git-summary", get(code::git_summary))
+        .route("/api/repos/{owner}/{name}/branches", get(code::branches))
+        .route("/api/repos/{owner}/{name}/tree", get(code::tree))
+        .route("/api/repos/{owner}/{name}/blob", get(code::blob))
+        .route("/api/repos/{owner}/{name}/history", get(code::history))
+        .route("/api/repos/{owner}/{name}/blame", get(code::blame))
+        .route("/api/repos/{owner}/{name}/edits", post(code::edits))
+        .route("/api/repos/{owner}/{name}/ask", post(code::ask))
+        .route(
+            "/api/repos/{owner}/{name}/drafts",
+            get(code::list_drafts).put(code::put_draft).delete(code::delete_draft),
+        )
+        .route(
+            "/api/editor/settings",
+            get(code::editor_settings).put(code::put_editor_settings),
+        )
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))
@@ -1407,6 +1556,10 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
         .route("/api/sessions/{id}/findings", get(findings::list))
         .route("/api/findings", get(findings::list_all))
+        .route("/api/loops", get(loops::list).post(loops::create))
+        .route("/api/loops/{id}", put(loops::update).delete(loops::delete))
+        .route("/api/loops/{id}/run-now", post(loops::run_now))
+        .route("/api/loops/{id}/runs", get(loops::runs))
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
         .route("/api/redteam/runs/{id}/stop", post(redteam::stop))
@@ -1425,9 +1578,6 @@ async fn serve() -> Result<()> {
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app.clone());
 
-    let listener = tokio::net::TcpListener::bind(&app.cfg.bind)
-        .await
-        .with_context(|| format!("cannot bind {}", app.cfg.bind))?;
     println!("colonizer listening on http://{}", app.cfg.bind);
     println!("data: {}", app.cfg.data_dir.display());
     match &app.cfg.assets {
@@ -1487,6 +1637,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { redteam::run(redteam).await });
     let schedules = app.clone();
     tokio::spawn(async move { redteam::run_schedules(schedules).await });
+    let loop_ticks = app.clone();
+    tokio::spawn(async move { loops::run(loop_ticks).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
     tokio::spawn(reclaim::run(app.clone()));
@@ -1601,6 +1753,7 @@ pub(crate) mod tests {
             agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
             redteam: redteam::RedTeamStore::new(&root.join("data"), &root.join("config")),
+            loops: loops::LoopStore::new(&root.join("config")),
             session_persist: Mutex::new(()),
             config_write: Mutex::new(()),
             config_damage: std::sync::Mutex::new(None),
@@ -1626,13 +1779,16 @@ pub(crate) mod tests {
             updater: update::Updater::new(),
             gateway: gateway::Gateway::new(&root.join("data")).unwrap(),
             repo_owners: RwLock::new(BTreeSet::new()),
-            answer_cache: AnswerCache::default(),
+            answer_cache: AnswerCache::persistent(root.join("data/cache/answers")),
+            http_cache: cache_store::DiskCache::new(root.join("data/cache/http"), cache_store::HTTP_MAX_BYTES),
+            img_cache: cache_store::DiskCache::new(root.join("data/cache/img"), cache_store::IMG_MAX_BYTES),
             new_orgs: RwLock::new(BTreeMap::new()),
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_refreshed: Mutex::new(None),
             orgs_failed_at: Mutex::new(None),
             pull: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
+            graft: Mutex::new(Default::default()),
             telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
             stream: stream::Hub::new(),
         })
@@ -1648,6 +1804,11 @@ pub(crate) mod tests {
     fn update_takes_an_optional_force_flag_and_nothing_else() {
         let parse = |args: &[&str]| Args::parse(args.iter().map(ToString::to_string).collect());
         assert!(matches!(parse(&["update"]), Ok(Some(Args::Update { force: false }))));
+        assert!(matches!(parse(&["login-item", "enable"]), Ok(Some(Args::LoginItem(a))) if a == "enable"));
+        assert!(matches!(parse(&["login-item", "status"]), Ok(Some(Args::LoginItem(a))) if a == "status"));
+        assert!(parse(&["login-item"]).is_err());
+        assert!(parse(&["login-item", "start"]).is_err());
+        assert!(parse(&["login-item", "enable", "extra"]).is_err());
         assert!(matches!(
             parse(&["update", "--force"]),
             Ok(Some(Args::Update { force: true }))
@@ -1735,6 +1896,58 @@ pub(crate) mod tests {
             (header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==".to_string()),
         ]
         .to_vec()
+    }
+
+    #[tokio::test]
+    async fn the_app_files_load_before_sign_in_and_nothing_else_does() {
+        let root = temp_root();
+        let app = test_app(&root);
+        for uri in [
+            "/manifest.webmanifest",
+            "/sw.js",
+            "/sw-routes.js",
+            "/offline.html",
+            "/icons/icon-192.png",
+        ] {
+            let res = auth_router(&app).oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{uri} is public");
+        }
+        for uri in ["/", "/assets/index-abc.js", "/icons/../api/sessions", "/sw.js.map"] {
+            let res = auth_router(&app).oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri} stays behind sign-in");
+        }
+        let res = auth_router(&app)
+            .oneshot(guarded(Method::POST, "/sw.js", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "only GET is public");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_manifest_and_service_worker_are_served_with_their_types() {
+        let root = temp_root();
+        let assets = root.join("assets-dir");
+        std::fs::create_dir_all(assets.join("web")).unwrap();
+        std::fs::write(assets.join("web/index.html"), "<html></html>").unwrap();
+        std::fs::write(assets.join("web/manifest.webmanifest"), "{}").unwrap();
+        std::fs::write(assets.join("web/sw.js"), "self;").unwrap();
+        let app = test_app(&root);
+        let router: Router<()> = web_router(Some(&assets)).with_state(app.clone());
+        for (uri, want) in [
+            ("/manifest.webmanifest", "application/manifest+json"),
+            ("/sw.js", "javascript"),
+        ] {
+            let res = router.clone().oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            let ct = res
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(ct.contains(want), "{uri}: {ct}");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2577,10 +2790,179 @@ pub(crate) mod tests {
 }
 
 /// Cached answers for slow read-only endpoints, by key: when each was computed, and the value.
+/// With a disk layer (`<data_dir>/cache/answers`, see [`cache_store`]) answers outlive a restart:
+/// a key missing from memory is looked up on disk once, served at the age it has there, and
+/// refreshed behind the answer when that age is past the key's freshness — so a restarted
+/// mothership answers from what it last knew instead of "scanning".
 #[derive(Default)]
 pub struct AnswerCache {
-    entries: std::sync::Mutex<HashMap<String, (Instant, serde_json::Value)>>,
+    entries: std::sync::Mutex<HashMap<String, CachedAnswer>>,
     refreshing: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Keys already looked up on disk this run, found or not, so a miss costs one read.
+    probed: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// When a scope was last invalidated, in ms since the epoch: `repo:<owner/name>`, `org:<org>`
+    /// or `key:<key>` (see [`answer_scopes`]). An answer computed before its scope's mark is stale
+    /// whatever its age.
+    marks: std::sync::Mutex<HashMap<String, u64>>,
+    disk: Option<cache_store::DiskCache>,
+}
+
+#[derive(Clone)]
+struct CachedAnswer {
+    /// When it was stored, on this run's clock; `None` for an answer read from disk that is older
+    /// than this process's clock can say (it is stale).
+    at: Option<Instant>,
+    /// When its computation started, on the wall clock (ms): what the cockpit shows as "updated",
+    /// and what invalidation marks are compared with.
+    fetched_at: u64,
+    value: serde_json::Value,
+}
+
+/// Keys that must not outlive the process: markers of work done this run and live measurements.
+fn answer_persists(key: &str) -> bool {
+    !(key.starts_with("code-fetch:") || key.starts_with("repo-meta-pending:") || key == "storage")
+}
+
+/// The org-wide aggregates, recomputed (from per-repository parts) when one repository changes.
+const ORG_AGGREGATES: &[&str] = &["deps-published:", "deps-dependencies:", "deps-supply:"];
+
+/// The invalidation scopes a key belongs to: itself, the repository its first segment names
+/// (`packages:owner/name`, `code-loc:owner/name:sha`, `deps-scan:owner/name@sha`), the org of an
+/// org aggregate, and `repos` for the repository list.
+pub fn answer_scopes(key: &str) -> Vec<String> {
+    let mut out = vec![format!("key:{key}")];
+    if let Some((_, rest)) = key.split_once(':') {
+        let first = rest.split([':', '@']).next().unwrap_or(rest);
+        if first.contains('/') {
+            out.push(format!("repo:{first}"));
+        } else if ORG_AGGREGATES.iter().any(|p| key.starts_with(p)) {
+            out.push(format!("org:{first}"));
+        }
+    }
+    out
+}
+
+impl AnswerCache {
+    /// A cache that keeps its answers under `dir` as well as in memory.
+    pub fn persistent(dir: impl Into<PathBuf>) -> Self {
+        AnswerCache {
+            disk: Some(cache_store::DiskCache::new(dir, cache_store::ANSWERS_MAX_BYTES)),
+            ..Default::default()
+        }
+    }
+
+    /// The cached answer for `key`: from memory, else (once per run) from disk.
+    fn lookup(&self, key: &str) -> Option<CachedAnswer> {
+        if let Some(hit) = self.entries.lock().unwrap_or_else(|p| p.into_inner()).get(key) {
+            return Some(hit.clone());
+        }
+        let disk = self.disk.as_ref()?;
+        if !answer_persists(key) || !self.probed.lock().unwrap_or_else(|p| p.into_inner()).insert(key.to_string()) {
+            return None;
+        }
+        let entry = disk.load(key)?;
+        let age = Duration::from_millis(cache_store::now_ms().saturating_sub(entry.fetched_at));
+        let hit = CachedAnswer {
+            at: Instant::now().checked_sub(age),
+            fetched_at: entry.fetched_at,
+            value: entry.value,
+        };
+        // A computation that finished meanwhile is newer than the disk: keep it.
+        Some(
+            self.entries
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entry(key.to_string())
+                .or_insert(hit)
+                .clone(),
+        )
+    }
+
+    fn is_fresh(&self, key: &str, hit: &CachedAnswer, fresh: Duration) -> bool {
+        if !hit.at.is_some_and(|at| at.elapsed() < fresh) {
+            return false;
+        }
+        let marks = self.marks.lock().unwrap_or_else(|p| p.into_inner());
+        !answer_scopes(key)
+            .iter()
+            .any(|s| marks.get(s).is_some_and(|m| *m >= hit.fetched_at))
+    }
+
+    /// Stores an answer whose computation started at `started` (ms), in memory and on disk.
+    fn put(&self, key: &str, started: u64, value: serde_json::Value) {
+        if let Some(disk) = self.disk.as_ref().filter(|_| answer_persists(key)) {
+            let mut entry = cache_store::DiskEntry::new(key, value.clone());
+            entry.fetched_at = started;
+            if let Err(e) = disk.store(&entry) {
+                eprintln!("{key}: could not keep the answer on disk: {e:#}");
+            }
+        }
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            key.to_string(),
+            CachedAnswer {
+                at: Some(Instant::now()),
+                fetched_at: started,
+                value,
+            },
+        );
+    }
+
+    /// Claims the one background refresh a key may have running; false when one already is.
+    fn begin_refresh(&self, key: &str) -> bool {
+        self.refreshing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.to_string())
+    }
+
+    fn end_refresh(&self, key: &str) {
+        self.refreshing.lock().unwrap_or_else(|p| p.into_inner()).remove(key);
+    }
+
+    /// Whether a refresh of `key` is running.
+    pub fn is_refreshing(&self, key: &str) -> bool {
+        self.refreshing.lock().unwrap_or_else(|p| p.into_inner()).contains(key)
+    }
+
+    /// When the cached answer for `key` was computed (ms since the epoch), if one is cached.
+    pub fn fetched_at(&self, key: &str) -> Option<u64> {
+        self.lookup(key).map(|hit| hit.fetched_at)
+    }
+
+    /// A cached answer still within `fresh` (and not invalidated since), without computing anything.
+    pub fn peek(&self, key: &str, fresh: Duration) -> Option<serde_json::Value> {
+        self.lookup(key)
+            .filter(|hit| self.is_fresh(key, hit, fresh))
+            .map(|hit| hit.value)
+    }
+
+    /// Stores a value computed outside [`cached_answer`] (one batch answering many keys).
+    pub fn insert(&self, key: &str, started: u64, value: serde_json::Value) {
+        self.put(key, started, value);
+    }
+
+    /// Marks every answer in `scope` (see [`answer_scopes`]) stale: the next read serves it and
+    /// refreshes it behind the answer.
+    pub fn invalidate(&self, scope: impl Into<String>) {
+        self.marks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(scope.into(), cache_store::now_ms());
+    }
+
+    /// Drops a key from memory, so the next read waits for a new computation.
+    fn forget(&self, key: &str) {
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).remove(key);
+    }
+
+    /// [`Self::forget`] for every key starting with `prefix` (in-memory only keys, such as
+    /// `code-fetch:<org>/`, are the ones this is for).
+    pub fn forget_prefix(&self, prefix: &str) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|key, _| !key.starts_with(prefix));
+    }
 }
 
 /// Stale-while-revalidate for a slow read-only answer. Within `fresh` the cached value is returned
@@ -2595,18 +2977,95 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(key)
-            .is_some_and(|(_, v)| v.as_bool() == Some(true))
+            .is_some_and(|hit| hit.value.as_bool() == Some(true))
     }
 
     /// Sets or clears a boolean mark next to the cached answers — e.g. "this answer was made while
-    /// GitHub was still computing, refresh it soon".
+    /// GitHub was still computing, refresh it soon". Marks live in memory only.
     pub fn answer_cache_mark(&self, key: &str, on: bool) {
-        self.answer_cache
-            .entries
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(key.to_string(), (Instant::now(), serde_json::Value::Bool(on)));
+        self.answer_cache.entries.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            key.to_string(),
+            CachedAnswer {
+                at: Some(Instant::now()),
+                fetched_at: cache_store::now_ms(),
+                value: serde_json::Value::Bool(on),
+            },
+        );
     }
+
+    /// A colony pushed to, opened or merged a pull request on `repo`: its answers, its org's
+    /// aggregates and the repository list go stale, and the next read of the clone fetches again.
+    /// Nothing else is touched — other repositories keep their answers, and the org aggregates
+    /// recompute from per-repository scans that are reused until a branch moves.
+    pub fn invalidate_repo(&self, repo: &str) {
+        self.answer_cache.forget(&format!("code-fetch:{repo}"));
+        self.answer_cache.invalidate(format!("repo:{repo}"));
+        if let Some((owner, _)) = repo.split_once('/') {
+            self.answer_cache.invalidate(format!("org:{owner}"));
+        }
+        self.answer_cache.invalidate("key:repos");
+    }
+}
+
+/// `value` with when it was computed and whether a refresh is running, for the cockpit's
+/// "updated 5m ago · refreshing": `cached_at` (RFC 3339) and `refreshing` on an object answer.
+pub fn with_cache_info(app: &App, key: &str, mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(at) = app
+            .answer_cache
+            .fetched_at(key)
+            .and_then(|ms| DateTime::<Utc>::from_timestamp_millis(ms as i64))
+        {
+            obj.insert("cached_at".into(), json!(at));
+        }
+        obj.insert("refreshing".into(), json!(app.answer_cache.is_refreshing(key)));
+    }
+    value
+}
+
+/// Starts one background computation of `key` unless one is running; its result is stored.
+fn spawn_refresh<F, Fut>(app: &Shared, key: String, compute: F, log_errors: bool)
+where
+    F: Fn(Shared) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+{
+    if !app.answer_cache.begin_refresh(&key) {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        let started = cache_store::now_ms();
+        match compute(app.clone()).await {
+            Ok(value) => app.answer_cache.put(&key, started, value),
+            Err(e) if log_errors => eprintln!("{key}: {e:#}"),
+            Err(_) => {}
+        }
+        app.answer_cache.end_refresh(&key);
+    });
+}
+
+/// [`cached_answer`] for an answer too slow to wait for on a request (it may clone repositories
+/// and call registries): a cached value is returned as `Some` (and refreshed behind the answer once
+/// stale); a miss starts the first computation in the background and returns `None` at once, so the
+/// caller can answer "scanning" and be asked again. A failed computation leaves nothing cached, so
+/// the next ask starts it again.
+pub fn cached_answer_nowait<F, Fut>(
+    app: &Shared,
+    key: impl Into<String>,
+    fresh: Duration,
+    compute: F,
+) -> Option<serde_json::Value>
+where
+    F: Fn(Shared) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+{
+    let key: String = key.into();
+    let hit = app.answer_cache.lookup(&key);
+    let stale = hit.as_ref().is_none_or(|h| !app.answer_cache.is_fresh(&key, h, fresh));
+    if stale {
+        spawn_refresh(app, key, compute, true);
+    }
+    hit.map(|h| h.value)
 }
 
 pub async fn cached_answer<F, Fut>(
@@ -2620,53 +3079,169 @@ where
     Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
 {
     let key: String = key.into();
-    let hit = app
-        .answer_cache
-        .entries
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&key)
-        .cloned();
-    if let Some((at, value)) = hit {
-        if at.elapsed() >= fresh {
-            let first = app
-                .answer_cache
-                .refreshing
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(key.clone());
-            if first {
-                let app = app.clone();
-                tokio::spawn(async move {
-                    if let Ok(value) = compute(app.clone()).await {
-                        app.answer_cache
-                            .entries
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .insert(key.clone(), (Instant::now(), value));
-                    }
-                    app.answer_cache
-                        .refreshing
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .remove(&key);
-                });
-            }
+    if let Some(hit) = app.answer_cache.lookup(&key) {
+        if !app.answer_cache.is_fresh(&key, &hit, fresh) {
+            spawn_refresh(app, key, compute, false);
         }
-        return Ok(value);
+        return Ok(hit.value);
     }
+    let started = cache_store::now_ms();
     let value = compute(app.clone()).await?;
-    app.answer_cache
-        .entries
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(key, (Instant::now(), value.clone()));
+    app.answer_cache.put(&key, started, value.clone());
     Ok(value)
 }
 
 #[cfg(test)]
 mod answer_cache_tests {
     use super::*;
+
+    #[test]
+    fn keys_belong_to_their_repository_and_org_aggregates_to_their_org() {
+        assert_eq!(
+            answer_scopes("packages:acme/web"),
+            vec!["key:packages:acme/web", "repo:acme/web"]
+        );
+        assert_eq!(
+            answer_scopes("code-loc:acme/web:abc123"),
+            vec!["key:code-loc:acme/web:abc123", "repo:acme/web"]
+        );
+        assert_eq!(
+            answer_scopes("deps-scan:acme/web@abc123:v1"),
+            vec!["key:deps-scan:acme/web@abc123:v1", "repo:acme/web"]
+        );
+        assert_eq!(answer_scopes("deps-supply:acme"), vec!["key:deps-supply:acme", "org:acme"]);
+        assert_eq!(
+            answer_scopes("registry:npm:@acme/sdk:true"),
+            vec!["key:registry:npm:@acme/sdk:true"]
+        );
+        assert_eq!(answer_scopes("repos"), vec!["key:repos"]);
+    }
+
+    #[test]
+    fn answers_survive_a_restart_at_the_age_they_had() {
+        let dir = std::env::temp_dir().join(format!("colonizer-answers-{}", util::short_id()));
+        let two_hours_ago = cache_store::now_ms() - 2 * 3600 * 1000;
+        let before = AnswerCache::persistent(&dir);
+        before.put("deps-supply:acme", two_hours_ago, json!({"risks": []}));
+        before.put("code-fetch:acme/web", two_hours_ago, json!(true));
+        let after = AnswerCache::persistent(&dir);
+        let hit = after.lookup("deps-supply:acme").expect("read back from disk");
+        assert_eq!(hit.value, json!({"risks": []}));
+        assert_eq!(hit.fetched_at, two_hours_ago);
+        assert!(
+            !after.is_fresh("deps-supply:acme", &hit, Duration::from_secs(3600)),
+            "an hour's freshness has passed"
+        );
+        assert!(after.is_fresh("deps-supply:acme", &hit, Duration::from_secs(3 * 3600)));
+        assert!(after.lookup("code-fetch:acme/web").is_none(), "run-only markers are not kept");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_mothership_serves_the_kept_answer_and_refreshes_it_behind() {
+        let root = std::env::temp_dir().join(format!("colonizer-answers-restart-{}", util::short_id()));
+        let app = tests::test_app(&root);
+        let disk = cache_store::DiskCache::new(root.join("data/cache/answers"), cache_store::ANSWERS_MAX_BYTES);
+        let mut kept = cache_store::DiskEntry::new("deps-supply:acme", json!({"v": "old"}));
+        kept.fetched_at = cache_store::now_ms() - 2 * 3600 * 1000;
+        disk.store(&kept).unwrap();
+        let compute = |_app: Shared| async move { Ok(json!({"v": "new"})) };
+        assert_eq!(
+            cached_answer_nowait(&app, "deps-supply:acme", Duration::from_secs(3600), compute),
+            Some(json!({"v": "old"})),
+            "no scanning: the kept answer comes back at once"
+        );
+        for _ in 0..100 {
+            if cached_answer_nowait(&app, "deps-supply:acme", Duration::from_secs(3600), compute) == Some(json!({"v": "new"})) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            cached_answer_nowait(&app, "deps-supply:acme", Duration::from_secs(3600), compute),
+            Some(json!({"v": "new"}))
+        );
+        assert_eq!(
+            disk.load("deps-supply:acme").unwrap().value,
+            json!({"v": "new"}),
+            "and the refresh is kept too"
+        );
+        let annotated = with_cache_info(&app, "deps-supply:acme", json!({"v": "new"}));
+        assert!(annotated["cached_at"].is_string());
+        assert_eq!(annotated["refreshing"], json!(false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_push_to_one_repository_stales_only_its_answers_and_its_orgs_aggregates() {
+        let root = std::env::temp_dir().join(format!("colonizer-invalidate-{}", util::short_id()));
+        let app = tests::test_app(&root);
+        let started = cache_store::now_ms() - 10;
+        let keys = [
+            "packages:acme/web",
+            "deps-scan:acme/web@abc:v1",
+            "deps-supply:acme",
+            "repos",
+            "packages:acme/api",
+            "deps-supply:other",
+            "registry:npm:left-pad:true",
+        ];
+        for key in keys {
+            app.answer_cache.put(key, started, json!(key));
+        }
+        app.answer_cache_mark("code-fetch:acme/web", true);
+        app.invalidate_repo("acme/web");
+        let fresh = |key: &str| {
+            let hit = app.answer_cache.lookup(key).unwrap();
+            app.answer_cache.is_fresh(key, &hit, Duration::from_secs(3600))
+        };
+        for stale in &keys[..4] {
+            assert!(!fresh(stale), "{stale} should be stale");
+        }
+        for kept in &keys[4..] {
+            assert!(fresh(kept), "{kept} should be untouched");
+        }
+        assert!(
+            !app.answer_cache_has("code-fetch:acme/web"),
+            "the next read fetches the clone"
+        );
+        // An answer computed after the push is fresh again.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        app.answer_cache.put("packages:acme/web", cache_store::now_ms(), json!("new"));
+        assert!(fresh("packages:acme/web"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_nowait_answer_starts_in_the_background_and_is_served_once_ready() {
+        let root = std::env::temp_dir().join(format!("colonizer-nowait-{}", util::short_id()));
+        let app = tests::test_app(&root);
+        let compute = |_app: Shared| async move { Ok(serde_json::json!("scanned")) };
+        assert_eq!(
+            cached_answer_nowait(&app, "scan", Duration::from_secs(60), compute),
+            None,
+            "a miss answers at once"
+        );
+        for _ in 0..100 {
+            if cached_answer_nowait(&app, "scan", Duration::from_secs(60), compute).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            cached_answer_nowait(&app, "scan", Duration::from_secs(60), compute),
+            Some(serde_json::json!("scanned"))
+        );
+        let failing = |_app: Shared| async move { Err::<serde_json::Value, _>(anyhow::anyhow!("offline")) };
+        assert_eq!(cached_answer_nowait(&app, "broken", Duration::from_secs(60), failing), None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            cached_answer_nowait(&app, "broken", Duration::from_secs(60), failing),
+            None,
+            "a failure caches nothing"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]

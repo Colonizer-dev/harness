@@ -297,6 +297,25 @@ pub(crate) async fn record_routed(app: &App, org: &str, cost: f64) {
     append_row(app, row).await;
 }
 
+/// One chat reply's tokens and cost (the cockpit's model chat, no colony): a `usage` row under the
+/// conversation's workspace, or the `chat` pseudo-org when it has none, so it lands in spend history
+/// beside the colonies' own. `cost` is `None` when the model's prices are unknown.
+pub(crate) async fn record_chat_usage(
+    app: &App,
+    org: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: Option<f64>,
+) {
+    let mut row = base_row("usage", org);
+    row.model = Some(model.to_string());
+    row.input_tokens = input_tokens;
+    row.output_tokens = output_tokens;
+    row.cost_usd = cost;
+    append_row(app, row).await;
+}
+
 /// What one turn's `model_usage` gained over the last cumulative, for the journal to record as
 /// increments. `old_*` is a session's record before the turn, `new_*` after; a session that has
 /// never reported something starts from zero, and a cost that only comes down again (a cheaper

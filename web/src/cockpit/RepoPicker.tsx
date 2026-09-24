@@ -33,6 +33,19 @@ const LANGUAGE_COLORS: Record<string, string> = {
   MDX: "#fcb32c",
   Dockerfile: "#384d54",
   HCL: "#844FBA",
+  TSX: "#3178c6",
+  ReScript: "#ed5051",
+  SCSS: "#c6538c",
+  Markdown: "#083fa1",
+  YAML: "#cb171e",
+  TOML: "#9c4221",
+  JSON: "#292929",
+  SQL: "#e38c00",
+  Makefile: "#427819",
+  Lua: "#000080",
+  PHP: "#4F5D95",
+  Elixir: "#6e4a7e",
+  Zig: "#ec915c",
 };
 
 /** A language's GitHub colour; grey for any the table does not name. */

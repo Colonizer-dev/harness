@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatComparison, outsideTask, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { formatComparison, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const TASKS = JSON.parse(readFileSync(join(ROOT, 'scripts/bench/tasks.json'), 'utf8'));
@@ -80,6 +80,19 @@ test('a comparison shows what changed, per task', () => {
   assert.match(text, /no pull request \(failed\)/);
 });
 
+test('a --timeout that would wait for NaN fails at parse, before any colony exists', () => {
+  assert.equal(parseArgs(['run', '--timeout', '30']).timeoutMs, 30_000);
+  for (const bad of [[], [''], ['soon'], ['0'], ['-5']]) {
+    assert.throws(() => parseArgs(['run', '--repo', 'o/r', '--timeout', ...bad]), /--timeout needs/);
+  }
+});
+
+test('a flag left dangling for its value fails at parse, with the flag named', () => {
+  for (const flag of ['--repo', '--label', '--only', '--timeout', '--data']) {
+    assert.throws(() => parseArgs(['run', '--repo', 'o/r', flag]), new RegExp(`${flag} needs a value`));
+  }
+});
+
 test('every task names a check that exists, and the fixture is there', () => {
   assert.ok(existsSync(join(ROOT, TASKS.fixture, 'package.json')));
   assert.ok(TASKS.tasks.length >= 3);
@@ -136,4 +149,27 @@ test('routed cost is recorded per task and counted in the run and the comparison
   const text = formatComparison({ label: 'before', results: [old] }, { label: 'after', results: [routed] });
   assert.match(text, /0\.20 → 0\.50 \(\+0\.30\)/);
   assert.match(text, /Cost \$0\.20 → \$0\.50 \(routed \$0\.00 → \$0\.30\)/);
+});
+
+test('the run summary counts clean resolutions, and the gap between the two rates', () => {
+  const row = (passed, clean) => ({ passed, clean, cost_usd: 0, routed_cost_usd: 0, working_ms: 0, questions: 0, tool_errors: 0 });
+  const s = summarizeRun([row(true, true), row(true, false), row(false, true), row(true, null)]);
+  assert.equal(s.clean_resolved, 1);
+  assert.equal(s.hacked_resolved, 1);
+  assert.equal(s.clean_rate, 0.25);
+  assert.equal(s.gap, s.pass_rate - s.clean_rate, 'the gap is resolved minus clean, never folded into the pass rate');
+  const quiet = summarizeRun([row(true, null)]);
+  assert.equal(quiet.clean_rate, null, 'a run with nothing audited has no clean rate, not a zero');
+  assert.equal(quiet.gap, null);
+});
+
+test('a comparison carries the clean verdict per task and the gap per run', () => {
+  const text = formatComparison(
+    { label: 'before', results: [{ id: 'add-helper', passed: true, clean: true }, { id: 'cart-rounding', passed: true }] },
+    { label: 'after', results: [{ id: 'add-helper', passed: true, clean: false }, { id: 'cart-rounding', passed: false, clean: null }] },
+  );
+  assert.match(text, /\| Clean \|/);
+  assert.match(text, /clean → HACKED/);
+  assert.match(text, /– → –/);
+  assert.match(text, /Clean resolved 1\/2 → 0\/2 \(clean rate 50% → 0%, gap 50% → 50%\)/);
 });

@@ -727,11 +727,31 @@ export interface PluginDir {
   commands: number;
 }
 
+/** Where a downloadable skillset is: `local` means the operator's own directory holds its name. */
+export type DownloadState = "idle" | "installed" | "downloading" | "unpacking" | "failed" | "unavailable" | "local";
+
+/** GET /api/plugins/graft, and one entry of GET /api/plugins `downloadable`: a skillset the mothership downloads on request. */
+export interface DownloadableSkillset {
+  name: string;
+  /** The pinned bundle release; null when this build pins none for this machine's architecture. */
+  release: string | null;
+  /** The release on disk when it differs from the pinned one. */
+  installed_release: string | null;
+  state: DownloadState;
+  bytes: number;
+  total: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 /** GET /api/plugins */
 export interface PluginListing {
   /** Where an operator puts their own plugin directories. */
   local_root: string;
   plugins: PluginDir[];
+  /** Skillsets that are downloaded on request; absent on a mothership that offers none. */
+  downloadable?: DownloadableSkillset[];
 }
 
 // ---------------------------------------------------------------------------
@@ -976,7 +996,27 @@ export type AgentEventBody =
   /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
   | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
-  | { type: "finding"; title: string; body: string; evidence: string };
+  | { type: "finding"; title: string; body: string; evidence: string }
+  /**
+   * The mothership's independent verdict on a completion claim (§6.3, Autopilot): tests re-run in a
+   * fresh checkout and the git state read directly, never the agent's own account. Host-generated,
+   * like the finding-chain events, so the runner-event schema does not list it.
+   */
+  | {
+      type: "verification";
+      verdict: "confirmed" | "contradicted" | "unverifiable";
+      by_declaration: boolean;
+      summary: string;
+      contradictions: string[];
+      command: string | null;
+      command_source: "config" | "package.json" | "Cargo.toml" | "Makefile" | null;
+      exit_code: number | null;
+      tests_ms: number | null;
+      commits: number;
+      files_changed: string[];
+      snapshot: string | null;
+      ms: number;
+    };
 
 export type AgentEvent = Sequenced & AgentEventBody;
 
@@ -1132,6 +1172,53 @@ export interface NewRedTeamSchedule {
   enabled?: boolean;
 }
 
+/** When a loop runs, in UTC (loops.rs, schedule.rs). `self_paced`: each run names the next (loop_next), else a day later. */
+export type LoopCadence =
+  | RedTeamCadence
+  | { every: "interval"; minutes: number }
+  | { every: "daily"; hour: number; minute: number }
+  | { every: "self_paced" };
+
+/** A scheduled colony (GET /api/loops). */
+export interface Loop {
+  id: string;
+  name: string;
+  org: string;
+  repo: string;
+  prompt: string;
+  cadence: LoopCadence;
+  tz_offset_minutes: number;
+  model: string | null;
+  subagent_model: string | null;
+  autopilot: boolean;
+  max_runs: number | null;
+  end_at: string | null;
+  enabled: boolean;
+  /** Null once the loop has ended. */
+  next_run_at: string | null;
+  runs: number;
+  last_run: { session: string; at: string } | null;
+  /** The last thing it did or was told: a skip, the colony's chosen next run, why it ended. */
+  last_note: string | null;
+  ended_reason: string | null;
+  created_at: string;
+}
+
+/** POST /api/loops, and PUT /api/loops/{id} (a full replace). */
+export interface NewLoop {
+  name: string;
+  repo: string;
+  prompt: string;
+  cadence: LoopCadence;
+  tz_offset_minutes?: number;
+  model?: string | null;
+  subagent_model?: string | null;
+  autopilot?: boolean;
+  max_runs?: number | null;
+  end_at?: string | null;
+  enabled?: boolean;
+}
+
 /** GET /api/hunters/{id}/probe: whether an external hunter is installed and could run here. */
 export interface HunterProbe {
   manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };
@@ -1280,4 +1367,377 @@ export interface RepoMeta {
   contributors: { login: string; avatar_url: string; contributions: number }[];
   pushed_at: string | null;
   html_url: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// The Code page (code.rs): a repository read from the mothership's bare clone
+// ---------------------------------------------------------------------------
+
+/** GET /api/repos/{o}/{r}/loc: lines of code by language at the default branch. */
+export interface RepoLoc {
+  ref: string;
+  sha: string;
+  total: number;
+  by_language: { name: string; files: number; code: number; blank: number }[];
+}
+
+/** GET /api/repos/{o}/{r}/coverage: line coverage from CI artifacts, or why there is none. */
+export type RepoCoverage =
+  | { measured: true; percent: number; format: string; file: string; artifact: string; run: number; at?: string }
+  | { measured: false; reason: string };
+
+/** GET /api/repos/{o}/{r}/git-summary. */
+export interface RepoGitSummary {
+  repo: string;
+  branches: number;
+  open_prs: number | null;
+  release: { tagName: string; name: string; publishedAt: string } | null;
+  latest_tag: string | null;
+}
+
+export interface RepoBranch {
+  name: string;
+  sha: string;
+  date: string;
+  author: string;
+  message: string;
+  default: boolean;
+  protected: boolean;
+  colony: boolean;
+  ahead: number;
+  behind: number;
+  pr: { number: number; title: string; url: string; isDraft: boolean } | null;
+}
+
+export interface RepoBranches {
+  repo: string;
+  default: string;
+  branches: RepoBranch[];
+}
+
+export interface RepoTree {
+  repo: string;
+  ref: string;
+  sha: string;
+  paths: string[];
+  truncated: boolean;
+}
+
+export interface RepoBlob {
+  path: string;
+  ref: string;
+  sha: string;
+  size: number;
+  binary: boolean;
+  too_large: boolean;
+  text: string | null;
+}
+
+export interface FileCommit {
+  sha: string;
+  author: string;
+  date: string;
+  message: string;
+}
+
+export interface RepoBlame {
+  path: string;
+  ref: string;
+  sha: string;
+  commits: Record<string, { author?: string; time?: number; summary?: string }>;
+  /** Per line (0-based index = line - 1), the commit that last touched it. */
+  lines: string[];
+}
+
+export interface EditsRequest {
+  base?: string;
+  branch: string;
+  message: string;
+  title: string;
+  body: string;
+  files: { path: string; content: string }[];
+}
+
+/** An autosaved edit on the mothership (never on GitHub until a pull request is confirmed). */
+export interface Draft {
+  ref: string;
+  path: string;
+  content: string;
+  base_sha: string;
+  saved_at: string;
+}
+
+/** GET/POST /api/login-item: whether the mothership starts at login (a LaunchAgent or systemd user unit). */
+export interface LoginItemStatus {
+  platform: "macos" | "linux" | "unsupported";
+  installed: boolean;
+  enabled: boolean;
+  pid: number | null;
+  definition: string;
+  binary: string;
+  log: string;
+  note: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Chat: a direct conversation with a model, no colony (GET/POST /api/chat, docs/protocol.md)
+// ---------------------------------------------------------------------------
+
+export interface ChatMeta {
+  id: string;
+  title: string;
+  model: string;
+  system?: string;
+  max_tokens: number;
+  /** The workspace its spend is filed under; absent files it under the `chat` pseudo-org. */
+  workspace?: string;
+  created_at: string;
+  updated_at: string;
+  /** Kept at the top of the list; absent from an older mothership. */
+  pinned?: boolean;
+  /** 0–1; absent leaves it to the provider. */
+  temperature?: number;
+  /** The persona preset the system prompt came from, a label only. */
+  persona?: string;
+  /** The title is still the automatic one; the first reply replaces it with a generated one. */
+  auto_title?: boolean;
+  forked_from?: { chat: string; message: string };
+}
+
+/** What an attachment left on the message it came with: never the content, only what it was. An image
+ * also carries its stored reference, so it can be shown and sent to the model again. */
+export interface ChatAttachmentNote {
+  kind: string;
+  label: string;
+  sha?: string;
+  mime?: string;
+  width?: number;
+  height?: number;
+  bytes?: number;
+}
+
+/** A stored chat image (POST /api/chat/attachments), content-addressed by its sha256. */
+export interface ChatImageRef {
+  sha: string;
+  mime: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/** Persona preset edits and notes on replies, kept on the mothership (GET /api/chat/prefs). */
+export interface ChatPrefs {
+  /** Preset id → the system prompt saved to it. */
+  personas: Record<string, string>;
+  /** Reply message id → the operator's note on it. */
+  feedback: Record<string, string>;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+  model?: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd?: number;
+  stopped: boolean;
+  error?: string;
+  parent_id?: string;
+  first_token_ms?: number;
+  latency_ms?: number;
+  attachments?: ChatAttachmentNote[];
+  /** A compare reply not picked yet; the model's history leaves it out. */
+  candidate?: boolean;
+  lane?: number;
+}
+
+export interface ChatProvider {
+  id: string;
+  name: string;
+  models: string[];
+  preset?: string;
+  wire?: "anthropic" | "openai";
+  has_key?: boolean;
+  pricing?: { input_per_mtok: number; output_per_mtok: number } | null;
+}
+
+export interface ChatModels {
+  /** The cheap default (the summaries' model), or null when none is reachable. */
+  default: string | null;
+  /** Plain Claude models: usable only with an Anthropic API key or an Anthropic provider. */
+  claude: { available: boolean; reason: string | null };
+  providers: ChatProvider[];
+}
+
+/** Something attached to a message (docs/protocol.md, "Chat attachments"). */
+export type ChatAttachment =
+  | { kind: "colony"; id: string }
+  | { kind: "file"; repo: string; path: string; ref?: string }
+  | { kind: "map"; repo: string }
+  | { kind: "map_component"; repo: string; component: string }
+  | { kind: "snippet"; label?: string; text: string }
+  /** A stored image (`sha`), or older clients' inline base64 `data`, which the mothership stores first. */
+  | { kind: "image"; sha: string; name?: string }
+  | { kind: "image"; media_type: string; data: string; name?: string }
+  | { kind: "colonies_today"; org?: string }
+  | { kind: "merged_prs"; org?: string; days?: number };
+
+/** One line of the streamed reply to POST /api/chat/{id}/messages (or /compare, tagged by `lane`). */
+export type ChatStreamEvent = (
+  | { type: "delta"; text: string }
+  | { type: "done"; message: ChatMessage; chat?: ChatMeta }
+  | { type: "error"; message: string; message_record?: ChatMessage }
+) & { lane?: number };
+
+export interface ChatSendRequest {
+  content?: string;
+  regenerate?: boolean;
+  /** Answer with this model once; the conversation keeps its own. */
+  model?: string;
+  context?: { colony?: string; file?: { repo: string; path: string; ref?: string } };
+  attachments?: ChatAttachment[];
+}
+
+export interface ChatCompareRequest {
+  content: string;
+  models: [string, string];
+  attachments?: ChatAttachment[];
+}
+
+export type ChatPatch = Partial<Pick<ChatMeta, "title" | "model" | "system" | "max_tokens" | "workspace" | "pinned" | "persona">> & {
+  /** A negative temperature clears it. */
+  temperature?: number;
+};
+
+// ---------------------------------------------------------------------------
+// Packages (GET /api/orgs/{org}/packages/*): published, dependencies, supply chain
+// ---------------------------------------------------------------------------
+
+/** A scan that has not landed yet: ask again in a few seconds. */
+export interface ScanPending {
+  status: "scanning";
+  message: string;
+}
+
+/** What the mothership adds to an answer served from its cache: when it was computed, and whether
+ *  a refresh is running behind it. */
+export interface CacheInfo {
+  cached_at?: string;
+  refreshing?: boolean;
+}
+
+export type Ecosystem = "npm" | "cargo" | "pypi" | "go" | "dart" | "swift";
+
+export interface ScannedRepo {
+  repo: string;
+  sha?: string;
+  error?: string;
+  lockfiles?: string[];
+  skipped?: string[];
+  defined?: number;
+}
+
+export interface RegistryInfo {
+  latest: string | null;
+  published_at: string | null;
+  created_at?: string | null;
+  downloads: number | null;
+  downloads_period?: string;
+  url: string;
+}
+
+export interface PublishedPackage {
+  ecosystem: Ecosystem;
+  name: string;
+  version: string | null;
+  repo: string;
+  path: string;
+  private: boolean;
+  registry: string | null;
+  status: "published" | "unpublished" | "private";
+  /** The repository's version is ahead of the registry's latest. */
+  unreleased_changes: boolean;
+  published: RegistryInfo | null;
+}
+
+export interface GithubPackage {
+  name: string;
+  type: string;
+  visibility: string;
+  versions: number | null;
+  updated_at: string | null;
+  url: string | null;
+  repo: string | null;
+}
+
+export interface PackagesPublished extends CacheInfo {
+  org: string;
+  scanned_at: string;
+  repos: ScannedRepo[];
+  packages: PublishedPackage[];
+  github_packages: { packages: GithubPackage[]; note: string | null };
+}
+
+export interface Advisory {
+  id: string;
+  summary?: string | null;
+  severity: string;
+  fixed?: string | null;
+  url?: string;
+}
+
+export interface DependencyVersion {
+  version: string;
+  behind: boolean;
+  users: { repo: string; path: string }[];
+  vulns: Advisory[];
+}
+
+export interface Dependency {
+  ecosystem: Ecosystem;
+  name: string;
+  direct: boolean | null;
+  dev: boolean;
+  latest: string | null;
+  outdated: boolean;
+  vulnerable: boolean;
+  drift: boolean;
+  versions: DependencyVersion[];
+}
+
+export interface PackagesDependencies extends CacheInfo {
+  org: string;
+  scanned_at: string;
+  repos: ScannedRepo[];
+  ecosystems: { ecosystem: Ecosystem; direct: number; transitive: number }[];
+  totals: { direct: number; transitive: number; outdated: number; vulnerable: number };
+  packages: Dependency[];
+}
+
+export type RiskSeverity = "critical" | "high" | "moderate" | "low";
+
+export interface SupplyRisk {
+  severity: RiskSeverity;
+  kind: string;
+  ecosystem: Ecosystem;
+  name: string;
+  version: string | null;
+  reason: string;
+  fix: { available: boolean; version?: string | null };
+  url: string;
+  direct: boolean;
+  via: string[];
+  users: { repo: string; path: string }[];
+}
+
+export interface SupplyChain extends CacheInfo {
+  org: string;
+  scanned_at: string;
+  repos: ScannedRepo[];
+  counts: Partial<Record<RiskSeverity, number>>;
+  fixable: number;
+  risks: SupplyRisk[];
+  note: string;
 }

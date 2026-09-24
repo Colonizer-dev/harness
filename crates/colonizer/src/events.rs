@@ -21,7 +21,7 @@ use crate::protocol::{AgentEvent, AgentState};
 use crate::{lifecycle::*, publish::*, queue::*, sessions::*};
 
 #[derive(Debug, PartialEq)]
-enum Autopilot {
+pub(crate) enum Autopilot {
     Publish,
     Wait(&'static str),
     /// Flags the colony for the maintainer.
@@ -57,6 +57,17 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
         Autopilot::Wait("the agent didn't write or update its PR description this turn")
     } else {
         Autopilot::Publish
+    }
+}
+
+/// Issue #328: what autopilot does once a completion claim's verification verdict is in. A
+/// contradicted colony is held for the maintainer exactly as a failed turn is; anything else
+/// publishes as before — an unverifiable claim is not the colony's fault, and holding it would
+/// strand finished work on infra noise.
+pub(crate) fn verdict_step(verdict: &crate::verify::Verdict) -> Autopilot {
+    match verdict {
+        crate::verify::Verdict::Contradicted => Autopilot::Hold("the completion claim was contradicted"),
+        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Unverifiable => Autopilot::Publish,
     }
 }
 
@@ -309,6 +320,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
         }
+        AgentEvent::LoopNext { delay_minutes, reason } => {
+            crate::loops::on_next(app, id, delay_minutes, &reason).await;
+        }
+        AgentEvent::LoopStop { reason } => {
+            crate::loops::on_stop(app, id, &reason).await;
+        }
         AgentEvent::TurnEnd {
             is_error,
             result,
@@ -350,22 +367,26 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                     written
                 };
                 let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
+                let errored = is_error;
+                let open_question = rt.open_question.lock().await.is_some();
+                let step = autopilot_step(errored, interrupted, open_question, pr_written);
                 if s.autopilot && s.status.is_live() {
-                    let errored = is_error;
-                    let open_question = rt.open_question.lock().await.is_some();
-                    match autopilot_step(errored, interrupted, open_question, pr_written) {
+                    match step {
                         // Issue #84: the kill-switch holds the publish without flagging the colony.
                         Autopilot::Publish if crate::authority::external_writes_blocked() => {
                             app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
+                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
                         }
                         Autopilot::Publish => {
                             app.session_log(
                                 id,
                                 "info",
-                                "autopilot: the agent finished and wrote its PR description, publishing".into(),
+                                "autopilot: the agent finished and wrote its PR description; verifying the claim \
+                                 before publishing"
+                                    .into(),
                             )
                             .await;
-                            tokio::spawn(publish_session(app.clone(), id.to_string()));
+                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), true));
                         }
                         Autopilot::Wait(reason) => {
                             app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
@@ -384,6 +405,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                             .await;
                         }
                     }
+                } else if step == Autopilot::Publish && s.status.is_live() {
+                    // Issue #328: autopilot off still verifies and records the claim; publishing stays manual.
+                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
                 }
             }
             // A turn that died on an empty plan parks the colony instead of holding it: the error
@@ -529,8 +553,8 @@ pub(crate) async fn memory_proposal(app: &Shared, id: &str, scope: Option<&str>,
 }
 
 /// Issue #84: what the colony's log says when the write kill-switch holds an effect back.
-const AUTOPILOT_BLOCKED: &str = "autopilot: not publishing, external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS); \
-                                 press Create PR when writes are enabled";
+pub(crate) const AUTOPILOT_BLOCKED: &str = "autopilot: not publishing, external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS); press Create PR when \
+     writes are enabled";
 const FINDING_BLOCKED: &str =
     "ignored a finding: external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS), so no issue is filed";
 
@@ -692,6 +716,18 @@ mod tests {
         assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
         assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
         assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+    }
+
+    /// Issue #328: only a contradicted claim holds — unverifiable is infra noise, not the
+    /// colony's fault, and holding it would strand finished work.
+    #[test]
+    fn only_a_contradicted_claim_holds_the_publish() {
+        assert_eq!(
+            verdict_step(&crate::verify::Verdict::Contradicted),
+            Autopilot::Hold("the completion claim was contradicted")
+        );
+        assert_eq!(verdict_step(&crate::verify::Verdict::Confirmed), Autopilot::Publish);
+        assert_eq!(verdict_step(&crate::verify::Verdict::Unverifiable), Autopilot::Publish);
     }
 
     #[test]

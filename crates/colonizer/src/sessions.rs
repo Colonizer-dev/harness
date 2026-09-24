@@ -343,6 +343,14 @@ pub struct Session {
     /// they already wait on their parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_behind: Option<String>,
+    /// How this colony's completion claims are verified (issue #328): the `verify` configuration
+    /// resolved at launch — `auto` (the default), `none`, or an explicit test command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
+    /// The verdict attached to the colony's last completion claim, and everything behind it.
+    /// `None` until a claim has been verified (verify.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<crate::verify::Verification>,
     pub error: Option<String>,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
     /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
@@ -405,6 +413,11 @@ pub struct Session {
     /// this field existed.
     pub boot_cpus: Option<u64>,
     pub boot_memory: Option<String>,
+    /// The image this colony's microVM booted from, exactly as `msb run` received it: the one a
+    /// verification's fresh-checkout run reuses. `null` on colonies booted before the field
+    /// existed, which fall back to the configured image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_image: Option<String>,
     /// The app directory this colony's mounts came from. An update keeps that
     /// directory until no live colony still names it (`update::sweep_slots`).
     pub app_slot: Option<String>,
@@ -460,6 +473,8 @@ impl Default for Session {
             needs_rebase: false,
             rebase_orphaned: false,
             queued_behind: None,
+            verify: None,
+            verification: None,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -478,6 +493,7 @@ impl Default for Session {
             boot_timing: None,
             boot_cpus: None,
             boot_memory: None,
+            boot_image: None,
             app_slot: None,
             boot_attempt_started_at: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
@@ -520,6 +536,9 @@ pub struct Runtime {
     pub(crate) file_lock: Mutex<()>,
     /// Serialises findings, so the per-colony cap holds when two arrive together.
     pub(crate) findings_lock: Mutex<()>,
+    /// Serialises completion-claim verifications (verify.rs): a second claim that lands mid-run
+    /// queues behind it and then verifies the newer state, never concurrent with it.
+    pub(crate) verify_lock: Mutex<()>,
     pub(crate) events_path: PathBuf,
     pub(crate) logs_path: PathBuf,
     pub activity: Mutex<Activity>,
@@ -655,6 +674,7 @@ impl Runtime {
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
             findings_lock: Mutex::new(()),
+            verify_lock: Mutex::new(()),
             events_path,
             logs_path,
             activity: Mutex::new({
@@ -898,6 +918,10 @@ pub struct NewSession {
     /// Omitted uses the publish module's `autopilot` setting.
     #[serde(default)]
     pub autopilot: Option<bool>,
+    /// How this colony's completion claims are verified: `auto` (the default), `none`, or an
+    /// explicit test command. Omitted uses the publish module's `verify` setting.
+    #[serde(default)]
+    pub verify: Option<String>,
     /// Whether a filed finding from this colony spawns a fix colony; omitted uses the publish
     /// module's `autofix` setting.
     #[serde(default)]
@@ -1196,6 +1220,13 @@ pub(crate) fn autopilot_default(agents: &[AgentModule], modules: &ModulesConfig)
         .unwrap_or(false)
 }
 
+/// How new colonies' completion claims are verified (issue #328): the publish module's `verify`
+/// setting — `auto`, `none`, or an explicit test command.
+pub(crate) fn verify_default(agents: &[AgentModule], modules: &ModulesConfig) -> String {
+    let schema = schema_for("publish", &modules.publish.provider, agents);
+    setting_str(&modules.publish, &schema, "verify")
+}
+
 #[allow(clippy::result_large_err)]
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
@@ -1406,6 +1437,14 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         needs_rebase: false,
         rebase_orphaned: false,
         queued_behind,
+        verify: Some(
+            req.verify
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| verify_default(&app.agents, &modules), str::to_string),
+        ),
+        verification: None,
         error: None,
         cost_usd: None,
         model_usage: None,
@@ -1425,6 +1464,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         boot_timing: None,
         boot_cpus: None,
         boot_memory: None,
+        boot_image: None,
         app_slot: None,
         boot_attempt_started_at: None,
         created_at: now,
@@ -1967,6 +2007,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
     }
+    // A loop's colony gets loop_stop, and loop_next when the loop is self-paced (loops.rs).
+    if let Some(self_paced) = crate::loops::colony_self_paced(app, s.origin.as_deref()).await {
+        runner_env.insert("COLONIZER_LOOP".into(), Value::String("true".into()));
+        runner_env.insert("COLONIZER_LOOP_SELF_PACED".into(), Value::String(self_paced.to_string()));
+    }
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
@@ -2334,6 +2379,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.update_session(id, |x| {
         x.boot_cpus = Some(spec.cpus);
         x.boot_memory = Some(spec.memory.clone());
+        x.boot_image = Some(spec.image.clone());
     })
     .await;
     mark_phase(app, id, &mut timing, "mesh-start").await;
@@ -3265,6 +3311,8 @@ pub(crate) mod tests {
             needs_rebase: false,
             rebase_orphaned: false,
             queued_behind: None,
+            verify: None,
+            verification: None,
             error: None,
             cost_usd: None,
             model_usage: None,
@@ -3283,6 +3331,7 @@ pub(crate) mod tests {
             boot_timing: None,
             boot_cpus: None,
             boot_memory: None,
+            boot_image: None,
             app_slot: None,
             boot_attempt_started_at: None,
             created_at: Utc::now(),
@@ -3366,6 +3415,7 @@ pub(crate) mod tests {
             title: String::new(),
             instructions: String::new(),
             autopilot: None,
+            verify: None,
             autofix: None,
             automerge: None,
             allow_duplicate: false,
@@ -4110,6 +4160,7 @@ pub(crate) mod tests {
                 title: String::new(),
                 instructions: String::new(),
                 autopilot: None,
+                verify: None,
                 autofix: None,
                 automerge: None,
                 allow_duplicate: false,
@@ -4192,6 +4243,7 @@ pub(crate) mod tests {
                 title: String::new(),
                 instructions: String::new(),
                 autopilot: None,
+                verify: None,
                 autofix: None,
                 automerge: None,
                 allow_duplicate: false,
@@ -4314,6 +4366,7 @@ pub(crate) mod tests {
             title: String::new(),
             instructions: String::new(),
             autopilot: None,
+            verify: None,
             autofix: None,
             automerge: None,
             allow_duplicate: false,

@@ -1,0 +1,6 @@
+# The Node.js runtime inside the graft skillset bundle (scripts/graft-bundle/build.sh), one row per guest
+# platform, checksums from that release's SHASUMS256.txt. Not node-guest's Node 24: graft 0.19's native
+# tree-sitter 0.21 core does not compile against Node 24's V8 headers, so the bundle carries Node 22 LTS and
+# its bin/graft wrapper runs graft with it. Same columns as vendor/node.lock.
+node  22.23.2  linux-arm64  runtime  fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8  https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz
+node  22.23.2  linux-x64    runtime  d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307  https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz
