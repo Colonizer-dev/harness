@@ -340,6 +340,14 @@ pub struct Session {
     /// the signals behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_routing: Option<Value>,
+    /// The providers this colony may spend on through the gateway (issue #409): the ids its model
+    /// settings actually route to, as computed at boot. `proxy` refuses a request for any other
+    /// configured provider — providers.json is mothership-wide, and one colony's token must not
+    /// open another colony's provider. Empty for Claude-only colonies. `None` for a session saved
+    /// before the field existed: a colony already running across the upgrade keeps the access it
+    /// booted with, and its next boot derives and enforces the set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_providers: Option<Vec<String>>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
@@ -423,6 +431,7 @@ impl Default for Session {
             model_tier: None,
             claude_account: None,
             model_routing: None,
+            allowed_providers: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
@@ -1322,6 +1331,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         model_tier,
         claude_account: Some(claude_account),
         model_routing: None,
+        // Filled in at boot, once the colony's model settings resolve to actual providers.
+        allowed_providers: None,
         routed_cost_usd: None,
         host_disk_bytes: None,
         cleaned_up: false,
@@ -1809,6 +1820,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         );
     }
     let used = routing.used(&runner_env);
+    // Recorded on the session because the gateway needs it long after boot: every proxied call is
+    // checked against this set (issue #409), so a colony's token opens only these providers.
+    app.update_session(id, |x| {
+        x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect())
+    })
+    .await;
     let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe_cached(app, p))).await;
     for (provider, health) in used.iter().zip(probes) {
         if health["reachable"] != true {
@@ -3008,6 +3025,7 @@ pub(crate) mod tests {
         full.error = Some("boom".into());
         full.cost_usd = Some(1.5);
         full.model_usage = Some(json!({"claude-x": {"input_tokens": 1}}));
+        full.allowed_providers = Some(vec!["acme".into()]);
         full.routed_cost_usd = Some(0.25);
         full.host_disk_bytes = Some(1024);
         full.cleaned_up = true;
@@ -3107,6 +3125,7 @@ pub(crate) mod tests {
             model_tier: None,
             claude_account: None,
             model_routing: None,
+            allowed_providers: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,

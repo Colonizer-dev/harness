@@ -408,7 +408,16 @@ pub async fn enforce_budget(app: &Shared, id: &str) -> bool {
 /// Adds one gateway response's spend to the colony and re-checks its budget. A response with nothing
 /// priced in it (a provider without pricing) changes nothing: its tokens still reach the session through
 /// the runner's per-model usage.
-pub async fn record_routed_usage(app: &Shared, colony: &str, provider: &providers::Provider, usage: providers::Usage) {
+/// `landed` runs inside the same sessions write lock that adds the cost — the gateway hands its
+/// in-flight estimate back there, so budget checks (which read both under the read lock) never see
+/// the cost twice or not at all. A cost that is not recorded drops `landed` unrun.
+pub async fn record_routed_usage(
+    app: &Shared,
+    colony: &str,
+    provider: &providers::Provider,
+    usage: providers::Usage,
+    landed: impl FnOnce() + Send,
+) {
     let cost = provider.cost_usd(usage);
     if cost <= 0.0 {
         return;
@@ -416,6 +425,7 @@ pub async fn record_routed_usage(app: &Shared, colony: &str, provider: &provider
     let Some((session, _)) = app
         .update_session(colony, |x| {
             x.routed_cost_usd = Some(x.routed_cost_usd.unwrap_or_default() + cost);
+            landed();
         })
         .await
     else {
