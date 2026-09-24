@@ -171,13 +171,16 @@ pub enum ClaimKind {
 }
 
 /// A competing remote claim: where it was found and what names it. `host`/`colony` come from
-/// parsing the claim comments, so a branch or PR match usually leaves them unknown.
+/// parsing the claim comments, so a branch or PR match usually leaves them unknown. `merged` says
+/// a PullRequest claim's pull request has landed: open work and landed work block a waiter's turn
+/// differently (see [`claim_wait_conflict`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteClaimInfo {
     pub kind: ClaimKind,
     pub detail: String,
     pub host: Option<String>,
     pub colony: Option<String>,
+    pub merged: bool,
 }
 
 /// The 409 text for a refused launch: the holding host and colony when the claim names them, else
@@ -198,6 +201,34 @@ pub fn remote_conflict_message(info: &RemoteClaimInfo, issue: u64) -> String {
              so starting one here duplicates its work. Pass allow_duplicate to start another anyway."
         ),
     }
+}
+
+/// The colony id a colony's branch name carries: the tail after `colonizer/issue-{N}-`.
+fn branch_colony(branch: &str, issue: u64) -> Option<&str> {
+    branch
+        .strip_prefix(branch_prefix(issue).as_str())
+        .filter(|tail| !tail.is_empty())
+}
+
+/// Issue #321: what stands between a claim_wait waiter whose turn has come and taking the issue
+/// over. `None` promotes it; `Some(reason)` retires it instead, in the words a fresh launch would
+/// have been refused with. A merged pull request on the issue is never tolerated — the work has
+/// landed, and starting would redo it — and neither is a claim another mothership holds; a live
+/// branch, open pull request or stale label of one of `our_colonies` on the issue is, since the
+/// waiter is that colony's successor in its own queue.
+pub fn claim_wait_conflict(info: Option<&RemoteClaimInfo>, issue: u64, our_colonies: &[&str]) -> Option<String> {
+    let info = info?;
+    let merged_pr = info.kind == ClaimKind::PullRequest && info.merged;
+    let ours = info.colony.as_deref().is_some_and(|colony| our_colonies.contains(&colony))
+        || matches!(info.kind, ClaimKind::Branch if branch_colony(&info.detail, issue).is_some_and(|c| our_colonies.contains(&c)));
+    if merged_pr || !ours {
+        return Some(if merged_pr {
+            "the holder's pull request was merged; the issue is done".to_string()
+        } else {
+            remote_conflict_message(info, issue)
+        });
+    }
+    None
 }
 
 /// Whether a launch checks GitHub for a competing claim. `allow_duplicate` skips the remote check
@@ -348,12 +379,13 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
         .iter()
         .map(|(head, state, url)| (head.as_str(), state.as_str(), url.as_str()))
         .collect();
-    if let Some((_, _, url)) = pr_claimed(&pr_refs, issue) {
+    if let Some((_, state, url)) = pr_claimed(&pr_refs, issue) {
         return Ok(Some(RemoteClaimInfo {
             kind: ClaimKind::PullRequest,
             detail: url.to_string(),
             host,
             colony,
+            merged: state.eq_ignore_ascii_case("merged"),
         }));
     }
     // Then a live branch with the colony prefix.
@@ -368,6 +400,7 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
             detail: branch,
             host,
             colony,
+            merged: false,
         }));
     }
     // Then the label itself.
@@ -379,6 +412,7 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
             detail: CLAIM_LABEL.to_string(),
             host,
             colony,
+            merged: false,
         }));
     }
     Ok(None)
@@ -422,14 +456,10 @@ pub async fn publish_claim(app: &App, repo: &str, issue: u64, colony: &str) {
         ]),
     )
     .await;
-    if let Err(e) = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--add-label", CLAIM_LABEL]),
-    )
-    .await
-    {
-        eprintln!("claims: could not add the {CLAIM_LABEL} label to {repo}#{issue} for colony {colony}: {e:#}");
-    }
+    // The comment goes up before the label: a release racing this claim (a waiter taking over
+    // from a holder that just finished, issue #321) re-reads the comments after it removes the
+    // label, so either it sees this claim and puts the label back, or this label lands after
+    // its removal.
     if let Err(e) = exec_within(
         REMOTE_TIMEOUT,
         &mut app.gh(["issue", "comment", number.as_str(), "-R", repo, "--body", body.as_str()]),
@@ -443,6 +473,14 @@ pub async fn publish_claim(app: &App, repo: &str, issue: u64, colony: &str) {
             format!("could not claim #{issue} on GitHub ({e:#}); the local guard still refuses duplicates on this mothership"),
         )
         .await;
+    }
+    if let Err(e) = exec_within(
+        REMOTE_TIMEOUT,
+        &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--add-label", CLAIM_LABEL]),
+    )
+    .await
+    {
+        eprintln!("claims: could not add the {CLAIM_LABEL} label to {repo}#{issue} for colony {colony}: {e:#}");
     }
 }
 
@@ -479,6 +517,31 @@ pub async fn release_claim(app: &App, repo: &str, issue: u64, colony: &str) {
         &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--remove-label", CLAIM_LABEL]),
     )
     .await;
+    // A successor may have claimed the issue while this release ran (issue #321: a waiter takes
+    // over the moment its holder finishes). `publish_claim` comments before it labels, so a
+    // re-read after the removal either sees that claim — and the label goes back — or the
+    // successor's label lands after the removal anyway.
+    let reread = exec_within(
+        REMOTE_TIMEOUT,
+        &mut app.gh(["issue", "view", number.as_str(), "-R", repo, "--json", "comments"]),
+    )
+    .await
+    .map(|out| comment_bodies(&serde_json::from_str(&out).unwrap_or(Value::Null)));
+    if let Ok(bodies) = reread
+        && let Some(successor) = bodies.iter().rev().filter_map(|body| parse_claim(body)).next()
+        && !ours_or_stale(Some(&successor), colony)
+    {
+        let _ = exec_within(
+            REMOTE_TIMEOUT,
+            &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--add-label", CLAIM_LABEL]),
+        )
+        .await;
+        eprintln!(
+            "claims: colony {} claimed {repo}#{issue} while colony {colony} released it; its label stays",
+            successor.colony
+        );
+        return;
+    }
     let host = host_label(app).await;
     let body = format!(
         "Colonizer colony `{colony}` on host `{host}` released issue #{issue}: it finished without a merged pull request, so the issue is free for another colony."
@@ -511,6 +574,149 @@ pub fn spawn_release_if_needed(app: Shared, session: &Session) {
     tokio::spawn(async move {
         release_claim(&app, &repo, issue, &colony).await;
     });
+}
+
+/// A claim this mothership owns that no session of ours holds any more: the mark a boot reconcile
+/// removes. `colony` is the id the claim comment named, so the release stays identity-guarded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrphanedClaim {
+    pub repo: String,
+    pub issue: u64,
+    pub colony: String,
+}
+
+/// Whether a claim's host label is this mothership's. The label is the hostname plus the stable
+/// install id (see `host_label`), so the comparison runs on the id — never on a hostname, which
+/// can be renamed between boots. A bare id matches too, for hosts where no hostname probes.
+fn claim_is_ours(host: &str, our_host_id: &str) -> bool {
+    let host = host.trim();
+    host == our_host_id || host.ends_with(&format!(" ({our_host_id})"))
+}
+
+/// Whether a session of ours still keeps its claim through a restart: it holds the issue, or it
+/// ended in a state whose terminal transition keeps the mark — a merged pull request (the record
+/// of who did the work) or a stopped/failed colony whose pull request is still out. The boot
+/// reconcile only finishes what a terminal transition would have done, never more.
+fn keeps_claim(s: &Session) -> bool {
+    crate::sessions::holds_issue(s) || !should_release(&s.status, s.pr_url.as_deref())
+}
+
+/// The claims in `marks` this mothership should drop: ours by host id, and no longer held — no
+/// session is on that repo+issue under the claim's colony id in a state that holds the issue, so
+/// a live holder keeps its mark through a restart while a stopped or failed one does not (issue
+/// #321). Claims by another host are never in what this returns, whatever the sessions say.
+pub fn orphaned_claims(our_host_id: &str, sessions: &[Session], marks: &[(String, RemoteClaim)]) -> Vec<OrphanedClaim> {
+    marks
+        .iter()
+        .filter(|(_, claim)| claim_is_ours(&claim.host, our_host_id))
+        .filter(|(repo, claim)| {
+            !sessions
+                .iter()
+                .any(|s| s.id == claim.colony && s.repo == *repo && s.issue == Some(claim.issue) && keeps_claim(s))
+        })
+        .map(|(repo, claim)| OrphanedClaim {
+            repo: repo.clone(),
+            issue: claim.issue,
+            colony: claim.colony.clone(),
+        })
+        .collect()
+}
+
+/// The `number` of every entry in a `gh issue list --json number` answer. Rows without one are
+/// skipped, not fatal: one odd row must not hide the marks behind it.
+fn labelled_issues(value: &Value) -> Vec<u64> {
+    value
+        .as_array()
+        .map(|issues| {
+            issues
+                .iter()
+                .filter_map(|i| i.get("number").and_then(Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Boot reconcile (issue #321): read every issue still labelled claimed in the repositories this
+/// mothership's colonies touch, and release the marks we own but no longer hold — a colony that
+/// died while the mothership was down never got to release its own, and the label would otherwise
+/// refuse every future launch on the issue forever. Claims by another host are never touched.
+/// Best effort throughout, and never on the serving path: `main` spawns it once recovery has
+/// settled the session list. The kill switch means no external writes at all, this included.
+pub async fn reconcile_orphaned_claims(app: Shared) {
+    if crate::authority::external_writes_blocked() {
+        return;
+    }
+    let repos: Vec<String> = {
+        let sessions = app.sessions.read().await;
+        let mut repos: Vec<String> = sessions.iter().map(|s| s.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+        repos
+    };
+    let our_host_id = crate::runtime::host_id(&app);
+    for repo in repos {
+        let out = match exec_within(
+            REMOTE_TIMEOUT,
+            &mut app.gh([
+                "issue",
+                "list",
+                "-R",
+                repo.as_str(),
+                "--label",
+                CLAIM_LABEL,
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number",
+            ]),
+        )
+        .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("claims: could not list claimed issues on {repo} to reconcile: {e:#}");
+                continue;
+            }
+        };
+        let mut marks = Vec::new();
+        for issue in labelled_issues(&serde_json::from_str(&out).unwrap_or(Value::Null)) {
+            let number = issue.to_string();
+            let Ok(out) = exec_within(
+                REMOTE_TIMEOUT,
+                &mut app.gh(["issue", "view", number.as_str(), "-R", repo.as_str(), "--json", "comments"]),
+            )
+            .await
+            else {
+                eprintln!("claims: could not read the claim on {repo}#{issue} to reconcile it");
+                continue;
+            };
+            let bodies = comment_bodies(&serde_json::from_str(&out).unwrap_or(Value::Null));
+            if let Some(claim) = bodies.iter().rev().filter_map(|body| parse_claim(body)).next() {
+                marks.push((repo.clone(), claim));
+            }
+        }
+        let sessions = app.sessions.read().await.clone();
+        for orphan in orphaned_claims(&our_host_id, &sessions, &marks) {
+            // Re-checked against the live list before the release: an operator resume during the
+            // scan must not have its colony's fresh claim torn off.
+            let held_again = app
+                .sessions
+                .read()
+                .await
+                .iter()
+                .any(|s| s.id == orphan.colony && s.repo == orphan.repo && s.issue == Some(orphan.issue) && keeps_claim(s));
+            if held_again {
+                continue;
+            }
+            eprintln!(
+                "claims: releasing the orphaned claim on {}#{}, colony {} no longer holds it",
+                orphan.repo, orphan.issue, orphan.colony
+            );
+            release_claim(&app, &orphan.repo, orphan.issue, &orphan.colony).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,6 +801,7 @@ mod tests {
             detail: CLAIM_LABEL.to_string(),
             host: Some("mothership (id-1)".to_string()),
             colony: Some("abc123".to_string()),
+            merged: false,
         }
     }
 
@@ -613,6 +820,7 @@ mod tests {
             detail: "colonizer/issue-7-abc123".to_string(),
             host: None,
             colony: None,
+            merged: false,
         };
         let message = remote_conflict_message(&branch, 7);
         assert!(message.contains("colonizer/issue-7-abc123"), "{message}");
@@ -622,10 +830,53 @@ mod tests {
             detail: "https://github.com/acme/app/pull/9".to_string(),
             host: None,
             colony: None,
+            merged: false,
         };
         let message = remote_conflict_message(&pr, 7);
         assert!(message.contains("https://github.com/acme/app/pull/9"), "{message}");
         assert!(message.contains("allow_duplicate"), "{message}");
+    }
+
+    #[test]
+    fn a_waiters_turn_ends_when_the_holders_pull_request_merged_but_ours_may_stand() {
+        // The holder merged: its session reads done and the gate hands the turn to the waiter,
+        // but the merged pull request still blocks the issue — promoting would redo landed work,
+        // so the waiter is retired with the reason a fresh launch would be refused for.
+        let pr = RemoteClaimInfo {
+            kind: ClaimKind::PullRequest,
+            detail: "https://github.com/acme/app/pull/9".to_string(),
+            host: Some("box (host-id-1)".to_string()),
+            colony: Some("holder".to_string()),
+            merged: true,
+        };
+        let reason = claim_wait_conflict(Some(&pr), 7, &["holder"]).expect("a merged pull request retires the waiter");
+        assert!(reason.contains("merged") && reason.contains("done"), "{reason}");
+        // The same pull request still open is our colony's own business: the waiter is its
+        // successor, so it takes the turn. A stranger's claim retires it.
+        let mut open = pr.clone();
+        open.merged = false;
+        assert_eq!(claim_wait_conflict(Some(&open), 7, &["holder"]), None);
+        assert!(claim_wait_conflict(Some(&open), 7, &["another"]).is_some());
+        // A branch names its colony in its tail, so a comment-less branch still reads as ours;
+        // a label of ours is a stale mark the promotion will take over. No claim, no conflict.
+        let branch = RemoteClaimInfo {
+            kind: ClaimKind::Branch,
+            detail: "colonizer/issue-7-holder".to_string(),
+            host: None,
+            colony: None,
+            merged: false,
+        };
+        assert_eq!(claim_wait_conflict(Some(&branch), 7, &["holder"]), None);
+        assert!(claim_wait_conflict(Some(&branch), 7, &["another"]).is_some());
+        let label = RemoteClaimInfo {
+            kind: ClaimKind::Label,
+            detail: CLAIM_LABEL.to_string(),
+            host: None,
+            colony: Some("holder".to_string()),
+            merged: false,
+        };
+        assert_eq!(claim_wait_conflict(Some(&label), 7, &["holder"]), None);
+        assert_eq!(claim_wait_conflict(None, 7, &["holder"]), None);
     }
 
     #[test]
@@ -677,5 +928,107 @@ mod tests {
             ..ours
         };
         assert!(!ours_or_stale(Some(&theirs), "abc123"));
+    }
+
+    /// A mark as the boot reconcile collects them: the repo plus the claim parsed from the issue's
+    /// latest claim comment.
+    fn mark(repo: &str, host: &str, colony: &str) -> (String, RemoteClaim) {
+        (
+            repo.to_string(),
+            RemoteClaim {
+                host: host.to_string(),
+                colony: colony.to_string(),
+                issue: 7,
+            },
+        )
+    }
+
+    /// A session of ours on issue 7, in whatever state.
+    fn holding_session(id: &str, status: SessionStatus) -> Session {
+        let mut s = crate::sessions::tests::colony("acme", status);
+        s.id = id.into();
+        s.repo = "acme/app".into();
+        s.issue = Some(7);
+        s
+    }
+
+    #[test]
+    fn an_unheld_claim_of_ours_is_orphaned() {
+        // The hostname-plus-id label matches on the stable id; a bare id matches too, for a host
+        // where no hostname probes.
+        for host in ["box (host-id-1)", "host-id-1"] {
+            let orphans = orphaned_claims("host-id-1", &[], &[mark("acme/app", host, "abc123")]);
+            assert_eq!(
+                orphans,
+                vec![OrphanedClaim {
+                    repo: "acme/app".into(),
+                    issue: 7,
+                    colony: "abc123".into()
+                }],
+                "{host} is this mothership, and nothing holds the issue"
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_holders_mark_survives_the_restart() {
+        let sessions = vec![holding_session("abc123", SessionStatus::Running)];
+        assert!(
+            orphaned_claims("host-id-1", &sessions, &[mark("acme/app", "box (host-id-1)", "abc123")]).is_empty(),
+            "the colony is still on the issue, so its claim stands"
+        );
+    }
+
+    #[test]
+    fn another_hosts_claim_is_never_touched_even_unheld() {
+        // A different install id is another mothership, whatever the hostname says: the id alone
+        // decides, so a renamed host cannot have its claims stripped by its neighbour.
+        for host in ["other-box (host-id-2)", "box (host-id-2)", "host-id-2"] {
+            assert!(
+                orphaned_claims("host-id-1", &[], &[mark("acme/app", host, "abc123")]).is_empty(),
+                "{host} is not us"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mark_its_terminal_transition_keeps_survives_the_reconcile() {
+        // A merged pull request keeps the mark as the record of who did the work, and a stopped
+        // colony whose pull request is still out keeps it too: the reconcile never drops what the
+        // colony's own terminal transition would have kept.
+        let merged = holding_session("abc123", SessionStatus::Merged);
+        let mut stopped_with_pr = holding_session("abc123", SessionStatus::Stopped);
+        stopped_with_pr.pr_url = Some("https://github.com/acme/app/pull/9".into());
+        for s in [merged, stopped_with_pr] {
+            assert!(
+                orphaned_claims(
+                    "host-id-1",
+                    std::slice::from_ref(&s),
+                    &[mark("acme/app", "box (host-id-1)", "abc123")]
+                )
+                .is_empty(),
+                "a {} colony keeps its mark",
+                s.status.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_colonys_mark_is_released_on_boot() {
+        // It died — or stopped — while the mothership was down, so it never released its own
+        // claim; the boot reconcile finishes the job a terminal transition would have.
+        for status in [SessionStatus::Stopped, SessionStatus::Failed] {
+            let sessions = vec![holding_session("abc123", status)];
+            assert_eq!(
+                orphaned_claims("host-id-1", &sessions, &[mark("acme/app", "box (host-id-1)", "abc123")]),
+                vec![OrphanedClaim {
+                    repo: "acme/app".into(),
+                    issue: 7,
+                    colony: "abc123".into()
+                }],
+                "a {} colony no longer holds its issue",
+                status.as_str()
+            );
+        }
     }
 }

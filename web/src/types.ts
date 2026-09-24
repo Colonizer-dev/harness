@@ -67,6 +67,8 @@ export interface Session {
   parent?: string | null;
   /** The colony this queued one waits for; null when it waits for a parallelism slot instead. Absent in older payloads, which read as a generic queued entry. */
   queued_behind?: string | null;
+  /** True while this colony waits in its issue's successor queue: it starts when the holder releases the issue (`queued_behind` names the holder). Absent in older payloads. */
+  claim_wait?: boolean;
   /** True when the colony branch has diverged from origin/{base} and needs a rebase. Absent in older payloads. */
   needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
@@ -1051,6 +1053,8 @@ export interface NewSessionRequest {
   automerge?: boolean;
   /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
   allow_duplicate?: boolean;
+  /** Queue the colony for an issue another colony already holds instead of refusing: it comes back `queued` (`claim_wait`, `queued_behind` naming the holder) and starts when the holder releases. `allow_duplicate` wins if both are set; a remote conflict still answers 409. */
+  queue_behind_holder?: boolean;
   /** Stack the new colony on another's branch: the parent session's id, which becomes `parent` and whose branch becomes `base`. Launching a stack is API-only; no form picker yet. */
   after?: string;
   /** Opt in to overlap-aware queueing: queue behind a live same-repo colony that's already touching files, instead of developing against the same paths at once. Off by default. */

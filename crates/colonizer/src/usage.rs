@@ -694,6 +694,7 @@ mod tests {
             needs_rebase: false,
             rebase_orphaned: false,
             queued_behind: None,
+            claim_wait: false,
             verify: None,
             verification: None,
             app_slot: None,

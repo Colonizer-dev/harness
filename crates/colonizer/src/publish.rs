@@ -82,6 +82,11 @@ pub async fn publish_session(app: Shared, id: String) {
                 x.publish_stage = None;
             })
             .await;
+            // Nothing to push: it frees the issue for a retry, on GitHub as well as locally, the
+            // same as a boot that fails after starting.
+            if let Some(fresh) = app.session(&id).await {
+                crate::claims::spawn_release_if_needed(app.clone(), &fresh);
+            }
         }
         Ok(github::Published::PullRequest(url)) => {
             // The colony pushed a branch and opened a pull request: this repository's answers (and

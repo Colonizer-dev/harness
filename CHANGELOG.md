@@ -16,6 +16,12 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **Wait behind the holder.** A launch on an issue another colony already holds can now queue for
+  the issue instead of being refused or duplicating it: `queue_behind_holder` on `POST /api/sessions`
+  admits the colony as a `claim_wait` successor (`queued_behind` naming the holder), the oldest
+  waiter takes over when the holder releases — carrying the GitHub `colonizer:claimed` mark with
+  it — and the cockpit's launch form offers the choice beside Allow duplicate, with each waiter's
+  place in line on its Inspector card. ([#321])
 - **Cached views survive a restart and a GitHub outage.** The Packages tab, repository meta,
   lines of code and registry facts are kept on disk (`<data>/cache`, capped, least-recently-used
   first out) and served at once after a restart with "updated 5m ago · refreshing" and a Refresh
@@ -678,6 +684,7 @@ Macs. ([#74])
 [#488]: https://github.com/Colonizer-dev/harness/pull/488
 [#489]: https://github.com/Colonizer-dev/harness/pull/489
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
+[#321]: https://github.com/Colonizer-dev/harness/issues/321
 [#519]: https://github.com/Colonizer-dev/harness/pull/519
 [#329]: https://github.com/Colonizer-dev/harness/issues/329
 [#331]: https://github.com/Colonizer-dev/harness/issues/331

@@ -120,6 +120,9 @@ enum Claim {
     /// The colony can never start, so the claim has taken it out of the queue; the message says why
     /// and the caller says so before moving on to the colonies behind it.
     Retire(Session, String),
+    /// The colony keeps its place: a `claim_wait` waiter still held at the lock was re-pointed
+    /// (issue #321), and the next candidate is looked at now rather than on a later tick.
+    Wait,
 }
 
 /// What holds a queued colony back before the slot rules even apply, decided on the snapshot: the
@@ -144,6 +147,15 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     // decide that the boot it spawns is a resume.
     if s.git_admin_dir.is_some() {
         return Gate::Admit;
+    }
+    // Issue #321: a `claim_wait` waiter starts only when the effective holder of its issue is
+    // itself — its holder finished and it is the oldest waiter, so no later launch can jump it.
+    // Until then it holds, looked past this tick like a parent-wait, behind whoever holds now.
+    if s.claim_wait
+        && let Some(issue) = s.issue
+        && issue_held_by(sessions, &s.repo, issue).is_some_and(|holder| holder.id != s.id)
+    {
+        return Gate::Hold;
     }
     // Issue #453: a colony queued behind a live same-repo colony for overlap waits until that
     // colony is no longer live — finished, or gone entirely, which releases it at once. Looked
@@ -196,8 +208,55 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
     // released from overlap queueing still names its holder: both belong to the wait, not the run.
     s.boot_timing = None;
     s.queued_behind = None;
+    // A promoted claim_wait waiter (issue #321) stops waiting here: the issue is its own, and the
+    // caller publishes the GitHub claim it deliberately never made at admission.
+    s.claim_wait = false;
     s.updated_at = Utc::now();
     Some(Claim::Start(s.clone()))
+}
+
+/// Issue #321: what still holds a `claim_wait` waiter back, so the decision can be re-checked under
+/// the admission lock and the pointer kept true. `Some(holder)` while someone else effectively
+/// holds its issue — the colony the waiter shows itself behind — and `None` once the issue is the
+/// waiter's own and it may start.
+fn waiter_still_held(s: &Session, sessions: &[Session]) -> Option<String> {
+    let issue = s.issue?;
+    if !s.claim_wait {
+        return None;
+    }
+    issue_held_by(sessions, &s.repo, issue)
+        .filter(|holder| holder.id != s.id)
+        .map(|holder| holder.id)
+}
+
+/// Issue #321: the remote check a waiter's promotion must pass first — the same one a fresh launch
+/// runs, with the same fallback: a failed lookup leaves the local guard holding, so an outage
+/// retires nothing. A holder whose pull request merged is decided locally, with no call at all:
+/// the work has landed, and promoting would redo it.
+async fn waiter_remote_conflict(app: &Shared, waiter: &Session, sessions: &[Session]) -> Option<String> {
+    let issue = waiter.issue?;
+    if sessions
+        .iter()
+        .any(|s| s.repo == waiter.repo && s.issue == Some(issue) && s.status == SessionStatus::Merged)
+    {
+        return Some("the holder's pull request was merged; the issue is done".into());
+    }
+    let info = match crate::claims::check_remote_claim(app, &waiter.repo, issue).await {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!(
+                "claims: remote claim check for waiter {} on {}#{issue} failed ({e:#}); the local guard decides",
+                waiter.id, waiter.repo
+            );
+            return None;
+        }
+    };
+    let our_colonies: Vec<&str> = sessions
+        .iter()
+        .filter(|s| s.repo == waiter.repo && s.issue == Some(issue))
+        .map(|s| s.id.as_str())
+        .collect();
+    crate::claims::claim_wait_conflict(info.as_ref(), issue, &our_colonies)
 }
 
 /// A queued colony stacked on a parent that can never provide a branch is failed with the reason, out
@@ -260,6 +319,28 @@ pub(crate) async fn start_queued(app: &Shared) {
     let paused = crate::reclaim::admission_paused(app).await;
     let modules = app.modules.read().await.clone();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    // Issue #321: a waiter whose holder changed says so. `queued_behind` follows whoever
+    // effectively holds its issue now, so the second waiter shows it is queued behind the first
+    // once the first takes over. A no-op write persists and broadcasts nothing.
+    {
+        let sessions = app.sessions.read().await.clone();
+        for waiter in sessions.iter().filter(|s| s.claim_wait) {
+            let Some(holder) = waiter_still_held(waiter, &sessions) else {
+                continue;
+            };
+            if waiter.queued_behind.as_deref() == Some(holder.as_str()) {
+                continue;
+            }
+            // Conditional on purpose: a promotion between the snapshot and this write must not
+            // hang a stale pointer on a colony that has already started.
+            app.update_session(&waiter.id, |x| {
+                if x.claim_wait && x.status == SessionStatus::Queued {
+                    x.queued_behind = Some(holder.clone());
+                }
+            })
+            .await;
+        }
+    }
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
         let sessions = app.sessions.read().await.clone();
@@ -273,6 +354,15 @@ pub(crate) async fn start_queued(app: &Shared) {
         }) else {
             return;
         };
+        // A waiter the gate called ready is checked against the forge before its promotion: the holder's
+        // PR may have merged, or the claim may have moved to someone else, and the check is a gh call, so
+        // it runs here rather than under the admission lock (issue #321). A failure falls back to the
+        // local guard, the same as admission does.
+        let refuse = match refuse {
+            Some(reason) => Some(reason),
+            None if next.claim_wait => waiter_remote_conflict(app, next, &sessions).await,
+            None => None,
+        };
         // Re-checked and claimed under one write lock, so neither another tick nor a concurrent create or
         // resume can take the slot in between.
         let (org_limit, repo_limit) = limits(&next.org);
@@ -284,7 +374,19 @@ pub(crate) async fn start_queued(app: &Shared) {
             org_limit,
             repo_limit,
             |sessions, room| {
+                // Issue #321: the promotion the snapshot promised is re-checked under the lock —
+                // a holder appearing, or an older waiter, between the two is caught here. A waiter
+                // still held keeps its place in the queue and shows who it is behind now; the tick
+                // moves on and looks again next time.
+                let still_held = sessions
+                    .iter()
+                    .find(|s| s.id == next.id)
+                    .and_then(|s| waiter_still_held(s, sessions));
                 let s = sessions.iter_mut().find(|s| s.id == next.id)?;
+                if let Some(holder) = still_held {
+                    s.queued_behind = Some(holder);
+                    return Some(Claim::Wait);
+                }
                 match refuse.as_deref() {
                     Some(reason) => claim_refused(s, reason),
                     None => claim_queued(s, room),
@@ -306,9 +408,24 @@ pub(crate) async fn start_queued(app: &Shared) {
                 crate::claims::spawn_release_if_needed(app.clone(), &retired);
                 continue;
             }
+            Some(Claim::Wait) => {
+                // The re-point was written under the lock; journal and broadcast it, then keep looking
+                // for a candidate that can go now instead of waiting for the next tick.
+                if let Some(updated) = app.session(&next.id).await {
+                    app.persist_and_broadcast(&updated).await;
+                }
+                continue;
+            }
             Some(Claim::Start(starting)) => {
                 app.persist_and_broadcast(&starting).await;
                 app.session_log(&next.id, "info", "a slot came free; starting".into()).await;
+                // A promoted claim_wait waiter (issue #321) takes the issue's mark over: the claim
+                // it never made at admission is published now, best effort, off this path.
+                if next.claim_wait
+                    && let Some(issue) = next.issue
+                {
+                    crate::claims::spawn_publish(app.clone(), next.repo.clone(), issue, next.id.clone());
+                }
                 // A colony that already has a worktree came from Resume, not Create: `git_admin_dir` stays None
                 // until a colony's first boot has created the worktree (boot_inner), and Resume refuses colonies
                 // without one (can_resume). Booting a resumed colony as fresh would try to create the worktree it
@@ -667,6 +784,67 @@ mod tests {
         p.id = id.into();
         p.branch = branch.into();
         p
+    }
+
+    /// A `claim_wait` waiter for issue 7 (issue #321), queued behind `holder`, created `ago_secs`
+    /// ago so the oldest-first tiebreak is deterministic.
+    fn claim_waiter(id: &str, holder: &str, ago_secs: i64) -> Session {
+        let mut s = colony("acme", SessionStatus::Queued);
+        s.id = id.into();
+        s.issue = Some(7);
+        s.claim_wait = true;
+        s.queued_behind = Some(holder.into());
+        s.created_at = Utc::now() - chrono::Duration::seconds(ago_secs);
+        s
+    }
+
+    /// The holder a claim waiter waits for, live on the same issue.
+    fn issue_holder(id: &str, status: SessionStatus) -> Session {
+        let mut s = colony("acme", status);
+        s.id = id.into();
+        s.issue = Some(7);
+        s
+    }
+
+    #[test]
+    fn a_claim_waiter_keeps_waiting_while_someone_else_holds_its_issue() {
+        let holder = issue_holder("holder", SessionStatus::Running);
+        let waiter = claim_waiter("waiter", "holder", 10);
+        let sessions = vec![holder.clone(), waiter.clone()];
+        assert!(
+            next_queued(&sessions, |_| true).is_none(),
+            "the holder still holds the issue, so the waiter is looked past"
+        );
+        // The pure decision the promotion re-checks under the lock: the waiter is held, and the
+        // pointer names who holds the issue now. A colony that is no waiter is never held.
+        assert_eq!(waiter_still_held(&waiter, &sessions).as_deref(), Some("holder"));
+        assert_eq!(waiter_still_held(&holder, &sessions), None);
+    }
+
+    #[test]
+    fn waiters_promote_oldest_first_and_the_second_re_points_to_the_first() {
+        // Issue #321: the holder is gone and only the waiters remain. The oldest waiter's turn is
+        // next — the gate admits it and the promotion clears the wait — and the second waiter
+        // holds behind it, its pointer following whoever holds the issue now.
+        let mut first = claim_waiter("first", "holder", 100);
+        let second = claim_waiter("second", "holder", 50);
+        let sessions = vec![first.clone(), second.clone()];
+        let (picked, refuse) = next_queued(&sessions, |_| true).expect("the oldest waiter's turn has come");
+        assert_eq!(picked.id, "first");
+        assert!(refuse.is_none());
+        // The promotion, re-checked under the lock: nothing holds the issue against it any more.
+        assert!(matches!(claim_queued(&mut first, true), Some(Claim::Start(_))));
+        assert!(!first.claim_wait, "promoted: the wait is over");
+        assert_eq!(first.queued_behind, None);
+        // The first waiter now holds the issue, so the second one cannot be jumped past it — and
+        // it shows it is queued behind the first.
+        let sessions = vec![first, second];
+        assert_eq!(
+            waiter_still_held(&sessions[1], &sessions).as_deref(),
+            Some("first"),
+            "the second waiter re-points to the first"
+        );
+        assert!(matches!(gate(&sessions[1], &sessions), Gate::Hold));
     }
 
     /// A queued colony stacked on `parent_id`, in the queue ahead of anything created later.

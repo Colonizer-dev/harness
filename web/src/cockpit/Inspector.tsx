@@ -10,6 +10,7 @@ import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../co
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
 import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
+import { claimWaitPosition } from "../api";
 import { useBehind } from "../behind";
 import { useApi } from "../context";
 import { needsYou } from "../notifications";
@@ -315,9 +316,12 @@ export function Inspector({
   // A queued colony waiting on another colony names it instead of reading as a generic queue
   // entry; a queued colony with no link still reads as plain "Queued".
   const queuedBehind = session?.queued_behind ?? null;
+  // A `claim_wait` successor also knows its place: the issue's oldest waiter takes over first.
+  const inLine = session ? claimWaitPosition(sessions, session) : null;
+  const position = inLine ? ` · #${inLine} in line` : "";
   const statusLabel =
     session?.status === "queued" && queuedBehind
-      ? `Queued behind ${queuedBehind}`
+      ? `Queued behind ${queuedBehind}${position}`
       : (session ? (SESSION_STATUS[session.status]?.label ?? session.status) : "");
   // Cross-colony boot medians for the mothership pane; the colony branch never reads it.
   const medianBoot = mothership ? bootMedians(sessions) : null;
@@ -582,7 +586,7 @@ export function Inspector({
                   <Fact
                     className="col-span-2"
                     label="QUEUED BEHIND"
-                    value={queuedBehind}
+                    value={`${queuedBehind}${position}`}
                     title={sessions.find((s) => s.id === queuedBehind)?.issue_title}
                   />
                 )}
