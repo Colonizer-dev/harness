@@ -56,6 +56,7 @@ import type {
   UpdateStatus,
   UsageStatus,
   VoiceStatus,
+  LoginItemStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -151,6 +152,10 @@ export interface Api {
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
   usage(): Promise<UsageStatus>;
   setUsage(enabled: boolean): Promise<UsageStatus>;
+  /** GET /api/login-item. */
+  loginItem(): Promise<LoginItemStatus>;
+  /** POST /api/login-item: start the mothership at login, or stop doing so (never stops a running one). */
+  setLoginItem(enabled: boolean): Promise<LoginItemStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** GET /api/repos/{owner}/{repo}/packages: monorepo detection. */
@@ -331,6 +336,8 @@ export const httpApi: Api = {
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
   usage: () => request("/api/telemetry/usage"),
   setUsage: (enabled) => put("/api/telemetry/usage", { enabled }),
+  loginItem: () => request("/api/login-item"),
+  setLoginItem: (enabled) => post("/api/login-item", { enabled }),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

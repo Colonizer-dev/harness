@@ -29,6 +29,7 @@ mod headroom;
 mod hunters;
 mod jev;
 mod lifecycle;
+mod login_item;
 mod maps;
 mod mem0;
 mod memory;
@@ -935,6 +936,12 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
         }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
+    // The installable-app files carry no secrets, and browsers fetch the manifest without the
+    // cookie: they load before sign-in, so the locked page still installs and shows its icon.
+    if req.method() == Method::GET && is_public_app_file(&path) {
+        req.extensions_mut().insert(auth::Authenticated(false));
+        return next.run(req).await;
+    }
     if req.method() == Method::GET
         && let Some(token) = auth::query_token(req.uri().query())
         && auth::tokens_match(&token, &app.api_token)
@@ -953,6 +960,42 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
+}
+
+/// The PWA files served before sign-in: the manifest, the service worker, its routing script, the
+/// offline page and the icons. Nothing under `/assets` or `/api`.
+fn is_public_app_file(path: &str) -> bool {
+    matches!(path, "/manifest.webmanifest" | "/sw.js" | "/sw-routes.js" | "/offline.html")
+        || (path.starts_with("/icons/") && !path.contains("..") && path.len() < 64)
+}
+
+/// `GET /api/login-item`: whether the mothership starts at login.
+async fn login_item_status(State(app): State<Shared>) -> ApiResult<login_item::Status> {
+    let data_dir = app.cfg.data_dir.clone();
+    let status = tokio::task::spawn_blocking(move || login_item::status(&data_dir))
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+    Ok(Json(status))
+}
+
+#[derive(Deserialize)]
+struct LoginItemRequest {
+    enabled: bool,
+}
+
+/// `POST /api/login-item {enabled}`: the Settings switch; the same code as `colonizer login-item`.
+async fn login_item_set(State(app): State<Shared>, Json(req): Json<LoginItemRequest>) -> ApiResult<login_item::Status> {
+    let data_dir = app.cfg.data_dir.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        if req.enabled {
+            login_item::enable(&data_dir)
+        } else {
+            login_item::disable(&data_dir)
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("{e}"))??;
+    Ok(Json(status))
 }
 
 async fn shutdown_signal() {
@@ -1120,12 +1163,14 @@ const USAGE: &str = "colonizer — turn a task into a pull request; see https://
 
 usage: colonizer
        colonizer version | update | open
+       colonizer login-item enable|disable|status
        colonizer telemetry show|on|off
 
   (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
   version         print what this build is, and whether it is a release (also --version, -V)
   update [--force]  install the newest release against a running mothership and restart into it (refuses a development build, or one newer than the latest release, unless --force)
   open            print the cockpit sign-in link and open it in a browser
+  login-item enable|disable|status  start the mothership at login (macOS LaunchAgent, Linux systemd user unit); disable never stops a running one
   telemetry show  print the exact anonymous usage batch that would be sent
   telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
   telemetry off   record no to anonymous usage reporting
@@ -1144,6 +1189,7 @@ enum Args {
     Version,
     Update { force: bool },
     Open,
+    LoginItem(String),
     TelemetryShow,
     TelemetrySet(bool),
 }
@@ -1167,6 +1213,15 @@ impl Args {
                 Some(other) => return Err(format!("unknown argument: {other}")),
             },
             "open" => Self::Open,
+            "login-item" => {
+                let action = iter
+                    .next()
+                    .ok_or_else(|| "login-item needs a command: enable, disable or status".to_string())?;
+                match action.as_str() {
+                    "enable" | "disable" | "status" => Self::LoginItem(action),
+                    other => return Err(format!("unknown login-item command: {other}")),
+                }
+            }
             "telemetry" => {
                 let sub = iter
                     .next()
@@ -1196,6 +1251,10 @@ impl Args {
                 Ok(())
             }
             Self::Update { force } => update::command(force).await,
+            Self::LoginItem(action) => {
+                let cfg = Settings::from_env()?;
+                login_item::command(&action, &cfg.data_dir)
+            }
             // Reprints the sign-in link (startup prints it too) and opens it the same way.
             Self::Open => {
                 let cfg = Settings::from_env()?;
@@ -1240,6 +1299,21 @@ async fn main() -> ExitCode {
 /// background loops.
 async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
+    // The port first, before anything touches colonies: a second mothership (one started at login
+    // while another runs by hand, or the reverse) must stop here, not after running recovery,
+    // backfills or reaping against the same data directory.
+    let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("{}", login_item::already_running_message(&cfg.bind));
+            // Under launchd/systemd a clean exit keeps the agent from restarting it in a loop.
+            if login_item::started_as_login_item() {
+                std::process::exit(0);
+            }
+            bail!("{} is already in use", cfg.bind);
+        }
+        Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
+    };
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
@@ -1325,6 +1399,7 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/api/status", get(status))
+        .route("/api/login-item", get(login_item_status).post(login_item_set))
         .route("/api/hosts", get(fleet::list_hosts_handler))
         .route("/api/modules", get(modules::list))
         .route("/api/modules/{kind}", put(modules::update))
@@ -1443,9 +1518,6 @@ async fn serve() -> Result<()> {
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app.clone());
 
-    let listener = tokio::net::TcpListener::bind(&app.cfg.bind)
-        .await
-        .with_context(|| format!("cannot bind {}", app.cfg.bind))?;
     println!("colonizer listening on http://{}", app.cfg.bind);
     println!("data: {}", app.cfg.data_dir.display());
     match &app.cfg.assets {
@@ -1666,6 +1738,11 @@ pub(crate) mod tests {
     fn update_takes_an_optional_force_flag_and_nothing_else() {
         let parse = |args: &[&str]| Args::parse(args.iter().map(ToString::to_string).collect());
         assert!(matches!(parse(&["update"]), Ok(Some(Args::Update { force: false }))));
+        assert!(matches!(parse(&["login-item", "enable"]), Ok(Some(Args::LoginItem(a))) if a == "enable"));
+        assert!(matches!(parse(&["login-item", "status"]), Ok(Some(Args::LoginItem(a))) if a == "status"));
+        assert!(parse(&["login-item"]).is_err());
+        assert!(parse(&["login-item", "start"]).is_err());
+        assert!(parse(&["login-item", "enable", "extra"]).is_err());
         assert!(matches!(
             parse(&["update", "--force"]),
             Ok(Some(Args::Update { force: true }))
@@ -1753,6 +1830,58 @@ pub(crate) mod tests {
             (header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==".to_string()),
         ]
         .to_vec()
+    }
+
+    #[tokio::test]
+    async fn the_app_files_load_before_sign_in_and_nothing_else_does() {
+        let root = temp_root();
+        let app = test_app(&root);
+        for uri in [
+            "/manifest.webmanifest",
+            "/sw.js",
+            "/sw-routes.js",
+            "/offline.html",
+            "/icons/icon-192.png",
+        ] {
+            let res = auth_router(&app).oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{uri} is public");
+        }
+        for uri in ["/", "/assets/index-abc.js", "/icons/../api/sessions", "/sw.js.map"] {
+            let res = auth_router(&app).oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri} stays behind sign-in");
+        }
+        let res = auth_router(&app)
+            .oneshot(guarded(Method::POST, "/sw.js", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "only GET is public");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_manifest_and_service_worker_are_served_with_their_types() {
+        let root = temp_root();
+        let assets = root.join("assets-dir");
+        std::fs::create_dir_all(assets.join("web")).unwrap();
+        std::fs::write(assets.join("web/index.html"), "<html></html>").unwrap();
+        std::fs::write(assets.join("web/manifest.webmanifest"), "{}").unwrap();
+        std::fs::write(assets.join("web/sw.js"), "self;").unwrap();
+        let app = test_app(&root);
+        let router: Router<()> = web_router(Some(&assets)).with_state(app.clone());
+        for (uri, want) in [
+            ("/manifest.webmanifest", "application/manifest+json"),
+            ("/sw.js", "javascript"),
+        ] {
+            let res = router.clone().oneshot(guarded(Method::GET, uri, vec![])).await.unwrap();
+            let ct = res
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(ct.contains(want), "{uri}: {ct}");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

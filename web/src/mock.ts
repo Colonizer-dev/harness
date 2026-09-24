@@ -47,6 +47,7 @@ import type {
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
+  LoginItemStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1100,6 +1101,7 @@ let mockTelemetry: TelemetryStatus = {
 // The usage batch: reporting is on by default, so `enabled` arrives already resolved to true — the
 // "never answered" distinction lives only in usage.json and is not exposed over the API. This build
 // has no sender; the batch is only collected and shown.
+let mockLoginItem = false;
 let mockUsage: UsageStatus = {
   enabled: true,
   blocked_by: null,
@@ -2168,6 +2170,13 @@ export function createMockApi(): Api {
       return clone(mockTelemetry);
     },
     usage: async () => clone(mockUsage),
+    loginItem: () =>
+      later(() => ({ platform: "macos", installed: mockLoginItem, enabled: mockLoginItem, pid: mockLoginItem ? 4242 : null, definition: "~/Library/LaunchAgents/dev.colonizer.mothership.plist", binary: "~/.local/bin/colonizer", log: "~/.local/share/colonizer/mothership.out", note: null }) as LoginItemStatus),
+    setLoginItem: (enabled) =>
+      later(() => {
+        mockLoginItem = enabled;
+        return { platform: "macos", installed: enabled, enabled, pid: enabled ? 4242 : null, definition: "~/Library/LaunchAgents/dev.colonizer.mothership.plist", binary: "~/.local/bin/colonizer", log: "~/.local/share/colonizer/mothership.out", note: null } as LoginItemStatus;
+      }),
     setUsage: async (enabled) => {
       await sleep(250);
       if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);
