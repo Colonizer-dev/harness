@@ -5,9 +5,10 @@ import { createContext, useContext } from "react";
 
 export type OpenSecrets = (id?: string) => void;
 
-export const SecretsNavContext = createContext<OpenSecrets>(() => {});
+/** Null outside App, so a caller can tell there is no Secrets page to send the user to. */
+export const SecretsNavContext = createContext<OpenSecrets | null>(null);
 
-export function useOpenSecrets(): OpenSecrets {
+export function useOpenSecrets(): OpenSecrets | null {
   return useContext(SecretsNavContext);
 }
 
