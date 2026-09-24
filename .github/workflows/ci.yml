@@ -66,18 +66,13 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-  # One leg per agent module, so a red run names the module: the Claude Code adapter (driven through
-  # a fake SDK) and the Pi adapter (driven through a fake Pi process). Neither touches the network.
+  # Both agent modules' adapters, as named steps so a red run names the module: the Claude Code
+  # adapter (driven through a fake SDK) and the Pi adapter (driven through a fake Pi process).
+  # Neither touches the network. One job, not a matrix: `runner` is a required status check on main,
+  # and a matrix would report as `runner (claude-code)` / `runner (pi)`, leaving `runner` pending.
   runner:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [claude-code, pi]
-    defaults:
-      run:
-        working-directory: modules/agents/${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -85,19 +80,29 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: modules/agents/${{ matrix.module }}/package-lock.json
+          cache-dependency-path: |
+            modules/agents/claude-code/package-lock.json
+            modules/agents/pi/package-lock.json
 
-      - name: Install dependencies
+      - name: Install the Claude Code runner's dependencies
+        working-directory: modules/agents/claude-code
         run: npm ci
 
-      - name: Test
+      - name: Test the Claude Code runner
+        working-directory: modules/agents/claude-code
+        run: npm test
+
+      - name: Install the Pi runner's dependencies
+        working-directory: modules/agents/pi
+        run: npm ci
+
+      - name: Test the Pi runner
+        working-directory: modules/agents/pi
         run: npm test
 
       # The OpenCode runner has no dependencies (its MCP server is hand-rolled), so there is
-      # nothing to install: plain `node --test` from the repository root, once, on the first leg.
+      # nothing to install: plain `node --test` from the repository root.
       - name: Test the OpenCode runner
-        if: matrix.module == 'claude-code'
-        working-directory: ${{ github.workspace }}
         run: node --test modules/agents/opencode/test/*.test.mjs
 
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
