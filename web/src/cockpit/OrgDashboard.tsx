@@ -266,16 +266,27 @@ export function OrgDashboard({
   // --- Spend per day by model (org-wide: history is per org, never per repo). ---
   const tokByModel = new Map<string, number>();
   const costByDay = new Map<string, Map<string, number>>();
+  const tokensByDay = new Map<string, Map<string, number>>();
+  let pricedModelCost = 0;
   for (const d of current) {
     const o = d.orgs.find((e) => sameOrg(e.org, org.org));
     if (!o) continue;
     const costs = new Map<string, number>();
+    const tokens = new Map<string, number>();
     for (const m of o.models) {
       tokByModel.set(m.model, (tokByModel.get(m.model) ?? 0) + m.tokens);
       costs.set(m.model, m.cost_usd ?? 0);
+      tokens.set(m.model, m.tokens);
+      pricedModelCost += m.cost_usd ?? 0;
     }
     costByDay.set(d.day, costs);
+    tokensByDay.set(d.day, tokens);
   }
+  // Claude Code reports cost per colony, not per model, and a routed provider without prices has
+  // none at all: the org total is known while almost every model's cost is null. Drawing cost per
+  // model would then show an empty chart beside a real total, so it draws tokens per model instead
+  // and says why.
+  const modelsPriced = pricedModelCost > 0;
   const topModels = [...tokByModel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([model]) => model);
   const prevCosts = previous.map((d) => d.orgs.filter((e) => sameOrg(e.org, org.org)).reduce((n, e) => n + (e.cost_usd ?? e.routed_cost_usd ?? 0), 0));
   const spendGhost = compare && previous.length > 0 ? days.map((_, i) => prevCosts[i] || null) : undefined;
@@ -369,20 +380,24 @@ export function OrgDashboard({
       />
 
       <ChartSection
-        title="Spend by model"
+        title={modelsPriced ? "Spend by model" : "Tokens by model"}
         legend={topModels.length > 0 ? <DashLegend items={topModels.map((m) => ({ label: m.split("/").pop() ?? m, color: modelColorFor(m) }))} /> : undefined}
         chart={
           <AreaChart
-            series={topModels.map((model) => ({ label: model.split("/").pop() ?? model, color: modelColorFor(model), values: days.map((d) => costByDay.get(d)?.get(model) ?? 0) }))}
+            series={topModels.map((model) => ({
+              label: model.split("/").pop() ?? model,
+              color: modelColorFor(model),
+              values: days.map((d) => (modelsPriced ? costByDay : tokensByDay).get(d)?.get(model) ?? 0),
+            }))}
             labels={labels}
-            ghost={spendGhost}
-            format={(v) => formatCost(v)}
-            formatY={(v) => (v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${Math.round(v)}`)}
+            ghost={modelsPriced ? spendGhost : undefined}
+            format={(v) => (modelsPriced ? formatCost(v) : formatTokens(v))}
+            formatY={(v) => (modelsPriced ? (v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${Math.round(v)}`) : formatTokens(v))}
             readTitle={`Last ${range} days`}
             emptyNote="no model spend in range"
           />
         }
-        foot={`${spendSub} · ${latCaption}`}
+        foot={`${spendSub}${modelsPriced ? "" : " · per-model prices unknown (Claude Code reports cost per colony; set prices on routed providers), so the chart shows tokens"} · ${latCaption}`}
         sideTitle="Token mix"
         side={mix.shown.map((m) => ({
           label: m.model,
