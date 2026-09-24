@@ -300,7 +300,7 @@ missing values mean the `default`.
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
   "merged_at": null, "pr_opened_at": null, "ci_state": "success|failure|pending|no_checks",
-  "changed_paths": ["apps/pwa/src/main.ts"],
+  "changed_paths": ["apps/pwa/src/main.ts"], "summary": "Fix the login redirect loop on expired sessions",
   "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_cpus": 4, "boot_memory": "8g",
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
@@ -328,6 +328,18 @@ pull request keeps its last settled verdict. The cockpit derives lead time (`mer
 `gh pr view --json files` when the PR opens and again when it merges, and for older colonies by a
 best-effort startup backfill; left out while empty. The cockpit maps each path to the monorepo
 package with the longest matching path to show a monorepo's packages under its repository row.
+
+`summary` is the task in one plain sentence (at most 120 characters), written by a cheap model
+from the issue's title and body (or an open session's instructions) shortly after launch, rewritten
+from the pull request's title and body when it opens, and backfilled at startup for up to 50 live
+colonies that have none. Only that task text is sent. The model is, in order: the agent module's
+`summary_model` (`<provider>/<model>` or a Claude model); else the first `<provider>/<model>` among
+its `subagent_model`, `model_low` and `background_model` whose provider is configured, called
+through that provider's saved config and key like the autonomy judge; else `claude-haiku-4-5` with
+an Anthropic API key (`sk-ant-api…`). The Claude subscription token is never used for summaries, so
+with nothing else configured there are none (logged once). It is left out until written; the
+`summaries` setting (`COLONIZER_SUMMARIES`, on by default) turns it off, and a failed request
+leaves it out while the cockpit shows the title.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish

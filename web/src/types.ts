@@ -58,6 +58,8 @@ export interface Session {
   /** null for an open session started on a repository without an issue. */
   issue: number | null;
   issue_title: string;
+  /** The task in one plain sentence, written by a cheap model (summaries.rs); absent until written. */
+  summary?: string | null;
   status: SessionStatus;
   branch: string;
   base: string | null;

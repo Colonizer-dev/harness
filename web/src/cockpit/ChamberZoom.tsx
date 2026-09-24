@@ -13,6 +13,7 @@ import { AntBubble } from "./AntBubble";
 import { BUBBLE_TONE, colonySays, settlerSays } from "./bubbles";
 import { feedEntry } from "./feed";
 import { branchPaths, tunnelPath, tunnelSeed } from "./nest";
+import { taskLine } from "../summary";
 
 /** Closed, open on a colony, or playing the zoom-out before unmounting. */
 export type ZoomState =
@@ -187,7 +188,7 @@ export function ChamberZoom({
           {status?.label ?? ""}
         </span>
         <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
-          {session.issue_title || status?.label}
+          {taskLine(session, status?.label ?? "")}
         </span>
         <span className="shrink-0 font-mono text-[11px] text-faint tabular-nums">
           {steps} steps · {settlerCount}

@@ -9,6 +9,7 @@ import type { Session } from "../types";
 import { feedEntries } from "./feed";
 import { KIND_DOT, READ_AT, relative } from "./InboxView";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
+import { taskLine, taskTooltip } from "../summary";
 
 /** How many notification lines the panel lists before "Open inbox" takes over. */
 const PANEL_LINES = 20;
@@ -189,7 +190,7 @@ function InboxPanel({
                 <div className="mt-1.5 text-[13.5px] font-semibold [text-wrap:pretty]">
                   {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
                 </div>
-                <div className="mt-0.5 truncate text-[12.5px] text-muted">{session.issue_title || "no title yet"}</div>
+                <div className="mt-0.5 truncate text-[12.5px] text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}</div>
               </div>
             ))}
           </section>

@@ -16,6 +16,7 @@ import { sessionCost } from "../spend";
 import type { Session } from "../types";
 import { colX, monotonePath, orgColorFor, RANGES, type ChartPoint, type RangeDays } from "./dash";
 import { LiveCost, TweenedValue } from "./Live";
+import { taskLine } from "../summary";
 
 /** A section: the 14px heading with its faint meta, an optional right slot, and the body. */
 export function Section({
@@ -792,6 +793,7 @@ export function ColonyRow({
   bumped,
   onOpen,
   showOrg = true,
+  orgAvatar,
 }: {
   session: Session;
   age: string;
@@ -799,6 +801,8 @@ export function ColonyRow({
   bumped: boolean;
   onOpen?: (id: string) => void;
   showOrg?: boolean;
+  /** The org's logo from /api/orgs; the lettermark tile stands in without one. */
+  orgAvatar?: string | null;
 }): ReactElement {
   const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone };
   const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
@@ -814,9 +818,16 @@ export function ColonyRow({
         title={session.issue_title || short}
         className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-[13.5px] text-text hover:opacity-80"
       >
-        {session.issue_title || short} <span className="font-mono text-[12px] text-faint">{short}</span>
+        {taskLine(session, short)} <span className="font-mono text-[12px] text-faint">{short}</span>
       </button>
-      <span className="min-w-0 truncate text-[13px] text-faint">{showOrg ? orgOf(session) : ""}</span>
+      <span className="flex min-w-0 items-center gap-1.5 text-[13px] text-faint">
+        {showOrg && (
+          <>
+            <OrgTile org={orgOf(session)} avatar={orgAvatar} size={16} />
+            <span className="truncate">{orgOf(session)}</span>
+          </>
+        )}
+      </span>
       <span className="truncate text-[13px]" style={{ color: TONE_COLOR[meta.tone] }}>
         {meta.label}
       </span>

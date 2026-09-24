@@ -16,6 +16,7 @@ import { RepoCard, RepoPicker } from "./RepoPicker";
 import { AntBubble } from "./AntBubble";
 import { BUBBLE_TONE, MAX_ANT_BUBBLES } from "./bubbles";
 import { componentForPath, antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
+import { taskLine } from "../summary";
 
 const REPO_KEY = "colonizer.mapRepo";
 const TOUCHED_POLL_MS = 5000;
@@ -419,7 +420,7 @@ export function NestMapView({
                       <button
                         type="button"
                         onClick={() => onSelect(session.id)}
-                        title={`${session.repo}${session.issue != null ? ` #${session.issue}` : ""} · ${session.issue_title || "open session"} · ${doing}`}
+                        title={`${session.repo}${session.issue != null ? ` #${session.issue}` : ""} · ${taskLine(session, "open session")} · ${doing}`}
                         aria-label={`colony ${session.issue_title || session.id} ${doing} in ${id}`}
                         className={`relative block -translate-x-1/2 -translate-y-1/2 cursor-pointer ${mode === "reading" ? "opacity-70" : ""}`}
                       >
@@ -438,7 +439,7 @@ export function NestMapView({
                         <span className="pointer-events-none absolute bottom-full left-1/2 mb-3 -translate-x-1/2">
                           <AntBubble
                             text={mapBubble(mode, blocked, session.status, hereFiles)}
-                            title={`${session.issue_title || session.id} · ${doing}`}
+                            title={`${taskLine(session, session.id)} · ${doing}`}
                             tone={blocked ? "var(--warn)" : mode === "reading" ? BUBBLE_TONE.thinking : BUBBLE_TONE.working}
                           />
                         </span>
@@ -454,7 +455,7 @@ export function NestMapView({
                   key={`wait-${s.id}`}
                   type="button"
                   onClick={() => onSelect(s.id)}
-                  title={`${s.issue_title || s.id} · ${isBlocked(s) ? (s.status === "waiting_for_answer" ? "waiting for you" : "idle") : "starting — nothing read or changed yet"}`}
+                  title={`${taskLine(s, s.id)} · ${isBlocked(s) ? (s.status === "waiting_for_answer" ? "waiting for you" : "idle") : "starting — nothing read or changed yet"}`}
                   aria-label={`colony ${s.issue_title || s.id}, nothing read or changed yet`}
                   className="absolute z-[3] -translate-x-1/2 -translate-y-full cursor-pointer"
                   style={{ left: box.width / 2 + 34 + i * 22, top: SURFACE_Y }}
@@ -618,7 +619,7 @@ function ChamberPanel({
           inside.map(({ session }) => (
             <div key={session.id} className="flex items-center gap-2 py-1">
               <button type="button" onClick={() => onSelect(session.id)} className="min-w-0 flex-1 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-[13px] text-text hover:underline">
-                {session.issue_title || "open session"}
+                {taskLine(session, "open session")}
                 <span className="ml-1.5 font-mono text-[11px] text-faint">{session.issue != null ? `#${session.issue}` : ""}</span>
               </button>
               <span className="text-[11.5px] text-faint">{SESSION_STATUS[session.status]?.label}</span>

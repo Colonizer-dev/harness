@@ -51,6 +51,20 @@
         "default": "",
         "env": "COLONIZER_SUBAGENT_MODEL"
       },
+      "summary_model": {
+        "type": "string",
+        "title": "Summary model",
+        "description": "Which model writes the one-line task summaries: <provider>/<model> from Model providers, or a Claude model. Empty picks the first <provider>/<model> the agent already routes to (subagent, small-task or background model), else Claude Haiku with an Anthropic API key. The Claude subscription login is never used for this.",
+        "default": "",
+        "env": "COLONIZER_SUMMARY_MODEL"
+      },
+      "summaries": {
+        "type": "boolean",
+        "title": "Task summaries",
+        "description": "Write each colony's task as one plain sentence with a cheap model (see Summary model), so the cockpit can say what a colony is doing. Only the issue or instructions text is sent. On by default.",
+        "default": true,
+        "env": "COLONIZER_SUMMARIES"
+      },
       "background_model": {
         "type": "string",
         "title": "Background model",

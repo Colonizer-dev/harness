@@ -37,6 +37,7 @@ import {
   tunnelSeed,
   type NestBox,
 } from "./nest";
+import { taskLine, taskTooltip } from "../summary";
 
 /** The nest by colony, or the architecture map (NestMapView). */
 export type NestMode = "nest" | "map";
@@ -694,7 +695,7 @@ export function NestView({
                   type="button"
                   onClick={() => select(session.id, slot)}
                   onDoubleClick={() => openColony(session.id)}
-                  title={`${session.repo}#${session.issue ?? ""} · ${session.issue_title || status?.label}`}
+                  title={`${session.repo}#${session.issue ?? ""} · ${taskLine(session, status?.label ?? "")}${taskTooltip(session) ? ` — ${taskTooltip(session)}` : ""}`}
                   aria-label={`${session.repo} ${session.issue != null ? `#${session.issue}` : ""}, ${status?.label ?? ""}`}
                   data-flash={flashed || undefined}
                   className={`absolute flex cursor-pointer flex-col items-center justify-center gap-[3px] overflow-hidden border p-1.5 text-center transition-[transform,box-shadow,border-color] duration-500 ${flashed ? "nest-flash" : ""}`}
@@ -868,7 +869,7 @@ export function NestView({
                 />
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate text-[14px]">
-                    {session.issue_title || "waiting on your answer"}{" "}
+                    {taskLine(session, "waiting on your answer")}{" "}
                     <span className="font-mono text-[12px] text-faint">{chamberLabel(session, 112)}</span>
                   </span>
                   {questions[session.id] && <span className="truncate text-[12.5px] text-warn">{questions[session.id]}</span>}

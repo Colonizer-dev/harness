@@ -608,6 +608,7 @@ export function Inspector({
                     </span>
                   </div>
                   <div className="text-[13.5px] font-semibold leading-snug">{session.issue_title || "no title yet"}</div>
+                  {session.summary && session.summary !== session.issue_title && <div className="mt-0.5 text-[12.5px] leading-snug text-muted">{session.summary}</div>}
                   <div className="truncate font-mono text-[11.5px] text-muted">
                     {session.branch}
                     {session.base ? ` → ${session.base}` : ""}

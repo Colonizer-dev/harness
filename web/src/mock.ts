@@ -840,6 +840,8 @@ function baseSession(id: string, repo: string, issue: number | null, title: stri
     attention: null,
     issue,
     issue_title: title,
+    // A short, plain task line like the one the mothership's cheap model writes.
+    summary: title.length > 60 ? `${title.slice(0, 57).trimEnd()}…` : title,
     status: "starting",
     branch: `colonizer/${slug}`,
     base: "main",
