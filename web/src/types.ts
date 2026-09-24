@@ -116,6 +116,8 @@ export interface Session {
   pr_opened_at?: string | null;
   /** The pull request's checks in one word, as last read by the PR watcher. */
   ci_state?: CiState | null;
+  /** The files the colony's pull request changed (first 500); absent until read from GitHub. */
+  changed_paths?: string[];
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
@@ -1133,4 +1135,11 @@ export interface HunterProbe {
   manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };
   installed: string | null;
   probe: { runtime_ok: boolean; docker_ok: boolean; ready: boolean; detail: string };
+}
+
+/** GET /api/repos/{owner}/{repo}/packages: whether the repository is a monorepo, and its packages. */
+export interface RepoPackages {
+  monorepo: boolean;
+  tool: string | null;
+  packages: { name: string; path: string }[];
 }

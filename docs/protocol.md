@@ -216,6 +216,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
+| `GET /api/repos/{owner}/{repo}/packages` | Monorepo detection: `{monorepo, tool, packages: [{name, path}]}`. `tool` is `npm-workspaces`, `pnpm`, `yarn`, `bun`, `turbo`, `nx`, `cargo`, `go-work`, `lerna` or `dirs` (no manifest declares them, but two or more `apps/*` / `packages/*` directories hold a manifest), `null` with an empty list when the repository is a single package. Read from the default branch's tree plus the root workspace manifests; served from a 10-minute stale-while-revalidate cache |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
@@ -298,6 +299,7 @@ missing values mean the `default`.
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
   "merged_at": null, "pr_opened_at": null, "ci_state": "success|failure|pending|no_checks",
+  "changed_paths": ["apps/pwa/src/main.ts"],
   "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_cpus": 4, "boot_memory": "8g",
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
@@ -320,6 +322,11 @@ cancelled, timed-out or action-required check is `failure`, any unfinished one `
 passing, neutral or skipped `success`, and a pull request with no checks `no_checks`. A merged
 pull request keeps its last settled verdict. The cockpit derives lead time (`merged_at` −
 `created_at`), PR cycle time (`merged_at` − `pr_opened_at`) and CI pass rate from them.
+
+`changed_paths` lists the files the colony's pull request changes (the first 500), read with
+`gh pr view --json files` when the PR opens and again when it merges, and for older colonies by a
+best-effort startup backfill; left out while empty. The cockpit maps each path to the monorepo
+package with the longest matching path to show a monorepo's packages under its repository row.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish

@@ -2138,6 +2138,14 @@ export function createMockApi(): Api {
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
+    repoPackages: (repo) =>
+      later(
+        () =>
+          repo.endsWith("/web")
+            ? { monorepo: true, tool: "turbo", packages: [{ name: "pwa", path: "apps/pwa" }, { name: "website", path: "apps/website" }, { name: "sdk", path: "packages/sdk" }] }
+            : { monorepo: false, tool: null, packages: [] },
+        200,
+      ),
     findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),

@@ -84,6 +84,7 @@ pub async fn publish_session(app: Shared, id: String) {
             .await;
         }
         Ok(github::Published::PullRequest(url)) => {
+            tokio::spawn(record_changed_paths(app.clone(), id.clone(), url.clone()));
             app.update_session(&id, |x| {
                 x.status = SessionStatus::PrOpened;
                 x.pr_url = Some(url);
@@ -207,6 +208,53 @@ pub async fn backfill_merged_at(app: Shared) {
     }
     if filled > 0 {
         println!("sessions: backfilled merge and pull-request times for {filled} merged colonies");
+    }
+}
+
+/// Reads a colony's pull-request file list from GitHub and keeps it as `changed_paths`, which the
+/// cockpit maps to a monorepo's packages. A measurement: `updated_at` is left alone, and a `gh`
+/// failure or an empty list keeps whatever was recorded before.
+pub async fn record_changed_paths(app: Shared, id: String, pr_url: String) {
+    let Ok(paths) = github::pr_files(&app, &pr_url).await else {
+        return;
+    };
+    if paths.is_empty() {
+        return;
+    }
+    app.record_measurement(&id, |s| {
+        if s.changed_paths != paths {
+            s.changed_paths = paths;
+        }
+    })
+    .await;
+}
+
+/// The colonies the changed-paths backfill asks GitHub about, as `(id, pr_url)`: every colony with
+/// a pull request and no recorded paths yet.
+pub(crate) fn changed_paths_backfill_targets(sessions: &[Session]) -> Vec<(String, String)> {
+    sessions
+        .iter()
+        .filter(|s| s.changed_paths.is_empty())
+        .filter(|s| {
+            matches!(
+                s.status,
+                SessionStatus::PrOpened | SessionStatus::Merged | SessionStatus::Closed
+            )
+        })
+        .filter_map(|s| s.pr_url.clone().map(|url| (s.id.clone(), url)))
+        .collect()
+}
+
+/// One-off backfill for `changed_paths`, four `gh` calls at a time, off the serving path.
+pub async fn backfill_changed_paths(app: Shared) {
+    use futures_util::StreamExt;
+    let targets = changed_paths_backfill_targets(&app.sessions.read().await);
+    let count = targets.len();
+    futures_util::stream::iter(targets)
+        .for_each_concurrent(4, |(id, url)| record_changed_paths(app.clone(), id, url))
+        .await;
+    if count > 0 {
+        println!("sessions: read changed files for {count} colonies with pull requests");
     }
 }
 
@@ -634,6 +682,9 @@ pub async fn watch_pull_requests(app: Shared) {
                                 let parent = s.clone();
                                 async move { retarget_stacked_children(&app, &parent).await }
                             });
+                            // The merged file list is final; re-read it, as later pushes may have
+                            // moved it since the PR opened.
+                            tokio::spawn(record_changed_paths(app.clone(), s.id.clone(), url.clone()));
                         }
                     }
                     // While the pull request is still open, a move into behind/conflicted — or back
@@ -1275,6 +1326,26 @@ mod tests {
             Some(github_time)
         );
         assert_eq!(resolve_merged_at(Some(github_time), None, flip_at), Some(github_time));
+    }
+
+    #[test]
+    fn colonies_with_a_pull_request_and_no_changed_paths_are_backfilled() {
+        let with_pr = |status| {
+            let mut s = colony("acme", status);
+            s.pr_url = Some(format!("https://github.com/acme/repo/pull/{}", s.id));
+            s
+        };
+        let merged = with_pr(SessionStatus::Merged);
+        let open = with_pr(SessionStatus::PrOpened);
+        let mut known = with_pr(SessionStatus::Merged);
+        known.changed_paths = vec!["src/lib.rs".into()];
+        let running = with_pr(SessionStatus::Running);
+        let no_pr = colony("acme", SessionStatus::Merged);
+        let ids: Vec<String> = changed_paths_backfill_targets(&[merged.clone(), open.clone(), known, running, no_pr])
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, vec![merged.id, open.id]);
     }
 
     #[test]

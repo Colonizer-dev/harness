@@ -34,6 +34,7 @@ mod modules;
 mod notify;
 mod openai;
 mod orgs;
+mod packages;
 mod plugins;
 mod presets;
 mod protocol;
@@ -1358,6 +1359,7 @@ async fn serve() -> Result<()> {
         )
         .route("/api/repos", get(github::list_repos))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
+        .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))
@@ -1462,6 +1464,9 @@ async fn serve() -> Result<()> {
     // one; best effort, off the serving path.
     let merged_at_backfill = app.clone();
     tokio::spawn(async move { publish::backfill_merged_at(merged_at_backfill).await });
+    // Colonies whose pull request predates `changed_paths` gain its file list, for the monorepo
+    // package rows; best effort, off the serving path.
+    tokio::spawn(publish::backfill_changed_paths(app.clone()));
     tokio::spawn(watchdog::run(app.clone()));
     tokio::spawn(autonomy::run(app.clone()));
     tokio::spawn(burn_down::run(app.clone()));
@@ -2540,8 +2545,8 @@ pub(crate) mod tests {
 /// Cached answers for slow read-only endpoints, by key: when each was computed, and the value.
 #[derive(Default)]
 pub struct AnswerCache {
-    entries: std::sync::Mutex<HashMap<&'static str, (Instant, serde_json::Value)>>,
-    refreshing: std::sync::Mutex<std::collections::HashSet<&'static str>>,
+    entries: std::sync::Mutex<HashMap<String, (Instant, serde_json::Value)>>,
+    refreshing: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Stale-while-revalidate for a slow read-only answer. Within `fresh` the cached value is returned
@@ -2550,7 +2555,7 @@ pub struct AnswerCache {
 /// failed computation keeps the last good value and reports the error only when there is none.
 pub async fn cached_answer<F, Fut>(
     app: &Shared,
-    key: &'static str,
+    key: impl Into<String>,
     fresh: Duration,
     compute: F,
 ) -> anyhow::Result<serde_json::Value>
@@ -2558,12 +2563,13 @@ where
     F: Fn(Shared) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
 {
+    let key: String = key.into();
     let hit = app
         .answer_cache
         .entries
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .get(key)
+        .get(&key)
         .cloned();
     if let Some((at, value)) = hit {
         if at.elapsed() >= fresh {
@@ -2572,7 +2578,7 @@ where
                 .refreshing
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(key);
+                .insert(key.clone());
             if first {
                 let app = app.clone();
                 tokio::spawn(async move {
@@ -2581,13 +2587,13 @@ where
                             .entries
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .insert(key, (Instant::now(), value));
+                            .insert(key.clone(), (Instant::now(), value));
                     }
                     app.answer_cache
                         .refreshing
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .remove(key);
+                        .remove(&key);
                 });
             }
         }

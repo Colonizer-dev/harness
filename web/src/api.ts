@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  RepoPackages,
   BurnDownStatus,
   FleetHost,
   FindingRecord,
@@ -135,6 +136,8 @@ export interface Api {
   setUsage(enabled: boolean): Promise<UsageStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
+  /** GET /api/repos/{owner}/{repo}/packages: monorepo detection. */
+  repoPackages(repo: string): Promise<RepoPackages>;
   sessions(): Promise<Session[]>;
   session(id: string): Promise<Session>;
   /** The colony's finding ledger, in the order it was written (an append-only record per finding stage). */
@@ -267,6 +270,10 @@ export const httpApi: Api = {
   issues: (repo) => {
     const [owner, name] = repo.split("/");
     return request(`/api/repos/${enc(owner)}/${enc(name)}/issues`);
+  },
+  repoPackages: (repo) => {
+    const [owner, name] = repo.split("/");
+    return request(`/api/repos/${enc(owner)}/${enc(name)}/packages`);
   },
   sessions: () => request("/api/sessions"),
   session: (id) => request(`/api/sessions/${enc(id)}`),

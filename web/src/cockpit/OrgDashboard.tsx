@@ -5,13 +5,15 @@
 // launched/returned/cost/models) and optional cumulative provider tallies. Anything without a
 // source (coverage, time to recover, per-day latency, lead-time histogram) is named as unmeasured
 // once, never guessed. Lead time, PR cycle time and CI pass rate come from delivery.ts.
-import { useState, type ReactElement, type ReactNode } from "react";
+import { Fragment, useContext, useEffect, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
+import { ApiContext } from "../context";
+import { inPackage, packageRows, OUTSIDE, UNKNOWN, type PackageRow } from "./monorepo";
 
 import { sameOrg, timeAgo } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, formatTokens, modelMix, orgCost } from "../spend";
-import type { Session, SpendHistory } from "../types";
+import type { RepoPackages, Session, SpendHistory } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { AreaChart, ChartSection, ColonyRow, DashLegend, KpiStrip, OrgTile, PillTab, Rules, Section, type KpiDef } from "./DashChart";
 import { isBumped, isFlashed, type LiveEvents } from "./liveEvents";
@@ -91,6 +93,8 @@ export function OrgDashboard({
   onBack,
   providers = [],
   initialRepo = null,
+  initialPackages,
+  initialPackage = null,
   toolbar,
   events,
   onOpenColony,
@@ -108,6 +112,10 @@ export function OrgDashboard({
   /** The repo filter to start on. Null in production — the tests pin the filtered state through
    *  it because static markup cannot click. */
   initialRepo?: string | null;
+  /** Monorepo detections by repository, pinned by tests; fetched from the API otherwise. */
+  initialPackages?: Record<string, RepoPackages>;
+  /** The package row to start filtered on (with `initialRepo`); tests only. */
+  initialPackage?: string | null;
   /** The realtime feed's connection (issue #446); the header shows it now, so this is unread. */
   connection?: LiveConnection;
   /** The range/compare toolbar, which the caller owns; drawn at the title row's right. */
@@ -120,7 +128,14 @@ export function OrgDashboard({
   // figure reads `scoped`. Spend history is per org per day, so it — and the ghost line drawn
   // from it — stays org-wide; the spend panel's sub-line says so while a repo is selected.
   const [repo, setRepo] = useState<string | null>(initialRepo);
-  const scoped = repo ? sessions.filter((s) => sameOrg(s.repo, repo)) : sessions;
+  // A monorepo's package filter narrows the repository filter further: `pkg` is a package path (or
+  // the outside / not-read row key) within `repo`.
+  const [pkg, setPkg] = useState<string | null>(initialPackage);
+  const detections = useRepoPackages(sessions, initialPackages);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialRepo && initialPackage ? [initialRepo] : []));
+  const repoScoped = repo ? sessions.filter((s) => sameOrg(s.repo, repo)) : sessions;
+  const pkgDetection = repo ? detections[repo] : undefined;
+  const scoped = repo && pkg && pkgDetection ? repoScoped.filter((s) => inPackage(s, pkg, pkgDetection)) : repoScoped;
 
   const { current, previous } = slicePeriods(history, range);
   const days = current.map((d) => d.day);
@@ -290,7 +305,24 @@ export function OrgDashboard({
   const labels = days.map(shortDayLabel);
   const pctOf = (v: number) => (funnel.launched > 0 ? `${Math.round((v / funnel.launched) * 100)}%` : "");
   const shareOf = (v: number) => (funnel.launched > 0 ? (v / funnel.launched) * 100 : 0);
-  const pickRepo = (r: string) => setRepo((cur) => (cur !== null && sameOrg(cur, r) ? null : r));
+  const pickRepo = (r: string) => {
+    setPkg(null);
+    setRepo((cur) => (cur !== null && sameOrg(cur, r) && pkg === null ? null : r));
+  };
+  const pickPackage = (r: string, key: string) => {
+    const same = repo !== null && sameOrg(repo, r) && pkg === key;
+    setRepo(r);
+    setPkg(same ? null : key);
+  };
+  const toggleExpanded = (r: string) =>
+    setExpanded((cur) => {
+      const next = new Set(cur);
+      if (next.has(r)) next.delete(r);
+      else next.add(r);
+      return next;
+    });
+  const pkgLabel = (key: string) =>
+    key === OUTSIDE ? "outside packages" : key === UNKNOWN ? "files not read" : (pkgDetection?.packages.find((p) => p.path === key)?.name ?? key);
 
   return (
     <div className="flex flex-col gap-10">
@@ -306,7 +338,7 @@ export function OrgDashboard({
           {org.description && <p data-org-description className="m-0 mt-2 max-w-[640px] text-[14px] leading-snug text-text/80 [text-wrap:pretty]">{org.description}</p>}
           <div className="mt-2 text-[14px] text-muted">
             {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
-            {repo ? ` · filtered to ${shortRepo(repo)}` : ""}
+            {repo ? ` · filtered to ${shortRepo(repo)}${pkg ? ` / ${pkgLabel(pkg)}` : ""}` : ""}
           </div>
         </div>
         {toolbar}
@@ -383,34 +415,45 @@ export function OrgDashboard({
                   <span className="text-right">$ / PR</span>
                 </div>
                 {repos.map((r) => {
-                  const active = repo !== null && sameOrg(repo, r.repo);
+                  const active = repo !== null && sameOrg(repo, r.repo) && pkg === null;
                   const mine = sessions.filter((s) => sameOrg(s.repo, r.repo));
                   const failedHere = mine.filter((s) => s.status === "failed").length;
-                  const decided = failedHere + r.merged;
-                  const fr = decided > 0 ? failedHere / decided : null;
+                  const detection = detections[r.repo];
+                  const mono = detection?.monorepo === true;
+                  const open = mono && expanded.has(r.repo);
                   return (
-                    <button
-                      key={r.repo}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => pickRepo(r.repo)}
-                      title={`Filter the dashboard to ${r.repo}`}
-                      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 ${active ? "bg-panel-2" : "bg-transparent"}`}
-                    >
-                      <span className="min-w-0 truncate font-mono text-[13px]">{shortRepo(r.repo)}</span>
-                      <span className="text-right text-muted">{r.colonies}</span>
-                      <span className="flex items-center gap-2.5">
-                        <span className="h-1 flex-1 overflow-hidden rounded-sm bg-panel-3">
-                          <span className="block h-full transition-[width] duration-700" style={{ width: `${Math.round(r.rate * 100)}%`, background: "var(--chart-1)" }} />
-                        </span>
-                        <span className="w-10 text-right">{`${Math.round(r.rate * 100)}%`}</span>
-                      </span>
-                      <span className={`text-right ${fr != null && fr > 0.08 ? "text-err" : "text-muted"}`} title={fr != null ? `${failedHere} failed of ${decided} decided (merged+failed)` : "nothing decided"}>
-                        {fr != null ? `${(fr * 100).toFixed(1)}%` : "—"}
-                      </span>
-                      <span className="text-right">{formatCost(r.spend)}</span>
-                      <span className="text-right text-muted">{formatCost(costPerMerged(r.spend, r.merged))}</span>
-                    </button>
+                    <Fragment key={r.repo}>
+                      <RepoTableRow
+                        name={shortRepo(r.repo)}
+                        title={`Filter the dashboard to ${r.repo}`}
+                        active={active}
+                        colonies={r.colonies}
+                        rate={r.rate}
+                        failed={failedHere}
+                        merged={r.merged}
+                        spend={r.spend}
+                        onClick={() => pickRepo(r.repo)}
+                        mono={
+                          mono
+                            ? {
+                                open,
+                                count: detection.packages.length,
+                                tool: detection.tool,
+                                onToggle: () => toggleExpanded(r.repo),
+                              }
+                            : undefined
+                        }
+                      />
+                      {open &&
+                        packageRows(mine, detection).map((p) => (
+                          <PackageTableRow
+                            key={p.key}
+                            row={p}
+                            active={repo !== null && sameOrg(repo, r.repo) && pkg === p.key}
+                            onClick={() => pickPackage(r.repo, p.key)}
+                          />
+                        ))}
+                    </Fragment>
                   );
                 })}
               </div>
@@ -452,3 +495,158 @@ export function OrgDashboard({
 
 /** The repositories table's grid, shared by its header and rows. */
 const REPO_GRID = "grid grid-cols-[minmax(0,1.4fr)_72px_minmax(0,1.4fr)_64px_84px_72px] items-center gap-4";
+
+/** Fetches each repository's monorepo detection once per mount (the mothership caches it). Tests
+ *  pin the map instead: static markup has no ApiContext. */
+function useRepoPackages(sessions: Session[], pinned?: Record<string, RepoPackages>): Record<string, RepoPackages> {
+  const api = useContext(ApiContext);
+  const [found, setFound] = useState<Record<string, RepoPackages>>(pinned ?? {});
+  const repos = [...new Set(sessions.map((s) => s.repo))].sort().join(",");
+  useEffect(() => {
+    if (pinned || !api) return;
+    let cancelled = false;
+    for (const r of repos.split(",").filter(Boolean)) {
+      api
+        .repoPackages(r)
+        .then((d) => {
+          if (!cancelled) setFound((cur) => ({ ...cur, [r]: d }));
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [api, repos, pinned]);
+  return found;
+}
+
+function failCell(failed: number, merged: number): { text: string; tone: string; title: string } {
+  const decided = failed + merged;
+  const fr = decided > 0 ? failed / decided : null;
+  return {
+    text: fr != null ? `${(fr * 100).toFixed(1)}%` : "—",
+    tone: fr != null && fr > 0.08 ? "text-err" : "text-muted",
+    title: fr != null ? `${failed} failed of ${decided} decided (merged+failed)` : "nothing decided",
+  };
+}
+
+function RateBar({ rate }: { rate: number }): ReactElement {
+  return (
+    <span className="flex items-center gap-2.5">
+      <span className="h-1 flex-1 overflow-hidden rounded-sm bg-panel-3">
+        <span className="block h-full transition-[width] duration-700" style={{ width: `${Math.round(rate * 100)}%`, background: "var(--chart-1)" }} />
+      </span>
+      <span className="w-10 text-right">{`${Math.round(rate * 100)}%`}</span>
+    </span>
+  );
+}
+
+/** A repository's row; a monorepo's carries a chevron that opens its package rows. */
+function RepoTableRow({
+  name,
+  title,
+  active,
+  colonies,
+  rate,
+  failed,
+  merged,
+  spend,
+  onClick,
+  mono,
+}: {
+  name: string;
+  title: string;
+  active: boolean;
+  colonies: number;
+  rate: number;
+  failed: number;
+  merged: number;
+  spend: number | null;
+  onClick: () => void;
+  mono?: { open: boolean; count: number; tool: string | null; onToggle: () => void };
+}): ReactElement {
+  const fail = failCell(failed, merged);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-pressed={active}
+      onClick={onClick}
+      onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      title={title}
+      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent ${active ? "bg-panel-2" : "bg-transparent"}`}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        {mono && (
+          <button
+            type="button"
+            aria-expanded={mono.open}
+            aria-label={`${mono.open ? "hide" : "show"} the ${mono.count} packages in ${name}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              mono.onToggle();
+            }}
+            className="-ml-1 grid size-5 shrink-0 cursor-pointer place-items-center rounded border-0 bg-transparent text-muted hover:bg-panel-3 hover:text-text"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={`transition-transform ${mono.open ? "rotate-90" : ""}`}>
+              <path d="m9 6 6 6-6 6" />
+            </svg>
+          </button>
+        )}
+        <span className="min-w-0 truncate font-mono text-[13px]">{name}</span>
+        {mono && (
+          <span className="shrink-0 rounded-full border border-border px-1.5 py-px text-[11px] text-muted" title={mono.tool ? `detected from ${mono.tool}` : undefined}>
+            monorepo · {mono.count} packages
+          </span>
+        )}
+      </span>
+      <span className="text-right text-muted">{colonies}</span>
+      <RateBar rate={rate} />
+      <span className={`text-right ${fail.tone}`} title={fail.title}>
+        {fail.text}
+      </span>
+      <span className="text-right">{formatCost(spend)}</span>
+      <span className="text-right text-muted">{formatCost(costPerMerged(spend, merged))}</span>
+    </div>
+  );
+}
+
+/** One package of an expanded monorepo, indented under its repository. */
+function PackageTableRow({ row, active, onClick }: { row: PackageRow; active: boolean; onClick: () => void }): ReactElement {
+  const fail = failCell(row.failed, row.merged);
+  const special = row.path === null;
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      title={
+        special
+          ? row.key === OUTSIDE
+            ? "Colonies that changed files outside every package (root config, docs, CI)"
+            : "Colonies whose pull-request file list has not been read yet"
+          : `Filter the dashboard to ${row.path} — a colony that touched several packages counts in each`
+      }
+      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-dashed border-border py-2.5 text-left text-[13px] tabular-nums text-text hover:bg-panel-2 ${active ? "bg-panel-2" : "bg-transparent"}`}
+    >
+      <span className="flex min-w-0 items-center gap-2 pl-7">
+        <span aria-hidden="true" className="h-3 w-2 shrink-0 border-b border-l border-border-strong" />
+        <span className={`min-w-0 truncate ${special ? "italic text-muted" : "font-mono text-[12.5px]"}`}>{row.name}</span>
+        {row.path && <span className="min-w-0 truncate text-[11.5px] text-faint">{row.path}</span>}
+      </span>
+      <span className="text-right text-muted">{row.colonies}</span>
+      <RateBar rate={row.rate} />
+      <span className={`text-right ${fail.tone}`} title={fail.title}>
+        {fail.text}
+      </span>
+      <span className="text-right">{formatCost(row.spend)}</span>
+      <span className="text-right text-muted">{formatCost(costPerMerged(row.spend, row.merged))}</span>
+    </button>
+  );
+}

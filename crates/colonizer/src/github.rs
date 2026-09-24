@@ -964,6 +964,28 @@ pub async fn pr_info(app: &App, url: &str) -> Result<PrInfo> {
     pr_info_from_json(&out)
 }
 
+/// The paths a pull request changes, from `gh pr view --json files`, capped at
+/// [`crate::sessions::CHANGED_PATHS_CAP`]. Its own call, not a `PR_VIEW_FIELDS` field: the file list
+/// is read twice per PR (opened, merged), not on every watch tick.
+pub async fn pr_files(app: &App, url: &str) -> Result<Vec<String>> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "files", "--jq", ".files[].path"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    Ok(pr_file_paths(&out))
+}
+
+fn pr_file_paths(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(crate::sessions::CHANGED_PATHS_CAP)
+        .map(str::to_string)
+        .collect()
+}
+
 /// Reads `gh pr view --json` output into a [`PrInfo`], split from `pr_info` so it is tested
 /// without `gh`.
 fn pr_info_from_json(out: &str) -> Result<PrInfo> {
@@ -2095,6 +2117,13 @@ mod tests {
             {"number": 3, "labels": [{"name": "ready"}, {"name": "blocked"}]}
         ]);
         assert_eq!(f.apply(issues), json!([{"number": 1, "labels": [{"name": "ready"}]}]));
+    }
+
+    #[test]
+    fn pr_file_paths_are_trimmed_and_capped() {
+        assert_eq!(super::pr_file_paths("a/b.rs\n\n  c.md \n"), vec!["a/b.rs", "c.md"]);
+        let many: String = (0..600).map(|i| format!("f{i}\n")).collect();
+        assert_eq!(super::pr_file_paths(&many).len(), crate::sessions::CHANGED_PATHS_CAP);
     }
 
     #[test]

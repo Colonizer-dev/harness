@@ -229,6 +229,10 @@ fn publishing_holds_slot_legacy() -> bool {
     true
 }
 
+/// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
+/// sweeping change cannot bloat sessions.json.
+pub const CHANGED_PATHS_CAP: usize = 500;
+
 /// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
 /// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
 /// making every existing file unparseable on upgrade. New fields need no annotation of their own.
@@ -301,6 +305,11 @@ pub struct Session {
     /// read by the PR watcher; a settled verdict survives a later `pending` reading once merged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_state: Option<crate::github::CiState>,
+    /// The files the colony's pull request changed (first [`CHANGED_PATHS_CAP`]), read from GitHub
+    /// once the PR is open and again when it merges; empty until then. The cockpit maps them to a
+    /// monorepo's packages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_paths: Vec<String>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
@@ -437,6 +446,7 @@ impl Default for Session {
             pr_url: None,
             merged_at: None,
             pr_opened_at: None,
+            changed_paths: Vec::new(),
             ci_state: None,
             publish_stage: None,
             publishing_holds_slot: false,
@@ -1366,6 +1376,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         pr_url: None,
         merged_at: None,
         pr_opened_at: None,
+        changed_paths: Vec::new(),
         ci_state: None,
         publish_stage: None,
         // A fresh colony is starting or queued, never publishing: the flag is inert.
@@ -3180,6 +3191,7 @@ pub(crate) mod tests {
             pr_url: None,
             merged_at: None,
             pr_opened_at: None,
+            changed_paths: Vec::new(),
             ci_state: None,
             publish_stage: None,
             // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
