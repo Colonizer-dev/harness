@@ -1,0 +1,15 @@
+{
+  "name": "colonizer-agent-hermes",
+  "version": "0.1.0",
+  "description": "Colonizer agent module: Nous Research's Hermes Agent CLI, driven headlessly",
+  "scripts": {
+    "test": "node --test test/runner.test.mjs",
+    "start": "node runner.mjs"
+  },
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
