@@ -13,6 +13,7 @@ mod autonomy;
 mod burn_down;
 mod cache_store;
 mod chat;
+mod chat_images;
 mod claims;
 mod claude_accounts;
 mod claude_login;
@@ -1483,6 +1484,14 @@ async fn serve() -> Result<()> {
         )
         .route("/api/chat", get(chat::list).post(chat::create))
         .route("/api/chat/models", get(chat::models))
+        .route(
+            "/api/chat/attachments",
+            post(chat_images::upload).layer(DefaultBodyLimit::max(chat_images::UPLOAD_BODY_LIMIT)),
+        )
+        .route("/api/chat/attachments/{sha}", get(chat_images::serve))
+        .route("/api/chat/prefs", get(chat::prefs))
+        .route("/api/chat/prefs/personas/{id}", put(chat::put_persona))
+        .route("/api/chat/prefs/feedback/{message}", put(chat::put_feedback))
         .route("/api/chat/{id}", get(chat::get).patch(chat::patch).delete(chat::delete))
         .route(
             "/api/chat/{id}/messages",

@@ -17,8 +17,10 @@ export interface Pending {
   label: string;
   /** Characters of context it adds, when known. */
   chars: number | null;
-  /** A data: URL for an image chip's thumbnail. */
+  /** An object or data: URL for an image chip's thumbnail. */
   preview?: string;
+  /** An image still uploading to the mothership, 0–1; absent once it is stored. */
+  progress?: number;
 }
 
 export function pending(attachment: ChatAttachment, chars: number | null, label?: string, preview?: string): Pending {

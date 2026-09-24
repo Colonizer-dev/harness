@@ -14,21 +14,27 @@ import { IconBranch, IconDownload, IconSearch, IconSliders, IconX } from "../com
 import { Button, cx, orgOf, stored, store } from "../components/ui";
 import { formatCost, formatTokens } from "../spend";
 import { useModels } from "../useModels";
-import type { ChatAttachment, ChatMessage, ChatMeta, ChatModels, ChatPatch, ChatStreamEvent, Repo, Session } from "../types";
+import type { ChatAttachment, ChatAttachmentNote, ChatMessage, ChatMeta, ChatModels, ChatPatch, ChatPrefs, ChatStreamEvent, Repo, Session } from "../types";
 import { AttachMenu, pending, type AttachStep, type Pending } from "./chat/AttachMenu";
 import { ChatComposer, MOD, type SendKey } from "./chat/ChatComposer";
 import { ChatSidebar } from "./chat/ChatSidebar";
-import { HandoffDialog, IssueDialog, LoopDialog } from "./chat/Dialogs";
-import { MessageRow, StreamingRow, type MessageAction } from "./chat/Message";
+import { HandoffDialog, ImageLightbox, IssueDialog, LoopDialog } from "./chat/Dialogs";
+import { MessageRow, StreamingRow, type MessageAction, type OpenImage } from "./chat/Message";
 import { Popover, Select, type ListItem } from "./chat/Popover";
 import {
   candidatesByParent,
   estimateTokens,
+  hasImages,
+  imageProblem,
   inputCost,
+  LEGACY_FEEDBACK_KEY,
+  LEGACY_PERSONA_KEY,
+  legacyEntries,
   loadPersonas,
+  personaEdit,
   pricingOf,
-  savePersona,
   searchMessages,
+  storedImages,
   visionCapable,
   type Persona,
   type SlashCommand,
@@ -47,7 +53,11 @@ export function conversationAsInstructions(meta: ChatMeta | null, messages: read
   const turns = cut >= 0 ? messages.slice(0, cut + 1) : messages;
   const body = turns
     .filter((m) => !m.error && !m.candidate && m.content.trim())
-    .map((m) => `${m.role === "user" ? "Me" : "Assistant"}:\n${m.content.trim()}`)
+    .map((m) => {
+      // A colony cannot see the chat's images; it is told they were there.
+      const images = storedImages(m.attachments).map((i) => `[image shared in the chat, not attached: ${i.label}]\n`);
+      return `${m.role === "user" ? "Me" : "Assistant"}:\n${images.join("")}${m.content.trim()}`;
+    })
     .join("\n\n");
   return `Work on what this conversation${meta?.title ? ` ("${meta.title}")` : ""} settles on.\n\n${body}`;
 }
@@ -174,7 +184,9 @@ export function ChatView({
   const [busy, setBusy] = useState(false);
   const [compareModel, setCompareModel] = useState<string | null>(null);
   const [settings, setSettings] = useState<Draft>({ model: "", system: "", persona: "Plain", temperature: null, max_tokens: 4096 });
-  const [personas, setPersonas] = useState<Persona[]>(() => loadPersonas(read));
+  const [prefs, setPrefs] = useState<ChatPrefs>({ personas: {}, feedback: {} });
+  const personas = useMemo<Persona[]>(() => loadPersonas(prefs.personas), [prefs.personas]);
+  const [lightbox, setLightbox] = useState<OpenImage | null>(null);
   const [sendKey, setSendKey] = useState<SendKey>(() => (read("colonizer.chat.sendKey") === "mod-enter" ? "mod-enter" : "enter"));
   const [collapsed, setCollapsed] = useState(() => read("colonizer.chat.sidebar") === "collapsed");
   const [search, setSearch] = useState<{ query: string; index: number } | null>(null);
@@ -218,6 +230,24 @@ export function ChatView({
     );
     void refresh();
   }, [api, refresh]);
+
+  // Persona edits and reply notes live on the mothership; ones an earlier version kept in this
+  // browser are moved up once.
+  useEffect(() => {
+    void (async () => {
+      let p = await api.chatPrefs().catch(() => null);
+      if (!p) return;
+      try {
+        for (const [id, system] of legacyEntries(read(LEGACY_PERSONA_KEY), p.personas)) p = await api.saveChatPersona(id, system);
+        for (const [id, note] of legacyEntries(read(LEGACY_FEEDBACK_KEY), p.feedback)) p = await api.saveChatFeedback(id, note);
+        store(LEGACY_PERSONA_KEY, null);
+        store(LEGACY_FEEDBACK_KEY, null);
+      } catch {
+        /* kept in the browser; tried again next time */
+      }
+      setPrefs(p);
+    })();
+  }, [api]);
 
   // A deletion still inside its undo window happens now if the view goes away.
   useEffect(() => {
@@ -331,7 +361,7 @@ export function ChatView({
     input_tokens: 0,
     output_tokens: 0,
     stopped: false,
-    attachments: attached.map((p) => ({ kind: p.attachment.kind, label: p.label })),
+    attachments: attached.map((p): ChatAttachmentNote => (p.attachment.kind === "image" && "sha" in p.attachment ? { kind: "image", label: p.label, sha: p.attachment.sha } : { kind: p.attachment.kind, label: p.label })),
   });
 
   const send = useCallback(
@@ -412,10 +442,11 @@ export function ChatView({
   const blocked =
     blockedReason(model, models) ?? (comparing ? (compareModel ? blockedReason(compareModel, models) : "Pick the second model to compare with.") : null);
   const vision = visionCapable(model, models) && (!compareModel || visionCapable(compareModel, models));
+  const uploading = attachments.some((p) => p.progress !== undefined);
 
   const submit = async () => {
     const text = draft.trim();
-    if (!text || busy || blocked) return;
+    if (!text || busy || blocked || uploading) return;
     const attached = attachments;
     setDraft("");
     setAttachments([]);
@@ -470,24 +501,27 @@ export function ChatView({
         toast({ title: "This model cannot see images", body: "Images go only to Claude models and Anthropic-wire providers. Switch models to attach one.", kind: "warn" });
         return;
       }
-      if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) {
-        toast(`${file.type || "That file"} is not a supported image (png, jpeg, gif, webp).`, "error");
+      const problem = imageProblem(file, attachments.filter((a) => a.attachment.kind === "image").length);
+      if (problem) {
+        toast(problem, "error");
         return;
       }
-      // 5 MB of base64 on the wire is about 3.7 MB of image.
-      if (file.size > 3.7 * 1024 * 1024) {
-        toast("Images are limited to about 3.7 MB.", "error");
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const url = String(reader.result);
-        const name = file.name || "pasted image";
-        addAttachment(pending({ kind: "image", media_type: file.type, data: url.slice(url.indexOf(",") + 1), name }, 1600 * 4, name, url));
-      };
-      reader.readAsDataURL(file);
+      // The image is stored on the mothership right away; the message then refers to it by hash.
+      const name = file.name || "pasted image";
+      const preview = URL.createObjectURL(file);
+      const p: Pending = { ...pending({ kind: "image", sha: "", name }, 1600 * 4, name, preview), progress: 0 };
+      addAttachment(p);
+      const update = (f: (x: Pending) => Pending) => setAttachments((list) => list.map((x) => (x.key === p.key ? f(x) : x)));
+      api.uploadChatImage(file, (fraction) => update((x) => ({ ...x, progress: Math.min(fraction, 0.99) }))).then(
+        (ref) => update((x) => ({ ...x, attachment: { kind: "image", sha: ref.sha, name }, progress: undefined })),
+        (e) => {
+          toast(`${name}: ${errorMessage(e)}`, "error");
+          setAttachments((list) => list.filter((x) => x.key !== p.key));
+          URL.revokeObjectURL(preview);
+        },
+      );
     },
-    [vision, toast, addAttachment],
+    [api, vision, attachments, toast, addAttachment],
   );
 
   const estimate = useMemo(() => {
@@ -531,9 +565,14 @@ export function ChatView({
             const meta = await api.forkChat(current.id, m.id, false);
             await refresh();
             await open(meta.id);
-            await send(meta, action.content);
+            // The edited message keeps its images: they are stored, so they go again by reference.
+            const images = storedImages(m.attachments).map((i) => pending({ kind: "image", sha: i.sha, name: i.label }, 1600 * 4, i.label));
+            await send(meta, action.content, { attached: images });
             break;
           }
+          case "note":
+            setPrefs(await api.saveChatFeedback(m.id, action.note));
+            break;
           case "pick":
             setMessages((await api.pickChat(current.id, m.id)).messages);
             break;
@@ -663,7 +702,13 @@ export function ChatView({
       draft={draft}
       onDraft={setDraft}
       attachments={attachments}
-      onRemoveAttachment={(k) => setAttachments((a) => a.filter((x) => x.key !== k))}
+      onRemoveAttachment={(k) =>
+        setAttachments((a) => {
+          const gone = a.find((x) => x.key === k);
+          if (gone?.preview?.startsWith("blob:")) URL.revokeObjectURL(gone.preview);
+          return a.filter((x) => x.key !== k);
+        })
+      }
       model={model}
       models={models}
       claudeIds={claudeIds}
@@ -672,7 +717,7 @@ export function ChatView({
       compareModel={compareModel}
       onCompareModel={setCompareModel}
       busy={busy}
-      blocked={draft.trim() ? blocked : null}
+      blocked={draft.trim() ? blocked ?? (uploading ? "Waiting for the images to upload…" : null) : null}
       onSubmit={() => void submit()}
       onStop={() => abort.current?.abort()}
       sendKey={sendKey}
@@ -700,6 +745,9 @@ export function ChatView({
       hit={search && hits.includes(x.id) ? (hits[hitIndex] === x.id ? "current" : "match") : null}
       onAction={onActionStable}
       onOpenFile={openFile}
+      note={prefs.feedback[x.id] ?? null}
+      imageUrl={api.chatImageUrl}
+      onOpenImage={setLightbox}
     />
   );
 
@@ -801,10 +849,10 @@ export function ChatView({
                 <IconSearch size={15} />
               </button>
               <a
-                href={api.chatExportUrl(current.id)}
-                download={`${(current.title || "chat").replace(/[^\w.-]+/g, "-").slice(0, 60)}.md`}
+                href={api.chatExportUrl(current.id, hasImages(messages))}
+                download={`${(current.title || "chat").replace(/[^\w.-]+/g, "-").slice(0, 60)}.${hasImages(messages) ? "zip" : "md"}`}
                 aria-label="export as Markdown"
-                title="Export as Markdown"
+                title={hasImages(messages) ? "Export as Markdown, with the images beside it in a zip" : "Export as Markdown"}
                 className="grid size-8 place-items-center rounded-lg text-faint hover:bg-panel-2 hover:text-text"
               >
                 <IconDownload size={15} />
@@ -825,9 +873,13 @@ export function ChatView({
               onTemperature={(t) => patch({ temperature: t ?? -1 })}
               onMaxTokens={(n) => patch({ max_tokens: n })}
               onSavePreset={(p, text) => {
-                savePersona(read, (k, v) => store(k, v), p.id, text);
-                setPersonas(loadPersonas(read));
-                toast(`Saved to the ${p.name} preset`, "success");
+                api.saveChatPersona(p.id, personaEdit(p.id, text)).then(
+                  (next) => {
+                    setPrefs(next);
+                    toast(`Saved to the ${p.name} preset`, "success");
+                  },
+                  (e) => toast(errorMessage(e), "error"),
+                );
               }}
             />
           </Popover>
@@ -937,6 +989,7 @@ export function ChatView({
         )}
       </section>
 
+      {lightbox && <ImageLightbox {...lightbox} onClose={() => setLightbox(null)} />}
       {handoff && (
         <HandoffDialog
           repos={repos}

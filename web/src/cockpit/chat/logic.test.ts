@@ -7,16 +7,22 @@ import {
   dayBucket,
   estimateTokens,
   groupChats,
+  hasImages,
+  IMAGE_MAX_BYTES,
+  IMAGES_PER_MESSAGE,
+  imageProblem,
   inputCost,
+  legacyEntries,
   loadPersonas,
   looksLikePath,
   modelEntries,
   modelTags,
   parseSlash,
+  personaEdit,
   pricingOf,
-  savePersona,
   searchMessages,
   slashMatches,
+  storedImages,
   visionCapable,
 } from "./logic";
 
@@ -157,17 +163,38 @@ describe("messages", () => {
 });
 
 describe("personas", () => {
-  it("keeps edits in storage and forgets one set back to its default", () => {
-    const box = new Map<string, string>();
-    const read = (k: string) => box.get(k) ?? null;
-    const write = (k: string, v: string) => void box.set(k, v);
-    expect(loadPersonas(read).map((p) => p.name)).toEqual(["Plain", "Code reviewer", "Architect", "Release writer"]);
-    savePersona(read, write, "reviewer", "Be terse.");
-    expect(loadPersonas(read).find((p) => p.id === "reviewer")?.system).toBe("Be terse.");
-    const original = loadPersonas(() => null).find((p) => p.id === "reviewer")!.system;
-    savePersona(read, write, "reviewer", original);
-    expect(JSON.parse(box.get("colonizer.chat.personas")!)).toEqual({});
-    expect(loadPersonas(() => "not json")[0].name).toBe("Plain");
+  it("applies the mothership's edits and forgets one set back to its default", () => {
+    expect(loadPersonas({}).map((p) => p.name)).toEqual(["Plain", "Code reviewer", "Architect", "Release writer"]);
+    expect(loadPersonas({ reviewer: "Be terse." }).find((p) => p.id === "reviewer")?.system).toBe("Be terse.");
+    const original = loadPersonas({}).find((p) => p.id === "reviewer")!.system;
+    expect(personaEdit("reviewer", original)).toBeNull();
+    expect(personaEdit("reviewer", "Be terse.")).toBe("Be terse.");
+  });
+
+  it("moves browser-kept edits up once, never over the mothership's", () => {
+    expect(legacyEntries('{"reviewer":"old","architect":"mine","x":3}', { reviewer: "server" })).toEqual([["architect", "mine"]]);
+    expect(legacyEntries("not json", {})).toEqual([]);
+    expect(legacyEntries(null, {})).toEqual([]);
+  });
+});
+
+describe("images", () => {
+  it("checks type, size and count before uploading", () => {
+    expect(imageProblem({ type: "image/png", size: 1000 }, 0)).toBeNull();
+    expect(imageProblem({ type: "image/svg+xml", size: 10 }, 0)).toMatch(/not a supported image/);
+    expect(imageProblem({ type: "image/jpeg", size: IMAGE_MAX_BYTES + 1 }, 0)).toMatch(/10 MB/);
+    expect(imageProblem({ type: "image/webp", size: 10 }, IMAGES_PER_MESSAGE)).toMatch(/At most 8/);
+  });
+
+  it("finds a message's stored images to send again", () => {
+    const notes = [
+      { kind: "image", label: "cat.png", sha: "a".repeat(64) },
+      { kind: "image", label: "inline, before images were stored" },
+      { kind: "file", label: "x.rs" },
+    ];
+    expect(storedImages(notes)).toEqual([{ sha: "a".repeat(64), label: "cat.png" }]);
+    expect(hasImages([msg("u", "user", "q", { attachments: notes })])).toBe(true);
+    expect(hasImages([msg("u", "user", "q")])).toBe(false);
   });
 });
 

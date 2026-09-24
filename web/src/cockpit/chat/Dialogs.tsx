@@ -233,3 +233,29 @@ export function IssueDialog({
     </Shell>
   );
 }
+
+/** A stored image full size; Esc or a click anywhere closes it. */
+export function ImageLightbox({ src, label, width, height, onClose }: { src: string; label: string; width?: number; height?: number; onClose: () => void }): ReactElement {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (ref.current && !ref.current.open) ref.current.showModal();
+  }, []);
+  return (
+    <dialog
+      ref={ref}
+      onClose={onClose}
+      onClick={() => ref.current?.close()}
+      aria-label={`image ${label}`}
+      className="m-auto max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] cursor-zoom-out overflow-hidden rounded-xl border border-border bg-panel p-0 text-text backdrop:bg-black/75"
+    >
+      <img src={src} alt={label} className="block max-h-[calc(100vh-72px)] max-w-[calc(100vw-32px)] object-contain" />
+      <div className="flex items-center gap-2 px-3 py-1.5 text-[12px] text-muted">
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {width && height ? <span className="tabular-nums text-faint">{`${width}×${height}`}</span> : null}
+        <a href={src} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
+          Open original
+        </a>
+      </div>
+    </dialog>
+  );
+}

@@ -1,7 +1,8 @@
 // One message in the conversation: the speaker's mark, the text (Markdown for replies), what was
 // attached, and for replies the model, tokens, cost and timing. Actions sit under it: copy, edit
 // and resend, regenerate (optionally with another model), branch, and hand-offs to a colony, a
-// loop or a GitHub issue. A thumbs-down keeps a private note in this browser.
+// loop or a GitHub issue. Stored images show as thumbnails that open full size. A thumbs-down keeps
+// a private note on the mothership.
 import { memo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { ProviderMark } from "../../components/providerMark";
 import {
@@ -32,27 +33,15 @@ export type MessageAction =
   | { kind: "colony" }
   | { kind: "loop" }
   | { kind: "issue" }
-  | { kind: "pick" };
+  | { kind: "pick" }
+  | { kind: "note"; note: string | null };
 
-const NOTE_KEY = "colonizer.chat.feedback";
-
-function readNotes(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(NOTE_KEY) ?? "{}") as Record<string, string>;
-  } catch {
-    return {};
-  }
-}
-
-function writeNote(id: string, note: string | null): void {
-  try {
-    const notes = readNotes();
-    if (note === null) delete notes[id];
-    else notes[id] = note;
-    localStorage.setItem(NOTE_KEY, JSON.stringify(notes));
-  } catch {
-    /* storage blocked: the note is lost, nothing else breaks */
-  }
+/** A stored image to show full size. */
+export interface OpenImage {
+  src: string;
+  label: string;
+  width?: number;
+  height?: number;
 }
 
 const KIND_ICON: Record<string, ReactNode> = {
@@ -64,6 +53,29 @@ const KIND_ICON: Record<string, ReactNode> = {
   colonies: <IconSpark size={12} />,
   merged: <IconGitPR size={12} />,
 };
+
+/** A message's stored images as thumbnails; each opens full size. */
+export function ImageThumbs({ notes, imageUrl, onOpen }: { notes: readonly ChatAttachmentNote[]; imageUrl: (sha: string) => string; onOpen?: (image: OpenImage) => void }): ReactElement {
+  return (
+    <div className="mb-1.5 flex flex-wrap gap-1.5" aria-label="images">
+      {notes.map((n) => {
+        const src = imageUrl(n.sha!);
+        return (
+          <button
+            key={n.sha}
+            type="button"
+            onClick={() => onOpen?.({ src, label: n.label, width: n.width, height: n.height })}
+            title={`${n.label}${n.width && n.height ? ` · ${n.width}×${n.height}` : ""}`}
+            aria-label={`open image ${n.label}`}
+            className="cursor-zoom-in overflow-hidden rounded-lg border border-border bg-panel-2/70 p-0 hover:border-border-strong"
+          >
+            <img src={src} alt={n.label} loading="lazy" decoding="async" width={n.width || undefined} height={n.height || undefined} className="block h-auto max-h-40 w-auto max-w-[240px] object-contain" />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 export function AttachmentPill({ note, onRemove, preview, detail }: { note: ChatAttachmentNote; onRemove?: () => void; preview?: string; detail?: string }): ReactElement {
   return (
@@ -118,6 +130,9 @@ export const MessageRow = memo(function MessageRow({
   hit,
   onAction,
   onOpenFile,
+  note = null,
+  imageUrl,
+  onOpenImage,
 }: {
   m: ChatMessage;
   models: ChatModels | null;
@@ -128,12 +143,18 @@ export const MessageRow = memo(function MessageRow({
   hit: "match" | "current" | null;
   onAction: (m: ChatMessage, action: MessageAction) => void;
   onOpenFile?: (path: string) => void;
+  /** The operator's note on this reply, kept on the mothership. */
+  note?: string | null;
+  /** Where a stored image is served; without it, images show as pills. */
+  imageUrl?: (sha: string) => string;
+  onOpenImage?: (image: OpenImage) => void;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [regenOpen, setRegenOpen] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
-  const [note, setNote] = useState<string | null>(() => readNotes()[m.id] ?? null);
   const [noteDraft, setNoteDraft] = useState("");
+  const images = imageUrl ? (m.attachments ?? []).filter((a) => a.kind === "image" && a.sha) : [];
+  const pills = (m.attachments ?? []).filter((a) => !images.includes(a));
   const regenButton = useRef<HTMLButtonElement>(null);
   const noteButton = useRef<HTMLButtonElement>(null);
   const user = m.role === "user";
@@ -165,9 +186,10 @@ export const MessageRow = memo(function MessageRow({
           {!user && <span className="text-faint">{mark.name}</span>}
         </div>
 
-        {m.attachments && m.attachments.length > 0 && (
+        {images.length > 0 && imageUrl && <ImageThumbs notes={images} imageUrl={imageUrl} onOpen={onOpenImage} />}
+        {pills.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
-            {m.attachments.map((a, i) => (
+            {pills.map((a, i) => (
               <AttachmentPill key={i} note={a} />
             ))}
           </div>
@@ -285,7 +307,7 @@ export const MessageRow = memo(function MessageRow({
                     </ActionButton>
                     <Popover open={noteOpen} onClose={() => setNoteOpen(false)} anchor={noteButton} width={320} label="Note on this reply">
                       <div className="flex flex-col gap-2 p-3">
-                        <span className="text-[12.5px] text-muted">What was wrong? Kept only in this browser.</span>
+                        <span className="text-[12.5px] text-muted">What was wrong? Kept on this mothership, for you.</span>
                         <textarea
                           value={noteDraft}
                           autoFocus
@@ -299,8 +321,7 @@ export const MessageRow = memo(function MessageRow({
                             <Button
                               size="sm"
                               onClick={() => {
-                                writeNote(m.id, null);
-                                setNote(null);
+                                onAction(m, { kind: "note", note: null });
                                 setNoteOpen(false);
                               }}
                             >
@@ -311,9 +332,7 @@ export const MessageRow = memo(function MessageRow({
                             size="sm"
                             variant="primary"
                             onClick={() => {
-                              const n = noteDraft.trim() || "Not helpful";
-                              writeNote(m.id, n);
-                              setNote(n);
+                              onAction(m, { kind: "note", note: noteDraft.trim() || "Not helpful" });
                               setNoteOpen(false);
                             }}
                           >
