@@ -12,6 +12,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import type { RepoMap, Session } from "../types";
 import { SURFACE_Y, normalizeBox, surfaceGrass, type NestBox } from "./nest";
 import { FileTreePane } from "./FileTreePane";
+import { RepoCard, RepoPicker } from "./RepoPicker";
 import { AntBubble } from "./AntBubble";
 import { BUBBLE_TONE, MAX_ANT_BUBBLES } from "./bubbles";
 import { componentForPath, antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
@@ -236,24 +237,7 @@ export function NestMapView({
     <div className="relative flex min-h-0 flex-col">
       {/* The map's own bar: which repository, what drew it, and the way to draw it again. */}
       <div className="relative z-[5] flex flex-wrap items-center gap-x-4 gap-y-2 px-6 pb-2 pt-3 text-[13px]">
-        {repos.length > 1 ? (
-          <label className="flex items-center gap-2 text-muted">
-            <span className="sr-only">repository</span>
-            <select
-              value={repo ?? ""}
-              onChange={(event) => pickRepo(event.target.value)}
-              className="cursor-pointer rounded-full border border-border bg-transparent px-3 py-1 font-mono text-[12.5px] text-text outline-none hover:border-border-strong"
-            >
-              {repos.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : repo ? (
-          <span className="font-mono text-[12.5px] text-text">{repo}</span>
-        ) : null}
+        {repos.length > 0 && <RepoPicker repos={repos} value={repo} onChange={pickRepo} />}
         {stored_ && (
           <span className="text-faint" title={new Date(stored_.generated_at).toLocaleString()}>
             {map?.subtitle ? `${map.subtitle} · ` : ""}drawn {formatWhen(stored_.generated_at)} ({timeAgo(stored_.generated_at)})
@@ -283,6 +267,11 @@ export function NestMapView({
           </div>
         )}
       </div>
+      {repo && (
+        <div className="relative z-[4] px-6 pb-2">
+          <RepoCard repo={repo} />
+        </div>
+      )}
       {rawOpen && stored_ && <RawMapDialog value={stored_} onClose={() => setRawOpen(false)} />}
 
       <div className="flex min-h-0 flex-1">

@@ -7,6 +7,7 @@ import type {
   ColonySecretRequest,
   SecretsListing,
   RepoMap,
+  RepoMeta,
   TouchedFiles,
   FleetHost,
   FindingRecord,
@@ -210,6 +211,8 @@ export interface Api {
   checkMem0(): Promise<Mem0Check>;
   /** A repository's architecture map and the newest colony drawing it. */
   repoMap(repo: string): Promise<RepoMap>;
+  /** GET /api/repos/{owner}/{repo}/meta: description, languages, weekly commits, contributors. */
+  repoMeta(repo: string): Promise<RepoMeta>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
@@ -348,6 +351,7 @@ export const httpApi: Api = {
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
+  repoMeta: (repo) => request(`/api/repos/${repo.split("/").map(enc).join("/")}/meta`),
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),

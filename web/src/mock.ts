@@ -2706,6 +2706,27 @@ export function createMockApi(): Api {
       return { ...mem0 };
     },
     repoMap: (repo) => later(() => repoMap(repo)),
+    repoMeta: (repo) =>
+      later(() => ({
+        full_name: repo,
+        description: `The ${repo.split("/")[1]} repository`,
+        homepage: null,
+        stars: 12,
+        primary_language: "Rust",
+        languages: [
+          { name: "Rust", bytes: 7000, percent: 70 },
+          { name: "TypeScript", bytes: 2500, percent: 25 },
+          { name: "Shell", bytes: 500, percent: 5 },
+        ],
+        commits_weekly: Array.from({ length: 52 }, (_, i) => (i * 7) % 13),
+        stats_pending: false,
+        contributors: [
+          { login: "ada", avatar_url: "", contributions: 120 },
+          { login: "linus", avatar_url: "", contributions: 40 },
+        ],
+        pushed_at: new Date().toISOString(),
+        html_url: `https://github.com/${repo}`,
+      })),
     repoMapFile: (repo, path) =>
       later(() => ({
         repo,

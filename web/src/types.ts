@@ -1263,3 +1263,19 @@ export interface TouchedFiles {
   /** The files each live colony's recent tool calls looked at, newest first; absent from an older mothership. */
   reading?: Record<string, string[]>;
 }
+
+/** GET /api/repos/{owner}/{repo}/meta: what the repository picker shows about a repository. */
+export interface RepoMeta {
+  full_name: string;
+  description: string | null;
+  homepage: string | null;
+  stars: number;
+  primary_language: string | null;
+  languages: { name: string; bytes: number; percent: number }[];
+  /** 52 weekly commit counts, oldest first; empty while GitHub is still computing them. */
+  commits_weekly: number[];
+  stats_pending: boolean;
+  contributors: { login: string; avatar_url: string; contributions: number }[];
+  pushed_at: string | null;
+  html_url: string | null;
+}
