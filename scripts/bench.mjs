@@ -45,7 +45,7 @@ const gh = (args, options = {}) => execFileSync('gh', args, { encoding: 'utf8', 
 const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(path, init) {
+export async function api(path, init) {
   // authHeaders last: a caller must not be able to clobber the token.
   const res = await fetch(`${MOTHERSHIP}${path}`, { ...init, headers: { 'content-type': 'application/json', ...init?.headers, ...authHeaders } });
   const text = await res.text();
