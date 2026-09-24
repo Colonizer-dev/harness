@@ -1487,3 +1487,127 @@ export interface ChatSendRequest {
   regenerate?: boolean;
   context?: { colony?: string; file?: { repo: string; path: string; ref?: string } };
 }
+
+// ---------------------------------------------------------------------------
+// Packages (GET /api/orgs/{org}/packages/*): published, dependencies, supply chain
+// ---------------------------------------------------------------------------
+
+/** A scan that has not landed yet: ask again in a few seconds. */
+export interface ScanPending {
+  status: "scanning";
+  message: string;
+}
+
+export type Ecosystem = "npm" | "cargo" | "pypi" | "go" | "dart" | "swift";
+
+export interface ScannedRepo {
+  repo: string;
+  sha?: string;
+  error?: string;
+  lockfiles?: string[];
+  skipped?: string[];
+  defined?: number;
+}
+
+export interface RegistryInfo {
+  latest: string | null;
+  published_at: string | null;
+  created_at?: string | null;
+  downloads: number | null;
+  downloads_period?: string;
+  url: string;
+}
+
+export interface PublishedPackage {
+  ecosystem: Ecosystem;
+  name: string;
+  version: string | null;
+  repo: string;
+  path: string;
+  private: boolean;
+  registry: string | null;
+  status: "published" | "unpublished" | "private";
+  /** The repository's version is ahead of the registry's latest. */
+  unreleased_changes: boolean;
+  published: RegistryInfo | null;
+}
+
+export interface GithubPackage {
+  name: string;
+  type: string;
+  visibility: string;
+  versions: number | null;
+  updated_at: string | null;
+  url: string | null;
+  repo: string | null;
+}
+
+export interface PackagesPublished {
+  org: string;
+  scanned_at: string;
+  repos: ScannedRepo[];
+  packages: PublishedPackage[];
+  github_packages: { packages: GithubPackage[]; note: string | null };
+}
+
+export interface Advisory {
+  id: string;
+  summary?: string | null;
+  severity: string;
+  fixed?: string | null;
+  url?: string;
+}
+
+export interface DependencyVersion {
+  version: string;
+  behind: boolean;
+  users: { repo: string; path: string }[];
+  vulns: Advisory[];
+}
+
+export interface Dependency {
+  ecosystem: Ecosystem;
+  name: string;
+  direct: boolean | null;
+  dev: boolean;
+  latest: string | null;
+  outdated: boolean;
+  vulnerable: boolean;
+  drift: boolean;
+  versions: DependencyVersion[];
+}
+
+export interface PackagesDependencies {
+  org: string;
+  scanned_at: string;
+  repos: ScannedRepo[];
+  ecosystems: { ecosystem: Ecosystem; direct: number; transitive: number }[];
+  totals: { direct: number; transitive: number; outdated: number; vulnerable: number };
+  packages: Dependency[];
+}
+
+export type RiskSeverity = "critical" | "high" | "moderate" | "low";
+
+export interface SupplyRisk {
+  severity: RiskSeverity;
+  kind: string;
+  ecosystem: Ecosystem;
+  name: string;
+  version: string | null;
+  reason: string;
+  fix: { available: boolean; version?: string | null };
+  url: string;
+  direct: boolean;
+  via: string[];
+  users: { repo: string; path: string }[];
+}
+
+export interface SupplyChain {
+  org: string;
+  scanned_at: string;
+  repos: ScannedRepo[];
+  counts: Partial<Record<RiskSeverity, number>>;
+  fixable: number;
+  risks: SupplyRisk[];
+  note: string;
+}

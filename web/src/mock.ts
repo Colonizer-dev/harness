@@ -3,6 +3,9 @@ import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import type {
+  PackagesPublished,
+  PackagesDependencies,
+  SupplyChain,
   ArchMap,
   ChatMessage,
   ChatMeta,
@@ -2820,6 +2823,58 @@ export function createMockApi(): Api {
       c.meta.updated_at = message.ts;
       onEvent({ type: "done", message });
     },
+    orgPublished: (org) =>
+      later(
+        (): PackagesPublished => ({
+          org,
+          scanned_at: new Date().toISOString(),
+          repos: [{ repo: `${org}/web`, sha: "abc1234", defined: 3 }],
+          packages: [
+            { ecosystem: "npm", name: `@${org.toLowerCase()}/sdk`, version: "1.4.0", repo: `${org}/web`, path: "packages/sdk", private: false, registry: null, status: "published", unreleased_changes: true, published: { latest: "1.3.2", published_at: "2026-09-20T10:00:00Z", downloads: 1240, downloads_period: "last week", url: "https://www.npmjs.com/" } },
+            { ecosystem: "npm", name: "pwa", version: "0.0.0", repo: `${org}/web`, path: "apps/pwa", private: true, registry: null, status: "private", unreleased_changes: false, published: null },
+            { ecosystem: "cargo", name: "colonizer-harness", version: "0.1.9", repo: `${org}/harness`, path: "crates/colonizer", private: false, registry: null, status: "published", unreleased_changes: false, published: { latest: "0.1.9", published_at: "2026-09-24T13:59:00Z", downloads: 310, downloads_period: "90 days", url: "https://crates.io/" } },
+          ],
+          github_packages: { packages: [{ name: "mothership", type: "container", visibility: "private", versions: 12, updated_at: "2026-09-23T08:00:00Z", url: null, repo: `${org}/harness` }], note: null },
+        }),
+        300,
+      ),
+    orgDependencies: (org) =>
+      later(
+        (): PackagesDependencies => ({
+          org,
+          scanned_at: new Date().toISOString(),
+          repos: [{ repo: `${org}/web`, sha: "abc1234", lockfiles: ["bun.lock"] }],
+          ecosystems: [
+            { ecosystem: "npm", direct: 2, transitive: 1 },
+            { ecosystem: "cargo", direct: 1, transitive: 0 },
+          ],
+          totals: { direct: 3, transitive: 1, outdated: 1, vulnerable: 1 },
+          packages: [
+            { ecosystem: "npm", name: "react", direct: true, dev: false, latest: "19.1.1", outdated: true, vulnerable: false, drift: true, versions: [{ version: "19.1.0", behind: true, users: [{ repo: `${org}/web`, path: "bun.lock" }], vulns: [] }, { version: "18.3.1", behind: true, users: [{ repo: `${org}/app`, path: "package-lock.json" }], vulns: [] }] },
+            { ecosystem: "npm", name: "lodash", direct: false, dev: false, latest: null, outdated: false, vulnerable: true, drift: false, versions: [{ version: "4.17.20", behind: false, users: [{ repo: `${org}/web`, path: "bun.lock" }], vulns: [{ id: "GHSA-35jh-r3h4-6jhm", summary: "Command injection in lodash", severity: "high", fixed: "4.17.21", url: "https://osv.dev/vulnerability/GHSA-35jh-r3h4-6jhm" }] }] },
+            { ecosystem: "cargo", name: "serde", direct: true, dev: false, latest: "1.0.210", outdated: false, vulnerable: false, drift: false, versions: [{ version: "1.0.210", behind: false, users: [{ repo: `${org}/harness`, path: "Cargo.lock" }], vulns: [] }] },
+          ],
+        }),
+        300,
+      ),
+    orgSupplyChain: (org) =>
+      later(
+        (): SupplyChain => ({
+          org,
+          scanned_at: new Date().toISOString(),
+          repos: [{ repo: `${org}/web`, sha: "abc1234", lockfiles: ["bun.lock"] }],
+          counts: { high: 2, moderate: 1, low: 1 },
+          fixable: 1,
+          risks: [
+            { severity: "high", kind: "vulnerability", ecosystem: "npm", name: "lodash", version: "4.17.20", reason: "GHSA-35jh-r3h4-6jhm: Command injection in lodash", fix: { available: true, version: "4.17.21" }, url: "https://osv.dev/vulnerability/GHSA-35jh-r3h4-6jhm", direct: false, via: ["some-lib"], users: [{ repo: `${org}/web`, path: "bun.lock" }] },
+            { severity: "high", kind: "typosquat", ecosystem: "npm", name: "expres", version: "1.0.0", reason: "name is one or two letters from the popular \"express\" — check it is the package you meant", fix: { available: false }, url: "https://www.npmjs.com/package/expres", direct: true, via: [], users: [{ repo: `${org}/web`, path: "package-lock.json" }] },
+            { severity: "moderate", kind: "install-script", ecosystem: "npm", name: "esbuild", version: "0.23.0", reason: "runs code on install — review: postinstall: node install.js", fix: { available: false }, url: "https://www.npmjs.com/package/esbuild", direct: true, via: [], users: [{ repo: `${org}/web`, path: "bun.lock" }] },
+            { severity: "low", kind: "missing-integrity", ecosystem: "npm", name: "left-pad", version: null, reason: "no integrity hash in package-lock.json", fix: { available: false }, url: "", direct: true, via: [], users: [{ repo: `${org}/app`, path: "package-lock.json" }] },
+          ],
+          note: "registry facts for up to 300 direct or vulnerable versions; advisories from OSV.dev",
+        }),
+        300,
+      ),
     repoMeta: (repo) =>
       later(() => ({
         full_name: repo,

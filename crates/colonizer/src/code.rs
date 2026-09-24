@@ -96,7 +96,7 @@ fn bad(message: &str) -> crate::AppError {
 // --- the bare clone -----------------------------------------------------------------------------
 
 /// The bare clone, created on first use and fetched at most once per [`FETCH_EVERY`].
-async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::PathBuf> {
+pub(crate) async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::PathBuf> {
     let bare = app.bare_repo(repo);
     if !bare.join("HEAD").exists() {
         if let Some(parent) = bare.parent() {
@@ -145,7 +145,7 @@ async fn default_branch(app: &Shared, bare: &FsPath) -> Result<String> {
 
 /// A ref the bare clone resolves: a branch name maps to `refs/remotes/origin/<name>` (what the fetch
 /// keeps current), a sha stays a sha. Returns `(ref_name, commit_sha)`.
-async fn resolve(app: &Shared, bare: &FsPath, r: Option<&str>) -> Result<(String, String)> {
+pub(crate) async fn resolve(app: &Shared, bare: &FsPath, r: Option<&str>) -> Result<(String, String)> {
     let name = match r {
         Some(r) => valid_ref(r).ok_or_else(|| anyhow!("invalid ref"))?,
         None => default_branch(app, bare).await?,
@@ -219,7 +219,7 @@ pub fn parse_ls_tree_line(line: &str) -> Option<(String, String, u64, String)> {
     Some((kind, sha, size, path.to_string()))
 }
 
-async fn ls_tree(app: &Shared, bare: &FsPath, sha: &str) -> Result<Vec<(String, u64, String)>> {
+pub(crate) async fn ls_tree(app: &Shared, bare: &FsPath, sha: &str) -> Result<Vec<(String, u64, String)>> {
     let out = git_bytes(app, bare, &["ls-tree", "-r", "-l", "-z", sha]).await?;
     Ok(out
         .split(|b| *b == 0)
@@ -476,7 +476,7 @@ pub fn count_lines(text: &str) -> (u64, u64) {
 }
 
 /// Reads many blobs with one `git cat-file --batch`, calling `each` with every blob's bytes.
-async fn cat_batch(app: &Shared, bare: &FsPath, blobs: &[String], mut each: impl FnMut(usize, &[u8])) -> Result<()> {
+pub(crate) async fn cat_batch(app: &Shared, bare: &FsPath, blobs: &[String], mut each: impl FnMut(usize, &[u8])) -> Result<()> {
     let mut cmd = app.git(bare);
     cmd.args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
