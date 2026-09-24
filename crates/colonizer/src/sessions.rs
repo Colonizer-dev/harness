@@ -9,7 +9,9 @@ use crate::{
     config::{ModulesConfig, setting, setting_str, setting_u64},
     diagnosis, github, memory,
     modules::{AgentModule, schema_for},
-    orgs, providers, resolve_guest_claude_bin, restack,
+    orgs,
+    protocol::QuestionRisk,
+    providers, resolve_guest_claude_bin, restack,
     sandbox::{self, BootSpec, Mount, Secret},
     spend,
     stack::{self, Stacked},
@@ -521,9 +523,9 @@ pub struct Runtime {
     /// lines out of order.
     pub(crate) last_seq: AtomicU64,
     pub(crate) logs: Mutex<VecDeque<Value>>,
-    /// The open question: its id, and the questions themselves, which autonomous mode needs to
-    /// answer among the options the agent offered.
-    pub(crate) open_question: Mutex<Option<(String, Vec<Value>)>>,
+    /// The open question: its id, the questions themselves — which autonomous mode needs to answer
+    /// among the options the agent offered — and the question's risk class, which its ceiling reads.
+    pub(crate) open_question: Mutex<Option<(String, Vec<Value>, QuestionRisk)>>,
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
@@ -565,8 +567,8 @@ pub(crate) struct Broadcast {
 }
 
 impl Runtime {
-    /// The question a colony is waiting on, if it is waiting on one.
-    pub async fn open_question(&self) -> Option<(String, Vec<Value>)> {
+    /// The question a colony is waiting on, if it is waiting on one, with its risk class.
+    pub(crate) async fn open_question(&self) -> Option<(String, Vec<Value>, QuestionRisk)> {
         self.open_question.lock().await.clone()
     }
 
@@ -595,7 +597,9 @@ impl Runtime {
         // would publish over it. The last question with no later `question_answered` for its id is
         // still open, with its own timestamp as the start of the wait.
         let mut agent_seq = 0;
-        let mut open_question: Option<(String, Vec<Value>, Option<DateTime<Utc>>)> = None;
+        // The replayed open question: its id, its questions, when it was asked, its risk class.
+        type Replayed = (String, Vec<Value>, Option<DateTime<Utc>>, QuestionRisk);
+        let mut open_question: Option<Replayed> = None;
         for v in events_bytes
             .split(|b| *b == b'\n')
             .filter_map(|line| serde_json::from_str::<Value>(std::str::from_utf8(line).ok()?).ok())
@@ -618,7 +622,8 @@ impl Runtime {
                         .and_then(Value::as_str)
                         .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
                         .map(|ts| ts.with_timezone(&Utc));
-                    open_question = Some((id.to_string(), questions, asked));
+                    let risk = QuestionRisk::from_wire(v.get("risk"));
+                    open_question = Some((id.to_string(), questions, asked, risk));
                 }
                 ("question_answered", Some(id)) if open_question.as_ref().is_some_and(|(open, ..)| open == id) => {
                     open_question = None;
@@ -666,7 +671,7 @@ impl Runtime {
             open_question: Mutex::new(
                 open_question
                     .as_ref()
-                    .map(|(id, questions, _)| (id.clone(), questions.clone())),
+                    .map(|(id, questions, _, risk)| (id.clone(), questions.clone(), *risk)),
             ),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
@@ -681,7 +686,7 @@ impl Runtime {
                 let now = Utc::now();
                 let mut activity = Activity::new(now);
                 // A question with no readable timestamp starts its wait now, as the live path does.
-                activity.question_since = open_question.map(|(_, _, asked)| asked.unwrap_or(now));
+                activity.question_since = open_question.map(|(_, _, asked, _)| asked.unwrap_or(now));
                 activity
             }),
             load_error: Mutex::new((!read_errors.is_empty()).then_some(read_errors.join("; "))),
@@ -4082,7 +4087,7 @@ pub(crate) mod tests {
     fn a_question_still_open_on_disk_is_restored_on_load() {
         let dir = std::env::temp_dir().join(format!("colonizer-open-question-{}", short_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let question = r#"{"seq":3,"ts":"2026-09-21T09:30:00.000Z","type":"question","question_id":"q1","questions":[{"header":"pin","options":[]}]}"#;
+        let question = r#"{"seq":3,"ts":"2026-09-21T09:30:00.000Z","type":"question","question_id":"q1","questions":[{"header":"pin","options":[]}],"risk":"read_only"}"#;
 
         // Asked and never answered: the question is open, and its wait started when it was asked.
         std::fs::write(
@@ -4091,7 +4096,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let rt = Runtime::load(&dir);
-        let (id, questions) = rt
+        let (id, questions, risk) = rt
             .open_question
             .try_lock()
             .unwrap()
@@ -4099,6 +4104,11 @@ pub(crate) mod tests {
             .expect("the question is still open");
         assert_eq!(id, "q1");
         assert_eq!(questions, vec![json!({"header": "pin", "options": []})]);
+        assert_eq!(
+            risk,
+            QuestionRisk::ReadOnly,
+            "the risk class rides out the restart with the question"
+        );
         assert_eq!(
             rt.activity.try_lock().unwrap().question_since,
             Some("2026-09-21T09:30:00Z".parse::<DateTime<Utc>>().unwrap())
@@ -4115,6 +4125,37 @@ pub(crate) mod tests {
         assert!(rt.open_question.try_lock().unwrap().is_none());
         assert!(rt.activity.try_lock().unwrap().question_since.is_none());
         assert_eq!(rt.agent_seq.load(Ordering::SeqCst), 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The risk class folds on replay exactly as the live path folds it (`events.rs`): a question
+    /// from an older runner, with no `risk` on disk, restarts as a workspace write; a class a
+    /// future runner knows stays above every ceiling, and the judge must keep refusing it.
+    #[test]
+    fn a_restored_question_risk_folds_the_same_way_the_live_path_does() {
+        let dir = std::env::temp_dir().join(format!("colonizer-open-question-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stored = |risk: &str| format!(r#"{{"seq":1,"type":"question","question_id":"q1","questions":[]{risk}}}"#);
+        for (line, expected, why) in [
+            (stored(""), QuestionRisk::WorkspaceWrite, "an older runner left the field out"),
+            (stored(r#","risk":null"#), QuestionRisk::WorkspaceWrite, "null is absent"),
+            (
+                stored(r#","risk":"unknown_string_from_a_newer_runner""#),
+                QuestionRisk::Unknown,
+                "a string outside the vocabulary",
+            ),
+            (stored(r#","risk":3"#), QuestionRisk::Unknown, "not a string at all"),
+            (
+                stored(r#","risk":{"note":"trust me"}"#),
+                QuestionRisk::Unknown,
+                "not a string at all",
+            ),
+        ] {
+            std::fs::write(dir.join("events.jsonl"), format!("{line}\n")).unwrap();
+            let rt = Runtime::load(&dir);
+            let (_, _, risk) = rt.open_question.try_lock().unwrap().clone().expect("still open");
+            assert_eq!(risk, expected, "{why}: for {line}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

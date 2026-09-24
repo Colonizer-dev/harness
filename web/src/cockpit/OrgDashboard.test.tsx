@@ -112,6 +112,19 @@ describe("OrgDashboard", () => {
     expect(html).toContain("the API serves no coverage");
   });
 
+  it("pages the colonies ten at a time with search and status, repository and agent filters", () => {
+    const many = Array.from({ length: 23 }, (_, i) => session({ id: `c${i}`, issue: i, status: i % 3 === 0 ? "failed" : "running", repo: i % 2 ? "acme/api" : "acme/webshop" }));
+    const html = renderToStaticMarkup(<OrgDashboard org={ACME} sessions={many} history={history} range={30} compare onBack={noop} />);
+    expect(html).toMatch(/>Colonies<\/h2><span[^>]*>23</);
+    expect(html).toContain("1–10 of 23 colonies");
+    expect(html).toContain('aria-label="search colonies"');
+    for (const f of ['aria-label="status"', 'aria-label="repository"']) expect(html).toContain(f);
+    // One agent across every colony: nothing to choose between, so no agent menu.
+    expect(html).not.toContain('aria-label="agent"');
+    const few = render();
+    expect(few).not.toContain('aria-label="pages"');
+  });
+
   it("adds previous-period deltas and sparklines to the measured KPIs", () => {
     const days = ["2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"];
     const h: SpendHistory = { days: days.map((d) => histDay(d, 1, 0, 1)) };

@@ -83,6 +83,16 @@ setting) is called out under **Take care** rather than left for you to find.
   requirement — with a dry-run mode. The contract, the local assumptions the object-store backend
   surfaced, and the migration procedure are in docs/session-store.md; the reads and per-session
   file writes, and a CLI to run a migration, are follow-ups. ([#325])
+- **Read-only shared memory, enforced twice.** Subagents and background tasks can search shared memory but never
+  propose: the runner's hook already refused `memory_propose` for any agent but the orchestrator, and now the
+  mothership re-checks each proposal's `origin` before it touches a store — with the mem0 provider, a refused
+  proposal is never sent upstream. Proposals record who made them (`source.origin` beside `source.session_id`,
+  shown in review), the access matrix and what is *not* implemented (automatic extraction of memories from
+  conversation turns) are documented. ([#324])
+
+### Changed
+
+- **Long cockpit lists page ten at a time.** The workspace dashboard's Packages tables (Published, Dependencies, Supply chain) and the colony lists on the overview and the workspace dashboard now show ten rows per page with a pager ("11–20 of 54"), a search box and filters that fit the data: status, ecosystem, repository and unreleased changes on Published; repository on Dependencies; search, ecosystem and repository on Supply chain; a failed bucket in the overview's status menu; and status, repository and agent on a workspace's colonies. Changing the search or a filter goes back to page one, and the tab counts still show totals. The Code page gets a Grid | List toggle, where List is one compact row per repository, and the browser remembers the choice.
 
 ## [v0.1.9] - 2026-09-24
 
@@ -652,6 +662,7 @@ Macs. ([#74])
 [#334]: https://github.com/Colonizer-dev/harness/issues/334
 [#202]: https://github.com/Colonizer-dev/harness/issues/202
 [#219]: https://github.com/Colonizer-dev/harness/issues/219
+[#324]: https://github.com/Colonizer-dev/harness/issues/324
 [#332]: https://github.com/Colonizer-dev/harness/issues/332
 [#333]: https://github.com/Colonizer-dev/harness/issues/333
 [#335]: https://github.com/Colonizer-dev/harness/issues/335

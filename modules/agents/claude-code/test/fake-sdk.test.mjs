@@ -18,6 +18,7 @@ import {
   endsWithQuestion,
   MAX_TOOL_OUTPUT,
   rtkRewrite,
+  riskClass,
   runAgent,
   SUPERPOWERS_COLONIZER_NOTE,
   SUPERPOWERS_SKILL,
@@ -167,6 +168,7 @@ test('maps a turn with a question to protocol events', async () => {
       type: 'question',
       question_id: 'toolu_ask',
       message_id: 'msg_1',
+      risk: 'workspace_write',
       questions: [
         {
           question: 'Which file name?',
@@ -215,6 +217,18 @@ test('maps a turn with a question to protocol events', async () => {
   assert.deepEqual(states, ['idle', 'working', 'waiting_for_answer', 'working', 'idle', 'exited']);
   const turnEnd = events.findIndex((e) => e.type === 'turn_end');
   assert.deepEqual(events[turnEnd + 1], { type: 'status', state: 'idle' });
+});
+
+test('every question is risk-classified by rounding up across all of its text', () => {
+  const q = (question, header = '', options = []) => [{ question, header, options }];
+  assert.equal(riskClass(q('Which file name do you want?')), 'workspace_write', 'the default');
+  assert.equal(riskClass([]), 'workspace_write');
+  assert.equal(riskClass(q('Shall I copy the API key into the .env file?')), 'credential_adjacent');
+  assert.equal(riskClass(q('Rotate the ssh key too?', 'Secrets')), 'credential_adjacent');
+  assert.equal(riskClass(q('Proceed?', 'Deploy', [{ label: 'Yes', description: 'Push to main and tag the release' }])), 'publish_affecting');
+  assert.equal(riskClass(q('Open the pull request once tests pass?')), 'publish_affecting');
+  // Highest class wins wherever it appears, and word boundaries keep a tokenizer from being a token.
+  assert.equal(riskClass([...q('Use which tokenizer library?'), ...q('And where do the API keys live?')]), 'credential_adjacent');
 });
 
 test('a full turn emits exactly the committed contract fixture, so runner drift fails here', async () => {

@@ -319,7 +319,7 @@ test('bridge files findings and proposes memory, and needs its token', async () 
     assert.equal((await (await post(b, '/finding', { title: 'T', body: 'B', evidence: 'E' })).json()).filed, true);
     assert.deepEqual(events.at(-1), { type: 'finding', title: 'T', body: 'B', evidence: 'E' });
     assert.equal((await (await post(b, '/memory', { scope: 'org', title: 'M', content: 'C', tags: ['a'] })).json()).ok, true);
-    assert.deepEqual(events.at(-1), { type: 'memory_proposal', scope: 'org', title: 'M', content: 'C', tags: ['a'] });
+    assert.deepEqual(events.at(-1), { type: 'memory_proposal', origin: 'orchestrator', scope: 'org', title: 'M', content: 'C', tags: ['a'] });
     assert.match((await (await post(b, '/memory', { scope: 'bogus', title: 'M', content: 'C' })).json()).error, /repo, org or global/);
     assert.match((await (await post(b, '/finding', { title: 'T', body: '', evidence: '' })).json()).error, /body, evidence/);
     assert.equal(events.filter((e) => e.type === 'finding').length, 1); // rejected calls emit nothing

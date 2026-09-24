@@ -127,7 +127,7 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
 {"type":"thinking","message_id":"msg_…","block_index":1,"text":"summary"}            // optional
 {"type":"tool_call","message_id":"msg_…","tool_call_id":"toolu_…","name":"Bash","input":{"command":"ls"}}
 {"type":"tool_result","tool_call_id":"toolu_…","output":"…","is_error":false}        // output ≤ 20 000 chars
-{"type":"question","question_id":"toolu_…","message_id":"msg_…","questions":[
+{"type":"question","question_id":"toolu_…","message_id":"msg_…","risk":"workspace_write","questions":[
   {"question":"Which database?","header":"Database","multi_select":false,
    "options":[{"label":"Postgres","description":"…","preview":null},{"label":"SQLite","description":"…"}]}
 ]}
@@ -159,6 +159,11 @@ Rules:
 - Agents must ask the user only through `question` events (the Claude Code runner appends a system
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
   options; UIs always add "Other".
+- Every question carries a **risk class** in `risk` (optional), a closed vocabulary ordered lowest
+  to highest: `read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`. The
+  runner assigns the class; the Mothership's autonomy judge enforces it against its ceiling
+  (§6.2b). A question with no `risk` — an older runner's — counts as `workspace_write`; a value
+  outside the vocabulary counts as above every ceiling and is never answered automatically.
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
 - `model_changed` names the orchestrator model. The runner emits it when Claude Code's init first
   names the model (`previous: null`), so a client always knows it, and after each `set_model` the
@@ -1267,8 +1272,16 @@ tells the runner memory is enabled. The runner exposes two tools to the agent: `
 Proposing emits a runner event; nothing is written inside the colony:
 
 ```jsonc
-{"type":"memory_proposal","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
+{"type":"memory_proposal","origin":"orchestrator","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
 ```
+
+`origin` names who asked: `orchestrator`, a `subagent:<name>` or a `background:<name>`. Only the
+orchestrator proposes — the runner's `PreToolUse` hook refuses the tool for any agent with an
+`agent_id`, and the mothership refuses any proposal whose origin is not the orchestrator's
+(`memory_read_only`, logged in the colony's transcript) before it touches a store, so with the `mem0`
+provider a refused proposal is never sent upstream. An event without `origin` — a runner from before
+the field existed — is read as the orchestrator. The matrix and where it is enforced are in
+[architecture](architecture.md#shared-memory-access).
 
 The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
@@ -1305,6 +1318,7 @@ for a person. `judge` means a model answers one the person has not.
 | `after_minutes` | 10 | How long a question waits for a person first; `0` answers as soon as it is seen |
 | `max_answers` | 5 | Judged answers per colony, after which it is left for the person |
 | `free_text` | false | Whether a question with no options may be answered |
+| `risk_ceiling` | `workspace_write` | The highest risk class (§2) the judge may answer. A question above the ceiling is never answered: the judge logs once per question that it has left the question for the person, and waits however long — without spending the colony's judged answers, so a later question within the ceiling is still judged |
 
 Every thirty seconds the Mothership looks for colonies in `waiting_for_answer` whose question has
 waited long enough. It sends the model the task, the question with its options, and the last few
@@ -1317,6 +1331,13 @@ JSON, or free text while `free_text` is off: each leaves the question for the pe
 guessing, and stops this colony being judged again. This is the boundary that keeps a colony's own
 output (which can carry repository content, which can carry instructions) from becoming an
 instruction to the Mothership.
+
+Risk bounds it further. Every question carries a risk class (§2) and `risk_ceiling` is the highest
+class the judge may answer, `workspace_write` by default. A question above the ceiling —
+publish-affecting or credential-adjacent, unless the ceiling is raised — degrades to notify-only:
+the judge never answers it, logs once per question that it has left the question for the person,
+and waits however long it takes — without spending the colony's answer budget, so a later
+question within the ceiling is judged as usual.
 
 Not reaching an answer is different from refusing one. Any failure short of a refusal — a provider
 that cannot be reached, an HTTP error status (a 401 from a stale key as much as a 5xx), a reply

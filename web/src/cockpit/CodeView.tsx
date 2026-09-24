@@ -6,11 +6,19 @@ import { Suspense, lazy, useEffect, useMemo, useState, type ReactElement } from 
 import { useApi } from "../context";
 import type { OrgInfo, Repo, RepoCoverage, RepoGitSummary, RepoLoc, RepoMeta, Session } from "../types";
 import { Avatar } from "../components/Avatar";
-import { Spinner, cx, sameOrg, timeAgo } from "../components/ui";
+import { Spinner, cx, sameOrg, store, stored, timeAgo } from "../components/ui";
+import { Segmented } from "./ListControls";
 import { languageColor } from "./RepoPicker";
 import { compact, shares, sumLoc } from "./code";
 
 const CodeEditor = lazy(() => import("./CodeEditor"));
+
+/** Grid of cards or a compact list; remembered per browser. */
+export type CodeLayout = "grid" | "list";
+export const CODE_LAYOUT_KEY = "colonizer.codeLayout";
+export function readCodeLayout(): CodeLayout {
+  return stored(CODE_LAYOUT_KEY) === "list" ? "list" : "grid";
+}
 
 interface RepoFacts {
   meta?: RepoMeta | null;
@@ -117,12 +125,85 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function RepoCodeCard({ repo, facts, live, onOpen }: { repo: string; facts: RepoFacts | undefined; live: number; onOpen: () => void }): ReactElement {
-  const name = repo.split("/")[1];
+/** What a card and a list row both show about one repository. */
+function repoSummary(facts: RepoFacts | undefined) {
   const langRows = facts?.loc ? shares(facts.loc.by_language) : (facts?.meta?.languages.map((l) => ({ name: l.name, percent: l.percent })) ?? []);
   const commits = facts?.meta?.commits_weekly ?? [];
   const yearCommits = commits.reduce((a, b) => a + b, 0);
   const release = facts?.git?.release?.tagName ?? facts?.git?.latest_tag ?? null;
+  return { langRows, commits, yearCommits, release };
+}
+
+const liveCount = (sessions: Session[], repo: string): number => sessions.filter((s) => s.repo === repo && ["starting", "running", "waiting_for_answer"].includes(s.status)).length;
+
+/** The list layout: one compact row per repository, the same facts as the cards. */
+function RepoCodeTable({ repos, facts, sessions, onOpen }: { repos: string[]; facts: Record<string, RepoFacts>; sessions: Session[]; onOpen: (repo: string) => void }): ReactElement {
+  const th = "py-2 pr-4 font-normal";
+  return (
+    <div className="mt-6 overflow-x-auto rounded-xl border border-border bg-panel">
+      <table className="w-full min-w-[860px] border-collapse text-[13px]">
+        <thead>
+          <tr className="border-b border-border text-left text-[12px] text-muted">
+            <th className={cx(th, "pl-4")}>Repository</th>
+            <th className={cx(th, "w-40")}>Languages</th>
+            <th className={cx(th, "text-right")}>Lines</th>
+            <th className={cx(th, "text-right")}>Coverage</th>
+            <th className={cx(th, "text-right")}>Commits · 52w</th>
+            <th className={cx(th, "text-right")}>Branches</th>
+            <th className={cx(th, "text-right")}>Open PRs</th>
+            <th className={th}>Release</th>
+            <th className={th}>Pushed</th>
+            <th className="py-2 pr-4" aria-label="actions" />
+          </tr>
+        </thead>
+        <tbody>
+          {repos.map((repo) => {
+            const f = facts[repo];
+            const { langRows, yearCommits, release } = repoSummary(f);
+            const live = liveCount(sessions, repo);
+            return (
+              <tr key={repo} className="border-b border-border/60 last:border-b-0 hover:bg-panel-2">
+                <td className="max-w-[18rem] py-2.5 pl-4 pr-4">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-mono text-[13px] font-semibold text-text">{repo.split("/")[1]}</span>
+                    {live > 0 && <span className="shrink-0 text-[11.5px] text-accent">{live} live</span>}
+                  </div>
+                  <div className="truncate text-[12px] text-muted">{f?.meta?.description ?? (f ? "No description" : "Loading…")}</div>
+                </td>
+                <td className="py-2.5 pr-4">
+                  <LanguageBar rows={langRows} height={6} />
+                  {langRows[0] && (
+                    <div className="mt-1 truncate text-[11.5px] text-muted">
+                      {langRows[0].name} {langRows[0].percent}%
+                    </div>
+                  )}
+                </td>
+                <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.loc ? compact(f.loc.total) : f?.error ? <span className="text-faint" title={f.error}>—</span> : "…"}</td>
+                <td className="py-2.5 pr-4 text-right">
+                  <CoveragePill coverage={f?.coverage} />
+                </td>
+                <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.meta ? (f.meta.stats_pending ? "counting…" : yearCommits) : "…"}</td>
+                <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.git?.branches ?? "…"}</td>
+                <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.git ? (f.git.open_prs ?? "—") : "…"}</td>
+                <td className="max-w-[9rem] truncate py-2.5 pr-4 font-mono text-[12px] text-muted">{f?.git ? (release ?? "none") : "…"}</td>
+                <td className="whitespace-nowrap py-2.5 pr-4 text-[12px] text-faint">{f?.meta?.pushed_at ? timeAgo(f.meta.pushed_at) : "—"}</td>
+                <td className="py-2.5 pr-4 text-right">
+                  <button type="button" onClick={() => onOpen(repo)} className="cursor-pointer whitespace-nowrap rounded-lg border border-border-strong bg-panel-2 px-2.5 py-1 text-[12px] font-medium text-text hover:bg-panel-3">
+                    Open editor
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RepoCodeCard({ repo, facts, live, onOpen }: { repo: string; facts: RepoFacts | undefined; live: number; onOpen: () => void }): ReactElement {
+  const name = repo.split("/")[1];
+  const { langRows, commits, yearCommits, release } = repoSummary(facts);
   return (
     <article className="flex flex-col gap-3 rounded-xl border border-border bg-panel p-4">
       <header className="flex items-start gap-3">
@@ -169,6 +250,7 @@ export function CodeView({
   onCreated,
   onOpenColony,
   openRequest,
+  initialLayout,
 }: {
   orgs: OrgInfo[];
   repos: Repo[];
@@ -179,10 +261,17 @@ export function CodeView({
   onOpenColony: (id: string) => void;
   /** Open this file in the editor (from the Chat view); a new `n` asks again. */
   openRequest?: { repo: string; path: string; n: number } | null;
+  /** The layout to start in; read from localStorage when absent (tests pin it). */
+  initialLayout?: CodeLayout;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(openRequest?.repo ?? null);
   const [initialPath, setInitialPath] = useState<string | null>(openRequest?.path ?? null);
   const [seenRequest, setSeenRequest] = useState(openRequest?.n ?? 0);
+  const [layout, setLayoutState] = useState<CodeLayout>(() => initialLayout ?? readCodeLayout());
+  const setLayout = (next: CodeLayout) => {
+    setLayoutState(next);
+    store(CODE_LAYOUT_KEY, next);
+  };
   if (openRequest && openRequest.n !== seenRequest) {
     setSeenRequest(openRequest.n);
     setEditing(openRequest.repo);
@@ -252,6 +341,17 @@ export function CodeView({
           <h1 className="m-0 text-[30px] font-semibold leading-tight tracking-[-0.035em] text-text">Code · {org.org}</h1>
           {org.description && <p className="m-0 mt-1 text-[14px] text-muted">{org.description}</p>}
         </div>
+        {orgRepos.length > 0 && (
+          <Segmented
+            label="layout"
+            value={layout}
+            onChange={setLayout}
+            options={[
+              { value: "grid", label: <><LayoutIcon kind="grid" /> Grid</>, title: "Repository cards" },
+              { value: "list", label: <><LayoutIcon kind="list" /> List</>, title: "One compact row per repository" },
+            ]}
+          />
+        )}
       </header>
       <section aria-label="workspace totals" className="mt-6 grid gap-4 rounded-xl border border-border bg-panel p-4 sm:grid-cols-[repeat(3,minmax(0,1fr))_2fr]">
         <Stat label="Repositories">{orgRepos.length}</Stat>
@@ -264,19 +364,32 @@ export function CodeView({
       </section>
       {orgRepos.length === 0 ? (
         <p className="mt-6 text-[13px] text-faint">No repositories in {org.org} that this GitHub login can see.</p>
+      ) : layout === "list" ? (
+        <RepoCodeTable repos={orgRepos} facts={facts} sessions={sessions} onOpen={setEditing} />
       ) : (
         <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
           {orgRepos.map((repo) => (
-            <RepoCodeCard
-              key={repo}
-              repo={repo}
-              facts={facts[repo]}
-              live={sessions.filter((s) => s.repo === repo && ["starting", "running", "waiting_for_answer"].includes(s.status)).length}
-              onOpen={() => setEditing(repo)}
-            />
+            <RepoCodeCard key={repo} repo={repo} facts={facts[repo]} live={liveCount(sessions, repo)} onOpen={() => setEditing(repo)} />
           ))}
         </div>
       )}
     </main>
+  );
+}
+
+function LayoutIcon({ kind }: { kind: CodeLayout }): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      {kind === "grid" ? (
+        <>
+          <rect x="4" y="4" width="7" height="7" rx="1.5" />
+          <rect x="13" y="4" width="7" height="7" rx="1.5" />
+          <rect x="4" y="13" width="7" height="7" rx="1.5" />
+          <rect x="13" y="13" width="7" height="7" rx="1.5" />
+        </>
+      ) : (
+        <path d="M4 6h16M4 12h16M4 18h16" />
+      )}
+    </svg>
   );
 }
