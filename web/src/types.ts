@@ -1198,6 +1198,8 @@ export interface KeychainHealth {
 export interface SecretsListing {
   keychain: KeychainHealth;
   secrets: SecretRow[];
+}
+
 /** One component of a repository's architecture map (GET /api/maps/{owner}/{repo}, from an archify
  *  architecture diagram): archify's own layout (`pos` top-left, `size`), and the repository files
  *  it lives in. */
