@@ -334,16 +334,24 @@ function clean(repo) {
 
 // ---------------------------------------------------------------------------------------------- command
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, files: [] };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
-    const value = () => argv[++i];
+    // Refuse a missing value here: a flag left dangling would otherwise be read as undefined
+    // (a NaN --timeout) or silently dropped (--data), after the colonies have already been created.
+    const value = () => {
+      if (i + 1 >= argv.length) throw new Error(`${a} needs a value`);
+      return argv[++i];
+    };
     if (a === '--repo') args.repo = value();
     else if (a === '--label') args.label = value();
     else if (a === '--only') args.only = value().split(',').map((s) => s.trim());
-    else if (a === '--timeout') args.timeoutMs = Number(value()) * 1000;
-    else if (a === '--data') args.data = value();
+    else if (a === '--timeout') {
+      const seconds = Number(value());
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('--timeout needs a positive number of seconds');
+      args.timeoutMs = seconds * 1000;
+    } else if (a === '--data') args.data = value();
     else if (a.startsWith('--')) throw new Error(`unknown argument ${a}`);
     else args.files.push(a);
   }

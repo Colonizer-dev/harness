@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatComparison, outsideTask, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { formatComparison, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const TASKS = JSON.parse(readFileSync(join(ROOT, 'scripts/bench/tasks.json'), 'utf8'));
@@ -78,6 +78,19 @@ test('a comparison shows what changed, per task', () => {
   assert.match(text, /pass → FAIL/);
   assert.match(text, /0\.20 → 0\.50 \(\+0\.30\)/);
   assert.match(text, /no pull request \(failed\)/);
+});
+
+test('a --timeout that would wait for NaN fails at parse, before any colony exists', () => {
+  assert.equal(parseArgs(['run', '--timeout', '30']).timeoutMs, 30_000);
+  for (const bad of [[], [''], ['soon'], ['0'], ['-5']]) {
+    assert.throws(() => parseArgs(['run', '--repo', 'o/r', '--timeout', ...bad]), /--timeout needs/);
+  }
+});
+
+test('a flag left dangling for its value fails at parse, with the flag named', () => {
+  for (const flag of ['--repo', '--label', '--only', '--timeout', '--data']) {
+    assert.throws(() => parseArgs(['run', '--repo', 'o/r', flag]), new RegExp(`${flag} needs a value`));
+  }
 });
 
 test('every task names a check that exists, and the fixture is there', () => {
