@@ -58,7 +58,7 @@ is meant to reach.
 
 - **Mesh on** is `modules.mesh_enabled()` and the vendored `headscale`, `tailscale` and `tailscaled`
   binaries present. It adds an `allow@host:tcp:<control>` rule for the headscale control port and
-  the WireGuard rules (`crates/colonizer/src/sessions.rs`).
+  the WireGuard rules (`crates/colonizer/src/boot.rs`).
 - **Any provider** adds an `allow@host:tcp:<gateway>` rule for the provider gateway port. There is
   one route per provider in `providers.json`, whether or not the colony uses it
   (`crates/colonizer/src/providers.rs`).
@@ -92,7 +92,7 @@ listens on (`crates/colonizer/src/mesh.rs:188-189`).
 - **Order.** Explicit rules go before the profile rules ([`common.rs:920-922`][cli-order]). Profile
   rules only allow, so these rules open that UDP port even on private-range host addresses, which
   `public` leaves to the default deny.
-- **Read once.** The list is taken at each boot (`crates/colonizer/src/sessions.rs:1889`) and fixed
+- **Read once.** The list is taken at each boot (`crates/colonizer/src/boot.rs:695`) and fixed
   for the life of the microVM (see [Runtime changes](#runtime-changes)).
 
 ## How microsandbox enforces policy
@@ -222,11 +222,11 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 
 ## Host-loopback listeners
 
-A colony's profile is `public` alone (`crates/colonizer/src/sessions.rs:1862`). Besides the
+A colony's profile is `public` alone (`crates/colonizer/src/boot.rs:694`). Besides the
 profile's port-53 DNS rule, which the forwarder answers ([`types.rs:827-835`][allow-dns]), its only
 Host-group allows are the Headscale control port when the mesh is on
-(`crates/colonizer/src/sessions.rs:1889-1890`) and the gateway port when providers are configured
-(`crates/colonizer/src/sessions.rs:1907-1916`). A `host` rule names the Host group
+(`crates/colonizer/src/boot.rs:721-722`) and the gateway port when providers are configured
+(`crates/colonizer/src/boot.rs:739-748`). A `host` rule names the Host group
 ([`net_rule.rs:563-574`][rule-host]), so it covers the gateway's IPv4 and IPv6, and TCP to either is
 dialled to host loopback ([`poll.rs:817-835`][tcp-host]). Every other Host port falls to the default
 deny. The table lists what the harness host has on loopback, at default ports. Its `.rs` paths are
@@ -240,13 +240,13 @@ under `crates/colonizer/src/` unless given in full.
 | 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:247`, `mesh.rs:291`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |
 | 41742 | `127.0.0.1`, control port + 2 (`mesh.rs:248-249`, `mesh.rs:292`) | Headscale gRPC | `grpc_allow_insecure: false` and no TLS configured; not verified | Default deny since #375 |
 | 41744 | `127.0.0.1`, mesh `socks_port` (`mesh.rs:190-191`, `modules.rs:178`) | Harness `tailscaled` SOCKS5, which the harness uses to dial colonies (`mesh.rs:418-422`) | None (tailscale v1.102.4 [`proxy.go:98-101`][ts-socks-server], [`socks5.go:158-172`][ts-socks-auth]) | Default deny since #375 |
-| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:68-70`, `sessions.rs:1898-1901`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`sessions.rs:1479`, `crates/colonizer-agentd/src/main.rs:176-188`) | Default deny since #375 |
+| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:68-70`, `boot.rs:731-734`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`boot.rs:284`, `crates/colonizer-agentd/src/main.rs:176-188`) | Default deny since #375 |
 | Any | The operator's, such as the `local` provider preset's `127.0.0.1:8080` (`web/src/components/SettingsDialog.tsx:1971`) | Anything else on host loopback | Its own | Default deny since #375; the gateway still proxies to a configured provider |
 
 Still open, all **(inferred)** and untested:
 
 - **Gateway bind.** The gateway allow is built from the configured bind string
-  (`crates/colonizer/src/sessions.rs:1907-1916`), not from the listener that bound; a bind failure
+  (`crates/colonizer/src/boot.rs:739-748`), not from the listener that bound; a bind failure
   is only logged (`crates/colonizer/src/main.rs:1129-1143`). If the gateway fails to bind, whatever
   else holds that port is reachable.
 - **IPv6 loopback.** TCP to the gateway's IPv6 address is dialled to host `::1` first (see

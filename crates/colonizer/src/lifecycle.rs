@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 
 #[allow(unused_imports)]
-use crate::{events::*, publish::*, queue::*, sessions::*};
+use crate::{boot::boot, events::*, publish::*, queue::*, sessions::*};
 
 /// What a refused resume says: the conditions `can_resume` checks, phrased for the user.
 pub(crate) const RESUME_CONFLICT: &str = "this colony can't be resumed: it has to be stopped and still have its worktree";

@@ -1070,7 +1070,7 @@ for a second opinion on the tier §6.1b's rule already picked, in shadow mode on
 attached to `Signals`/`Decision` as `jev: Option<JevOpinion>` (tier, model, confidence, an estimated
 cost) and recorded alongside the rule's own decision, but `decide` never reads it — it stays exactly
 the synchronous, pure function §6.1b describes, with no model and no network call inside it. The
-network call happens once, in the async boot path in `sessions.rs`, before `decide` runs.
+network call happens once, in the async boot path in `boot.rs`, before `decide` runs.
 
 Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` (a `claude-code`
 module setting, default `false`) and a `JEV_API_KEY` secret, declared in `module.json`'s `secrets`

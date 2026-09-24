@@ -202,7 +202,7 @@ fn review_prompt(repo: &str, issue_url: &str, title: &str, diff: &str) -> String
 }
 
 /// The orchestrator model host-side calls run on: the agent module's `model` setting, the same one
-/// a colony's own orchestrator would resolve (sessions.rs `boot`). Without one there is nothing to
+/// a colony's own orchestrator would resolve (boot.rs `boot`). Without one there is nothing to
 /// judge with, so the call refuses and the finding is recorded as an error rather than filed
 /// unjudged — a model that cannot be reached must never silently mean "file it anyway".
 async fn orchestrator_model(app: &App, modules: &ModulesConfig) -> Result<String> {

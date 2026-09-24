@@ -10,7 +10,7 @@
 //! calls through this trait yet. Wiring callers over to it is a later slice.
 //!
 //! `pull` is included because it is part of the launch path today
-//! (`sessions.rs` checks the image cache, pulls, then boots). The
+//! (`boot.rs` checks the image cache, pulls, then boots). The
 //! cache-inspection helpers (`is_cached`, `cached_images`) stay as
 //! [`crate::sandbox`] free functions: they describe the local image cache,
 //! not an execution primitive, and the Setup pane's pre-pull keeps calling

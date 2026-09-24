@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 #[allow(unused_imports)]
-use crate::{events::*, lifecycle::*, publish::*, sessions::*};
+use crate::{boot::boot, events::*, lifecycle::*, publish::*, sessions::*};
 
 /// Whether another colony of `repo` (in `org`) can start right now. Three limits apply together and the
 /// tightest wins: the global one, the org's own if it sets one, and the per-repository one. A queued

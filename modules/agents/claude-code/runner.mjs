@@ -108,7 +108,7 @@ export function superpowersBootstrap(skill) {
   ].join('\n');
 }
 
-/** Where the mothership mounts what the token-saving settings need (crates/colonizer/src/sessions.rs). */
+/** Where the mothership mounts what the token-saving settings need (crates/colonizer/src/boot.rs). */
 export const RTK_BIN = '/opt/colonizer/bin/rtk';
 export const CAVEMAN_SKILL = '/opt/colonizer/caveman/SKILL.md';
 export const CAVEMAN_LEVELS = new Set(['lite', 'full', 'ultra']);

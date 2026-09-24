@@ -29,7 +29,7 @@
 #   whatever Anthropic's `stable` channel points at that day. A colony is a Linux microVM, so the
 #   Mac's own binary cannot run in it. (A Linux host reuses its own Claude Code install instead.)
 # - on every host, the Linux Node.js runtime colonies run (node.lock, fetched by the guest_node step
-#   below): unlike Claude Code there is no host install to reuse, and sessions.rs fails the boot
+#   below): unlike Claude Code there is no host install to reuse, and boot.rs fails the boot
 #   without bin/node-guest, so a Linux install fetches it just like a Mac one does.
 #
 #   COLONIZER_VERSION=v0.1.0   install that release instead of the latest
@@ -111,7 +111,7 @@ main() {
     guest_node "$tmp/unpack/colonizer/bin/node-guest" "$tmp/unpack/colonizer/node.lock" "linux-arm64"
   elif [ "$platform" = linux-x86_64 ]; then
     # No host fallback for node: unlike claude-guest, which a Linux host reuses from its own
-    # install, sessions.rs fails the boot without bin/node-guest — so Linux installs fetch it too.
+    # install, boot.rs fails the boot without bin/node-guest — so Linux installs fetch it too.
     guest_node "$tmp/unpack/colonizer/bin/node-guest" "$tmp/unpack/colonizer/node.lock" "linux-x64"
   fi
 
@@ -142,7 +142,7 @@ main() {
     rm -rf "$app.old"
   fi
   # Colonies mount vendored plugins straight out of the slot the mothership was
-  # started from (sessions.rs resolves its assets through current_exe, which
+  # started from (boot.rs resolves its assets through current_exe, which
   # canonicalises the symlink away), so removing it under a running colony takes
   # its plugins with it. An update applied by a running mothership sets
   # COLONIZER_KEEP_PREVIOUS=1 and cleans the slot up itself, once nothing is

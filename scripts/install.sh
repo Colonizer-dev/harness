@@ -66,7 +66,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$bundle" = 0 ]; then
 fi
 
 # The Node runtime has no host fallback on any host — unlike the agent binary above, which Linux
-# reuses from the host install. sessions.rs mounts dist/bin/node-guest into every colony whose agent
+# reuses from the host install. boot.rs mounts dist/bin/node-guest into every colony whose agent
 # command starts with `node` and fails the boot when it is missing, so the pinned Linux build is
 # fetched on Darwin and Linux alike: at install time, never at runtime.
 if [ "$bundle" = 0 ]; then
