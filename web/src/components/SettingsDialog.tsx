@@ -1,5 +1,7 @@
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useRef,
@@ -69,17 +71,21 @@ import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { GuideIcon, SectionHero, guideFor, isAdvancedField, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
-// Shell: a section list on the left, the selected section on the right.
+// Shell: the sections across the top (groups as tabs, sections as chips), the page beneath.
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
 export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
+
+/** The page's hero card (settingsGuide.tsx), which every Pane shows at the top of its body. */
+const HeroContext = createContext<ReactNode>(null);
 
 const KIND_INFO: Record<string, { title: string; description: string }> = {
   source: { title: "Source", description: "Where tasks come from" },
@@ -398,6 +404,77 @@ export function SettingsBody({
 
   const back = narrow ? () => setSection(null) : undefined;
 
+  /** Two or three facts for the hero card, from what this screen already has loaded. */
+  const heroStats = (id: SectionId): HeroStat[] => {
+    const onOff = (on: boolean | null | undefined): HeroStat["tone"] => (on ? "ok" : undefined);
+    switch (id) {
+      case "setup":
+        return setup && setupToneValue ? [{ label: "Status", value: setupToneValue === "ok" ? "All set" : "Not finished", tone: setupToneValue }] : [];
+      case "connections":
+        return status
+          ? [
+              { label: "GitHub", value: github?.connected ? (github.login ?? "Connected") : "Not connected", tone: github?.connected ? "ok" : "err" },
+              { label: "Claude", value: claude?.configured ? "Connected" : "Not connected", tone: claude?.configured ? "ok" : "err" },
+            ]
+          : [];
+      case "providers":
+        return providers ? [{ label: "Providers", value: String(providers.length + 1) }] : [];
+      case "runtime":
+        return status
+          ? [
+              { label: "microsandbox", value: status.sandbox.msb_version ?? "missing", tone: status.sandbox.msb_version ? "ok" : "err" },
+              { label: "Mesh", value: meshBroken(status.mesh) ? "Needs attention" : "Healthy", tone: meshBroken(status.mesh) ? "err" : "ok" },
+            ]
+          : [];
+      case "live-map":
+        return telemetry ? [{ label: "Live map", value: telemetry.enabled ? "On" : "Off", tone: onOff(telemetry.enabled) }] : [];
+      case "updates":
+        return update
+          ? [
+              { label: "Installed", value: update.installed.version },
+              ...(update.available && update.latest ? [{ label: "Available", value: update.latest.version, tone: "ok" as const }] : []),
+            ]
+          : [];
+      case "usage":
+        return usage ? [{ label: "Usage data", value: usage.enabled ? "On" : "Off", tone: onOff(usage.enabled) }] : [];
+      case "notifications":
+        return [
+          { label: "In tab", value: notifications.inTab ? "On" : "Off", tone: onOff(notifications.inTab) },
+          { label: "Sound", value: notifications.sound ? "On" : "Off", tone: onOff(notifications.sound) },
+          { label: "Browser", value: notifications.browser ? "On" : "Off", tone: onOff(notifications.browser) },
+        ];
+    }
+    if (id.startsWith("org:")) {
+      const o = orgs?.find((x) => sameOrg(x.org, id.slice("org:".length)));
+      return o
+        ? [
+            { label: "Live", value: String(o.colonies.live), tone: o.colonies.live > 0 ? "ok" : undefined },
+            { label: "Colonies", value: String(o.colonies.total) },
+            { label: "Workspace", value: orgEnabled(o.settings) ? "On" : "Off", tone: onOff(orgEnabled(o.settings)) },
+          ]
+        : [];
+    }
+    if (id.startsWith("module:")) {
+      const kind = id.slice("module:".length);
+      const m = modules?.find((x) => x.kind === kind);
+      const d = drafts[kind];
+      if (!m || !d) return [];
+      const stats: HeroStat[] = [{ label: "Module", value: d.enabled ? "On" : "Off", tone: onOff(d.enabled) }];
+      const provider = m.providers.find((x) => x.id === d.provider);
+      if (m.providers.length > 1 && provider) stats.push({ label: "Provider", value: provider.name });
+      // One or two short, essential values: a model, a count, a mode.
+      for (const [key, field] of Object.entries(m.schema?.properties ?? {})) {
+        if (stats.length >= 3) break;
+        if (isAdvancedField(key, field) || field.type === "boolean" || field.format) continue;
+        const v = d.settings[key];
+        if (v === undefined || v === null || v === "" || String(v).length > 22) continue;
+        stats.push({ label: field.title ?? key, value: String(v) });
+      }
+      return stats;
+    }
+    return [];
+  };
+
   let pane: ReactNode = null;
   if (active === "setup") {
     pane = (
@@ -474,6 +551,23 @@ export function SettingsBody({
       );
   }
 
+  // What the page is for, as a card: Pane shows it at the top of its body; Setup and a workspace
+  // draw their own frame, so for them it sits above the pane instead.
+  const hero = active ? <SectionHero guide={guideFor(active)} stats={heroStats(active)} /> : null;
+  const ownFrame = active === "setup" || Boolean(active?.startsWith("org:"));
+  const framed = (
+    <HeroContext.Provider value={ownFrame ? null : hero}>
+      {ownFrame ? (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="shrink-0 px-5 pt-4">{hero}</div>
+          {pane}
+        </div>
+      ) : (
+        pane
+      )}
+    </HeroContext.Provider>
+  );
+
   return (
     <div className={cx("flex flex-col", embedded ? "h-full min-h-0" : "h-[min(680px,calc(100dvh-24px))]")}>
       {/* The cockpit has its own header and crumb, so the embedded frame does not repeat them. */}
@@ -496,13 +590,13 @@ export function SettingsBody({
         active === null ? (
           <SectionNav layout="list" groups={groups} active={null} onSelect={select} initialFocus={lastSection.current} />
         ) : (
-          pane
+          framed
         )
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <SectionNav layout="side" groups={groups} active={active} onSelect={select} />
-          {pane}
-        </div>
+        <>
+          <TopNav groups={groups} active={active} onSelect={select} />
+          <div className="flex min-h-0 flex-1">{framed}</div>
+        </>
       )}
     </div>
   );
@@ -633,6 +727,117 @@ function SectionNav({
   );
 }
 
+/**
+ * The wide layout's nav, across the top: the groups as tabs, and the chosen group's sections as
+ * chips beneath, each with its icon. The chip row is one Tab stop; the arrows move along it.
+ */
+function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; active: SectionId | null; onSelect: (id: SectionId) => void }) {
+  const owner = groups.find((g) => g.items.some((item) => item.id === active)) ?? groups[0];
+  const [groupLabel, setGroupLabel] = useState(owner?.label);
+  // Following the page: a section opened from elsewhere (a link, a deep link) brings its group along.
+  const [lastActive, setLastActive] = useState(active);
+  if (active !== lastActive) {
+    setLastActive(active);
+    if (owner) setGroupLabel(owner.label);
+  }
+  const group = groups.find((g) => g.label === groupLabel) ?? owner;
+  const refs = useRef<Partial<Record<SectionId, HTMLButtonElement | null>>>({});
+  const items = group?.items ?? [];
+
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key) || items.length === 0) return;
+    const index = Math.max(0, items.findIndex((item) => item.id === active));
+    const next =
+      e.key === "ArrowRight" ? (index + 1) % items.length
+      : e.key === "ArrowLeft" ? (index - 1 + items.length) % items.length
+      : e.key === "Home" ? 0
+      : items.length - 1;
+    e.preventDefault();
+    onSelect(items[next].id);
+    refs.current[items[next].id]?.focus();
+  };
+
+  return (
+    <nav aria-label="Settings sections" className="shrink-0 border-b border-border">
+      <div role="tablist" aria-label="Settings groups" className="flex gap-1 px-4 pt-2.5">
+        {groups.map((g) => {
+          const current = g.label === group?.label;
+          return (
+            <button
+              key={g.label}
+              type="button"
+              role="tab"
+              aria-selected={current}
+              onClick={() => {
+                setGroupLabel(g.label);
+                if (g.items[0] && !g.items.some((item) => item.id === active)) onSelect(g.items[0].id);
+              }}
+              className={cx(
+                "relative cursor-pointer rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
+                current ? "text-text" : "text-muted hover:bg-panel-2 hover:text-text",
+              )}
+            >
+              {g.label}
+              <span className="ml-1.5 text-[11.5px] font-normal tabular-nums text-faint">{g.items.length || ""}</span>
+              {current && <span aria-hidden="true" className="absolute inset-x-2 -bottom-[1px] h-0.5 rounded-full bg-accent" />}
+            </button>
+          );
+        })}
+      </div>
+      <div className="border-t border-border">
+        {group?.loading && (
+          <p className="flex items-center gap-2 px-5 py-2.5 text-[12.5px] text-muted">
+            <Spinner className="size-3" /> Loading…
+          </p>
+        )}
+        {group?.error && <p className="px-5 py-2.5 text-[12.5px] text-err">{group.error}</p>}
+        <ul onKeyDown={onKeyDown} className="scroll-thin flex gap-1.5 overflow-x-auto px-4 py-2.5">
+          {items.map((item) => {
+            const current = item.id === active;
+            return (
+              <li key={item.id} className="shrink-0">
+                <button
+                  type="button"
+                  ref={(el) => {
+                    refs.current[item.id] = el;
+                  }}
+                  aria-current={current ? "true" : undefined}
+                  tabIndex={current || (!items.some((i) => i.id === active) && item === items[0]) ? 0 : -1}
+                  title={item.hint}
+                  onClick={() => onSelect(item.id)}
+                  className={cx(
+                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-[13px] transition-colors",
+                    current ? "border-border-strong bg-panel-2 font-medium text-text" : "border-transparent text-muted hover:bg-panel-2 hover:text-text",
+                  )}
+                >
+                  <GuideIcon name={guideFor(item.id).icon} size={15} className={current ? "text-accent" : undefined} />
+                  <span className="whitespace-nowrap">{item.label}</span>
+                  {item.dirty && (
+                    <>
+                      <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-accent" />
+                      <span className="sr-only">unsaved changes</span>
+                    </>
+                  )}
+                  {item.badge && <span className="text-[11.5px] tabular-nums text-faint">{item.badge}</span>}
+                  {item.tone && (
+                    <>
+                      <span
+                        aria-hidden="true"
+                        className={cx("size-2 shrink-0 rounded-full", item.tone === "ok" ? "bg-ok" : item.tone === "err" ? "bg-err" : "bg-warn")}
+                      />
+                      {item.toneText && <span className="sr-only">{item.toneText}</span>}
+                    </>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </nav>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Pane and row layout shared by every section
 // ---------------------------------------------------------------------------
@@ -656,6 +861,7 @@ function Pane({
   children: ReactNode;
 }) {
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const hero = useContext(HeroContext);
   const stacked = Boolean(back);
   // In the narrow, back-navigable layout the pane replaces the list, so focus must follow.
   useEffect(() => {
@@ -689,7 +895,10 @@ function Pane({
         </div>
         {aside && <div className="flex shrink-0 items-center leading-8">{aside}</div>}
       </div>
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {hero}
+        {children}
+      </div>
       {footer && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">{footer}</div>}
     </section>
   );
@@ -1693,6 +1902,45 @@ function ModulePane({
 
   const setField = (key: string, value: unknown) => onDraft({ settings: { ...draft.settings, [key]: value } });
 
+  // Ports, timers and paths fold under Advanced; what most people change stays on the page.
+  const essentials = fields.filter(([key, field]) => !isAdvancedField(key, field));
+  const advanced = fields.filter(([key, field]) => isAdvancedField(key, field));
+  const renderField = ([key, field]: [string, SchemaField]) => {
+    // Jev's tunables only mean anything with the switch on.
+    if (
+      module.kind === "agent" &&
+      (key === "jev_keep_threshold" || key === "jev_preserve_recent") &&
+      draft.settings.jev_compaction !== true
+    )
+      return null;
+    const setting = (
+      <SettingField
+        key={key}
+        name={key}
+        field={field}
+        value={valueOf(draft.settings, key, field)}
+        onChange={(v) => setField(key, v)}
+        models={models && MODEL_KEYS.has(key) ? models : undefined}
+      />
+    );
+    // The download sits under the switch that asks for it, one divider group with it.
+    const showHeadroom =
+      module.kind === "agent" &&
+      key === "headroom" &&
+      (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
+    // The data-egress warning sits under the switch that asks for it, one divider group with it.
+    const showJevWarning = module.kind === "agent" && key === "jev_compaction" && draft.settings.jev_compaction === true;
+    return showHeadroom || showJevWarning ? (
+      <div key={key} className="pb-2.5">
+        {setting}
+        {showHeadroom && <HeadroomRow headroom={headroom} />}
+        {showJevWarning && <JevCompactionNotice />}
+      </div>
+    ) : (
+      setting
+    );
+  };
+
   return (
     <Pane
       title={info.title}
@@ -1723,7 +1971,8 @@ function ModulePane({
           <ImagePullRow pull={pull} />
         </div>
       )}
-      <div className={cx("divide-y divide-border", !draft.enabled && "opacity-60")}>
+      <div className={cx(!draft.enabled && "opacity-60")}>
+      <div className="divide-y divide-border rounded-xl border border-border bg-panel px-4">
         <Row id={providerId} label="Provider" info={providerInfo?.description ? <p>{providerInfo.description}</p> : undefined}>
           {module.providers.length > 1 ? (
             <select id={providerId} value={draft.provider} onChange={(e) => onDraft({ provider: e.target.value })} className={inputClass}>
@@ -1744,41 +1993,7 @@ function ModulePane({
           <p className="py-2.5 text-[12.5px] text-warn">These fields belong to the current provider. Save to switch.</p>
         )}
 
-        {fields.map(([key, field]) => {
-          // Jev's tunables only mean anything with the switch on.
-          if (
-            module.kind === "agent" &&
-            (key === "jev_keep_threshold" || key === "jev_preserve_recent") &&
-            draft.settings.jev_compaction !== true
-          )
-            return null;
-          const setting = (
-            <SettingField
-              key={key}
-              name={key}
-              field={field}
-              value={valueOf(draft.settings, key, field)}
-              onChange={(v) => setField(key, v)}
-              models={models && MODEL_KEYS.has(key) ? models : undefined}
-            />
-          );
-          // The download sits under the switch that asks for it, one divider group with it.
-          const showHeadroom =
-            module.kind === "agent" &&
-            key === "headroom" &&
-            (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
-          // The data-egress warning sits under the switch that asks for it, one divider group with it.
-          const showJevWarning = module.kind === "agent" && key === "jev_compaction" && draft.settings.jev_compaction === true;
-          return showHeadroom || showJevWarning ? (
-            <div key={key} className="pb-2.5">
-              {setting}
-              {showHeadroom && <HeadroomRow headroom={headroom} />}
-              {showJevWarning && <JevCompactionNotice />}
-            </div>
-          ) : (
-            setting
-          );
-        })}
+        {essentials.map(renderField)}
 
         {module.kind === "memory" && draft.provider === "mem0" && <Mem0KeyRow />}
 
@@ -1786,6 +2001,20 @@ function ModulePane({
         {module.kind === "voice" && <VoiceTestRow unsaved={dirty} />}
 
         {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
+      </div>
+      {advanced.length > 0 && (
+        <details className="group mt-3 rounded-xl border border-border bg-panel-2/40 [&_summary::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-4 py-2.5 text-[13px] font-medium text-muted hover:text-text">
+            <IconChevron size={14} className="transition-transform group-open:rotate-90" />
+            Advanced
+            <span className="font-normal text-faint">
+              · {advanced.length} {advanced.length === 1 ? "setting" : "settings"}
+            </span>
+            <span className="ml-auto text-[12px] font-normal text-faint">Ports, timers and paths — the defaults suit most setups</span>
+          </summary>
+          <div className="divide-y divide-border border-t border-border px-4">{advanced.map(renderField)}</div>
+        </details>
+      )}
       </div>
     </Pane>
   );
