@@ -7,8 +7,11 @@ import type {
   PackagesDependencies,
   SupplyChain,
   ArchMap,
+  ChatAttachment,
+  ChatAttachmentNote,
   ChatMessage,
   ChatMeta,
+  ChatStreamEvent,
   RepoMap,
   AgentEvent,
   AgentEventBody,
@@ -1229,6 +1232,35 @@ export function createMockApi(): Api {
   const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
   const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
   const mockChats = new Map<string, { meta: ChatMeta; messages: ChatMessage[] }>();
+  const mockId = () => Math.random().toString(16).slice(2, 10);
+  const mockNote = (a: ChatAttachment): ChatAttachmentNote => ({
+    kind: a.kind,
+    label: a.kind === "file" ? `${a.repo}/${a.path}` : a.kind === "snippet" ? a.label || "snippet" : a.kind === "colony" ? a.id : a.kind === "image" ? a.name || a.media_type : a.kind === "map" ? `${a.repo} map` : a.kind === "map_component" ? `${a.repo} · ${a.component}` : a.kind === "merged_prs" ? "merged PRs" : "today's colonies",
+  });
+
+  async function mockReply(c: { meta: ChatMeta; messages: ChatMessage[] }, model: string, parent: string | undefined, lane: number | undefined, onEvent: (e: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+    const started = Date.now();
+    const tag = <T extends object>(e: T) => (lane === undefined ? e : { ...e, lane });
+    const answer = `*(mock reply from ${model})* You asked: **${c.messages.at(-1)?.content.slice(0, 80) ?? ""}**\n\nSee \`src/main.rs\` for the entry point.\n\n\`\`\`rust\nfn main() {\n    let answer: u32 = 42; // the answer\n    println!("{answer}");\n}\n\`\`\``;
+    let text = "";
+    let first: number | undefined;
+    for (const word of answer.split(/(?<= )/)) {
+      if (signal?.aborted) break;
+      await sleep(lane === 1 ? 45 : 30);
+      first ??= Date.now() - started;
+      text += word;
+      onEvent(tag({ type: "delta" as const, text: word }));
+    }
+    const message: ChatMessage = { id: mockId(), role: "assistant", content: text, ts: new Date().toISOString(), model, input_tokens: 120, output_tokens: 40, cost_usd: 0.0004, stopped: Boolean(signal?.aborted), parent_id: parent, first_token_ms: first, latency_ms: Date.now() - started, candidate: lane !== undefined || undefined, lane };
+    c.messages.push(message);
+    c.meta = { ...c.meta, updated_at: message.ts };
+    let chat: ChatMeta | undefined;
+    if (c.meta.auto_title && lane === undefined && c.messages.filter((m) => m.role === "assistant").length === 1) {
+      c.meta = { ...c.meta, title: `About ${c.messages[0]?.content.slice(0, 24) ?? "this"}`, auto_title: false };
+      chat = c.meta;
+    }
+    onEvent(tag({ type: "done" as const, message, chat }));
+  }
   const repoMap = (repo: string): RepoMap => {
     const map = maps.get(repo);
     return {
@@ -2808,7 +2840,15 @@ export function createMockApi(): Api {
     editorSettings: async () => ({ autosave: true }),
     saveEditorSettings: async (body) => body,
     chats: () => later(() => ({ chats: [...mockChats.values()].map((c) => c.meta).sort((a, b) => b.updated_at.localeCompare(a.updated_at)) })),
-    chatModels: () => later(() => ({ default: "zai/glm-5.3-flash", claude: { available: false, reason: "a Claude model needs an Anthropic API key (sk-ant-api…) or an Anthropic model provider; the Claude subscription login is only used by colonies" }, providers: [{ id: "zai", name: "Z.AI", models: ["glm-5.3-flash", "glm-5.3"] }] })),
+    chatModels: () =>
+      later(() => ({
+        default: "zai/glm-5.3-flash",
+        claude: { available: false, reason: "a Claude model needs an Anthropic API key (sk-ant-api…) or an Anthropic model provider; the Claude subscription login is only used by colonies" },
+        providers: [
+          { id: "zai", name: "Z.AI", models: ["glm-5.3-flash", "glm-5.3"], preset: "zai", wire: "anthropic" as const, has_key: true, pricing: { input_per_mtok: 0.6, output_per_mtok: 2.2 } },
+          { id: "deepseek", name: "DeepSeek", models: ["deepseek-chat", "deepseek-reasoner"], preset: "deepseek", wire: "openai" as const, has_key: false, pricing: null },
+        ],
+      })),
     createChat: (body) =>
       later(() => {
         const at = new Date().toISOString();
@@ -2833,22 +2873,57 @@ export function createMockApi(): Api {
     sendChat: async (id, body, onEvent, signal) => {
       const c = mockChats.get(id);
       if (!c) throw new Error("no such conversation");
-      if (body.regenerate) while (c.messages.at(-1)?.role === "assistant") c.messages.pop();
-      else if (body.content) c.messages.push({ id: Math.random().toString(16).slice(2, 10), role: "user", content: body.content, ts: new Date().toISOString(), input_tokens: 0, output_tokens: 0, stopped: false });
-      if (!c.meta.title && body.content) c.meta.title = body.content.slice(0, 60);
-      const answer = `*(mock reply)* You asked: **${c.messages.at(-1)?.content.slice(0, 80) ?? ""}**\n\n\`\`\`ts\nconst answer = 42;\n\`\`\``;
-      let text = "";
-      for (const word of answer.split(/(?<= )/)) {
-        if (signal?.aborted) break;
-        await sleep(30);
-        text += word;
-        onEvent({ type: "delta", text: word });
+      let parent: string | undefined;
+      if (body.regenerate) {
+        while (c.messages.at(-1)?.role === "assistant") c.messages.pop();
+        parent = c.messages.at(-1)?.id;
+      } else if (body.content) {
+        const user: ChatMessage = { id: mockId(), role: "user", content: body.content, ts: new Date().toISOString(), input_tokens: 0, output_tokens: 0, stopped: false, attachments: (body.attachments ?? []).map(mockNote) };
+        c.messages.push(user);
+        parent = user.id;
       }
-      const message = { id: Math.random().toString(16).slice(2, 10), role: "assistant" as const, content: text, ts: new Date().toISOString(), model: c.meta.model, input_tokens: 120, output_tokens: 40, cost_usd: 0.0004, stopped: Boolean(signal?.aborted) };
-      c.messages.push(message);
-      c.meta.updated_at = message.ts;
-      onEvent({ type: "done", message });
+      if (!c.meta.title && body.content) c.meta = { ...c.meta, title: body.content.slice(0, 60), auto_title: true };
+      await mockReply(c, body.model ?? c.meta.model, parent, undefined, onEvent, signal);
     },
+    compareChat: async (id, body, onEvent, signal) => {
+      const c = mockChats.get(id);
+      if (!c) throw new Error("no such conversation");
+      const user: ChatMessage = { id: mockId(), role: "user", content: body.content, ts: new Date().toISOString(), input_tokens: 0, output_tokens: 0, stopped: false, attachments: (body.attachments ?? []).map(mockNote) };
+      c.messages.push(user);
+      if (!c.meta.title) c.meta = { ...c.meta, title: body.content.slice(0, 60) };
+      await Promise.all(body.models.map((m, lane) => mockReply(c, m, user.id, lane, onEvent, signal)));
+    },
+    pickChat: (id, messageId) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        const pick = c.messages.find((m) => m.id === messageId && m.candidate);
+        if (!pick) throw new Error("no such compare reply");
+        c.messages = c.messages
+          .filter((m) => !(m.candidate && m.parent_id === pick.parent_id && m.id !== messageId))
+          .map((m) => (m.id === messageId ? { ...m, candidate: false, lane: undefined } : m));
+        return { messages: [...c.messages] };
+      }),
+    forkChat: (id, messageId, include) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        const at = c.messages.findIndex((m) => m.id === messageId);
+        if (at < 0) throw new Error("no such message");
+        const now = new Date().toISOString();
+        const meta: ChatMeta = { ...c.meta, id: mockId(), title: `${c.meta.title || "conversation"} (branch)`, pinned: false, auto_title: false, created_at: now, updated_at: now, forked_from: { chat: id, message: messageId } };
+        mockChats.set(meta.id, { meta, messages: c.messages.slice(0, include ? at + 1 : at).filter((m) => !m.candidate) });
+        return meta;
+      }),
+    retitleChat: (id) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        c.meta = { ...c.meta, title: `Mock title for ${c.messages[0]?.content.slice(0, 20) ?? "chat"}`, auto_title: false };
+        return c.meta;
+      }),
+    chatExportUrl: (id) => `data:text/markdown,${encodeURIComponent(`# ${mockChats.get(id)?.meta.title ?? "Conversation"}\n`)}`,
+    chatIssue: async (_id, body) => ({ url: `https://github.com/${body.repo}/issues/999` }),
     orgPublished: (org) =>
       later(
         (): PackagesPublished => ({

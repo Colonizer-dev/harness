@@ -168,6 +168,7 @@ export function CodeView({
   onSelectOrg,
   onCreated,
   onOpenColony,
+  openRequest,
 }: {
   orgs: OrgInfo[];
   repos: Repo[];
@@ -176,8 +177,17 @@ export function CodeView({
   onSelectOrg: (org: string | null) => void;
   onCreated: (session: Session) => void;
   onOpenColony: (id: string) => void;
+  /** Open this file in the editor (from the Chat view); a new `n` asks again. */
+  openRequest?: { repo: string; path: string; n: number } | null;
 }): ReactElement {
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(openRequest?.repo ?? null);
+  const [initialPath, setInitialPath] = useState<string | null>(openRequest?.path ?? null);
+  const [seenRequest, setSeenRequest] = useState(openRequest?.n ?? 0);
+  if (openRequest && openRequest.n !== seenRequest) {
+    setSeenRequest(openRequest.n);
+    setEditing(openRequest.repo);
+    setInitialPath(openRequest.path);
+  }
   const org = orgs.find((o) => sameOrg(o.org, selectedOrg)) ?? null;
   const orgRepos = useMemo(
     () => repos.filter((r) => selectedOrg && sameOrg(r.full_name.split("/")[0], selectedOrg) && !r.archived).map((r) => r.full_name),
@@ -196,7 +206,17 @@ export function CodeView({
           </div>
         }
       >
-        <CodeEditor repo={editing} onClose={() => setEditing(null)} onCreated={onCreated} onOpenColony={onOpenColony} />
+        <CodeEditor
+          key={editing}
+          repo={editing}
+          initialPath={initialPath}
+          onClose={() => {
+            setEditing(null);
+            setInitialPath(null);
+          }}
+          onCreated={onCreated}
+          onOpenColony={onOpenColony}
+        />
       </Suspense>
     );
   }

@@ -1475,7 +1475,19 @@ async fn serve() -> Result<()> {
         .route("/api/chat", get(chat::list).post(chat::create))
         .route("/api/chat/models", get(chat::models))
         .route("/api/chat/{id}", get(chat::get).patch(chat::patch).delete(chat::delete))
-        .route("/api/chat/{id}/messages", post(chat::send))
+        .route(
+            "/api/chat/{id}/messages",
+            post(chat::send).layer(DefaultBodyLimit::max(chat::BODY_LIMIT)),
+        )
+        .route(
+            "/api/chat/{id}/compare",
+            post(chat::compare).layer(DefaultBodyLimit::max(chat::BODY_LIMIT)),
+        )
+        .route("/api/chat/{id}/pick", post(chat::pick))
+        .route("/api/chat/{id}/fork", post(chat::fork))
+        .route("/api/chat/{id}/title", post(chat::retitle))
+        .route("/api/chat/{id}/export", get(chat::export))
+        .route("/api/chat/{id}/issue", post(chat::file_issue))
         .route("/api/repos", get(github::list_repos))
         .route("/api/maps/{owner}/{name}", get(maps::get).post(maps::create))
         .route("/api/maps/{owner}/{name}/files", get(maps::files))
