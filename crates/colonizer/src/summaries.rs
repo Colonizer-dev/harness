@@ -1,7 +1,8 @@
 //! One-line task summaries: a cheap model reads a colony's issue (or its instructions) and writes
 //! the task as one plain sentence, so the cockpit can say what a colony is doing where it otherwise
 //! shows "open session" or a long issue title. Written once after launch, again from the pull
-//! request when it opens, and backfilled at startup for live colonies that have none.
+//! request when it opens, and backfilled at startup for colonies that have none — live ones first, then
+//! the most recently updated ended ones, so the Overview's history reads as summaries too.
 //!
 //! Only the task text leaves the host — the issue title and body, the instructions, or the pull
 //! request's title and body — never a secret, a path on the host, or colony output. A failure
@@ -35,11 +36,12 @@ const INPUT_LIMIT: usize = 6 * 1024;
 /// The longest summary kept.
 pub const SUMMARY_LIMIT: usize = 120;
 /// A summary request never outlasts this; the cockpit falls back to the title meanwhile.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounded `gh` reads of the issue or pull request body.
 const GH_TIMEOUT: Duration = Duration::from_secs(15);
-/// How many live colonies one start backfills, and how many at once.
-const BACKFILL_CAP: usize = 50;
+/// How many colonies one start backfills (live first, then the most recent ended ones), and how
+/// many at once.
+const BACKFILL_CAP: usize = 200;
 const BACKFILL_PARALLEL: usize = 2;
 
 /// Set once the first failure is logged, so a missing credential or an unreachable API does not
@@ -439,21 +441,21 @@ fn live(status: SessionStatus) -> bool {
     )
 }
 
-/// At startup: summarizes up to [`BACKFILL_CAP`] live colonies that have none, [`BACKFILL_PARALLEL`]
-/// at a time.
+/// At startup: summarizes up to [`BACKFILL_CAP`] colonies that have none — live ones first, then the
+/// most recently updated ended ones — [`BACKFILL_PARALLEL`] at a time.
 pub async fn backfill(app: Shared) {
     if !matches!(settings(&app).await, (true, Some(_))) {
         return;
     }
-    let ids: Vec<String> = app
+    let mut missing: Vec<(bool, chrono::DateTime<chrono::Utc>, String)> = app
         .sessions
         .read()
         .await
         .iter()
-        .filter(|s| s.summary.is_none() && live(s.status))
-        .map(|s| s.id.clone())
-        .take(BACKFILL_CAP)
+        .filter(|s| s.summary.is_none())
+        .map(|s| (live(s.status), s.updated_at, s.id.clone()))
         .collect();
+    let ids = backfill_order(&mut missing);
     let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(BACKFILL_PARALLEL));
     let mut tasks = Vec::new();
     for id in ids {
@@ -468,6 +470,29 @@ pub async fn backfill(app: Shared) {
     }
     for task in tasks {
         let _ = task.await;
+    }
+}
+
+/// The backfill order: live colonies first, then the rest, each newest first; capped.
+fn backfill_order(missing: &mut [(bool, chrono::DateTime<chrono::Utc>, String)]) -> Vec<String> {
+    missing.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    missing.iter().take(BACKFILL_CAP).map(|(_, _, id)| id.clone()).collect()
+}
+
+#[cfg(test)]
+mod backfill_order_tests {
+    use super::*;
+
+    #[test]
+    fn live_first_then_the_newest_ended_ones() {
+        let t = |h: i64| chrono::Utc::now() - chrono::Duration::hours(h);
+        let mut m = vec![
+            (false, t(1), "ended-new".into()),
+            (true, t(5), "live-old".into()),
+            (false, t(9), "ended-old".into()),
+            (true, t(2), "live-new".into()),
+        ];
+        assert_eq!(backfill_order(&mut m), vec!["live-new", "live-old", "ended-new", "ended-old"]);
     }
 }
 
