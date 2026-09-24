@@ -1,5 +1,15 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  Draft,
+  EditsRequest,
+  FileCommit,
+  RepoBlame,
+  RepoBlob,
+  RepoBranches,
+  RepoCoverage,
+  RepoGitSummary,
+  RepoLoc,
+  RepoTree,
   MapFileDetail,
   RepoPackages,
   BurnDownStatus,
@@ -213,6 +223,24 @@ export interface Api {
   repoMap(repo: string): Promise<RepoMap>;
   /** GET /api/repos/{owner}/{repo}/meta: description, languages, weekly commits, contributors. */
   repoMeta(repo: string): Promise<RepoMeta>;
+  // The Code page (code.rs), read from the mothership's bare clone.
+  repoLoc(repo: string): Promise<RepoLoc>;
+  repoCoverage(repo: string): Promise<RepoCoverage>;
+  repoGitSummary(repo: string): Promise<RepoGitSummary>;
+  repoBranches(repo: string): Promise<RepoBranches>;
+  repoTree(repo: string, ref?: string): Promise<RepoTree>;
+  repoBlob(repo: string, path: string, ref?: string): Promise<RepoBlob>;
+  fileHistory(repo: string, path: string, ref?: string): Promise<{ path: string; ref: string; commits: FileCommit[] }>;
+  fileBlame(repo: string, path: string, ref?: string): Promise<RepoBlame>;
+  /** Commits edited files to a new branch and opens a pull request; only after an explicit confirm. */
+  createEdits(repo: string, body: EditsRequest): Promise<{ url: string; branch: string; base: string }>;
+  /** A quick answer about a file from the cheap summary model. */
+  askFile(repo: string, body: { path: string; question: string; content: string; selection?: [number, number] | null }): Promise<{ answer: string; model: string }>;
+  drafts(repo: string, ref?: string): Promise<{ repo: string; autosave: boolean; drafts: Draft[] }>;
+  saveDraft(repo: string, body: { ref: string; path: string; content: string; base_sha: string }): Promise<{ saved_at: string }>;
+  deleteDrafts(repo: string, ref: string, path?: string): Promise<{ removed: number }>;
+  editorSettings(): Promise<{ autosave: boolean }>;
+  saveEditorSettings(body: { autosave: boolean }): Promise<{ autosave: boolean }>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
@@ -270,6 +298,14 @@ const post = <T>(path: string, body?: unknown) =>
 const put = <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body: JSON.stringify(body) });
 
 const del = <T>(path: string) => request<T>(path, { method: "DELETE" });
+const repoPath = (repo: string) => `/api/repos/${repo.split("/").map(encodeURIComponent).join("/")}`;
+/** `?a=1&b=2` from the defined values, or "". */
+const query = (params: Record<string, string | undefined | null>) => {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v != null && v !== "") q.set(k, v);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+};
 
 const enc = encodeURIComponent;
 
@@ -352,6 +388,21 @@ export const httpApi: Api = {
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   repoMeta: (repo) => request(`/api/repos/${repo.split("/").map(enc).join("/")}/meta`),
+  repoLoc: (repo) => request(`${repoPath(repo)}/loc`),
+  repoCoverage: (repo) => request(`${repoPath(repo)}/coverage`),
+  repoGitSummary: (repo) => request(`${repoPath(repo)}/git-summary`),
+  repoBranches: (repo) => request(`${repoPath(repo)}/branches`),
+  repoTree: (repo, ref) => request(`${repoPath(repo)}/tree${query({ ref })}`),
+  repoBlob: (repo, path, ref) => request(`${repoPath(repo)}/blob${query({ path, ref })}`),
+  fileHistory: (repo, path, ref) => request(`${repoPath(repo)}/history${query({ path, ref })}`),
+  fileBlame: (repo, path, ref) => request(`${repoPath(repo)}/blame${query({ path, ref })}`),
+  createEdits: (repo, body) => post(`${repoPath(repo)}/edits`, body),
+  askFile: (repo, body) => post(`${repoPath(repo)}/ask`, body),
+  drafts: (repo, ref) => request(`${repoPath(repo)}/drafts${query({ ref })}`),
+  saveDraft: (repo, body) => put(`${repoPath(repo)}/drafts`, body),
+  deleteDrafts: (repo, ref, path) => del(`${repoPath(repo)}/drafts${query({ ref, path })}`),
+  editorSettings: () => request("/api/editor/settings"),
+  saveEditorSettings: (body) => put("/api/editor/settings", body),
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),

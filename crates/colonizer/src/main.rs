@@ -14,6 +14,7 @@ mod burn_down;
 mod claims;
 mod claude_accounts;
 mod claude_login;
+mod code;
 mod colony_secrets;
 mod config;
 mod diagnosis;
@@ -1391,6 +1392,24 @@ async fn serve() -> Result<()> {
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
         .route("/api/repos/{owner}/{name}/meta", get(repo_meta::meta))
+        .route("/api/repos/{owner}/{name}/loc", get(code::loc))
+        .route("/api/repos/{owner}/{name}/coverage", get(code::coverage))
+        .route("/api/repos/{owner}/{name}/git-summary", get(code::git_summary))
+        .route("/api/repos/{owner}/{name}/branches", get(code::branches))
+        .route("/api/repos/{owner}/{name}/tree", get(code::tree))
+        .route("/api/repos/{owner}/{name}/blob", get(code::blob))
+        .route("/api/repos/{owner}/{name}/history", get(code::history))
+        .route("/api/repos/{owner}/{name}/blame", get(code::blame))
+        .route("/api/repos/{owner}/{name}/edits", post(code::edits))
+        .route("/api/repos/{owner}/{name}/ask", post(code::ask))
+        .route(
+            "/api/repos/{owner}/{name}/drafts",
+            get(code::list_drafts).put(code::put_draft).delete(code::delete_draft),
+        )
+        .route(
+            "/api/editor/settings",
+            get(code::editor_settings).put(code::put_editor_settings),
+        )
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))

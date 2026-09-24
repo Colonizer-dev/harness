@@ -233,6 +233,91 @@ async fn ask_with_api_key(key: &str, model: &str, input: &str) -> Result<String,
         .join("\n"))
 }
 
+/// The model route the summaries use, whether or not summaries are switched on: for other
+/// quick answers (the Code page's "Answer here"). Never the Claude subscription token.
+async fn route_only(app: &Shared) -> Option<Route> {
+    let modules = app.modules.read().await.clone();
+    let (summary_model, candidates) = match modules.get("agent") {
+        Some(choice) => {
+            let schema = modules::schema_for("agent", &choice.provider, &app.agents);
+            let candidates = ["subagent_model", "model_low", "background_model"].map(|k| setting_str(choice, &schema, k));
+            (setting_str(choice, &schema, "summary_model"), candidates.to_vec())
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let providers = app.providers();
+    let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+    let has_anthropic = providers.iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    let has_api_key = app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some());
+    let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key)
+}
+
+/// A free-form answer to `prompt` from the cheap summary model, with the model it came from. The
+/// prompt carries its own instructions; bounded to a minute.
+pub async fn ask_freeform(app: &Shared, prompt: &str) -> Result<(String, String), String> {
+    let route = route_only(app)
+        .await
+        .ok_or("no model for quick answers: set summary_model or a provider key in Settings → Agent")?;
+    let model = match &route {
+        Route::Provider(m) | Route::ApiKey(m) => m.clone(),
+    };
+    let answer = match &route {
+        Route::Provider(m) => {
+            match tokio::time::timeout(Duration::from_secs(60), crate::autonomy::ask_model(app, m, prompt)).await {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => return Err(format!("{e:#}")),
+                Err(_) => return Err(format!("{m} did not answer within 60s")),
+            }
+        }
+        Route::ApiKey(m) => {
+            let key = app
+                .claude_cred()
+                .and_then(|c| api_key_of(&c.value).map(str::to_string))
+                .ok_or("no Anthropic API key")?;
+            ask_freeform_with_api_key(&key, m, prompt).await?
+        }
+    };
+    Ok((answer, model))
+}
+
+async fn ask_freeform_with_api_key(key: &str, model: &str, prompt: &str) -> Result<String, String> {
+    let body = json!({
+        "model": crate::providers::api_model(model),
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("could not build an HTTP client: {e}"))?;
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let status = response.status();
+    let answer: Value = response.json().await.map_err(|e| format!("unreadable answer: {e}"))?;
+    if !status.is_success() {
+        let message = answer["error"]["message"].as_str().unwrap_or("no message");
+        return Err(format!("Anthropic answered {status}: {message}"));
+    }
+    Ok(answer["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 /// Logs a summary failure once per run.
 fn log_once(message: String) {
     if !FAILURE_LOGGED.swap(true, Ordering::SeqCst) {

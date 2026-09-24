@@ -28,7 +28,8 @@ describe("RepoPicker grouping", () => {
   it("colours languages like GitHub and falls back to grey", () => {
     expect(languageColor("Rust")).toBe("#dea584");
     expect(languageColor("TypeScript")).toBe("#3178c6");
-    expect(languageColor("Zig")).toBe("#8b949e");
+    expect(languageColor("Zig")).toBe("#ec915c");
+    expect(languageColor("Brainfuck")).toBe("#8b949e");
     expect(languageColor(null)).toBe("#8b949e");
   });
 });
