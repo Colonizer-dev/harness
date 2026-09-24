@@ -190,12 +190,14 @@ for module in "$root"/modules/agents/*/; do
     # recorded in fetch-at-install for scripts/install-release.sh to fetch from the npm registry.
     # Not every module runs on the Agent SDK (pi does not), and recording one that is not there
     # fails the build, so only a module that installed it records it.
-    (cd "$target" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
+    (cd "$target" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent) ||
+      { echo "install.sh: npm ci failed for agent module $id (does it ship a package-lock.json?)" >&2; exit 1; }
     if [ -d "$target/node_modules/@anthropic-ai/claude-agent-sdk" ]; then
       (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
     fi
   elif [ -f "$target/package.json" ]; then
-    (cd "$target" && npm ci --omit=dev --no-audit --no-fund --silent)
+    (cd "$target" && npm ci --omit=dev --no-audit --no-fund --silent) ||
+      { echo "install.sh: npm ci failed for agent module $id (does it ship a package-lock.json?)" >&2; exit 1; }
   fi
   echo "installed agent module $id"
 done
