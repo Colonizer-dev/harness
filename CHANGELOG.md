@@ -16,6 +16,14 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **Synthetic bench tasks, stage one.** `scripts/bench/synth.mjs` injects token-level bugs into Node
+  source and admits, through a green-reference / parses / breaks-the-same-tests-twice gate, only mutants
+  that break the repository's own tests deterministically. Each carries full provenance ($0: no model in
+  the loop) into a held-out pool kept outside the repo, scored oldest-first once 20 hand-reviewed tasks
+  open it and retired after three decisions; flaky mutants go to a raid set that is never scored.
+  Measured so far: 57 of 110 candidates admitted (bench fixture + telemetry). See
+  [docs/bench.md](docs/bench.md).
+
 - **The nest as a map of the software.** The nest has a Map mode: a repository's
   architecture — drawn by a mapping colony with the newly vendored
   [archify](https://github.com/tt-a1i/archify) skill (MIT) and stored by the
