@@ -231,6 +231,7 @@ export function AreaChart({
   readTitle,
   emptyNote = "no data in range",
   highlight = null,
+  seriesReadout = true,
 }: {
   series: AreaSeries[];
   /** One label per column for the tooltip and read-out (e.g. "Sep 3"). */
@@ -246,6 +247,8 @@ export function AreaChart({
   emptyNote?: string;
   /** A series label to bring forward (the side row under the pointer); the rest step back. */
   highlight?: string | null;
+  /** The per-series read-out above the chart; off where the section's logo legend names the series. */
+  seriesReadout?: boolean;
 }): ReactElement {
   const uid = useId().replace(/:/g, "");
   const dim = (label: string) => highlight != null && label !== highlight;
@@ -266,10 +269,13 @@ export function AreaChart({
   const axis = xLabels ?? labels;
   const nowTop = geo.length > 0 ? geo[geo.length - 1].tops[n - 1] : null;
   const nowColor = series.length > 0 ? series[series.length - 1].color : "var(--chart-1)";
-  const read =
+  const readAll =
     hv != null
       ? series.map((s) => ({ label: s.label, color: s.color, value: format(s.values[hv] ?? 0) }))
       : series.map((s) => ({ label: s.label, color: s.color, value: format(s.values.reduce((t, v) => t + (v ?? 0), 0)) }));
+  const read = seriesReadout
+    ? readAll
+    : [{ label: "total", color: "transparent", value: format(hv != null ? (totals[hv] ?? 0) : totals.reduce((t, v) => t + v, 0)) }];
   if (hv != null && ghost) read.push({ label: "prev", color: "var(--muted)", value: ghost[hv] != null ? format(ghost[hv] as number) : "—" });
   const ghostPts = ghost
     ? ghost
@@ -284,7 +290,7 @@ export function AreaChart({
         <span className="font-medium text-text">{hv != null ? labels[hv] : readTitle}</span>
         {read.map((r) => (
           <span key={r.label} className="inline-flex items-center gap-1.5">
-            <span aria-hidden="true" className="h-[7px] w-[7px] rounded-[2px]" style={{ background: r.color }} />
+            {r.color !== "transparent" && <span aria-hidden="true" className="h-[7px] w-[7px] rounded-[2px]" style={{ background: r.color }} />}
             {r.label} <span className="text-text">{r.value}</span>
           </span>
         ))}
@@ -434,9 +440,13 @@ export function ChartSection({
   side,
   sideFoot,
   sideLimit,
+  legendIcons = false,
 }: {
   title: string;
   legend?: ReactNode;
+  /** Every side row's icon, right-aligned in the heading: hover or focus one for its card, and the
+   *  chart brings that series forward — the legend and the share column are one hover. */
+  legendIcons?: boolean;
   /** The chart, or a function of the side row under the pointer so the chart can bring it forward. */
   chart: ReactNode | ((hot: string | null) => ReactNode);
   foot?: ReactNode;
@@ -446,12 +456,27 @@ export function ChartSection({
   /** Show this many side rows until "Show all" is pressed. */
   sideLimit?: number;
 }): ReactElement {
-  const [hot, setHot] = useState<string | null>(null);
+  const [hotAt, setHotAt] = useState<{ label: string; from: "legend" | "side" } | null>(null);
+  const hot = hotAt?.label ?? null;
+  const setHot = (label: string | null, from: "legend" | "side" = "side") => setHotAt(label == null ? null : { label, from });
+  const leave = (label: string) => setHotAt((h) => (h?.label === label ? null : h));
   const [all, setAll] = useState(false);
   const limited = sideLimit != null && side.length > sideLimit;
   const rows = limited && !all ? side.slice(0, sideLimit) : side;
   return (
-    <Section title={title} right={legend}>
+    <Section
+      title={title}
+      right={
+        legendIcons ? (
+          <span className="flex flex-wrap items-center justify-end gap-3">
+            {legend}
+            <LegendIcons rows={side} hot={hot} cardFor={hotAt?.from === "legend" ? hot : null} onHot={(label) => setHot(label, "legend")} onLeave={leave} />
+          </span>
+        ) : (
+          legend
+        )
+      }
+    >
       <Rules className="flex flex-wrap">
         <div className="min-w-0 flex-[2_1_460px] py-5 pr-6">
           {typeof chart === "function" ? chart(hot) : chart}
@@ -479,11 +504,11 @@ export function ChartSection({
             const isHot = hot === row.label;
             const hover = {
               onMouseEnter: () => setHot(row.label),
-              onMouseLeave: () => setHot((h) => (h === row.label ? null : h)),
+              onMouseLeave: () => leave(row.label),
               onFocus: () => setHot(row.label),
-              onBlur: () => setHot((h) => (h === row.label ? null : h)),
+              onBlur: () => leave(row.label),
             };
-            const card = row.card && isHot && (
+            const card = row.card && isHot && hotAt?.from === "side" && (
               <div
                 role="tooltip"
                 className="v3-pop pointer-events-none absolute right-[calc(100%+12px)] top-1/2 z-20 w-[260px] -translate-y-1/2 animate-[ck-in_140ms_ease-out_both] rounded-xl border border-border-strong p-3 text-left shadow-[0_16px_48px_rgb(0_0_0/0.35)]"
@@ -530,6 +555,56 @@ export function ChartSection({
         </div>
       </Rules>
     </Section>
+  );
+}
+
+/** The heading's logo legend: one ringed icon per series, in the series colour. Hover or focus
+ *  shows the row's card beneath it; the others step back while one is hot. */
+function LegendIcons({
+  rows,
+  hot,
+  cardFor,
+  onHot,
+  onLeave,
+}: {
+  rows: SideRow[];
+  hot: string | null;
+  cardFor: string | null;
+  onHot: (label: string) => void;
+  onLeave: (label: string) => void;
+}): ReactElement {
+  return (
+    <ul aria-label="series" className="m-0 flex list-none flex-wrap items-center justify-end gap-2 p-0">
+      {rows.map((row) => {
+        const isHot = hot === row.label;
+        const name = `${row.label}: ${typeof row.value === "string" || typeof row.value === "number" ? row.value : ""}${row.note ? ` (${row.note})` : ""}`;
+        return (
+          <li key={row.label} className="relative">
+            <button
+              type="button"
+              aria-label={name}
+              onClick={row.onClick}
+              onMouseEnter={() => onHot(row.label)}
+              onMouseLeave={() => onLeave(row.label)}
+              onFocus={() => onHot(row.label)}
+              onBlur={() => onLeave(row.label)}
+              className={`grid size-7 cursor-pointer place-items-center rounded-full border-0 bg-transparent p-0 transition-[opacity,transform] duration-150 focus-visible:outline-none ${hot != null && !isHot ? "opacity-40" : ""} ${isHot ? "scale-110" : ""}`}
+              style={{ boxShadow: `0 0 0 2px var(--bg), 0 0 0 ${isHot ? 4 : 3.5}px ${row.color}` }}
+            >
+              <span className="grid size-[22px] place-items-center overflow-hidden rounded-full">{row.icon ?? row.label.slice(0, 1)}</span>
+            </button>
+            {row.card && cardFor === row.label && (
+              <div
+                role="tooltip"
+                className="v3-pop pointer-events-none absolute right-0 top-[calc(100%+10px)] z-20 w-[260px] animate-[ck-in_140ms_ease-out_both] rounded-xl border border-border-strong p-3 text-left shadow-[0_16px_48px_rgb(0_0_0/0.35)]"
+              >
+                {row.card}
+              </div>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

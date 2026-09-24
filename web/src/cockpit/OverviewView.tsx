@@ -407,9 +407,11 @@ export function OverviewView({
               </span>
             ) : undefined
           }
+          legendIcons
           chart={(hot) => (
             <AreaChart
               highlight={hot}
+              seriesReadout={false}
               series={mergedSeries}
               labels={dayLabels}
               ghost={ghost}

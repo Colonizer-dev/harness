@@ -211,6 +211,17 @@ describe("ChartSection", () => {
     expect(html).toContain("Show all 7 workspaces");
     expect(seen).toBeNull();
   });
+
+  it("puts every series in the heading as a named, ringed logo when legendIcons is on", () => {
+    const side = Array.from({ length: 7 }, (_, i) => ({ label: `org${i}`, value: 7 - i, note: `${i}%`, share: 10, color: "rgb(1, 2, 3)", icon: <i>logo{i}</i> }));
+    const html = renderToStaticMarkup(
+      <ChartSection title="Merged PRs per day" legendIcons chart={<div>CHART</div>} sideTitle="Share by workspace" side={side} sideLimit={5} />,
+    );
+    // The legend names all seven, past the side column's limit, each with its count for a screen reader.
+    expect(html).toContain('aria-label="org6: 1 (6%)"');
+    expect(html).toContain("logo6");
+    expect(html).toContain("0 0 0 3.5px rgb(1, 2, 3)");
+  });
 });
 
 describe("ShareBar", () => {
