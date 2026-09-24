@@ -376,8 +376,9 @@ fn is_checklist_item(line: &str) -> bool {
 }
 
 /// Every distinct file path named across the title and the text. A `BTreeSet`, so the count and the
-/// directory comparison never depend on the order the paths appeared in.
-fn paths_in<'a>(title: &'a str, text: &'a str) -> BTreeSet<&'a str> {
+/// directory comparison never depend on the order the paths appeared in. `pub(crate)` so the boot
+/// path can hand the same set to sensitivity.rs, not just the count in `Signals` (issue #472).
+pub(crate) fn paths_in<'a>(title: &'a str, text: &'a str) -> BTreeSet<&'a str> {
     title
         .split_whitespace()
         .chain(text.split_whitespace())

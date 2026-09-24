@@ -377,15 +377,26 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
+    let body_text = issue
+        .as_ref()
+        .and_then(|i| i["body"].as_str())
+        .unwrap_or(s.instructions.as_str());
     let mut task_signals = crate::routing::signals(
         &s.issue_title,
-        issue.as_ref().and_then(|i| i["body"].as_str()).unwrap_or(&s.instructions),
+        body_text,
         &task_labels,
         // The RESOLVED stack, not the configured preset: `auto` is not a preset the harness
         // knows, so asking `find` about it would call every auto-detected repository unknown
         // and refuse it the cheapest tier — including the ones detection identified exactly.
         crate::presets::find(&stack).is_some(),
     );
+    // Sensitivity (issue #472): how strict the class is that this task's named paths fall into
+    // decides which providers the gateway will let the colony reach. Recorded here and enforced
+    // there — not filtered into `allowed_providers` — so a task that turns out to touch a
+    // restricted path it did not name up front is not locked out at boot.
+    let sensitivity_config = crate::sensitivity::SensitivityConfig::load(&wt);
+    let named_paths = crate::routing::paths_in(&s.issue_title, body_text);
+    let sensitivity = crate::sensitivity::classify_paths(named_paths, &sensitivity_config);
     // Jev shadow mode (jev.rs): an optional external classifier's second opinion, fetched here in
     // the async boot path — never inside `routing::decide`, which stays synchronous and pure. Off by
     // default, and a silent no-op without both the setting and a `JEV_API_KEY` secret: it is recorded
@@ -470,6 +481,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         message.push_str(&format!("; misroute: the rule wants {}", tier_decision.rule.as_str()));
     }
     log.info(message).await;
+    // Only the strict class gets a line: for every other class the gateway would do exactly what it
+    // would have done anyway, and a log that mostly repeats that is noise.
+    if sensitivity == crate::sensitivity::Sensitivity::Restricted {
+        log.info(
+            "sensitivity: this task's paths classify restricted; the gateway will refuse any provider not marked trusted in providers.json".to_string(),
+        )
+        .await;
+    }
     // A shadow opinion that disagrees with the rule is worth a low-key note for later promotion
     // analysis; it never blocks boot or looks like an error.
     if tier_decision.jev_agrees() == Some(false) {
@@ -491,8 +510,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "signals": task_signals,
         "jev": tier_decision.jev,
         "cost": cost_record,
+        "sensitivity": sensitivity.as_str(),
     });
-    app.update_session(id, |x| x.model_routing = Some(record.clone())).await;
+    app.update_session(id, |x| {
+        x.model_routing = Some(record.clone());
+        x.sensitivity = Some(sensitivity.as_str().to_string());
+    })
+    .await;
     let line = json!({
         "ts": Utc::now(),
         "kind": "decision",

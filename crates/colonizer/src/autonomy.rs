@@ -858,6 +858,7 @@ mod tests {
             fallback_model: None,
             pricing: None,
             normalize_cache_ttl: false,
+            trusted: false,
         }
     }
 

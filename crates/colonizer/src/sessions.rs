@@ -396,6 +396,12 @@ pub struct Session {
     /// booted with, and its next boot derives and enforces the set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_providers: Option<Vec<String>>,
+    /// The strictest file-sensitivity class this colony's task touches (sensitivity.rs, issue #472):
+    /// `open`, `standard`, `custom` or `restricted`. The gateway refuses a `restricted` colony any
+    /// provider not marked `trusted`, independently of `allowed_providers`. `None` for a colony that
+    /// booted before this field existed, or whose task named no sensitive path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
@@ -494,6 +500,7 @@ impl Default for Session {
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
+            sensitivity: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
@@ -1494,6 +1501,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         model_routing: None,
         // Filled in at boot, once the colony's model settings resolve to actual providers.
         allowed_providers: None,
+        sensitivity: None,
         routed_cost_usd: None,
         host_disk_bytes: None,
         cleaned_up: false,
@@ -2379,6 +2387,7 @@ pub(crate) mod tests {
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
+            sensitivity: None,
             routed_cost_usd: None,
             host_disk_bytes: None,
             cleaned_up: false,
