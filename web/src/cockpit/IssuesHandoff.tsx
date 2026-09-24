@@ -135,15 +135,16 @@ export function IssuesButton({ variant = "compact", ...props }: IssuesActions & 
         disabled={!props.githubConnected}
         onClick={() => setOpen((o) => !o)}
         className={cx(
+          // The dashboard's primary action: solid accent, the one orange button on the page.
           variant === "header"
-            ? "inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-border-strong bg-panel px-3 text-[13px] font-medium text-text transition-colors hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
+            ? "inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 text-[13px] font-semibold text-on-accent shadow-[0_1px_0_rgb(0_0_0/0.15)] transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-transparent px-2.5 text-[12.5px] font-medium text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50",
-          open && "border-border-strong bg-panel-2 text-text",
+          open && (variant === "header" ? "brightness-110" : "border-border-strong bg-panel-2 text-text"),
         )}
       >
         <GitHubMark size={variant === "header" ? 16 : 14} />
-        {variant === "header" && <span>Issues</span>}
-        <span className={cx("tabular-nums", variant === "header" && "rounded-full bg-panel-3 px-2 py-px text-[12px]")}>{count > 999 ? "999+" : count}</span>
+        {variant === "header" && <span>Send colonies</span>}
+        <span className={cx("tabular-nums", variant === "header" && "rounded-full bg-black/20 px-2 py-px text-[12px]")}>{count > 999 ? "999+" : count}</span>
       </button>
       {open && (
         <IssuesPane

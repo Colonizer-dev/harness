@@ -25,6 +25,7 @@ import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
+import { ChatView } from "./ChatView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
@@ -38,7 +39,7 @@ const VIEW_KEY = "colonizer.cockpitView";
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code", "chat"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -137,6 +138,8 @@ export function Cockpit({
   const api = useApi();
   const toast = useToast();
   const [view, setView] = useState<CockpitView>(storedView);
+  // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
+  const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -396,6 +399,21 @@ export function Cockpit({
         return <LoopsView org={selectedOrg} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
       case "secrets":
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
+      case "chat":
+        return (
+          <ChatView
+            org={selectedOrg}
+            repos={repos}
+            sessions={sessions}
+            autopilotDefault={autopilotDefault}
+            initialPrompt={askPrompt}
+            onPromptTaken={() => setAskPrompt(null)}
+            onCreated={(session) => {
+              onCreated(session);
+              setView("home");
+            }}
+          />
+        );
       case "host":
         return (
           <HostView
@@ -508,6 +526,10 @@ export function Cockpit({
               onCreated={(session) => {
                 onCreated(session);
                 setView("home");
+              }}
+              onAsk={(text) => {
+                setAskPrompt({ text, n: Date.now() });
+                setView("chat");
               }}
             />
           )}
