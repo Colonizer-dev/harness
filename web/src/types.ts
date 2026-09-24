@@ -763,6 +763,8 @@ export interface PluginListing {
 /** Every field is optional; missing or null inherits the global module setting. */
 export interface OrgSettings {
   agent?: {
+    /** Which installed agent module this org's colonies launch on; null inherits the mothership's choice. */
+    module?: string | null;
     model?: string | null;
     subagent_model?: string | null;
     background_model?: string | null;

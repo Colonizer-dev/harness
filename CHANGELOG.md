@@ -44,6 +44,14 @@ setting) is called out under **Take care** rather than left for you to find.
   on the Node 24 colonies run. Bundles are built by `.github/workflows/graft-bundle.yml`
   on `graft-*` tags; until one is published and pinned, the row says it is not
   available yet.
+- **Codex as an agent module.** `modules/agents/codex` runs OpenAI's Codex CLI headlessly (`codex
+  exec --json`) on the same runner protocol as Claude Code: one process per turn, the first turn's
+  thread id resumed into one continuous thread, token totals (codex reports no cost) on each
+  `turn_end`, and a `CODEX_API_KEY` colony secret for `api.openai.com` — no ChatGPT sign-in. The
+  module is pickable now; nothing stages the `codex` binary into the colony image yet, so a codex
+  colony stops at the runner's preflight until the pinned CLI is on the image's PATH.
+- **Org settings: pick which installed agent module an org's colonies launch on** (falls back to
+  the mothership's agent choice).
 - **Trajectory monitor: resolved versus clean-resolved.** A post-hoc audit of a colony's persisted event log — every archived `events-N.jsonl` and the current one — for the shapes of shortcutting (history mining, weakened tests, writes to what the scorer executes, solution fetches, unflagged injections), as a versioned, calibrated pattern set: any pattern whose false-positive rate on the committed calibration set's normal transcripts passes its budget is demoted to advisory automatically, so it reports without judging. `node scripts/trajectory-monitor.mjs --session <id> [--bench run.json | --calibration]` reports hits with redacted evidence and logs its own operation to the colony's `audit.jsonl`; `scripts/bench.mjs run` records `clean` and `hacks` per result, its summaries add `clean_resolved`, `hacked_resolved`, `clean_rate` and `gap`, and comparisons gain the clean verdict and the gap. The contract a future Evolver consumes — fitness is the clean rate, and a proposal that widens the gap is rejected — is fixed in [docs/trajectory-monitor.md](docs/trajectory-monitor.md). ([#329])
 - **External calibration against SWE-bench.** `scripts/swebench.mjs` runs the colonies on work nobody
   here chose: each instance becomes a private single-commit snapshot of the upstream repo (no history, no

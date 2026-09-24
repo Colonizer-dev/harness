@@ -1461,11 +1461,11 @@ strings; UIs offer `GET /api/models` as suggestions).
 
 The PUT is a merge, not a replace. A field of `settings` the body does not name keeps its saved value; a
 field it names always wins, `null` included: an explicit `null` is how a client inherits the global
-module setting. The merge reaches one level deeper for two nested fields: an `agent` object without
-`skillsets` keeps the saved skillset overrides, and a `watchdog` object without `waiting_minutes` keeps
-its saved value (the web form never sends `waiting_minutes`, and a save from a client that predates a
-field must not quietly clear it). So a body naming only `max_parallel` changes just that, where a plain
-replace would have cleared everything it left out.
+module setting. The merge reaches one level deeper for three nested fields: an `agent` object without
+`skillsets` or `module` keeps the saved skillset overrides and module pick, and a `watchdog` object
+without `waiting_minutes` keeps its saved value (the web form never sends `waiting_minutes`, and a save
+from a client that predates a field must not quietly clear it). So a body naming only `max_parallel`
+changes just that, where a plain replace would have cleared everything it left out.
 
 `settings.enabled` ([#176](https://github.com/Colonizer-dev/harness/issues/176)) is the on/off switch
 per org: absent or `true` the org is offered as a workspace, `false` — or a form save that names it
@@ -1477,6 +1477,10 @@ and its existing colonies: a colony of a switched-off org is still listed and re
 `agent.skillsets` is a map of plugin directory name to `true` or `false`: those skillsets are switched on
 or off for the org's colonies, on top of the global `plugins` setting; any it doesn't name follow the
 global switch. Names are plain directory names, at most 64. An empty map is stored as `null`.
+
+`agent.module` is which installed agent module the org's colonies launch on, shadowing the module chosen
+for the whole install (§7.2); `null` inherits. It must name an installed module. The pick is read at
+create and recorded on the colony, so a later change moves new colonies only.
 
 `max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
 (`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
@@ -1498,8 +1502,8 @@ something is pinned above it). `null` inherits.
 ```json
 {"settings": {
   "enabled": true,
-  "agent": {"model": "opus", "subagent_model": "deepseek/deepseek-flash", "background_model": null,
-            "skillsets": {"ecc": false, "google-skills": true}},
+  "agent": {"module": null, "model": "opus", "subagent_model": "deepseek/deepseek-flash",
+            "background_model": null, "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
   "repo_max_parallel": 1,
   "budget_usd": 20,
@@ -2218,7 +2222,7 @@ input files, which a colony reads next to `session.json`.
 
 | Colonizer today | Standard (UHP) | Wire location | Compat notes |
 | --- | --- | --- | --- |
-| One agent module for the install: `agent.provider` in `modules.json` (`"claude-code"`), set with `PUT /api/modules/agent` | `metadata.harness_id` on the create request | new optional `metadata.harness_id` in the `POST /api/sessions` body | Absent: the install's active agent module, as today. The value is a module id (`modules/agents/<id>/module.json`); UHP treats it as opaque. Unknown or disabled: **404** `harness_not_found`. Per-org `agent` overrides still set model, Claude account and skillsets and never pick the module. Further runners plug in here. |
+| One agent module for the install: `agent.provider` in `modules.json` (`"claude-code"`), set with `PUT /api/modules/agent` | `metadata.harness_id` on the create request | new optional `metadata.harness_id` in the `POST /api/sessions` body | Absent: the install's active agent module, as today. The value is a module id (`modules/agents/<id>/module.json`); UHP treats it as opaque. Unknown or disabled: **404** `harness_not_found`. Per-org `agent` overrides still set model, Claude account and skillsets; the per-org `agent.module` additionally picks which installed agent module the org's colonies launch on, fixed at create (§6.3). Further runners plug in here. |
 | `Session.agent` (`"claude-code"`), fixed at create | `harness_id` on a session; `metadata.harness_id` on a response | `Session` in REST replies and in the `session` WS frame | Sent beside `agent` in the deprecation release. UHP requires a server to report the harness it defaulted to but names no key; Colonizer uses `metadata.harness_id` on every response. |
 | — | `harness_mismatch` | continuation (§7.3) | A continuation that names another `harness_id` than the colony's: **409** `harness_mismatch`. A colony keeps one runner for life. |
 | `agent.module` in `/colonizer/session.json` | unchanged | inside the microVM | Not a wire name; the runner contract does not change. |

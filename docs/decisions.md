@@ -54,9 +54,10 @@ never spent answering a colony's questions.
 
 ### If it is ever revisited
 
-The shape would be an agent module that bundles `codex app-server` and owns its own sign-in — following
-the Claude Code module, where the subscription credential never reaches the gateway — not a new
-credential class in the gateway. Conditions that would change the decision:
+[`modules/agents/codex`](../modules/agents/codex) now drives `codex exec` headlessly on an OpenAI API
+key (a `CODEX_API_KEY` colony secret, not a plan). For ChatGPT-plan access the shape is unchanged: an
+agent module that bundles `codex app-server` and owns its own sign-in — not a new credential class in
+the gateway. Conditions that would change the decision:
 
 - OpenAI documents third-party access to ChatGPT plans, or opens OAuth client registration; or
 - the gateway gains a Responses API wire for other reasons.

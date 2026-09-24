@@ -118,6 +118,12 @@ jobs:
         working-directory: modules/agents/hermes
         run: npm test
 
+      # The Codex runner is shaped like the Grok Build and Hermes runners: no dependencies, the
+      # real runner.mjs driven over stdio against a stub codex CLI — no OpenAI, no network.
+      - name: Test the Codex runner
+        working-directory: modules/agents/codex
+        run: npm test
+
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
   # either, and none of the tests touch a mothership, a colony or the network; the job's one
   # network step is the staged-pack validation below, which downloads the pinned archives the

@@ -24,6 +24,10 @@ use std::{
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct AgentOverrides {
+    /// Which installed agent module this org's colonies launch on (issue #201). `None` inherits the
+    /// install's `agent.provider`; the pick is read at create and recorded on the colony.
+    #[serde(default)]
+    pub module: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -323,7 +327,29 @@ pub(crate) fn parse_org_line(line: &str) -> Option<(String, Option<String>)> {
 
 /// The agent module choice with the org's model and skillset overrides applied.
 pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoice {
-    let mut choice = modules.agent.clone();
+    with_org_overrides(modules.agent.clone(), org)
+}
+
+/// The settings a colony on agent module `agent_id` boots with (issue #201). The install's
+/// `modules.agent` settings belong to the install's own agent module, so they apply only when the
+/// colony runs on that module; a colony on another module — an org's pick — starts from that
+/// module's schema defaults instead, with the org's overrides on top. Handing a Codex colony the
+/// install's Claude model (or its per-task tier models) would launch it on a model it cannot run.
+pub fn effective_agent_for(modules: &ModulesConfig, org: &OrgSettings, agent_id: &str) -> ModuleChoice {
+    if agent_id == modules.agent.provider {
+        return effective_agent(modules, org);
+    }
+    with_org_overrides(
+        ModuleChoice {
+            provider: agent_id.to_string(),
+            enabled: true,
+            settings: Default::default(),
+        },
+        org,
+    )
+}
+
+fn with_org_overrides(mut choice: ModuleChoice, org: &OrgSettings) -> ModuleChoice {
     if let Some(agent) = &org.agent {
         for (key, value) in [
             ("model", &agent.model),
@@ -458,6 +484,18 @@ pub fn effective_stack(modules: &ModulesConfig, schema: &Value, org: &OrgSetting
     }
 }
 
+/// Which installed agent module one of this org's colonies launches on: the org's own pick when it set
+/// a non-blank one, else the install's selected agent module. Read once at create — the colony records
+/// the module id and boot re-resolves from that, so a later change moves new colonies only.
+pub fn effective_agent_module(org: &OrgSettings, modules: &ModulesConfig) -> String {
+    org.agent
+        .as_ref()
+        .and_then(|agent| agent.module.as_deref())
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or(&modules.agent.provider)
+        .to_string()
+}
+
 pub fn effective_memory_enabled(modules: &ModulesConfig, org: &OrgSettings) -> bool {
     let global = modules.memory.enabled
         && modules
@@ -556,6 +594,13 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
             && !crate::claude_accounts::valid_id(account)
         {
             return Err("Claude account ids are lowercase letters, digits and dashes, 1-40 characters".into());
+        }
+        // The id names `modules/agents/<id>`, so keep it to one plain name; a blank pick is inherit,
+        // like the stack pin, and whether it is installed is checked where the list is, in `put`.
+        if let Some(module) = agent.module.as_deref().filter(|m| !m.trim().is_empty())
+            && (module.len() > 64 || !module.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        {
+            return Err("agent module ids are letters, digits, dashes and underscores, at most 64 characters".into());
         }
     }
     if settings.max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
@@ -685,10 +730,13 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("agent") {
         incoming.agent = saved.agent.clone();
-    } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut())
-        && unnamed_sub("agent", "skillsets")
-    {
-        agent.skillsets = saved_agent.skillsets.clone();
+    } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut()) {
+        if unnamed_sub("agent", "skillsets") {
+            agent.skillsets = saved_agent.skillsets.clone();
+        }
+        if unnamed_sub("agent", "module") {
+            agent.module = saved_agent.module.clone();
+        }
     }
     if !named("max_parallel") {
         incoming.max_parallel = saved.max_parallel;
@@ -750,12 +798,32 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
         crate::plugins::check_skillsets(&app.cfg, checked.map(|(name, _)| name.as_str()))
             .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
     }
-    let mut req = req;
-    // No skillset overrides is the same as inheriting all of them.
-    if let Some(agent) = req.settings.agent.as_mut()
-        && agent.skillsets.as_ref().is_some_and(BTreeMap::is_empty)
+    // The org's agent module pick must be installed, or every create in the org fails with the same
+    // refusal; say what is available while the operator is still looking at the form (issue #201).
+    if let Some(module) = req
+        .settings
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.module.as_deref())
+        .filter(|m| !m.trim().is_empty())
+        && !app.agents.iter().any(|a| a.id == module)
     {
-        agent.skillsets = None;
+        let ids: Vec<&str> = app.agents.iter().map(|a| a.id.as_str()).collect();
+        let available = if ids.is_empty() { "none".to_string() } else { ids.join(", ") };
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("unknown agent module {module:?}; available: {available}"),
+        ));
+    }
+    let mut req = req;
+    // No skillset overrides is the same as inheriting all of them, and a blank module pick is inherit.
+    if let Some(agent) = req.settings.agent.as_mut() {
+        if agent.skillsets.as_ref().is_some_and(BTreeMap::is_empty) {
+            agent.skillsets = None;
+        }
+        if agent.module.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            agent.module = None;
+        }
     }
     keep_unnamed_fields(
         &mut req.settings,
@@ -819,6 +887,53 @@ mod tests {
             ..Default::default()
         };
         assert!(!effective_memory_enabled(&modules, &disabled));
+    }
+
+    #[test]
+    fn a_colony_on_another_agent_module_does_not_inherit_the_installs_agent_settings() {
+        let mut modules = ModulesConfig::default();
+        modules.agent.settings.insert("model".into(), json!("opus"));
+        modules.agent.settings.insert("model_high".into(), json!("opus"));
+        let org = OrgSettings::default();
+        // On the install's own module the install's settings stand.
+        let own = effective_agent_for(&modules, &org, &modules.agent.provider.clone());
+        assert_eq!(own.settings.get("model"), Some(&json!("opus")));
+        // On an org's pick of another module they are that other module's business, not this one's:
+        // schema defaults, plus whatever the org overrides.
+        let other = effective_agent_for(&modules, &org, "codex");
+        assert_eq!(other.provider, "codex");
+        assert!(other.settings.get("model").is_none() && other.settings.get("model_high").is_none());
+        let org = OrgSettings {
+            agent: Some(AgentOverrides {
+                model: Some("openai/gpt-5.5".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_agent_for(&modules, &org, "codex").settings.get("model"),
+            Some(&json!("openai/gpt-5.5")),
+            "the org's own model override still applies"
+        );
+    }
+
+    #[test]
+    fn the_org_agent_module_pick_overrides_the_installs_and_a_blank_one_falls_back() {
+        let modules = ModulesConfig::default();
+        let org = |module: &str| OrgSettings {
+            agent: Some(AgentOverrides {
+                module: Some(module.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(effective_agent_module(&OrgSettings::default(), &modules), "claude-code");
+        assert_eq!(effective_agent_module(&org("pi"), &modules), "pi");
+        assert_eq!(
+            effective_agent_module(&org(" "), &modules),
+            "claude-code",
+            "a blank pick is no pick"
+        );
     }
 
     #[test]
@@ -1198,6 +1313,20 @@ mod tests {
             validate(&skillsets(&[("a,b", true)])).is_err(),
             "a comma would split into two names in the setting"
         );
+        let module = |id: &str| OrgSettings {
+            agent: Some(AgentOverrides {
+                module: Some(id.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate(&module("codex")).is_ok());
+        assert!(validate(&module("")).is_ok(), "an empty pick is not set, not an error");
+        assert!(
+            validate(&module("two words")).is_err(),
+            "an agent module id is one plain name"
+        );
+        assert!(validate(&module("../etc")).is_err(), "an agent module id is never a path");
     }
 
     #[test]
@@ -1254,6 +1383,7 @@ mod tests {
             enabled: Some(false),
             agent: Some(AgentOverrides {
                 model: Some("opus".into()),
+                module: Some("pi".into()),
                 skillsets: Some(BTreeMap::from([("ecc".to_string(), true)])),
                 ..Default::default()
             }),
@@ -1316,6 +1446,19 @@ mod tests {
         let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
         keep_unnamed_fields(&mut cleared, &saved, Some(&clears));
         assert_eq!(cleared.repo_max_parallel, None, "a named null clears it back to inherit");
+        assert_eq!(
+            incoming.agent.as_ref().unwrap().module.as_deref(),
+            Some("pi"),
+            "a module pick a web build from before it survives the save"
+        );
+        let module_clears = json!({"agent": {"module": null}});
+        let mut cleared_module: OrgSettings = serde_json::from_value(module_clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared_module, &saved, Some(&module_clears));
+        assert_eq!(
+            cleared_module.agent.unwrap().module,
+            None,
+            "a named null clears it back to inherit"
+        );
         assert_eq!(
             incoming.agent.map(|a| (a.model, a.skillsets)),
             Some((None, None)),
@@ -1854,6 +1997,16 @@ mod tests {
             assert_eq!(err.status(), StatusCode::BAD_REQUEST);
             assert_eq!(err.message(), format!("unknown skillset {unknown:?}; available: ecc"));
         }
+        // The org's pick of agent module must be installed too, or create fails the same way.
+        let err = put(
+            State(app.clone()),
+            Path("acme".into()),
+            Json(json!({"settings": {"agent": {"module": "codex"}}})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "unknown agent module \"codex\"; available: none");
         let _ = std::fs::remove_dir_all(root);
     }
 
