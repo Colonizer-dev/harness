@@ -209,6 +209,16 @@ if ! prebuilt_bin colonizer; then
   install -m 755 "$root/target/release/colonizer" "$dist/bin/colonizer"
 fi
 
+# The macOS Keychain ties each saved secret to the binary that wrote it. An unsigned (ad-hoc)
+# build is a different app to it every time, so each rebuild asks again for every key. Signing
+# with one stable identity (e.g. an "Apple Development" or self-signed code-signing certificate)
+# keeps access across rebuilds. Opt-in; the name stays on this machine.
+if [ -n "${COLONIZER_CODESIGN_IDENTITY:-}" ] && [ "$(uname -s)" = Darwin ]; then
+  echo "==> signing colonizer as $COLONIZER_CODESIGN_IDENTITY"
+  codesign --force --sign "$COLONIZER_CODESIGN_IDENTITY" --identifier dev.colonizer.mothership \
+    --timestamp=none "$dist/bin/colonizer"
+fi
+
 if [ "$install_app" = 1 ]; then
   app="$HOME/.local/share/colonizer/app"
   echo "==> installing to $app"
