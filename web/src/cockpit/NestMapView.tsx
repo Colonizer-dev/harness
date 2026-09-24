@@ -12,6 +12,8 @@ import { errorMessage, useApi, useToast } from "../context";
 import type { RepoMap, Session } from "../types";
 import { SURFACE_Y, normalizeBox, surfaceGrass, type NestBox } from "./nest";
 import { FileTreePane } from "./FileTreePane";
+import { AntBubble } from "./AntBubble";
+import { BUBBLE_TONE, MAX_ANT_BUBBLES } from "./bubbles";
 import { antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
 
 const REPO_KEY = "colonizer.mapRepo";
@@ -200,19 +202,29 @@ export function NestMapView({
   const inRepo = sessions.filter((s) => s.repo === repo);
   // The explorer pane's files: fetched once per repository, when a component is first opened.
   const [files, setFiles] = useState<{ repo: string; revision: string | null; paths: string[] | null; error: string | null } | null>(null);
-  const wantFiles = open != null && repo != null && files?.repo !== repo;
+  // Keyed on the repository and whether a component is open, never on `files` itself: setting the
+  // loading state must not re-run (and so cancel) the very request that fills it.
+  const filesFor = useRef<string | null>(null);
+  const anyOpen = open != null;
   useEffect(() => {
-    if (!wantFiles || !repo) return;
+    if (!anyOpen || !repo || filesFor.current === repo) return;
+    filesFor.current = repo;
     let cancelled = false;
     setFiles({ repo, revision: null, paths: null, error: null });
     api
       .repoMapFiles(repo)
       .then((r) => !cancelled && setFiles({ repo, revision: r.revision, paths: r.paths, error: null }))
-      .catch((e) => !cancelled && setFiles({ repo, revision: null, paths: null, error: errorMessage(e) }));
+      .catch((e) => {
+        if (cancelled) return;
+        filesFor.current = null;
+        setFiles({ repo, revision: null, paths: null, error: errorMessage(e) });
+      });
     return () => {
       cancelled = true;
+      // A request cut off by a repository switch is asked again when that repository comes back.
+      if (filesFor.current === repo) filesFor.current = null;
     };
-  }, [wantFiles, repo, api]);
+  }, [anyOpen, repo, api]);
   const openComponent = open && map ? map.components.find((c) => c.id === open) : undefined;
   const markedPaths = useMemo(() => new Set((openComponent?.sources ?? []).map((s) => s.path.replace(/\/+$/, ""))), [openComponent]);
   const changingPaths = useMemo(() => new Set(inRepo.flatMap((s) => touched[s.id] ?? [])), [inRepo, touched]);
@@ -394,11 +406,12 @@ export function NestMapView({
               })}
 
               {/* The ants: each colony walks from the mouth, along the tunnels, to the chambers its files are in. */}
-              {[...places.byChamber.entries()].flatMap(([id, list]) =>
-                list.map(({ session, mode, blocked }, k) => {
+              {[...places.byChamber.entries()].flatMap(([id, list], chamberIndex) =>
+                list.map(({ session, mode, blocked, files: hereFiles }, k) => {
                   const route = antRoute(map, layout, id);
                   // Readers scout faster and further apart than the ants carrying changes.
-                  const seconds = (mode === "reading" ? 11 : 16) + ((k * 5 + id.length * 3) % 9);
+                  // A slow walk: a round trip takes the better part of a minute, readers a little quicker.
+                  const seconds = (mode === "reading" ? 34 : 46) + ((k * 7 + id.length * 3) % 14);
                   const doing = blocked ? (session.status === "waiting_for_answer" ? "waiting for you" : "idle") : mode === "reading" ? "reading here" : "changing files here";
                   return (
                     <div
@@ -430,6 +443,16 @@ export function NestMapView({
                           </span>
                         )}
                       </button>
+                      {/* What the first ant in a chamber is doing, as in the nest: at most four bubbles. */}
+                      {k === 0 && chamberIndex < MAX_ANT_BUBBLES && (
+                        <span className="pointer-events-none absolute bottom-full left-1/2 mb-3 -translate-x-1/2">
+                          <AntBubble
+                            text={mapBubble(mode, blocked, session.status, hereFiles)}
+                            title={`${session.issue_title || session.id} · ${doing}`}
+                            tone={blocked ? "var(--warn)" : mode === "reading" ? BUBBLE_TONE.thinking : BUBBLE_TONE.working}
+                          />
+                        </span>
+                      )}
                     </div>
                   );
                 }),
@@ -676,4 +699,12 @@ function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; 
       <pre className="scroll-thin m-0 max-h-[70vh] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed text-muted">{text}</pre>
     </dialog>
   );
+}
+
+/** A map ant's bubble: what its colony does in this chamber, named by the file it is on. */
+export function mapBubble(mode: PlaceMode, blocked: boolean, status: string, files: readonly string[]): string {
+  if (blocked) return status === "waiting_for_answer" ? "waiting for you" : "idle";
+  const file = files[0]?.split("/").pop();
+  if (!file) return mode === "reading" ? "reading…" : "changing files…";
+  return mode === "reading" ? `reading ${file}` : `editing ${file}`;
 }
