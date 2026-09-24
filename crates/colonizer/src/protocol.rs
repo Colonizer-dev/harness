@@ -42,6 +42,48 @@ impl AgentState {
     }
 }
 
+/// The risk class a runner stamps on a `question` (§2), ordered lowest to highest: the autonomy
+/// judge answers a question only at or below its ceiling. A question with no field — an older
+/// runner's — reads as [`QuestionRisk::WorkspaceWrite`], the default ceiling, and a value outside
+/// the vocabulary — a future runner's — reads as [`QuestionRisk::Unknown`], which is ordered above
+/// every known class and so is never answered automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum QuestionRisk {
+    ReadOnly,
+    WorkspaceWrite,
+    PublishAffecting,
+    CredentialAdjacent,
+    #[serde(other)]
+    Unknown,
+}
+
+impl QuestionRisk {
+    /// The wire spelling, for log lines.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::PublishAffecting => "publish_affecting",
+            Self::CredentialAdjacent => "credential_adjacent",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The class a question on the wire is treated as: its `risk` value. Absent or null — an older
+    /// runner's question — counts as a workspace write; anything else outside the vocabulary, a
+    /// string this build does not know or a value that is not a string at all, counts as
+    /// [`QuestionRisk::Unknown`], above every ceiling. The restart replay (`sessions.rs`) reads
+    /// the raw stored event, so it folds through here too: never more permissively than the live
+    /// parse (`events.rs`), which drops a body it cannot parse outright.
+    pub(crate) fn from_wire(risk: Option<&Value>) -> Self {
+        match risk {
+            None | Some(Value::Null) => Self::WorkspaceWrite,
+            Some(risk) => serde_json::from_value(risk.clone()).unwrap_or(Self::Unknown),
+        }
+    }
+}
+
 /// A runner event the harness acts on, tagged on its `type` field exactly as the runner writes it.
 /// Fields the harness only forwards — a question's `questions`, the subagent's `agent` ref, a
 /// finding's prose — are still modelled so the type is the whole contract for these events, not
@@ -59,13 +101,16 @@ pub(crate) enum AgentEvent {
     /// The echo of an accepted message; the watchdog recognises its own nudges by their `watchdog-` id (§6.3).
     UserMessage { id: String, text: String },
     /// A question that needs the user's answer; the innards of `questions` are the choice card's
-    /// business (§5) and the schema pins them, the harness only opens the question.
+    /// business (§5) and the schema pins them, the harness only opens the question. The risk class
+    /// travels with it: autonomous mode answers only at or below its ceiling (§6.2b).
     Question {
         question_id: String,
         #[serde(default)]
         questions: Vec<Value>,
         #[serde(default)]
         message_id: Option<String>,
+        #[serde(default)]
+        risk: Option<QuestionRisk>,
     },
     /// The user's answer travelled the four hops back (§2); the harness only closes the question.
     QuestionAnswered {
@@ -295,6 +340,51 @@ mod tests {
             }
             other => panic!("the envelope must not change the variant, got {other:?}"),
         }
+    }
+
+    /// The risk vocabulary is ordered lowest to highest, a question without the field counts as a
+    /// workspace write (an older runner's), and a value outside the vocabulary still deserialises —
+    /// as the class above every ceiling, never answered automatically. The wire parse and the
+    /// replay parse (`QuestionRisk::from_wire`) must agree, since a restart moves a question
+    /// between them.
+    #[test]
+    fn a_question_risk_is_ordered_and_tolerant_of_the_field_being_absent_or_unknown() {
+        let risk = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {
+            AgentEvent::Question { risk, .. } => risk.unwrap_or(QuestionRisk::WorkspaceWrite),
+            other => panic!("a question, got {other:?}"),
+        };
+        // A question without the field — or with it null — is an older runner's: a workspace write.
+        assert_eq!(risk(r#"{"type":"question","question_id":"q"}"#), QuestionRisk::WorkspaceWrite);
+        assert_eq!(
+            risk(r#"{"type":"question","question_id":"q","risk":null}"#),
+            QuestionRisk::WorkspaceWrite
+        );
+        // A value outside the vocabulary — a future runner's — is not a contract error: it is the
+        // class above every ceiling, never answered automatically.
+        assert_eq!(
+            risk(r#"{"type":"question","question_id":"q","risk":"teleport_the_repo"}"#),
+            QuestionRisk::Unknown
+        );
+        // The replay parse (sessions.rs, over the raw log lines) lands in the same places — and a
+        // risk that is not even a string is never read as absent, which would answer it.
+        assert_eq!(QuestionRisk::from_wire(None), QuestionRisk::WorkspaceWrite);
+        assert_eq!(QuestionRisk::from_wire(Some(&Value::Null)), QuestionRisk::WorkspaceWrite);
+        assert_eq!(
+            QuestionRisk::from_wire(Some(&json!("teleport_the_repo"))),
+            QuestionRisk::Unknown
+        );
+        assert_eq!(QuestionRisk::from_wire(Some(&json!(3))), QuestionRisk::Unknown);
+        assert_eq!(
+            QuestionRisk::from_wire(Some(&json!("credential_adjacent"))),
+            QuestionRisk::CredentialAdjacent
+        );
+
+        // The whole point of the order: a class a newer runner knows sits above every known
+        // ceiling, so the at-or-below check the judge reads never answers it by accident.
+        assert!(QuestionRisk::ReadOnly < QuestionRisk::WorkspaceWrite);
+        assert!(QuestionRisk::WorkspaceWrite < QuestionRisk::PublishAffecting);
+        assert!(QuestionRisk::PublishAffecting < QuestionRisk::CredentialAdjacent);
+        assert!(QuestionRisk::CredentialAdjacent < QuestionRisk::Unknown);
     }
 
     /// The schema's defaults, held by the type: a proposal without `scope` or `tags` proposes for

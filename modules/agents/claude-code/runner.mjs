@@ -200,7 +200,7 @@ const ASK_TOOL = 'AskUserQuestion';
  * Tools the orchestrator keeps when delegation is enforced, grouped by why each is not subagent work.
  * Everything else is refused by delegationDecision, including tools the harness's own text invites.
  */
-const ORCHESTRATOR_TOOLS = new Set([
+export const ORCHESTRATOR_TOOLS = new Set([
   // Delegating: `Task` is Claude Code's legacy alias for `Agent`, and sessions use both spellings.
   'Task',
   'Agent',
@@ -302,6 +302,33 @@ export function normalizeQuestions(input) {
       preview: typeof o?.preview === 'string' ? o.preview : null,
     })),
   }));
+}
+
+/**
+ * The risk class a question is published with, so the mothership can route it: an answering judge is
+ * configured with a ceiling and only sees questions at or below it, so misclassifying upward at worst
+ * costs the latency of a human, while misclassifying down would hand a credential- or publish-shaped
+ * question to a judge that must never see it. The heuristic therefore only rounds up, matches on word
+ * boundaries (a tokenizer is not a token), and `read_only` stays in the vocabulary for emitters that
+ * know more than this scan does — it is never a heuristic verdict.
+ */
+const CREDENTIALISH =
+  /\b(credentials?|secrets?|passwords?|passphrases?|(?:api|private|ssh)[\s_-]?keys?|tokens?|oauth)\b|\.env\b/i;
+const PUBLISHISH =
+  /\b(publish(?:es|ed|ing)?|releas(?:e|es|ed|ing)|deploy(?:s|ed|ing|ment)?|push(?:es|ed|ing)?|merg(?:e|es|ed|ing)|pull[\s_-]?requests?)\b/i;
+
+/** Round-up risk class of a normalized `questions` array; highest class across all its text wins. */
+export function riskClass(questions) {
+  const text = (Array.isArray(questions) ? questions : [])
+    .flatMap((q) => [
+      q?.question,
+      q?.header,
+      ...(Array.isArray(q?.options) ? q.options : []).map((o) => `${o?.label}\n${o?.description}`),
+    ])
+    .join('\n');
+  if (CREDENTIALISH.test(text)) return 'credential_adjacent';
+  if (PUBLISHISH.test(text)) return 'publish_affecting';
+  return 'workspace_write';
 }
 
 /** tool_result content → display text, capped at MAX_TOOL_OUTPUT characters. */
@@ -588,11 +615,13 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
       if (signal?.aborted) resolve(null);
       signal?.addEventListener('abort', () => resolve(null), { once: true });
     });
+    const questions = normalizeQuestions(toolInput);
     emit({
       type: 'question',
       question_id: questionId,
       message_id: toolMessage.get(questionId) ?? null,
-      questions: normalizeQuestions(toolInput),
+      risk: riskClass(questions),
+      questions,
     });
     settleStatus();
 

@@ -16,7 +16,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self};
 
-use crate::protocol::{AgentEvent, AgentState};
+use crate::protocol::{AgentEvent, AgentState, QuestionRisk};
 #[allow(unused_imports)]
 use crate::{lifecycle::*, publish::*, queue::*, sessions::*};
 
@@ -283,11 +283,17 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             }
         }
         AgentEvent::Question {
-            question_id, questions, ..
+            question_id,
+            questions,
+            risk,
+            ..
         } => {
             // The questions travel with the id: autonomous mode answers among the options the
-            // agent offered, and nothing else (docs/protocol.md §6.2b).
-            *rt.open_question.lock().await = Some((question_id, questions));
+            // agent offered, and nothing else (docs/protocol.md §6.2b). The risk class travels
+            // too — the judge answers only at or below its ceiling — and a question without one,
+            // from an older runner, counts as a workspace write.
+            let risk = risk.unwrap_or(QuestionRisk::WorkspaceWrite);
+            *rt.open_question.lock().await = Some((question_id, questions, risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
         AgentEvent::QuestionAnswered { .. } => {
