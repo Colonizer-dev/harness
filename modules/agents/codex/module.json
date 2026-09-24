@@ -1,0 +1,59 @@
+{
+  "kind": "agent",
+  "id": "codex",
+  "name": "Codex",
+  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It cannot ask the user questions yet, and nothing stages the codex binary into the colony image.",
+  "protocol": "colonizer-runner/1",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "codex"
+    ],
+    "image": "glibc + node >= 20 + the pinned @openai/codex CLI on PATH (npm install -g @openai/codex)",
+    "pins": {
+      "codex": {
+        "version": "0.156.1",
+        "source_rev": "81e8e29b2956dfe9b092c63953a9ed282781e77c"
+      }
+    }
+  },
+  "secrets": [
+    {
+      "env": [
+        "CODEX_API_KEY"
+      ],
+      "hosts": [
+        "api.openai.com"
+      ]
+    }
+  ],
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "Model for the colony as openai/<model> or a bare OpenAI model id, passed to codex exec -m. Empty (the default) passes no -m: Codex runs on the CLI's own default model. Other providers are refused: codex talks to api.openai.com directly in this slice.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "subagent_model": {
+        "type": "string",
+        "title": "Subagent model",
+        "description": "Accepted for parity with the other agent modules, but unused: headless codex exec has no subagent split, every turn runs on the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_MODEL"
+      },
+      "background_model": {
+        "type": "string",
+        "title": "Background model",
+        "description": "Accepted for parity with the other agent modules, but unused: headless codex exec has no background-worker split, every turn runs on the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_BACKGROUND_MODEL"
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ import { ModelPicker } from "./ModelPicker";
 import { Button, Spinner, Switch, cx, inputClass, stored, store } from "./ui";
 
 type FieldKey =
+  | "agent_module"
   | "model"
   | "subagent_model"
   | "background_model"
@@ -37,6 +38,7 @@ interface FieldSpec {
 }
 
 const FIELDS: FieldSpec[] = [
+  { key: "agent_module", group: "Models", label: "Agent module", hint: "Which installed agent runs this org's colonies", kind: "choice" },
   { key: "model", group: "Models", label: "Orchestrator", hint: "The main agent in each colony", kind: "model" },
   { key: "subagent_model", group: "Models", label: "Subagents", hint: "Agents the orchestrator starts for side tasks", kind: "model" },
   { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
@@ -56,6 +58,8 @@ type Draft = Record<FieldKey, { override: boolean; value: string | boolean }>;
 
 function readSetting(settings: OrgSettings, key: FieldKey): Value {
   switch (key) {
+    case "agent_module":
+      return settings.agent?.module;
     case "model":
     case "subagent_model":
     case "background_model":
@@ -93,6 +97,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     return m ? m.enabled && setting(kind, "enabled") !== false : undefined;
   };
   switch (key) {
+    case "agent_module":
+      // The mothership's own agent module: what an org without a pick of its own launches on.
+      return module("agent")?.provider;
     case "model":
     case "subagent_model":
     case "background_model":
@@ -116,12 +123,15 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
   }
 }
 
-function describe(spec: FieldSpec, value: Value): string {
+function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = null): string {
   if (value === undefined || value === null) return "global default";
   if (typeof value === "boolean") return value ? "on" : "off";
   // 0 — or nothing set at all, on the server's quota fields — is how unlimited is written.
   if (spec.key === "budget_usd" && value === 0) return "unlimited";
   if (spec.kind === "size" && (value === "" || value === "0")) return "unlimited";
+  if (spec.key === "agent_module" && typeof value === "string")
+    // The module's display name, not its id.
+    return modules?.find((m) => m.kind === "agent")?.providers?.find((p) => p.id === value)?.name ?? value;
   if (spec.kind === "choice" && typeof value === "string")
     // A blank `preset` reads as automatic too, the same as in Setup.
     return value.trim() === "" || value === "auto" ? "Automatic" : value.charAt(0).toUpperCase() + value.slice(1);
@@ -183,6 +193,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
   );
   const settings: OrgSettings = {
     agent: {
+      module: pick("agent_module") as string | null,
       model: pick("model") as string | null,
       subagent_model: pick("subagent_model") as string | null,
       background_model: pick("background_model") as string | null,
@@ -455,7 +466,7 @@ export function OrgSettingsForm({
                     label={spec.label}
                     hint={spec.hint}
                     override={draft[spec.key].override}
-                    inherited={describe(spec, globalValue(modules, spec.key))}
+                    inherited={describe(spec, globalValue(modules, spec.key), modules)}
                     onOverride={(override) => set(spec.key, { override })}
                   >
                     {spec.kind === "model" && (
@@ -510,13 +521,16 @@ export function OrgSettingsForm({
                         aria-label={`${spec.label} for ${org}`}
                         className={cx(inputClass, "w-40")}
                       >
-                        {(modules?.find((m) => m.kind === "sandbox")?.schema?.properties?.preset?.enum?.map(String) ?? []).map(
-                          (id) => (
-                            <option key={id} value={id}>
-                              {id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1)}
-                            </option>
-                          ),
-                        )}
+                        {(spec.key === "agent_module"
+                          ? (modules?.find((m) => m.kind === "agent")?.providers ?? []).map((p) => [p.id, p.name] as const)
+                          : (
+                              modules?.find((m) => m.kind === "sandbox")?.schema?.properties?.preset?.enum?.map(String) ?? []
+                            ).map((id) => [id, id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1)] as const)
+                        ).map(([id, label]) => (
+                          <option key={id} value={id}>
+                            {label}
+                          </option>
+                        ))}
                       </select>
                     )}
                     {spec.kind === "boolean" && (

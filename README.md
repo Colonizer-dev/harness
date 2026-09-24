@@ -185,11 +185,13 @@ that ends in a question mark.
 small contracts, selected in the UI and saved in `modules.json`. The agent contract is a JSON Lines
 protocol on stdio, so an agent module can be written in anything.
 
-The agent modules so far:
+The agent modules so far. An org can pick which installed agent module its colonies launch on (Org
+settings → Agent module; without a pick, the mothership's agent choice applies):
 
 | Agent | What it is | Status |
 | :--- | :--- | :--- |
 | [`claude-code`](modules/agents/claude-code) | Anthropic's Claude Code via the Claude Agent SDK, with questions to the user as choice cards | `SHIPPING` |
+| [`codex`](modules/agents/codex) | OpenAI's Codex CLI, headless: one `codex exec` process per turn, resumed into a single thread; the `codex` CLI must be present in the colony image | `SHIPPING` |
 | [`grok-build`](modules/agents/grok-build) | xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session | `PLANNED` |
 
 ---
@@ -210,6 +212,7 @@ mothership also tells you when a newer release is out, and can install it.
 | [`modules/agents/opencode`](modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
 | [`modules/agents/hermes`](modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
+| [`modules/agents/codex`](modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the `codex` CLI must be present in the colony image | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) with a snapshot of its built-in subagents (`claude-code-builtins.json`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
@@ -275,7 +278,9 @@ Stated here rather than buried.
   wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
 - **ChatGPT subscriptions are not a credential.** OpenAI-compatible providers take an API key: a ChatGPT
   plan is honoured by the Responses API behind Codex sign-in, which the gateway's `openai` wire does not
-  speak ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](docs/decisions.md)).
+  speak. The [`codex` agent module](modules/agents/codex) runs on an OpenAI API key instead — a `CODEX_API_KEY`
+  colony secret for `api.openai.com` — but a ChatGPT sign-in is still nothing the harness can spend
+  ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](docs/decisions.md)).
 - **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
   is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
   given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
@@ -436,6 +441,7 @@ cargo test --workspace                          # mothership and agentd, includi
 cargo clippy --workspace --all-targets -- -D warnings
 (cd modules/agents/claude-code && npm test)
 (cd modules/agents/pi && npm test)
+(cd modules/agents/codex && npm test)
 (cd services/telemetry && npm test)             # the live map's receiver
 (cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
 node --test scripts/test/colony-report.test.mjs

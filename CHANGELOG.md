@@ -29,6 +29,14 @@ setting) is called out under **Take care** rather than left for you to find.
   on the Node 24 colonies run. Bundles are built by `.github/workflows/graft-bundle.yml`
   on `graft-*` tags; until one is published and pinned, the row says it is not
   available yet.
+- **Codex as an agent module.** `modules/agents/codex` runs OpenAI's Codex CLI headlessly (`codex
+  exec --json`) on the same runner protocol as Claude Code: one process per turn, the first turn's
+  thread id resumed into one continuous thread, token totals (codex reports no cost) on each
+  `turn_end`, and a `CODEX_API_KEY` colony secret for `api.openai.com` — no ChatGPT sign-in. The
+  module is pickable now; nothing stages the `codex` binary into the colony image yet, so a codex
+  colony stops at the runner's preflight until the pinned CLI is on the image's PATH.
+- **Org settings: pick which installed agent module an org's colonies launch on** (falls back to
+  the mothership's agent choice).
 
 ## [v0.1.9] - 2026-09-24
 

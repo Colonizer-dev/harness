@@ -1206,10 +1206,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         ));
     }
     let modules = app.modules.read().await.clone();
+    // Which agent module the colony launches on: this org's pick, else the install's (issue #201).
+    // Recorded on the session, so boot re-resolves from that and a later change moves new colonies only.
     let agent = app
         .agents
         .iter()
-        .find(|a| a.id == modules.agent.provider)
+        .find(|a| a.id == orgs::effective_agent_module(&app.org_settings(owner), &modules))
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "the selected agent module is not installed"))?;
     // The colony's account: the request's explicit choice, else the org's override, else the
     // install default. Resolved before the gate so the refusal can name the account that is missing.
