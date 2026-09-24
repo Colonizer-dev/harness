@@ -73,6 +73,16 @@ setting) is called out under **Take care** rather than left for you to find.
   skillset is saved; and duplicate provider ids in a hand-edited `providers.json` are named, with the
   save over them refused. The house rule and its audit table are in
   [docs/architecture.md](docs/architecture.md). ([#326])
+- **A swappable session store.** The session index (`sessions.json`) is now written through one
+  interface, `SessionStore`, with the on-disk layout as the default backend and a reference
+  object-store backend beside it, so the same semantics can later be served off the local disk and
+  the per-session files under `data/sessions/<id>/` can follow. Each operation states its
+  consistency contract (atomic replace, at-least-once appends deduplicated by `seq` on read, one
+  writer per session), ids and file names are validated so host paths like worktrees are refused,
+  and `migrate` copies colonies between stores — source untouched, destination verified, empty by
+  requirement — with a dry-run mode. The contract, the local assumptions the object-store backend
+  surfaced, and the migration procedure are in docs/session-store.md; the reads and per-session
+  file writes, and a CLI to run a migration, are follow-ups. ([#325])
 - **Read-only shared memory, enforced twice.** Subagents and background tasks can search shared memory but never
   propose: the runner's hook already refused `memory_propose` for any agent but the orchestrator, and now the
   mothership re-checks each proposal's `origin` before it touches a store — with the mem0 provider, a refused
@@ -648,6 +658,7 @@ Macs. ([#74])
 [#442]: https://github.com/Colonizer-dev/harness/issues/442
 [#367]: https://github.com/Colonizer-dev/harness/issues/367
 [#366]: https://github.com/Colonizer-dev/harness/issues/366
+[#325]: https://github.com/Colonizer-dev/harness/issues/325
 [#334]: https://github.com/Colonizer-dev/harness/issues/334
 [#202]: https://github.com/Colonizer-dev/harness/issues/202
 [#219]: https://github.com/Colonizer-dev/harness/issues/219

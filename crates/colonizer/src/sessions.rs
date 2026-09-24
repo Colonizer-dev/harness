@@ -15,7 +15,8 @@ use crate::{
     sandbox::{self, BootSpec, Mount, Secret},
     spend,
     stack::{self, Stacked},
-    util::{append_line, random_token, read_trimmed, short_id, truncate, valid_repo, write_atomic, write_private},
+    store::SessionStore,
+    util::{append_line, random_token, read_trimmed, short_id, truncate, valid_repo, write_private},
     watchdog::Activity,
 };
 #[allow(unused_imports)]
@@ -835,7 +836,12 @@ impl App {
     pub(crate) async fn persist_sessions(&self) -> Result<()> {
         let _guard = self.session_persist.lock().await;
         let data = serde_json::to_vec_pretty(&*self.sessions.read().await).context("could not serialize the session list")?;
-        write_atomic(&self.sessions_file(), &data).await?;
+        // Through the session store (the default local one), not the file helper directly: the
+        // path and bytes are identical, and the write goes by the same name every backend will
+        // answer it by.
+        crate::store::LocalDirStore::new(self.cfg.data_dir.clone())
+            .write_index(&data)
+            .await?;
         // The session list is written on nearly every state change, so its saves are the signal
         // that the disk is taking writes again after a failure.
         self.storage_succeeded().await;
