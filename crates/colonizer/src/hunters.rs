@@ -1,8 +1,8 @@
-//! Pluggable security-hunter modules (Strix, Shannon) that a red-team run drives against a target:
-//! on-demand, checksum-verified, never vendored — Strix is Apache-2.0 and Shannon is AGPL-3.0, so
-//! both are kept clear of the binary by shelling out rather than linking. Each hunter's `Manifest`
-//! says how to install it, how to scan with it, and which parser reads its output; findings are
-//! normalised into the same `Finding` the orchestrator validates and files. Adding a hunter is a
+//! Pluggable security-hunter modules (Strix, Shannon) for a future red-team run stage to drive
+//! against a target: on-demand, checksum-verified, never vendored — Strix is Apache-2.0 and Shannon
+//! is AGPL-3.0, so both are kept clear of the binary by shelling out rather than linking. Each
+//! hunter's `Manifest` says how to install it, how to scan with it, and which parser would read its
+//! output; findings parse into the same `Finding` the orchestrator flow files. Adding a hunter is a
 //! manifest plus a parser (see docs/security-hunters.md).
 
 use crate::{ApiResult, Shared, client_error, findings::Finding};
@@ -19,7 +19,12 @@ use std::{
     collections::HashMap,
     os::unix::fs::PermissionsExt,
     path::{Path as FsPath, PathBuf},
-    time::Duration,
+    process::Stdio,
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -84,7 +89,7 @@ fn strix() -> Manifest {
         pinned_version: "1.6.2",
         runtime: Runtime::Binary,
         needs_docker: true,
-        install: "curl -sSL https://strix.ai/install | bash  (or: pipx install strix-agent==1.6.2)",
+        install: "POST /api/hunters/strix/install — pinned and checksum-verified from hunters.lock (requires COLONIZER_HUNTER_INSTALL=1)",
         scan: "strix -n --target {target} --scan-mode {mode}",
         output: &["vulnerabilities.json", "findings.sarif"],
         findings_format: FindingsFormat::StrixJson,
@@ -398,22 +403,25 @@ pub struct Probe {
     pub detail: String,
 }
 
-/// The pure half of [`probe`]: why this hunter can or cannot run here.
+/// The pure half of [`probe`]: why this hunter can or cannot run here. A hunter that needs Docker is
+/// never ready: colonies are microVMs without a Docker daemon yet, and the host's daemon is never
+/// shared with a colony — Docker socket access is host root, and hunters run arbitrary PoCs.
 fn probe_detail(runtime_ok: bool, runtime_msg: &str, docker_ok: bool) -> (bool, String) {
     if !runtime_ok {
         (false, runtime_msg.to_string())
     } else if !docker_ok {
         (
             false,
-            "no Docker daemon reachable: colonies are microVMs without Docker — set DOCKER_HOST to a host-side daemon".into(),
+            "needs a Docker daemon running inside the colony microVM: colonies do not have one yet, and the host's daemon is never shared with a colony (Docker socket access is host root)".into(),
         )
     } else {
         (true, "ready".into())
     }
 }
 
-/// Checks the hunter can actually run here: its runtime exists, and a Docker daemon answers when it
-/// needs one. A downloaded binary counts as present only once installed; Node is probed on PATH.
+/// Checks the hunter can actually run here: its runtime exists, and Docker is not needed. Docker is
+/// decided, not detected: nothing here may touch the host's Docker daemon, so a hunter with
+/// `needs_docker` stays not-ready until Docker runs inside the colony microVM.
 pub async fn probe(m: &Manifest, installed: bool) -> Probe {
     let (runtime_ok, runtime_msg) = match m.runtime {
         Runtime::Binary => (
@@ -430,13 +438,7 @@ pub async fn probe(m: &Manifest, installed: bool) -> Probe {
             )
         }
     };
-    let docker_ok = if m.needs_docker {
-        let mut cmd = Command::new("docker");
-        cmd.arg("info");
-        crate::util::exec_within(Duration::from_secs(10), &mut cmd).await.is_ok()
-    } else {
-        true
-    };
+    let docker_ok = !m.needs_docker;
     let (ready, detail) = probe_detail(runtime_ok, &runtime_msg, docker_ok);
     Probe {
         runtime_ok,
@@ -457,7 +459,12 @@ struct Pin {
     url: String,
 }
 
-fn pin_for(lock: &str, id: &str, arch: &str) -> Option<Pin> {
+/// The pin for this hunter on this OS and architecture: hunter binaries are Linux-only, so any
+/// non-Linux host has no pin and is therefore neither installable nor installed.
+fn pin_for(lock: &str, id: &str, os: &str, arch: &str) -> Option<Pin> {
+    if os != "linux" {
+        return None;
+    }
     let platform = match arch {
         "x86_64" => "linux-x86_64",
         "aarch64" => "linux-aarch64",
@@ -480,7 +487,7 @@ fn pin_for(lock: &str, id: &str, arch: &str) -> Option<Pin> {
 }
 
 fn pin(id: &str) -> Option<Pin> {
-    pin_for(LOCK, id, std::env::consts::ARCH)
+    pin_for(LOCK, id, std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn root(app: &Shared, id: &str) -> PathBuf {
@@ -493,101 +500,245 @@ fn installed_in(root: &FsPath, version: &str) -> Option<String> {
 }
 
 fn installed(app: &Shared, m: &Manifest) -> Option<String> {
-    pin(m.id).and_then(|p| installed_in(&root(app, m.id), &p.version))
+    installed_for(&root(app, m.id), pin(m.id).as_ref())
+}
+
+/// The installed check behind [`installed`], taking the pin explicitly so tests can show a binary on
+/// disk still counts as not installed when there is no pin for this host (e.g. macOS).
+fn installed_for(root: &FsPath, pin: Option<&Pin>) -> Option<String> {
+    let pin = pin?;
+    installed_in(root, &pin.version)
+}
+
+/// Largest hunter tarball the installer will buffer: Strix 1.6.2 ships ~89 MB per platform, so 256
+/// MiB is roughly 3x headroom against a compromised mirror serving an unbounded body.
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Env var that opts the operator into hunter installs: install runs only when it holds a truthy
+/// value (`1`/`true`/`on`/`yes`, case-insensitive); unset or anything else means disabled.
+const INSTALL_ENV_VAR: &str = "COLONIZER_HUNTER_INSTALL";
+
+/// One async mutex per hunter id, so two concurrent installs of the same hunter serialise: the
+/// second re-checks after acquiring the lock and returns without downloading again.
+static INSTALL_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn install_lock(id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    INSTALL_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(id.to_string())
+        .or_default()
+        .clone()
+}
+
+/// Monotonic process-local counter folded into staging/temp names so two installs never share one.
+static NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_suffix() -> String {
+    let n = NAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}-{n}", std::process::id())
+}
+
+/// Whether hunter installs are allowed right now (see [`INSTALL_ENV_VAR`]).
+fn hunter_install_allowed() -> bool {
+    hunter_install_allowed_for(std::env::var(INSTALL_ENV_VAR).ok().as_deref())
+}
+
+fn hunter_install_allowed_for(value: Option<&str>) -> bool {
+    matches!(
+        value.unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on" | "yes"
+    )
 }
 
 /// Downloads the pinned archive, checks its sha256 against the pin, and unpacks the single binary
-/// into `<data>/hunters/<id>/<version>/strix`. Nothing lands at the final path until the archive
-/// has been verified and fully unpacked.
+/// into `<data>/hunters/<id>/<version>/strix`. The verified bytes are piped straight into
+/// `tar -xzf -` over stdin — no tarball file ever lands on disk, so nothing can swap the archive
+/// between the hash check and the unpack — and the binary lands atomically (a uniquely-named temp
+/// file in the version dir, chmodded, then renamed over the final path), so readers never see a
+/// half-written binary. Staging uses a unique directory that is removed on every path.
 pub async fn install(app: &Shared, id: &str) -> Result<String> {
     let Some(pin) = pin(id) else {
-        bail!("no pinned artifact for {id} on this architecture");
+        bail!(
+            "no pinned {id} artifact for this machine ({}/{}); hunter binaries are Linux-only, see hunters.lock",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
     };
-    let root = root(app, id);
-    tokio::fs::create_dir_all(&root).await?;
-    let part = root.join(format!(".{}.tar.gz.part", pin.version));
-    if let Err(e) = download_verified(&pin, &part).await {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(e);
-    }
+    install_pinned(&root(app, id), &pin, MAX_DOWNLOAD_BYTES).await
+}
 
-    let staging = root.join(format!(".{}.unpack", pin.version));
+/// The core of [`install`], taking the root dir, the pin and the byte cap as parameters so tests can
+/// drive it against a local server with a tiny cap.
+async fn install_pinned(root: &FsPath, pin: &Pin, max_bytes: u64) -> Result<String> {
+    let _guard = install_lock(&pin.id).lock_owned().await;
+    if let Some(version) = installed_in(root, &pin.version) {
+        return Ok(version);
+    }
+    tokio::fs::create_dir_all(root).await?;
+    let bytes = download_bytes(pin, max_bytes).await?;
+
+    let staging = root.join(format!(".{}.staging-{}", pin.version, unique_suffix()));
+    tokio::fs::create_dir(&staging).await?;
+    let placed = unpack_and_place(root, &staging, &bytes, &pin.version).await;
     let _ = tokio::fs::remove_dir_all(&staging).await;
-    tokio::fs::create_dir_all(&staging).await?;
-    let unpacked = async {
-        let mut tar = Command::new("tar");
-        tar.arg("-xzf").arg(&part).arg("-C").arg(&staging);
-        crate::util::exec(&mut tar).await?;
-        let mut files: Vec<PathBuf> = Vec::new();
-        let mut entries = tokio::fs::read_dir(&staging).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_file() {
-                files.push(entry.path());
-            }
+    placed
+}
+
+/// Unpacks already-verified `bytes` via `tar` over stdin and atomically places the single binary.
+async fn unpack_and_place(root: &FsPath, staging: &FsPath, bytes: &[u8], version: &str) -> Result<String> {
+    let mut child = Command::new("tar")
+        .arg("-xzf")
+        .arg("-")
+        .arg("--no-same-owner")
+        .arg("-C")
+        .arg(staging)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting tar to unpack the hunter archive")?;
+    // The writer runs on its own task while `wait_with_output` drains stderr: pushing ~90 MB into
+    // a 64 KiB stdin pipe while tar fills its own stderr pipe would otherwise stall both sides.
+    let mut stdin = child.stdin.take().context("tar started without a stdin pipe")?;
+    let owned = bytes.to_vec();
+    let writer = tokio::spawn(async move {
+        let result = stdin.write_all(&owned).await;
+        drop(stdin);
+        result
+    });
+    let output = child.wait_with_output().await.context("unpacking the hunter archive")?;
+    writer
+        .await
+        .context("waiting for the tar stdin writer")?
+        .context("piping the verified archive into tar")?;
+    if !output.status.success() {
+        bail!(
+            "unpacking the hunter archive failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let binary = find_staged_binary(staging).await?;
+    let dest = root.join(version);
+    tokio::fs::create_dir_all(&dest).await?;
+    let tmp = dest.join(format!(".strix-install-{}", unique_suffix()));
+    let placed = async {
+        tokio::fs::rename(&binary, &tmp)
+            .await
+            .context("moving the hunter binary into place")?;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555)).await?;
+        tokio::fs::rename(&tmp, dest.join("strix"))
+            .await
+            .context("moving the hunter binary into place")?;
+        Ok(version.to_string())
+    }
+    .await;
+    if placed.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    placed
+}
+
+/// The single binary inside the staging dir: the archive holds exactly one regular file, preferring
+/// the one named like the release binary. Metadata is read without following links and symlinks are
+/// never accepted, so a hostile archive cannot point the install at a host path.
+async fn find_staged_binary(staging: &FsPath) -> Result<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut entries = tokio::fs::read_dir(staging).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if is_plain_file(&entry.path()).await? {
+            files.push(entry.path());
         }
-        if files.is_empty() {
-            let mut dirs: Vec<PathBuf> = Vec::new();
-            let mut top = tokio::fs::read_dir(&staging).await?;
-            while let Some(entry) = top.next_entry().await? {
-                if entry.file_type().await?.is_dir() {
-                    dirs.push(entry.path());
-                }
-            }
-            for dir in dirs {
-                let mut inner = tokio::fs::read_dir(&dir).await?;
+    }
+    if files.is_empty() {
+        let mut top = tokio::fs::read_dir(staging).await?;
+        while let Some(entry) = top.next_entry().await? {
+            let meta = tokio::fs::symlink_metadata(entry.path()).await?;
+            if meta.is_dir() {
+                let mut inner = tokio::fs::read_dir(entry.path()).await?;
                 while let Some(entry) = inner.next_entry().await? {
-                    if entry.file_type().await?.is_file() {
+                    if is_plain_file(&entry.path()).await? {
                         files.push(entry.path());
                     }
                 }
             }
         }
-        // The archive holds exactly one regular file; prefer the one named like the release binary.
-        let binary = files
-            .iter()
-            .find(|path| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("strix"))
-            })
-            .or_else(|| files.first())
-            .cloned();
-        let Some(binary) = binary else {
-            bail!("unpacked archive has no strix binary");
-        };
-        let dest = root.join(&pin.version);
-        let _ = tokio::fs::remove_dir_all(&dest).await;
-        tokio::fs::create_dir_all(&dest).await?;
-        tokio::fs::rename(&binary, dest.join("strix"))
-            .await
-            .context("moving the hunter binary into place")?;
-        tokio::fs::set_permissions(dest.join("strix"), std::fs::Permissions::from_mode(0o755)).await?;
-        Ok(pin.version.clone())
     }
-    .await;
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    let _ = tokio::fs::remove_file(&part).await;
-    unpacked
+    files
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("strix"))
+        })
+        .or_else(|| files.first())
+        .cloned()
+        .context("unpacked archive has no strix binary")
+}
+
+/// True for a regular file, without following a trailing symlink: symlinks fail this check.
+async fn is_plain_file(path: &FsPath) -> Result<bool> {
+    Ok(tokio::fs::symlink_metadata(path).await?.is_file())
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-async fn download_verified(pin: &Pin, part: &FsPath) -> Result<()> {
-    // GitHub release downloads redirect to object storage, so redirects are followed here (the provider
-    // gateway's client deliberately does not).
-    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).build()?;
-    let response = client.get(&pin.url).send().await?.error_for_status()?;
-    let mut file = tokio::fs::File::create(part).await?;
+/// Downloads the pinned URL into memory (bounded by `max_bytes`), rejecting early on an oversized
+/// Content-Length and while streaming, then verifies the sha256 over those same bytes.
+async fn download_bytes(pin: &Pin, max_bytes: u64) -> Result<Vec<u8>> {
+    // GitHub release downloads redirect to object storage, so redirects are followed here (the
+    // provider gateway's client deliberately does not) — but only over https, and at most ten hops.
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    });
+    let client = reqwest::Client::builder()
+        .redirect(policy)
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(600))
+        .build()?;
+    let response = client.get(&pin.url).send().await?;
+    // A refused non-https redirect (or any other non-success) must fail here as a status error,
+    // never fall through to a confusing "checksum mismatch" over an error page.
+    let status = response.status();
+    if !status.is_success() {
+        bail!("refusing {} {}: {} answered HTTP {status}", pin.id, pin.version, pin.url);
+    }
+    if let Some(len) = response.content_length()
+        && len > max_bytes
+    {
+        bail!(
+            "refusing {} {}: Content-Length {len} exceeds the download cap of {max_bytes} bytes",
+            pin.id,
+            pin.version
+        );
+    }
+    let mut bytes = Vec::new();
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("the download was interrupted")?;
+        if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
+            bail!(
+                "refusing {} {}: download exceeds the cap of {max_bytes} bytes",
+                pin.id,
+                pin.version
+            );
+        }
         digest.update(&chunk);
-        file.write_all(&chunk).await?;
+        bytes.extend_from_slice(&chunk);
     }
-    file.flush().await?;
-    drop(file);
 
     let got = hex(digest.finish().as_ref());
     if got != pin.sha256 {
@@ -598,15 +749,28 @@ async fn download_verified(pin: &Pin, part: &FsPath) -> Result<()> {
             pin.sha256
         );
     }
-    Ok(())
+    Ok(bytes)
 }
 
 /// `POST /api/hunters/{id}/install` — download and verify the pinned binary, or explain how to
-/// install a hunter that is not a downloaded binary.
+/// install a hunter that is not a downloaded binary. Installs run only when the operator opts in
+/// via `COLONIZER_HUNTER_INSTALL=1`; the check happens before any network I/O.
 pub async fn install_handler(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    install_handler_inner(State(app), Path(id), hunter_install_allowed()).await
+}
+
+/// The body of [`install_handler`], taking the opt-in explicitly so tests exercise both branches
+/// without touching the process environment.
+async fn install_handler_inner(State(app): State<Shared>, Path(id): Path<String>, allowed: bool) -> ApiResult<Value> {
     let Some(m) = find(&id) else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such hunter"));
     };
+    if !allowed {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            &format!("hunter installs are disabled; set {INSTALL_ENV_VAR}=1 to allow this install"),
+        ));
+    }
     if !m.available {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -626,7 +790,8 @@ pub async fn install_handler(State(app): State<Shared>, Path(id): Path<String>) 
         return Err(client_error(
             StatusCode::CONFLICT,
             &format!(
-                "no pinned {id} artifact for this machine's architecture ({}); see hunters.lock",
+                "no pinned {id} artifact for this machine ({}/{}); hunter binaries are Linux-only, see hunters.lock",
+                std::env::consts::OS,
                 std::env::consts::ARCH
             ),
         ));
@@ -750,8 +915,8 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_pins_strix_for_each_architecture() {
-        let pin = pin_for(LOCK, "strix", "x86_64").expect("hunters.lock pins strix for x86_64");
+    fn the_lock_pins_strix_for_linux_on_each_architecture() {
+        let pin = pin_for(LOCK, "strix", "linux", "x86_64").expect("hunters.lock pins strix for x86_64");
         assert_eq!(pin.sha256.len(), 64, "sha256 must be 64 hex characters");
         assert!(
             pin.url.starts_with("https://github.com/usestrix/strix/releases/download/"),
@@ -759,11 +924,67 @@ mod tests {
             pin.url
         );
         assert!(
-            pin_for(LOCK, "strix", "aarch64").is_some(),
+            pin_for(LOCK, "strix", "linux", "aarch64").is_some(),
             "hunters.lock pins strix for aarch64"
         );
-        assert_eq!(pin_for(LOCK, "strix", "riscv64"), None, "no pin for an unknown architecture");
-        assert_eq!(pin_for(LOCK, "nope", "x86_64"), None, "no pin for an unknown hunter");
+        assert_eq!(
+            pin_for(LOCK, "strix", "linux", "riscv64"),
+            None,
+            "no pin for an unknown architecture"
+        );
+        assert_eq!(pin_for(LOCK, "nope", "linux", "x86_64"), None, "no pin for an unknown hunter");
+    }
+
+    #[test]
+    fn pins_are_linux_only() {
+        assert_eq!(
+            pin_for(LOCK, "strix", "macos", "aarch64"),
+            None,
+            "no pin off Linux, even for a known hunter and arch"
+        );
+        assert_eq!(pin_for(LOCK, "strix", "windows", "x86_64"), None, "no pin off Linux");
+        assert!(
+            pin_for(LOCK, "strix", "linux", "x86_64").is_some() && pin_for(LOCK, "strix", "linux", "aarch64").is_some(),
+            "Linux still resolves both architectures"
+        );
+    }
+
+    #[test]
+    fn a_binary_on_disk_counts_as_not_installed_without_a_pin() {
+        let tmp = std::env::temp_dir().join(format!("colonizer-hunters-test-{}", crate::util::short_id()));
+        std::fs::create_dir_all(tmp.join("1.6.2")).unwrap();
+        std::fs::write(tmp.join("1.6.2/strix"), "").unwrap();
+        assert_eq!(
+            installed_for(&tmp, None),
+            None,
+            "a binary file with no pin (e.g. macOS) is not installed"
+        );
+        let pin = pin_for(LOCK, "strix", "linux", std::env::consts::ARCH).expect("a pin for this test host");
+        assert_eq!(
+            installed_for(&tmp, Some(&pin)),
+            Some("1.6.2".to_string()),
+            "the binary marks the pinned version installed where a pin exists"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn the_hunter_install_opt_in_needs_a_truthy_value() {
+        for truthy in ["1", "true", "TRUE", "on", "On", "yes", "YES", " 1 "] {
+            assert!(hunter_install_allowed_for(Some(truthy)), "{truthy:?} must allow installs");
+        }
+        for falsy in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("no"),
+            Some("2"),
+            Some("maybe"),
+        ] {
+            assert!(!hunter_install_allowed_for(falsy), "{falsy:?} must not allow installs");
+        }
     }
 
     #[test]
@@ -782,15 +1003,22 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_explains_a_missing_docker_daemon() {
+    fn the_probe_never_points_at_the_host_daemon() {
         let (ready, detail) = probe_detail(true, "binary not installed yet; POST /api/hunters/strix/install first", false);
-        assert!(!ready, "a hunter without Docker is not ready");
-        assert!(detail.contains("DOCKER_HOST"), "the detail names the way out: {detail}");
+        assert!(!ready, "a hunter needing Docker is not ready");
+        assert!(
+            !detail.contains("DOCKER_HOST"),
+            "the detail must never suggest the host daemon: {detail}"
+        );
+        assert!(
+            detail.contains("never shared"),
+            "the detail says the host daemon is never shared: {detail}"
+        );
         let (ready, detail) = probe_detail(false, "node runtime not found; install it before running this hunter", true);
         assert!(!ready, "a hunter without its runtime is not ready");
         assert!(detail.contains("node"), "the detail names the missing runtime: {detail}");
         let (ready, detail) = probe_detail(true, "binary not installed yet", true);
-        assert!(ready, "runtime plus Docker is ready");
+        assert!(ready, "runtime without a Docker need is ready");
         assert_eq!(detail, "ready");
     }
 
@@ -864,5 +1092,288 @@ mod tests {
         assert_eq!(shannon.licence, "AGPL-3.0");
         assert!(!shannon.available, "shannon is a manifest-only stub");
         assert!(find("nope").is_none(), "unknown hunters stay unknown");
+    }
+
+    // The install tests below drive `install_pinned` against a local axum server on 127.0.0.1:0
+    // serving a tar.gz built by shelling out to `tar` over a temp dir containing a `strix` file.
+
+    fn test_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("colonizer-hunters-{label}-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn make_tarball(payload: &[u8]) -> Vec<u8> {
+        let dir = std::env::temp_dir().join(format!("colonizer-hunters-tar-{}", crate::util::short_id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/strix"), payload).unwrap();
+        let status = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(dir.join("strix.tar.gz"))
+            .arg("-C")
+            .arg(dir.join("src"))
+            .arg("strix")
+            .status()
+            .expect("tar must exist for the test");
+        assert!(status.success(), "tar builds the test archive");
+        let bytes = std::fs::read(dir.join("strix.tar.gz")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        bytes
+    }
+
+    fn test_pin(url: String, bytes: &[u8]) -> Pin {
+        Pin {
+            id: "strix".into(),
+            version: "9.9.9".into(),
+            sha256: hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref()),
+            url,
+        }
+    }
+
+    async fn serve(router: axum::Router) -> std::net::SocketAddr {
+        serve_with(|_| router).await
+    }
+
+    async fn serve_with(build: impl FnOnce(std::net::SocketAddr) -> axum::Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("loopback binds");
+        let addr = listener.local_addr().expect("a local addr");
+        let router = build(addr);
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("the test server serves");
+        });
+        addr
+    }
+
+    fn version_entries(root: &FsPath) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn concurrent_installs_download_once_and_leave_no_leftovers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let payload = b"fake-strix-binary";
+        let archive = make_tarball(payload);
+        let served = archive.clone();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let router = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || {
+                let hits = hits.clone();
+                let served = served.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    served
+                }
+            }),
+        );
+        let addr = serve(router).await;
+        let pin = test_pin(format!("http://{addr}/file"), &archive);
+        let root = test_root("race");
+
+        let (first, second) = tokio::join!(
+            install_pinned(&root, &pin, MAX_DOWNLOAD_BYTES),
+            install_pinned(&root, &pin, MAX_DOWNLOAD_BYTES)
+        );
+        assert_eq!(first.unwrap(), "9.9.9");
+        assert_eq!(second.unwrap(), "9.9.9");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "the second install re-checks instead of downloading"
+        );
+        assert_eq!(version_entries(&root), ["9.9.9"], "only the version dir lands in the root");
+        let binary = root.join("9.9.9/strix");
+        assert_eq!(
+            std::fs::read(&binary).unwrap(),
+            payload,
+            "the installed binary is the served one"
+        );
+        assert_eq!(
+            std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
+            0o555,
+            "the installed binary is read-execute only"
+        );
+        assert_eq!(
+            version_entries(&root.join("9.9.9")),
+            ["strix"],
+            "no temp leftovers in the version dir"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_oversized_content_length_is_refused_before_installing() {
+        let archive = make_tarball(b"too big for the test cap");
+        let served = archive.clone();
+        let router = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || {
+                let served = served.clone();
+                async move { served }
+            }),
+        );
+        let addr = serve(router).await;
+        let pin = test_pin(format!("http://{addr}/file"), &archive);
+        let root = test_root("sizecap");
+
+        let err = install_pinned(&root, &pin, 16).await.expect_err("the cap refuses");
+        assert!(
+            err.to_string().contains("Content-Length"),
+            "the Content-Length check fires before the body is read: {err:#}"
+        );
+        assert!(!root.join("9.9.9").exists(), "nothing is installed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_chunked_body_past_the_cap_is_refused_while_streaming() {
+        // No Content-Length here, so the running-total check is the one that fires.
+        let router = axum::Router::new().route(
+            "/file",
+            axum::routing::get(|| async {
+                let chunks = vec![Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(vec![0u8; 64])); 4];
+                axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+            }),
+        );
+        let addr = serve(router).await;
+        let pin = Pin {
+            id: "strix".into(),
+            version: "9.9.9".into(),
+            sha256: "0".repeat(64),
+            url: format!("http://{addr}/file"),
+        };
+        let root = test_root("streamsize");
+
+        let err = install_pinned(&root, &pin, 16).await.expect_err("the cap refuses");
+        assert!(
+            err.to_string().contains("exceeds the cap"),
+            "the streaming check fires: {err:#}"
+        );
+        assert!(!root.join("9.9.9").exists(), "nothing is installed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_checksum_mismatch_installs_nothing() {
+        let archive = make_tarball(b"bytes the pin does not expect");
+        let served = archive.clone();
+        let router = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || {
+                let served = served.clone();
+                async move { served }
+            }),
+        );
+        let addr = serve(router).await;
+        let pin = Pin {
+            id: "strix".into(),
+            version: "9.9.9".into(),
+            sha256: "0".repeat(64),
+            url: format!("http://{addr}/file"),
+        };
+        let root = test_root("checksum");
+
+        let err = install_pinned(&root, &pin, MAX_DOWNLOAD_BYTES)
+            .await
+            .expect_err("the mismatch refuses");
+        assert!(
+            err.to_string().contains("checksum mismatch"),
+            "the refusal names the checksum: {err:#}"
+        );
+        assert!(!root.join("9.9.9").exists(), "nothing is installed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_redirect_off_https_is_refused() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let followed = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = followed.clone();
+        let addr = serve_with(|addr| {
+            let target = format!("http://{addr}/other");
+            axum::Router::new()
+                .route(
+                    "/redir",
+                    axum::routing::get(move || {
+                        let target = target.clone();
+                        async move {
+                            (
+                                axum::http::StatusCode::FOUND,
+                                [(
+                                    axum::http::header::LOCATION,
+                                    axum::http::HeaderValue::from_str(&target).expect("a valid Location"),
+                                )],
+                                "",
+                            )
+                        }
+                    }),
+                )
+                .route(
+                    "/other",
+                    axum::routing::get(move || {
+                        let followed = followed.clone();
+                        async move {
+                            followed.fetch_add(1, Ordering::SeqCst);
+                            "must never be fetched"
+                        }
+                    }),
+                )
+        })
+        .await;
+        let pin = Pin {
+            id: "strix".into(),
+            version: "9.9.9".into(),
+            sha256: "0".repeat(64),
+            url: format!("http://{addr}/redir"),
+        };
+        let root = test_root("redirect");
+
+        let err = install_pinned(&root, &pin, MAX_DOWNLOAD_BYTES)
+            .await
+            .expect_err("the http redirect is refused");
+        assert!(
+            err.to_string().contains("302"),
+            "the refusal reports the redirect status, not a checksum mismatch: {err:#}"
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 0, "the redirect target is never fetched");
+        assert!(!root.join("9.9.9").exists(), "nothing is installed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_install_route_needs_the_operator_opt_in() {
+        use axum::response::IntoResponse;
+        let root = test_root("optin");
+        let app = crate::tests::test_app(&root);
+
+        let denied = install_handler_inner(State(app.clone()), Path("strix".to_string()), false).await;
+        let denied = denied.expect_err("disabled installs are refused");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(denied.into_response().into_body(), 1024)
+            .await
+            .expect("a body");
+        assert!(
+            String::from_utf8_lossy(&body).contains(INSTALL_ENV_VAR),
+            "the refusal names the env var: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let unknown = install_handler_inner(State(app.clone()), Path("nope".to_string()), false).await;
+        assert_eq!(
+            unknown.expect_err("unknown hunters stay unknown").status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let stub = install_handler_inner(State(app.clone()), Path("shannon".to_string()), true).await;
+        assert_eq!(
+            stub.expect_err("the stub still refuses").status(),
+            StatusCode::BAD_REQUEST,
+            "opted in, the next check runs — without any network I/O"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
