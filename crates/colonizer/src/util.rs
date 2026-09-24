@@ -56,6 +56,20 @@ pub async fn exec_within(limit: Duration, cmd: &mut Command) -> Result<String> {
         .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
 }
 
+/// Runs a command with a deadline and returns `(stdout, stderr)` whatever the exit status: `gh api
+/// -i` prints a 304's head on stdout and then exits 1.
+pub async fn exec_capture(limit: Duration, cmd: &mut Command) -> Result<(String, String)> {
+    let desc = describe(cmd);
+    let out = tokio::time::timeout(limit, cmd.stdin(Stdio::null()).kill_on_drop(true).output())
+        .await
+        .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
+        .with_context(|| format!("failed to start `{desc}`"))?;
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+}
+
 /// Runs a command for its exit status only.
 pub async fn exec_status(cmd: &mut Command) -> Result<bool> {
     let desc = describe(cmd);

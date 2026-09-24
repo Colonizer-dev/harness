@@ -12,7 +12,7 @@ use crate::{ApiResult, Shared, client_error};
 use anyhow::Result;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use futures_util::{StreamExt, stream};
@@ -21,7 +21,7 @@ use futures_util::{StreamExt, stream};
 async fn bounded<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
     stream::iter(futs).buffer_unordered(8).collect().await
 }
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -1120,8 +1120,29 @@ pub fn wanted(path: &str) -> bool {
 
 // --- scanning a repository ----------------------------------------------------------------------
 
-/// One repository's manifests and lockfiles, parsed.
-#[derive(Debug, Default)]
+/// The names a scan read back from the cache may use for its `&'static str` fields: the
+/// ecosystems and risk kinds the parsers produce. Anything else fails the read, which is a miss.
+const KNOWN_STRS: &[&str] = &[
+    "npm",
+    "cargo",
+    "pypi",
+    "go",
+    "dart",
+    "swift",
+    "unpinned-source",
+    "wildcard-range",
+    "unpinned-version",
+    "missing-integrity",
+];
+
+fn known(s: &str) -> Option<&'static str> {
+    KNOWN_STRS.iter().copied().find(|k| *k == s)
+}
+
+/// One repository's manifests and lockfiles, parsed. Kept in the answer cache by commit
+/// (`deps-scan:<repo>@<sha>:v<SCAN_FORMAT>`), so an org aggregate recomputes from the scans of
+/// repositories whose branch has not moved without reading a file.
+#[derive(Debug, Default, PartialEq, Serialize)]
 pub struct RepoScan {
     pub repo: String,
     pub sha: String,
@@ -1134,9 +1155,143 @@ pub struct RepoScan {
     pub risks: Vec<(String, SpecRisk)>,
 }
 
+// The cached form of a scan, read back with owned strings and mapped onto the parsers' names.
+#[derive(Deserialize)]
+struct CachedDefined {
+    ecosystem: String,
+    name: String,
+    version: Option<String>,
+    private: bool,
+    registry: Option<String>,
+    license: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CachedLocked {
+    ecosystem: String,
+    name: String,
+    version: String,
+    direct: Option<bool>,
+    dev: bool,
+    via: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CachedRisk {
+    ecosystem: String,
+    name: String,
+    kind: String,
+    detail: String,
+}
+
+#[derive(Deserialize)]
+struct CachedScan {
+    repo: String,
+    sha: String,
+    defined: Vec<(String, CachedDefined)>,
+    declared: Vec<(String, String, bool)>,
+    locked: Vec<(String, CachedLocked)>,
+    files: Vec<String>,
+    skipped: Vec<String>,
+    risks: Vec<(String, CachedRisk)>,
+}
+
+impl RepoScan {
+    /// A scan read back from the answer cache; `None` when it does not parse or names an
+    /// ecosystem or risk kind this build does not know.
+    pub fn from_cache(value: Value) -> Option<RepoScan> {
+        let c: CachedScan = serde_json::from_value(value).ok()?;
+        Some(RepoScan {
+            repo: c.repo,
+            sha: c.sha,
+            defined: c
+                .defined
+                .into_iter()
+                .map(|(dir, d)| {
+                    Some((
+                        dir,
+                        Defined {
+                            ecosystem: known(&d.ecosystem)?,
+                            name: d.name,
+                            version: d.version,
+                            private: d.private,
+                            registry: d.registry,
+                            license: d.license,
+                        },
+                    ))
+                })
+                .collect::<Option<_>>()?,
+            declared: c
+                .declared
+                .into_iter()
+                .map(|(eco, name, dev)| Some((known(&eco)?, name, dev)))
+                .collect::<Option<_>>()?,
+            locked: c
+                .locked
+                .into_iter()
+                .map(|(path, l)| {
+                    Some((
+                        path,
+                        Locked {
+                            ecosystem: known(&l.ecosystem)?,
+                            name: l.name,
+                            version: l.version,
+                            direct: l.direct,
+                            dev: l.dev,
+                            via: l.via,
+                        },
+                    ))
+                })
+                .collect::<Option<_>>()?,
+            files: c.files,
+            skipped: c.skipped,
+            risks: c
+                .risks
+                .into_iter()
+                .map(|(path, r)| {
+                    Some((
+                        path,
+                        SpecRisk {
+                            ecosystem: known(&r.ecosystem)?,
+                            name: r.name,
+                            kind: known(&r.kind)?,
+                            detail: r.detail,
+                        },
+                    ))
+                })
+                .collect::<Option<_>>()?,
+        })
+    }
+}
+
+/// Bumped whenever the parsers change what a scan holds, so scans cached by an older build are
+/// not reused.
+const SCAN_FORMAT: u32 = 1;
+/// A scan is keyed by its commit, so it never goes stale by age; the cap only bounds the memory
+/// entry of a long-running mothership (the disk layer evicts by use).
+const SCAN_BY_SHA_FRESH: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+pub fn scan_key(repo: &str, sha: &str) -> String {
+    format!("deps-scan:{repo}@{sha}:v{SCAN_FORMAT}")
+}
+
+/// One repository's scan at its default branch's head: reused from the cache while the branch has
+/// not moved, read from the clone otherwise.
 async fn scan_repo(app: &Shared, repo: &str) -> Result<RepoScan> {
     let bare = crate::code::ensure_bare(app, repo).await?;
     let (_, sha) = crate::code::resolve(app, &bare, None).await?;
+    let key = scan_key(repo, &sha);
+    if let Some(scan) = app.answer_cache.peek(&key, SCAN_BY_SHA_FRESH).and_then(RepoScan::from_cache) {
+        return Ok(scan);
+    }
+    let started = crate::cache_store::now_ms();
+    let scan = read_scan(app, repo, &bare, sha).await?;
+    app.answer_cache.insert(&key, started, serde_json::to_value(&scan)?);
+    Ok(scan)
+}
+
+async fn read_scan(app: &Shared, repo: &str, bare: &std::path::Path, sha: String) -> Result<RepoScan> {
+    let bare = bare.to_path_buf();
     let entries = crate::code::ls_tree(app, &bare, &sha).await?;
     let mut scan = RepoScan {
         repo: repo.to_string(),
@@ -1222,19 +1377,46 @@ fn client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-async fn get_json(client: &reqwest::Client, url: &str, accept: Option<&str>) -> Result<Option<Value>> {
+/// A registry GET, conditional when an earlier answer is kept: the body is stored in
+/// `App::http_cache` with its ETag / Last-Modified, and a 304 answers with it. `None` for a 404.
+async fn get_json(app: &Shared, client: &reqwest::Client, url: &str, accept: Option<&str>) -> Result<Option<Value>> {
+    let key = format!("GET {url} {}", accept.unwrap_or_default());
+    let stored = app.http_cache.load(&key);
     let mut req = client.get(url);
     if let Some(a) = accept {
         req = req.header("accept", a);
     }
+    for (name, value) in stored.iter().flat_map(crate::cache_store::conditional_headers) {
+        req = req.header(name, value);
+    }
     let res = req.send().await?;
-    if res.status() == reqwest::StatusCode::NOT_FOUND {
+    let status = res.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    if !res.status().is_success() {
-        anyhow::bail!("{url} answered {}", res.status());
+    if status != reqwest::StatusCode::NOT_MODIFIED && !status.is_success() {
+        anyhow::bail!("{url} answered {status}");
     }
-    Ok(Some(res.json().await?))
+    let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let (etag, last_modified) = (header("etag"), header("last-modified"));
+    let body = if status == reqwest::StatusCode::NOT_MODIFIED {
+        String::new()
+    } else {
+        res.text().await?
+    };
+    let response = crate::cache_store::HttpResponse {
+        status: status.as_u16(),
+        etag,
+        last_modified,
+        body,
+    };
+    let (body, keep) = crate::cache_store::settle(&key, stored, response)?;
+    if let Some(entry) = keep
+        && let Err(e) = app.http_cache.store(&entry)
+    {
+        eprintln!("{url}: could not keep the response: {e:#}");
+    }
+    Ok(Some(serde_json::from_str(&body)?))
 }
 
 /// The Go module proxy's path escaping: each capital letter becomes `!` and its lowercase.
@@ -1255,7 +1437,7 @@ pub fn go_escape(module: &str) -> String {
 /// `null` when the registry does not know it. Cached per name for [`REGISTRY_FRESH`].
 async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downloads: bool) -> Value {
     let key = format!("registry:{eco}:{name}:{with_downloads}");
-    crate::cached_answer(app, key, REGISTRY_FRESH, move |_app| {
+    crate::cached_answer(app, key, REGISTRY_FRESH, move |app| {
         let name = name.clone();
         async move {
             let client = client()?;
@@ -1263,6 +1445,7 @@ async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downl
             Ok(match eco {
                 "npm" => {
                     let doc = get_json(
+                        &app,
                         &client,
                         &format!("https://registry.npmjs.org/{enc}"),
                         Some("application/vnd.npm.install-v1+json"),
@@ -1273,6 +1456,7 @@ async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downl
                         Some(doc) => {
                             let downloads = if with_downloads {
                                 get_json(
+                                    &app,
                                     &client,
                                     &format!("https://api.npmjs.org/downloads/point/last-week/{name}"),
                                     None,
@@ -1294,7 +1478,7 @@ async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downl
                         }
                     }
                 }
-                "cargo" => match get_json(&client, &format!("https://crates.io/api/v1/crates/{name}"), None).await? {
+                "cargo" => match get_json(&app, &client, &format!("https://crates.io/api/v1/crates/{name}"), None).await? {
                     None => Value::Null,
                     Some(doc) => json!({
                         "latest": doc["crate"]["max_stable_version"].as_str().or(doc["crate"]["max_version"].as_str()),
@@ -1305,7 +1489,7 @@ async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downl
                         "url": format!("https://crates.io/crates/{name}"),
                     }),
                 },
-                "pypi" => match get_json(&client, &format!("https://pypi.org/pypi/{name}/json"), None).await? {
+                "pypi" => match get_json(&app, &client, &format!("https://pypi.org/pypi/{name}/json"), None).await? {
                     None => Value::Null,
                     Some(doc) => {
                         let latest = doc["info"]["version"].as_str().unwrap_or_default().to_string();
@@ -1318,6 +1502,7 @@ async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downl
                     }
                 },
                 "go" => match get_json(
+                    &app,
                     &client,
                     &format!("https://proxy.golang.org/{}/@latest", go_escape(&name)),
                     None,
@@ -1333,7 +1518,7 @@ async fn registry_info(app: &Shared, eco: &'static str, name: String, with_downl
                     // The proxy answers 410/404 for modules it cannot fetch (private, missing).
                     _ => Value::Null,
                 },
-                "dart" => match get_json(&client, &format!("https://pub.dev/api/packages/{name}"), None).await? {
+                "dart" => match get_json(&app, &client, &format!("https://pub.dev/api/packages/{name}"), None).await? {
                     None => Value::Null,
                     Some(doc) => json!({
                         "latest": doc["latest"]["version"],
@@ -1386,12 +1571,13 @@ pub fn version_lt(a: &str, b: &str) -> bool {
 /// published_at}`; `null` when the registry does not know it. npm, crates.io and PyPI only.
 async fn version_info(app: &Shared, eco: &'static str, name: String, version: String) -> Value {
     let key = format!("registry-version:{eco}:{name}@{version}");
-    crate::cached_answer(app, key, REGISTRY_FRESH * 4, move |_app| {
+    crate::cached_answer(app, key, REGISTRY_FRESH * 4, move |app| {
         let (name, version) = (name.clone(), version.clone());
         async move {
             let client = client()?;
             Ok(match eco {
                 "npm" => match get_json(
+                    &app,
                     &client,
                     &format!("https://registry.npmjs.org/{}/{version}", name.replace('/', "%2F")),
                     None,
@@ -1401,7 +1587,14 @@ async fn version_info(app: &Shared, eco: &'static str, name: String, version: St
                     None => Value::Null,
                     Some(doc) => npm_version_facts(&doc),
                 },
-                "cargo" => match get_json(&client, &format!("https://crates.io/api/v1/crates/{name}/{version}"), None).await? {
+                "cargo" => match get_json(
+                    &app,
+                    &client,
+                    &format!("https://crates.io/api/v1/crates/{name}/{version}"),
+                    None,
+                )
+                .await?
+                {
                     None => Value::Null,
                     Some(doc) => json!({
                         "deprecated": Value::Null,
@@ -1411,7 +1604,7 @@ async fn version_info(app: &Shared, eco: &'static str, name: String, version: St
                         "published_at": doc["version"]["created_at"],
                     }),
                 },
-                "pypi" => match get_json(&client, &format!("https://pypi.org/pypi/{name}/{version}/json"), None).await? {
+                "pypi" => match get_json(&app, &client, &format!("https://pypi.org/pypi/{name}/{version}/json"), None).await? {
                     None => Value::Null,
                     Some(doc) => {
                         let classifier = doc["info"]["classifiers"]
@@ -1481,10 +1674,29 @@ pub fn npm_version_facts(doc: &Value) -> Value {
 
 // --- OSV ----------------------------------------------------------------------------------------
 
-/// Advisory ids per `(ecosystem, name, version)`, from OSV.dev's batch API. Cached per query set.
+/// How long OSV's answer for one `(ecosystem, name, version)` is reused.
+const OSV_FRESH: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Advisory ids per `(ecosystem, name, version)`, from OSV.dev's batch API. Each query's answer is
+/// cached on its own (`osv:<eco>:<name>@<version>`, a day), so a new lockfile entry asks OSV about
+/// that one package rather than re-sending the whole set, and a restart asks about none.
 async fn osv_ids(app: &Shared, queries: Vec<(&'static str, String, String)>) -> HashMap<(String, String, String), Vec<String>> {
+    let key = |(eco, name, version): &(&'static str, String, String)| format!("osv:{eco}:{name}@{version}");
     let mut out = HashMap::new();
-    for chunk in queries.chunks(1000) {
+    let mut ask = Vec::new();
+    for q in queries {
+        match app.answer_cache.peek(&key(&q), OSV_FRESH) {
+            Some(ids) => {
+                let ids: Vec<String> = serde_json::from_value(ids).unwrap_or_default();
+                if !ids.is_empty() {
+                    out.insert((q.0.to_string(), q.1.clone(), q.2.clone()), ids);
+                }
+            }
+            None if osv_ecosystem(q.0).is_some() => ask.push(q),
+            None => {}
+        }
+    }
+    for chunk in ask.chunks(1000) {
         let body: Vec<Value> = chunk
             .iter()
             .filter_map(|(eco, name, version)| {
@@ -1496,22 +1708,19 @@ async fn osv_ids(app: &Shared, queries: Vec<(&'static str, String, String)>) -> 
                 Some(json!({"package": {"name": name, "ecosystem": osv_ecosystem(eco)?}, "version": v}))
             })
             .collect();
-        let key = format!("osv-batch:{:x}", fnv(&serde_json::to_string(&body).unwrap_or_default()));
-        let answer = crate::cached_answer(app, key, REGISTRY_FRESH, move |_app| {
-            let body = body.clone();
-            async move {
-                let res = client()?
-                    .post("https://api.osv.dev/v1/querybatch")
-                    .timeout(Duration::from_secs(30))
-                    .json(&json!({"queries": body}))
-                    .send()
-                    .await?;
-                if !res.status().is_success() {
-                    anyhow::bail!("OSV answered {}", res.status());
-                }
-                Ok(res.json::<Value>().await?)
+        let started = crate::cache_store::now_ms();
+        let answer = async {
+            let res = client()?
+                .post("https://api.osv.dev/v1/querybatch")
+                .timeout(Duration::from_secs(30))
+                .json(&json!({"queries": body}))
+                .send()
+                .await?;
+            if !res.status().is_success() {
+                anyhow::bail!("OSV answered {}", res.status());
             }
-        })
+            Ok::<Value, anyhow::Error>(res.json::<Value>().await?)
+        }
         .await;
         let Ok(answer) = answer else { continue };
         for (q, result) in chunk.iter().zip(answer["results"].as_array().into_iter().flatten()) {
@@ -1521,6 +1730,7 @@ async fn osv_ids(app: &Shared, queries: Vec<(&'static str, String, String)>) -> 
                 .flatten()
                 .filter_map(|v| v["id"].as_str().map(str::to_string))
                 .collect();
+            app.answer_cache.insert(&key(q), started, json!(ids));
             if !ids.is_empty() {
                 out.insert((q.0.to_string(), q.1.clone(), q.2.clone()), ids);
             }
@@ -1532,10 +1742,10 @@ async fn osv_ids(app: &Shared, queries: Vec<(&'static str, String, String)>) -> 
 /// Summary, severity and first fixed version of one advisory; `null` when OSV cannot say.
 async fn osv_detail(app: &Shared, id: String) -> Value {
     let key = format!("osv-vuln:{id}");
-    crate::cached_answer(app, key, REGISTRY_FRESH * 4, move |_app| {
+    crate::cached_answer(app, key, REGISTRY_FRESH * 4, move |app| {
         let id = id.clone();
         async move {
-            let Some(doc) = get_json(&client()?, &format!("https://api.osv.dev/v1/vulns/{id}"), None).await? else {
+            let Some(doc) = get_json(&app, &client()?, &format!("https://api.osv.dev/v1/vulns/{id}"), None).await? else {
                 return Ok(Value::Null);
             };
             Ok(advisory_summary(&doc))
@@ -1571,11 +1781,6 @@ pub fn advisory_summary(doc: &Value) -> Value {
         "fixed": fixed,
         "url": format!("https://osv.dev/vulnerability/{}", doc["id"].as_str().unwrap_or("")),
     })
-}
-
-fn fnv(s: &str) -> u64 {
-    s.bytes()
-        .fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
 // --- the views ------------------------------------------------------------------------------
@@ -1650,15 +1855,10 @@ async fn github_packages(app: &Shared, org: &str) -> Value {
     let mut out = Vec::new();
     let mut errors = Vec::new();
     for kind in ["npm", "container", "maven", "rubygems", "nuget"] {
-        let res =
-            crate::util::exec(&mut app.gh(["api", &format!("/orgs/{org}/packages?package_type={kind}&per_page=100")])).await;
+        let res = crate::github::gh_get_json(app, &format!("/orgs/{org}/packages?package_type={kind}&per_page=100")).await;
         match res {
-            Ok(text) => {
-                for p in serde_json::from_str::<Value>(&text)
-                    .ok()
-                    .and_then(|v| v.as_array().cloned())
-                    .unwrap_or_default()
-                {
+            Ok(list) => {
+                for p in list.as_array().cloned().unwrap_or_default() {
                     out.push(json!({
                         "name": p["name"],
                         "type": p["package_type"],
@@ -2275,117 +2475,240 @@ fn scanning(what: &str, scope: &str) -> Value {
     json!({"status": "scanning", "message": format!("reading {scope}'s {what}; this can take a minute the first time")})
 }
 
+/// `?refresh=1`: the cockpit's Refresh button. The cached answer is still served at once; the
+/// refresh runs behind it.
+#[derive(Deserialize, Default)]
+pub struct RefreshQuery {
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+impl RefreshQuery {
+    fn wanted(&self) -> bool {
+        self.refresh.as_deref().is_some_and(|v| v != "0" && v != "false")
+    }
+}
+
+/// A slow scan answered from the cache: the last answer with `cached_at` and `refreshing` (and a
+/// refresh behind it once stale), or "scanning" while the very first one runs. `scope` is the org
+/// or `owner/name` the answer covers.
+fn serve_scan<F, Fut>(app: &Shared, key: String, q: &RefreshQuery, what: &str, scope: &str, compute: F) -> Value
+where
+    F: Fn(Shared) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<Value>> + Send + 'static,
+{
+    if q.wanted() {
+        // An asked-for refresh reads the clones afresh too, not only the registries.
+        if scope.contains('/') {
+            app.invalidate_repo(scope);
+        } else {
+            app.answer_cache.forget_prefix(&format!("code-fetch:{scope}/"));
+        }
+        app.answer_cache.invalidate(format!("key:{key}"));
+    }
+    match crate::cached_answer_nowait(app, key.clone(), SCAN_FRESH, compute) {
+        Some(value) => crate::with_cache_info(app, &key, value),
+        None => scanning(what, scope),
+    }
+}
+
 /// GET /api/orgs/{org}/packages/published
-pub async fn org_published(State(app): State<Shared>, Path(org): Path<String>) -> ApiResult<Value> {
+pub async fn org_published(
+    State(app): State<Shared>,
+    Path(org): Path<String>,
+    Query(q): Query<RefreshQuery>,
+) -> ApiResult<Value> {
     if !valid_part(&org) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid organization"));
     }
-    let key = format!("deps-published:{org}");
-    let value = crate::cached_answer_nowait(&app, key, SCAN_FRESH, {
+    let compute = {
         let org = org.clone();
-        move |app| {
+        move |app: Shared| {
             let org = org.clone();
             async move {
                 let repos = org_repos(&app, &org).await?;
                 published(&app, &org, &repos).await
             }
         }
-    });
-    Ok(Json(value.unwrap_or_else(|| scanning("published packages", &org))))
+    };
+    Ok(Json(serve_scan(
+        &app,
+        format!("deps-published:{org}"),
+        &q,
+        "published packages",
+        &org,
+        compute,
+    )))
 }
 
 /// GET /api/orgs/{org}/packages/dependencies
-pub async fn org_dependencies(State(app): State<Shared>, Path(org): Path<String>) -> ApiResult<Value> {
+pub async fn org_dependencies(
+    State(app): State<Shared>,
+    Path(org): Path<String>,
+    Query(q): Query<RefreshQuery>,
+) -> ApiResult<Value> {
     if !valid_part(&org) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid organization"));
     }
-    let key = format!("deps-dependencies:{org}");
-    let value = crate::cached_answer_nowait(&app, key, SCAN_FRESH, {
+    let compute = {
         let org = org.clone();
-        move |app| {
+        move |app: Shared| {
             let org = org.clone();
             async move {
                 let repos = org_repos(&app, &org).await?;
                 dependencies(&app, &org, &repos).await
             }
         }
-    });
-    Ok(Json(value.unwrap_or_else(|| scanning("dependencies", &org))))
+    };
+    Ok(Json(serve_scan(
+        &app,
+        format!("deps-dependencies:{org}"),
+        &q,
+        "dependencies",
+        &org,
+        compute,
+    )))
 }
 
 /// GET /api/orgs/{org}/packages/supply-chain
-pub async fn org_supply_chain(State(app): State<Shared>, Path(org): Path<String>) -> ApiResult<Value> {
+pub async fn org_supply_chain(
+    State(app): State<Shared>,
+    Path(org): Path<String>,
+    Query(q): Query<RefreshQuery>,
+) -> ApiResult<Value> {
     if !valid_part(&org) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid organization"));
     }
-    let key = format!("deps-supply:{org}");
-    let value = crate::cached_answer_nowait(&app, key, SCAN_FRESH, {
+    let compute = {
         let org = org.clone();
-        move |app| {
+        move |app: Shared| {
             let org = org.clone();
             async move {
                 let repos = org_repos(&app, &org).await?;
                 supply_chain(&app, &org, &repos).await
             }
         }
-    });
-    Ok(Json(value.unwrap_or_else(|| scanning("supply chain", &org))))
+    };
+    Ok(Json(serve_scan(
+        &app,
+        format!("deps-supply:{org}"),
+        &q,
+        "supply chain",
+        &org,
+        compute,
+    )))
+}
+
+/// The per-repository views: the same answers as the org views, for one repository.
+fn repo_scope(owner: &str, name: &str) -> Result<String, crate::AppError> {
+    if !valid_part(owner) || !valid_part(name) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    Ok(format!("{owner}/{name}"))
 }
 
 /// GET /api/repos/{owner}/{name}/supply-chain
-pub async fn repo_supply_chain(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
-    if !valid_part(&owner) || !valid_part(&name) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
-    }
-    let repo = format!("{owner}/{name}");
-    let key = format!("deps-supply-repo:{repo}");
-    let value = crate::cached_answer_nowait(&app, key, SCAN_FRESH, {
+pub async fn repo_supply_chain(
+    State(app): State<Shared>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<RefreshQuery>,
+) -> ApiResult<Value> {
+    let repo = repo_scope(&owner, &name)?;
+    let compute = {
         let (owner, repo) = (owner.clone(), repo.clone());
-        move |app| {
+        move |app: Shared| {
             let (owner, repo) = (owner.clone(), repo.clone());
             async move { supply_chain(&app, &owner, std::slice::from_ref(&repo)).await }
         }
-    });
-    Ok(Json(value.unwrap_or_else(|| scanning("supply chain", &repo))))
+    };
+    Ok(Json(serve_scan(
+        &app,
+        format!("deps-supply-repo:{repo}"),
+        &q,
+        "supply chain",
+        &repo,
+        compute,
+    )))
 }
 
 /// GET /api/repos/{owner}/{name}/published
-pub async fn repo_published(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
-    if !valid_part(&owner) || !valid_part(&name) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
-    }
-    let repo = format!("{owner}/{name}");
-    let key = format!("deps-published-repo:{repo}");
-    let value = crate::cached_answer_nowait(&app, key, SCAN_FRESH, {
+pub async fn repo_published(
+    State(app): State<Shared>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<RefreshQuery>,
+) -> ApiResult<Value> {
+    let repo = repo_scope(&owner, &name)?;
+    let compute = {
         let (owner, repo) = (owner.clone(), repo.clone());
-        move |app| {
+        move |app: Shared| {
             let (owner, repo) = (owner.clone(), repo.clone());
             async move { published(&app, &owner, std::slice::from_ref(&repo)).await }
         }
-    });
-    Ok(Json(value.unwrap_or_else(|| scanning("published packages", &repo))))
+    };
+    Ok(Json(serve_scan(
+        &app,
+        format!("deps-published-repo:{repo}"),
+        &q,
+        "published packages",
+        &repo,
+        compute,
+    )))
 }
 
 /// GET /api/repos/{owner}/{name}/dependencies
-pub async fn repo_dependencies(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
-    if !valid_part(&owner) || !valid_part(&name) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
-    }
-    let repo = format!("{owner}/{name}");
-    let key = format!("deps-dependencies-repo:{repo}");
-    let value = crate::cached_answer_nowait(&app, key, SCAN_FRESH, {
+pub async fn repo_dependencies(
+    State(app): State<Shared>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<RefreshQuery>,
+) -> ApiResult<Value> {
+    let repo = repo_scope(&owner, &name)?;
+    let compute = {
         let (owner, repo) = (owner.clone(), repo.clone());
-        move |app| {
+        move |app: Shared| {
             let (owner, repo) = (owner.clone(), repo.clone());
             async move { dependencies(&app, &owner, std::slice::from_ref(&repo)).await }
         }
-    });
-    Ok(Json(value.unwrap_or_else(|| scanning("dependencies", &repo))))
+    };
+    Ok(Json(serve_scan(
+        &app,
+        format!("deps-dependencies-repo:{repo}"),
+        &q,
+        "dependencies",
+        &repo,
+        compute,
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scan_is_kept_by_commit_and_read_back_whole() {
+        let scan = RepoScan {
+            repo: "acme/web".into(),
+            sha: "abc123".into(),
+            defined: vec![(
+                "packages/sdk".into(),
+                defined_by("package.json", r#"{"name":"@acme/sdk","version":"1.2.0","license":"MIT"}"#).unwrap(),
+            )],
+            declared: vec![("npm", "react".into(), false), ("cargo", "serde".into(), true)],
+            locked: vec![("package-lock.json".into(), locked("npm", "react", "19.0.0"))],
+            files: vec!["package-lock.json".into()],
+            skipped: vec!["huge.lock".into()],
+            risks: vec![("Cargo.toml".into(), spec_risk("cargo", "x", "wildcard-range", "any".into()))],
+        };
+        let value = serde_json::to_value(&scan).unwrap();
+        assert_eq!(RepoScan::from_cache(value.clone()), Some(scan));
+        // A name this build's parsers never produce is a miss, not a guess.
+        let mut foreign = value.clone();
+        foreign["declared"][0][0] = json!("hex");
+        assert_eq!(RepoScan::from_cache(foreign), None);
+        assert_eq!(RepoScan::from_cache(json!({"repo": "acme/web"})), None);
+        // Keyed by commit: the branch moving is a new key, so a stale scan is never reused.
+        assert_ne!(scan_key("acme/web", "abc123"), scan_key("acme/web", "def456"));
+        assert!(scan_key("acme/web", "abc123").starts_with("deps-scan:acme/web@abc123"));
+    }
 
     fn names(v: &[Locked]) -> Vec<String> {
         v.iter().map(|l| format!("{}@{}", l.name, l.version)).collect()

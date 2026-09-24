@@ -84,6 +84,9 @@ pub async fn publish_session(app: Shared, id: String) {
             .await;
         }
         Ok(github::Published::PullRequest(url)) => {
+            // The colony pushed a branch and opened a pull request: this repository's answers (and
+            // its org's aggregates) go stale; no other repository's do.
+            app.invalidate_repo(&s.repo);
             tokio::spawn(record_changed_paths(app.clone(), id.clone(), url.clone()));
             // The pull request says what was actually done: the summary is rewritten from it.
             tokio::spawn(crate::summaries::summarize_pull_request(app.clone(), id.clone(), url.clone()));
@@ -659,6 +662,10 @@ pub async fn watch_pull_requests(app: Shared) {
                             })
                             .await
                             .is_some_and(|(_, changed)| changed);
+                    }
+                    if changed && target == SessionStatus::Merged {
+                        // The default branch moved: the repository's scans and stats are stale.
+                        app.invalidate_repo(&s.repo);
                     }
                     if changed {
                         let message = match target {
