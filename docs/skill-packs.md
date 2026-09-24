@@ -18,8 +18,10 @@ mounts read-only at `/opt/colonizer/plugins/<name>`, and loads into Claude Code 
 ## plugin.json
 
 The manifest. Canonical readers (the validator, boot validation) prefer the root
-`plugin.json`; the Claude Code SDK reads the legacy `.claude-plugin/plugin.json`, so
-staged packs keep both with the same `name`, `version` and `description`.
+`plugin.json`; the Claude Code SDK reads the legacy `.claude-plugin/plugin.json`. Only
+superpowers stages both today (staging synthesizes the root manifest); ecc and
+google-skills stage `.claude-plugin/plugin.json` alone, which the SDK and both checkers
+read as the manifest.
 
 | Field | Meaning |
 | :--- | :--- |
@@ -27,7 +29,7 @@ staged packs keep both with the same `name`, `version` and `description`.
 | `name` | Plain, filesystem-safe pack name; conventionally the directory basename. |
 | `version` | Semver (`1.2.3`, with optional prerelease/build). |
 | `description` | Non-empty: what the pack is for. |
-| `skills` | Array of skill names the pack ships. Each must have a `skills/<name>/SKILL.md`. |
+| `skills` | Array of skill names the pack ships. Each must have a `skills/<name>/SKILL.md`. A legacy directory-style entry (`"./skills/"`, as upstream ecc ships) means every skill under that directory; both checkers accept it, as `is_skill_tree` in `crates/colonizer/src/plugins.rs` does. |
 
 Version pins live in `vendor/vendor.lock` as the sha256 of the upstream archive. Patch bumps
 are auto-adoptable by the daily vendored-plugin updater; a minor or major bump needs a new
@@ -39,9 +41,10 @@ Only when the pack ships tool servers. An object of server entries (or one under
 `mcpServers`/`servers`); each entry is either local or remote:
 
 - Local stdio: `command` plus optional `args` and `env`.
-- Remote: `url` plus a non-empty `hosts` (or `allowedHosts`) declaration, so the sandbox
-  gate keeps working. `scripts/validate-plugins.mjs` rejects a remote entry without hosts;
-  boot does not read `mcp.json` (see Validation below).
+- Remote: `url` plus a non-empty `hosts` (or `allowedHosts`) declaration. Both checkers
+  reject a remote entry without hosts (see Validation below). The declared hosts are not
+  enforced by a sandbox egress gate yet — colonies boot with `--net public` — but the boot
+  path reads and checks the declaration so the future gate (#304) can consume it.
 
 Packs with no tool servers — superpowers is one — ship no `mcp.json` at all.
 
@@ -66,15 +69,20 @@ Two checkers, with different reach:
   pack is checked when a colony boots, and again when Settings or an org override names
   it. The manifest must exist at `plugin.json` or `.claude-plugin/plugin.json` and parse
   as a JSON object, every `skills/<name>/` holding a `SKILL.md` must have a plain name,
-  and every skill the manifest lists must exist on disk. A pack that fails blocks the
-  colony's boot, and the save is refused, with the error naming the file. Skill-name
-  uniqueness across packs is checked at boot only.
+  every skill the manifest lists must exist on disk, and an `mcp.json` must give every
+  server a stdio `command` or a remote `url` with a non-empty `hosts`/`allowedHosts`
+  declaration (`mcp_hosts`, the reader the egress gate of #304 will consume). A pack that
+  fails blocks the colony's boot, and the save is refused, with the error naming the file.
+  Skill-name uniqueness across packs is checked at boot only.
 - **The full rule set** (`scripts/validate-plugins.mjs`): semver `version`, non-empty
   `description`, SKILL.md frontmatter, `mcp.json` shape and remote-host declarations,
-  and duplicate names within a pack. Run it by hand:
-  `node scripts/validate-plugins.mjs <dir>...`. CI runs its unit tests, not the validator
-  itself on the vendored packs, and neither `scripts/fetch-vendor.sh` nor the
-  vendored-plugin updater runs it yet (issue #370).
+  and duplicate names within a pack. It runs by hand
+  (`node scripts/validate-plugins.mjs <dir>...`), in CI and in the vendored-plugin
+  updater's proposal workflow over the staged packs (`VENDOR_KINDS="plugin prompt" sh
+  scripts/fetch-vendor.sh` stages `dist/plugins/*`, then the validator runs over them),
+  and in the updater itself, which validates the new archive of each pin it stages from
+  that archive before rewriting the lock line — a pack that fails is skipped, its errors
+  in the proposal when another pin is adopted, otherwise in the failed run's log.
 
 ## Minimal example
 

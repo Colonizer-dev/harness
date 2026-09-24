@@ -87,7 +87,9 @@ jobs:
         run: npm test
 
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
-  # either, and none of them touch a mothership, a colony or the network in their tests.
+  # either, and none of the tests touch a mothership, a colony or the network; the job's one
+  # network step is the staged-pack validation below, which downloads the pinned archives the
+  # way an install does.
   scripts:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -100,6 +102,14 @@ jobs:
 
       - name: Test
         run: node --test scripts/test/*.test.mjs
+
+      # The packs an install actually ships, staged exactly as scripts/fetch-vendor.sh stages
+      # them, checked against the full rule set in scripts/validate-plugins.mjs — the unit
+      # tests above cover the validator; this runs it over what a colony can mount.
+      - name: Validate the staged skill packs
+        run: |
+          VENDOR_KINDS="plugin prompt" sh scripts/fetch-vendor.sh
+          node scripts/validate-plugins.mjs dist/plugins/*
 
       # The build scripts' tests drive the real scripts against stub uname, cargo and msb on PATH, so
       # they need no cargo, no microsandbox and no network; the happy paths need a Linux host, which
