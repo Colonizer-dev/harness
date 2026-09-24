@@ -151,6 +151,24 @@ test('routed cost is recorded per task and counted in the run and the comparison
   assert.match(text, /Cost \$0\.20 → \$0\.50 \(routed \$0\.00 → \$0\.30\)/);
 });
 
+test('token categories ride through scoring, the run summary and the comparison', () => {
+  const tokenCategories = { read: 100, search: 0, command_output: 200, edit: 400, reasoning: 50, replay: 1000 };
+  const scored = scoreTask({ task, session, answers: [], timed_out: false, branchScore: clean, colony: { ...colony, tokenCategories } });
+  assert.deepEqual(scored.token_categories, tokenCategories);
+  const plain = scoreTask({ task, session, answers: [], timed_out: false, branchScore: clean, colony });
+  assert.equal(plain.token_categories, null, 'no colony record, no categories');
+
+  const s = summarizeRun([scored, scored]);
+  assert.equal(s.token_categories.edit, 800);
+  assert.equal(s.token_categories.replay, 2000);
+
+  const text = formatComparison({ label: 'before', results: [plain] }, { label: 'after', results: [scored] });
+  assert.match(text, /Tokens: read – → 100, command_output – → 200, edit – → 400, reasoning – → 50, replay – → 1000\./);
+  const both = formatComparison({ label: 'before', results: [scored] }, { label: 'after', results: [scored] });
+  assert.match(both, /Tokens: read 100 → 100/);
+  assert.doesNotMatch(both, /search/, 'a category neither run spent is not on the line');
+});
+
 test('the run summary counts clean resolutions, and the gap between the two rates', () => {
   const row = (passed, clean) => ({ passed, clean, cost_usd: 0, routed_cost_usd: 0, working_ms: 0, questions: 0, tool_errors: 0 });
   const s = summarizeRun([row(true, true), row(true, false), row(false, true), row(true, null)]);
