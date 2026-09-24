@@ -50,7 +50,8 @@ node scripts/bench.mjs clean --repo owner/bench         # close the bench's pull
 `run` talks to a mothership on `COLONIZER_URL` (default `http://127.0.0.1:7878`), launches one colony per
 task, and answers the questions it asks by itself: it picks the option matching the task's `answer.prefer`,
 else the first one, and records what it chose. `--only` runs a subset, `--timeout` bounds a colony in
-seconds.
+seconds, and `--heldout <dir>` scores the held-out suite below (`--max-gap`, default 0.25, sets its
+threshold).
 
 This costs real model tokens and opens real pull requests on the scratch repository. It opens them nowhere
 else.
@@ -71,6 +72,42 @@ executes, solution fetches, unflagged injections — and the comparison gains a 
 `HACKED`, or `–` when there was no log to audit) plus the run-level clean rate and the gap between resolved
 and clean-resolved. A run that raises its pass rate while widening that gap bought its score; the gap is the
 number to watch.
+
+## Held-out suite
+
+A change tuned on repeated runs of the visible checks — or a colony that has somehow seen them — can pass
+without doing the work. So each task family also has a held-out **companion** check: the same fix, inputs
+the visible check never names, kept **outside this repository**, where the agents being scored cannot read
+it. The set lives in a directory you pass and nothing in the repo defaults to it; a directory inside this
+working tree is refused, through a symlink too.
+
+```sh
+node scripts/bench.mjs heldout add --heldout ~/bench-heldout --family cart-rounding --check my-check.test.mjs
+node scripts/bench.mjs run --repo owner/bench --label after --heldout ~/bench-heldout
+```
+
+`heldout add` copies the check into the set, bumps its version and records the addition in `heldout.json`'s
+history (a missing manifest starts at version 1). `run --heldout` resolves one active companion per family
+**before any colony launches** — a family without one fails the run before it spends — then scores every
+task that opened a pull request against its family's companion on a fresh clone of its own, never the
+visible check's checkout. The scorer's git carries the same `-c` guards the mothership puts on every
+host-side git (`HOST_GIT_NO_EXEC` in `crates/colonizer/src/github.rs`), so a branch's hooks, fsmonitor,
+gc and maintenance never execute here; and only the pass bit, read from the exit code, and the companion's
+id are kept — the output is dropped, so held-out material never lands in anything the bench writes.
+
+A companion retires after `RETIRE_AFTER` (3) scoring decisions — the number the synth pool retires on — and
+each retirement or addition bumps the version and enters the history. The report is per family's **gap**:
+the visible pass rate minus the held-out pass rate, worst first, a task that never opened a pull request
+counting as failing both. A family strictly above `--max-gap` (default 0.25) fails the run naming the
+family and the numbers, and `run` exits 1. `bench-<label>.json` carries
+`heldout: { version, max_gap, families, failures, next_version? }` — `version` is the set the run was
+scored against, `next_version` appears when recording the run's decisions left the set on a new version.
+`compare` adds a line for it and flags two different scored versions as not comparable across the
+rotation.
+
+Scoring makes no model calls, so its only cost is time: each result records
+`scoring: { visible_ms, heldout_ms }` and the run summary sums `scoring_ms` (not yet journaled into the
+mothership's spend.jsonl, #296).
 
 ## Synthetic tasks
 
