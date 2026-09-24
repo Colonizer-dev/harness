@@ -1,0 +1,46 @@
+{
+  "kind": "agent",
+  "id": "grok-build",
+  "name": "Grok Build",
+  "description": "xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session. Experimental first slice; it cannot ask the user questions yet.",
+  "protocol": "colonizer-runner/1",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "grok"
+    ],
+    "image": "glibc + node >= 20",
+    "pins": {
+      "grok": {
+        "version": "1.0.34",
+        "source_rev": "036a5d8348cd744767cd0b08518ab17bf608fa7f",
+        "install": "https://x.ai/cli/install.sh"
+      }
+    }
+  },
+  "secrets": [
+    {
+      "env": [
+        "XAI_API_KEY"
+      ],
+      "hosts": [
+        "api.x.ai"
+      ]
+    }
+  ],
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "Model for the colony as xai-grok/<model> (grok-4.5 is the CLI's own default) or a bare xAI model id. Other providers are refused: grok talks to api.x.ai directly in this slice.",
+        "default": "xai-grok/grok-4.5",
+        "env": "COLONIZER_MODEL"
+      }
+    }
+  }
+}

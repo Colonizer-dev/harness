@@ -24,6 +24,14 @@ setting) is called out under **Take care** rather than left for you to find.
   Measured so far: 57 of 110 candidates admitted (bench fixture + telemetry). See
   [docs/bench.md](docs/bench.md).
 
+- **A first slice of Grok Build as an agent module.** `modules/agents/grok-build` drives xAI's
+  `grok` CLI headless on the runner protocol: one grok process per turn, resumed into a single
+  session, with the streaming events mapped to agent events and unknown types logged rather than
+  fatal. The binary is pinned (1.0.34, SOURCE_REV in `module.json`) with a loud preflight
+  (`GROK_CREDENTIAL_MISSING`, `GROK_BINARY_MISSING`, `GROK_VERSION_DRIFT`), the colony never runs
+  browser OAuth, and a fresh `GROK_HOME` plus `--sandbox off`, `--always-approve` and
+  `--disable-web-search` carry the nesting decisions. Experimental and PLANNED: the mothership-side
+  key push, gateway routing and question routing are follow-ups (see the module's README).
 - **The nest as a map of the software.** The nest has a Map mode: a repository's
   architecture — drawn by a mapping colony with the newly vendored
   [archify](https://github.com/tt-a1i/archify) skill (MIT) and stored by the
