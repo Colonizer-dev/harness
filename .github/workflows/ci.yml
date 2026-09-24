@@ -94,8 +94,9 @@ jobs:
         run: npm test
 
       # The OpenCode runner has no dependencies (its MCP server is hand-rolled), so there is
-      # nothing to install: plain `node --test` from the repository root.
+      # nothing to install: plain `node --test` from the repository root, once, on the first leg.
       - name: Test the OpenCode runner
+        if: matrix.module == 'claude-code'
         working-directory: ${{ github.workspace }}
         run: node --test modules/agents/opencode/test/*.test.mjs
 
