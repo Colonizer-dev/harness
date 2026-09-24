@@ -13,6 +13,7 @@
 // - "Manage workspaces": lives in the header's switcher (it opens org settings); this view has no
 //   org-settings opener of its own.
 // - "Answer": deep-links to the colony through onOpenColony; no inline answering backend here.
+import { HackerIcon } from "./HackerIcon";
 import { useMemo, useState, type ReactElement } from "react";
 
 import type { SectionId } from "../components/SettingsDialog";
@@ -699,10 +700,7 @@ function RedTeamActions({ org, live, onStart, onHistory }: { org: string; live: 
         title="Hunt for bugs with a red-team swarm"
         className="inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-panel px-2 py-1 text-[12px] text-text hover:border-border-strong hover:bg-panel-2"
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.2 7.5 9.5 4.4-1.3 7.5-4.9 7.5-9.5V6z" />
-          <path d="m9.5 12 2 2 3.5-4" />
-        </svg>
+        <HackerIcon size={14} />
         Red team
         {live > 0 && <span className="rounded-full bg-accent px-1.5 text-[10.5px] tabular-nums text-on-accent">{live}</span>}
       </button>

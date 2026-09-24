@@ -9,6 +9,10 @@ import { Button, Spinner, cx } from "../components/ui";
 import { formatCost } from "../spend";
 import type { HunterProbe, RedTeamRun, Repo, Session, StartRedTeamRunRequest } from "../types";
 import { WEEKDAYS, estimateCost, toUtcCadence, type ScheduleChoice } from "./redTeamPlan";
+import { IconAnt } from "../components/icons";
+import { HackerIcon } from "./HackerIcon";
+import strixLogo from "../assets/hunters/strix.png";
+import shannonLogo from "../assets/hunters/shannon.jpg";
 
 type Step = 0 | 1 | 2;
 const STEPS = ["Hunter", "Models", "Review"] as const;
@@ -19,10 +23,30 @@ const HUNTERS = [
     id: "swarm",
     name: "Colony swarm",
     blurb: "Colonies split eight focus areas and hunt for reproducible bugs, each with its own brief.",
+    logo: null,
   },
-  { id: "strix", name: "Strix", blurb: "Open-source AI pentesting agents that validate findings with working PoCs." },
-  { id: "shannon", name: "Shannon", blurb: "Keygraph's AI pentester for web apps and APIs." },
+  { id: "strix", name: "Strix", blurb: "Open-source AI pentesting agents that validate findings with working PoCs.", logo: strixLogo },
+  { id: "shannon", name: "Shannon", blurb: "Keygraph's AI pentester for web apps and APIs.", logo: shannonLogo },
 ] as const;
+
+/** What a red team is, in three lines, at the top of the wizard's first step. */
+function RedTeamIntro() {
+  return (
+    <div className="flex gap-3.5 rounded-xl border border-border bg-panel-2 p-4">
+      <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-err/10 text-err">
+        <HackerIcon size={24} />
+      </span>
+      <div className="min-w-0 space-y-1.5 text-[12.5px] leading-snug text-muted">
+        <p className="text-[14px] font-semibold text-text">What is a red team?</p>
+        <p>
+          A red team attacks your own code on purpose, the way an outsider would, so you find the holes first. Hunters read
+          the repository, try real exploits inside sealed microVMs, and keep only findings they can reproduce.
+        </p>
+        <p>Nothing touches your branches unless you let hunters fix what they find, and every fix still arrives as a pull request.</p>
+      </div>
+    </div>
+  );
+}
 
 export function RedTeamWizard({
   org,
@@ -164,8 +188,9 @@ export function WizardBody({
     <div className="flex max-h-[calc(100dvh-24px)] flex-col">
       <div className="shrink-0 border-b border-border px-5 pb-3 pt-4">
         <div className="flex items-center gap-2">
-          <h2 id="redteam-wizard-title" className="min-w-0 flex-1 text-[16px] font-semibold">
-            Red team · {org}
+          <h2 id="redteam-wizard-title" className="flex min-w-0 flex-1 items-center gap-2 text-[16px] font-semibold">
+            <HackerIcon size={18} className="shrink-0 text-err" />
+            <span className="truncate">Red team · {org}</span>
           </h2>
           <button type="button" onClick={() => onOpenHistory(org)} className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-[12.5px] text-muted hover:bg-panel-2 hover:text-text">
             History
@@ -188,6 +213,7 @@ export function WizardBody({
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         {step === 0 && (
           <div className="space-y-5">
+            <RedTeamIntro />
             <Field label="Who hunts">
               <div className="grid gap-2 sm:grid-cols-3">
                 {HUNTERS.map((h) => {
@@ -213,7 +239,16 @@ export function WizardBody({
                       )}
                     >
                       <span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">
-                        {h.name}
+                        <span className="flex min-w-0 items-center gap-2">
+                          {h.logo ? (
+                            <img src={h.logo} alt="" width={22} height={22} className="size-[22px] shrink-0 rounded-md" />
+                          ) : (
+                            <span className="grid size-[22px] shrink-0 place-items-center rounded-md bg-accent text-on-accent">
+                              <IconAnt size={14} />
+                            </span>
+                          )}
+                          <span className="truncate">{h.name}</span>
+                        </span>
                         <span className={cx("rounded-full px-1.5 py-px text-[10.5px] font-medium", runnable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
                       </span>
                       <span className="text-[12px] leading-snug text-muted">{h.blurb}</span>
