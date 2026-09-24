@@ -1933,11 +1933,98 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         "number,title,body,labels,author,updatedAt,url",
     ]))
     .await?;
-    Ok(Json(serde_json::from_str(&out)?))
+    let issues: Value = serde_json::from_str(&out)?;
+    let filter = {
+        let modules = app.modules.read().await;
+        LabelFilter::from_source(modules.get("source"), &app.agents)
+    };
+    Ok(Json(filter.apply(issues)))
+}
+
+/// The Source module's label filter: which open issues are offered for a colony. Labels compare
+/// case-insensitively; an empty include list offers everything, and an exclude always wins.
+#[derive(Debug, Default, PartialEq)]
+pub struct LabelFilter {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl LabelFilter {
+    pub fn new(include: &str, exclude: &str) -> Self {
+        let list = |s: &str| {
+            s.split(',')
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+        };
+        Self {
+            include: list(include),
+            exclude: list(exclude),
+        }
+    }
+
+    fn from_source(choice: Option<&crate::config::ModuleChoice>, agents: &[crate::modules::AgentModule]) -> Self {
+        let Some(choice) = choice else { return Self::default() };
+        let schema = crate::modules::schema_for("source", &choice.provider, agents);
+        Self::new(
+            &crate::config::setting_str(choice, &schema, "include_labels"),
+            &crate::config::setting_str(choice, &schema, "exclude_labels"),
+        )
+    }
+
+    /// Whether an issue with these label names is offered.
+    pub fn admits<'a>(&self, labels: impl IntoIterator<Item = &'a str>) -> bool {
+        let labels: Vec<String> = labels.into_iter().map(str::to_lowercase).collect();
+        if labels.iter().any(|l| self.exclude.contains(l)) {
+            return false;
+        }
+        self.include.is_empty() || labels.iter().any(|l| self.include.contains(l))
+    }
+
+    /// Keeps the issues of a `gh issue list --json labels,…` array that pass; anything that is not
+    /// an array passes through untouched.
+    fn apply(&self, issues: Value) -> Value {
+        if self.include.is_empty() && self.exclude.is_empty() {
+            return issues;
+        }
+        match issues {
+            Value::Array(list) => Value::Array(
+                list.into_iter()
+                    .filter(|issue| {
+                        let names = issue["labels"]
+                            .as_array()
+                            .map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        self.admits(names)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn label_filter_includes_any_and_excludes_win() {
+        use super::LabelFilter;
+        use serde_json::json;
+        let open = LabelFilter::new("", "");
+        assert!(open.admits([]), "no filter offers every issue");
+        let f = LabelFilter::new(" Ready, colonize ", "blocked");
+        assert!(f.admits(["ready"]));
+        assert!(f.admits(["bug", "COLONIZE"]), "case-insensitive, any one include is enough");
+        assert!(!f.admits(["bug"]), "an include list needs one of its labels");
+        assert!(!f.admits(["ready", "Blocked"]), "an exclude always wins");
+        let issues = json!([
+            {"number": 1, "labels": [{"name": "ready"}]},
+            {"number": 2, "labels": []},
+            {"number": 3, "labels": [{"name": "ready"}, {"name": "blocked"}]}
+        ]);
+        assert_eq!(f.apply(issues), json!([{"number": 1, "labels": [{"name": "ready"}]}]));
+    }
+
     #[test]
     fn gh_failures_are_classified_by_what_the_user_can_do() {
         use super::{Denial, classify};

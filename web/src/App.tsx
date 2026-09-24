@@ -643,6 +643,7 @@ export function App() {
       onClose={close}
       orgs={orgs}
       onOrgSaved={saveOrgInfo}
+      sessions={sessions}
     />
   );
 

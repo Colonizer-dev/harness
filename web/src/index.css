@@ -1575,3 +1575,35 @@ body {
     background: none;
   }
 }
+
+/* Settings hero pipeline: dashes travel along each connector toward the next step. */
+@keyframes flow-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+@keyframes flow-dash-both {
+  0%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dashoffset: -20;
+  }
+}
+.flow-dash {
+  animation: flow-dash 1.1s linear infinite;
+}
+.flow-dash-both {
+  animation: flow-dash-both 2.4s ease-in-out infinite;
+}
+.hero-band {
+  background-image: radial-gradient(circle at 1px 1px, rgb(128 128 128 / 0.12) 1px, transparent 0);
+  background-size: 14px 14px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-dash,
+  .flow-dash-both {
+    animation: none;
+  }
+}

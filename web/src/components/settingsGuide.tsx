@@ -151,7 +151,20 @@ const PATHS: Record<string, ReactNode> = {
   ),
   text: <path d="M4.5 6.5h15M4.5 12h15M4.5 17.5h9" />,
   queue: <path d="M4.5 6.5h15M4.5 12h15M4.5 17.5h15" />,
+  filter: <path d="M4 5h16l-6.2 7.4V19l-3.6-1.8v-4.8z" />,
 };
+
+/** A provider as its mark and its name, e.g. the GitHub mark beside "GitHub". */
+export function ModuleProviderMark({ id, name }: { id: string; name: string }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2 text-[13.5px] font-medium text-text">
+      <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-panel-2">
+        <GuideIcon name={id in PATHS ? id : "plug"} size={14} />
+      </span>
+      <span className="truncate">{name}</span>
+    </span>
+  );
+}
 
 export function GuideIcon({
   name,
@@ -180,7 +193,18 @@ export function GuideIcon({
   );
 }
 
-type FlowNode = { icon: string; label: string; lock?: boolean };
+export type FlowChip = { text: string; kind: "in" | "out" | "note" };
+export type FlowNode = {
+  icon: string;
+  label: string;
+  lock?: boolean;
+  /** A live figure under the label, e.g. "3 running". */
+  metric?: string;
+  /** Lights the node: the step where things are happening now. */
+  active?: boolean;
+  /** Label chips inside the node, e.g. a filter's include / exclude lists. */
+  chips?: FlowChip[];
+};
 export interface Guide {
   icon: string;
   blurb: string;
@@ -265,11 +289,13 @@ const GUIDES: Record<string, Guide> = {
   },
   source: {
     icon: "issue",
-    blurb: "Where colonies pick up the work to do.",
+    blurb: "Where colonies pick up the work to do: open issues, narrowed by your labels.",
     flow: [
       { icon: "github", label: "Issues" },
+      { icon: "filter", label: "Filter" },
       { icon: "queue", label: "Queue" },
-      { icon: "ant", label: "Colony" },
+      { icon: "ant", label: "Colonies" },
+      { icon: "pr", label: "Pull requests" },
     ],
   },
   sandbox: {
@@ -399,24 +425,30 @@ export type HeroStat = {
 export function SectionHero({
   guide,
   stats = [],
+  flow,
 }: {
   guide: Guide;
   stats?: HeroStat[];
+  /** Live nodes for this page's picture, in place of the guide's static ones. */
+  flow?: FlowNode[];
 }) {
   if (!guide.blurb) return null;
+  const nodes = flow ?? guide.flow;
   return (
     <div className="mb-4 overflow-hidden rounded-xl border border-border bg-panel-2">
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-4 p-4">
-        <div className="flex min-w-0 flex-1 basis-60 items-center gap-3.5">
-          <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
-            <GuideIcon name={guide.icon} size={24} />
-          </span>
-          <p className="min-w-0 text-[14px] font-medium leading-snug text-text">
-            {guide.blurb}
-          </p>
-        </div>
-        {guide.flow.length > 0 && <Flow nodes={guide.flow} both={guide.both} />}
+      <div className="flex items-center gap-3.5 p-4">
+        <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
+          <GuideIcon name={guide.icon} size={24} />
+        </span>
+        <p className="min-w-0 text-[14px] font-medium leading-snug text-text">
+          {guide.blurb}
+        </p>
       </div>
+      {nodes.length > 0 && (
+        <div className="hero-band border-t border-border px-4 pb-4 pt-5">
+          <Flow nodes={nodes} both={guide.both} />
+        </div>
+      )}
       {stats.length > 0 && (
         <div className="flex flex-wrap gap-2 border-t border-border px-4 py-2.5">
           {stats.map((s) => (
@@ -452,61 +484,84 @@ export function SectionHero({
 function Flow({ nodes, both }: { nodes: FlowNode[]; both?: boolean }) {
   return (
     <ol
-      aria-label={nodes.map((n) => n.label).join(both ? " and " : " to ")}
-      className="flex shrink-0 items-start gap-1"
+      aria-label={nodes.map((n) => (n.metric ? `${n.label}: ${n.metric}` : n.label)).join(both ? " and " : " to ")}
+      className="flex w-full items-start"
     >
       {nodes.map((node, i) => (
-        <li key={node.label} className="flex items-start gap-1">
-          {i > 0 && (
-            <svg
-              width="26"
-              height="36"
-              viewBox="0 0 26 36"
-              aria-hidden="true"
-              className="shrink-0 text-faint"
-            >
-              <path
-                d="M3 18h20"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeDasharray="2.5 3"
-              />
-              <path
-                d="m18.5 14 4.5 4-4.5 4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              {both && (
-                <path
-                  d="m7.5 14-4.5 4 4.5 4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              )}
-            </svg>
-          )}
-          <span className="flex w-[64px] flex-col items-center gap-1 text-center">
-            <span className="relative grid size-9 place-items-center rounded-lg border border-border bg-panel text-muted">
-              <GuideIcon name={node.icon} size={17} />
-              {node.lock && (
-                <span className="absolute -bottom-1 -right-1 grid size-4 place-items-center rounded-full bg-accent text-on-accent">
-                  <GuideIcon name="lock" size={10} />
-                </span>
-              )}
-            </span>
-            <span className="text-[11px] leading-tight text-muted">
-              {node.label}
-            </span>
-          </span>
+        <li key={node.label} className={cx("flex min-w-0 items-start", i > 0 && "flex-1")}>
+          {i > 0 && <Link both={both} lit={Boolean(node.active || nodes[i - 1].active)} />}
+          <FlowStep node={node} />
         </li>
       ))}
     </ol>
+  );
+}
+
+/** A connector: a dashed line whose dashes travel toward the next step (both ways for a link). */
+function Link({ both, lit }: { both?: boolean; lit: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 100 44"
+      preserveAspectRatio="none"
+      aria-hidden="true"
+      className={cx("mt-0 h-11 min-w-6 flex-1", lit ? "text-accent" : "text-faint")}
+    >
+      <path d="M4 22H96" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      <path
+        d="M4 22H96"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeDasharray="3 7"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+        className={both ? "flow-dash-both" : "flow-dash"}
+      />
+    </svg>
+  );
+}
+
+function FlowStep({ node }: { node: FlowNode }) {
+  return (
+    <div className="flex w-[92px] shrink-0 flex-col items-center gap-1.5 text-center">
+      <span
+        className={cx(
+          "relative grid size-11 place-items-center rounded-full border",
+          node.active
+            ? "border-accent bg-accent-soft text-accent shadow-[0_0_0_4px_var(--color-accent-soft)]"
+            : "border-border-strong bg-panel text-muted",
+        )}
+      >
+        <GuideIcon name={node.icon} size={19} />
+        {node.lock && (
+          <span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-accent text-on-accent">
+            <GuideIcon name="lock" size={10} />
+          </span>
+        )}
+      </span>
+      <span className="text-[12px] font-medium leading-tight text-text">{node.label}</span>
+      {node.metric && (
+        <span className={cx("text-[11.5px] leading-tight tabular-nums", node.active ? "text-accent" : "text-muted")}>
+          {node.metric}
+        </span>
+      )}
+      {node.chips && node.chips.length > 0 && (
+        <span className="flex max-w-[120px] flex-wrap justify-center gap-1">
+          {node.chips.map((chip) => (
+            <span
+              key={`${chip.kind}:${chip.text}`}
+              className={cx(
+                "rounded-full border px-1.5 py-px text-[10.5px] leading-4",
+                chip.kind === "in" && "border-ok/40 bg-ok/10 text-ok",
+                chip.kind === "out" && "border-err/40 bg-err/10 text-err line-through decoration-err/60",
+                chip.kind === "note" && "border-border text-muted",
+              )}
+            >
+              {chip.text}
+            </span>
+          ))}
+        </span>
+      )}
+    </div>
   );
 }
 

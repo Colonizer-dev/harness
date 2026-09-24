@@ -26,6 +26,7 @@ import type {
   ModelSetting,
   ModuleInfo,
   OrgInfo,
+  Session,
   ProviderAuth,
   ProviderHealth,
   ProviderLimits,
@@ -71,7 +72,7 @@ import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
-import { GuideIcon, SectionHero, guideFor, isAdvancedField, type HeroStat } from "./settingsGuide";
+import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
 
@@ -218,6 +219,7 @@ export function SettingsBody({
   onClose,
   orgs,
   onOrgSaved,
+  sessions,
 }: {
   /** Rendered inside the cockpit rather than a dialog: no title bar of its own, and it fills its column. */
   embedded?: boolean;
@@ -241,6 +243,8 @@ export function SettingsBody({
   /** The workspaces, for a Workspaces group of per-org settings; the cockpit passes them, the old dialog does not. */
   orgs?: OrgInfo[];
   onOrgSaved?: (saved: OrgInfo) => void;
+  /** The colony list, for the live counts in the Source page's picture. */
+  sessions?: Session[];
 }) {
   const api = useApi();
   const narrow = useMediaQuery("(max-width: 699px)");
@@ -553,7 +557,7 @@ export function SettingsBody({
 
   // What the page is for, as a card: Pane shows it at the top of its body; Setup and a workspace
   // draw their own frame, so for them it sits above the pane instead.
-  const hero = active ? <SectionHero guide={guideFor(active)} stats={heroStats(active)} /> : null;
+  const hero = active ? <SectionHero guide={guideFor(active)} stats={heroStats(active)} flow={active === "module:source" ? sourceFlow(drafts.source?.settings, sessions) : undefined} /> : null;
   const ownFrame = active === "setup" || Boolean(active?.startsWith("org:"));
   const framed = (
     <HeroContext.Provider value={ownFrame ? null : hero}>
@@ -1983,8 +1987,8 @@ function ModulePane({
               ))}
             </select>
           ) : (
-            <span id={providerId} className="block text-[13.5px]">
-              {providerInfo?.name ?? draft.provider}
+            <span id={providerId} className="block">
+              <ModuleProviderMark id={draft.provider} name={providerInfo?.name ?? draft.provider} />
             </span>
           )}
         </Row>
@@ -3716,4 +3720,33 @@ function ChipsInput({
       />
     </div>
   );
+}
+
+/** Splits a comma-separated label setting into its labels. */
+function labelList(value: unknown): string[] {
+  return typeof value === "string" ? value.split(",").map((l) => l.trim()).filter(Boolean) : [];
+}
+
+/**
+ * The Source page's picture, live: issues pass the label filter (as typed, before saving), wait in
+ * the queue, run as colonies and come out as pull requests, each step with its count right now.
+ */
+function sourceFlow(settings: Record<string, unknown> | undefined, sessions: Session[] = []): FlowNode[] {
+  const include = labelList(settings?.include_labels);
+  const exclude = labelList(settings?.exclude_labels);
+  const count = (...statuses: string[]) => sessions.filter((s) => statuses.includes(s.status)).length;
+  const queued = count("queued");
+  const live = count("starting", "running", "waiting_for_answer", "idle", "publishing");
+  const prs = count("pr_opened");
+  const chips: FlowChip[] =
+    include.length + exclude.length === 0
+      ? [{ text: "every open issue", kind: "note" }]
+      : [...include.map((text) => ({ text, kind: "in" as const })), ...exclude.map((text) => ({ text, kind: "out" as const }))];
+  return [
+    { icon: "github", label: "Open issues", metric: "GitHub" },
+    { icon: "filter", label: "Label filter", chips, active: include.length + exclude.length > 0 },
+    { icon: "queue", label: "Queue", metric: `${queued} waiting`, active: queued > 0 },
+    { icon: "ant", label: "Colonies", metric: `${live} running`, active: live > 0 },
+    { icon: "pr", label: "Pull requests", metric: `${prs} open` },
+  ];
 }

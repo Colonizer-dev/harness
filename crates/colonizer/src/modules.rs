@@ -140,7 +140,18 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             "github",
             "GitHub",
             "Issues from repositories your GitHub account can access",
-            json!({"type":"object","properties":{}}),
+            json!({"type":"object","properties":{
+                "include_labels": {
+                    "type": "string", "title": "Only issues labelled",
+                    "description": "Comma-separated labels, e.g. 'ready, colonize'. An issue is offered for a colony only if it carries at least one of them. Empty offers every open issue.",
+                    "default": ""
+                },
+                "exclude_labels": {
+                    "type": "string", "title": "Never issues labelled",
+                    "description": "Comma-separated labels, e.g. 'blocked, wontfix'. An issue carrying any of them is never offered, whatever else it carries.",
+                    "default": ""
+                }
+            }}),
         )],
         "sandbox" => vec![p(
             "microsandbox",
