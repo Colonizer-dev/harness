@@ -230,6 +230,7 @@ export function AreaChart({
   formatY,
   readTitle,
   emptyNote = "no data in range",
+  highlight = null,
 }: {
   series: AreaSeries[];
   /** One label per column for the tooltip and read-out (e.g. "Sep 3"). */
@@ -243,8 +244,11 @@ export function AreaChart({
   /** The read-out's title while nothing is hovered ("Last 30 days"). */
   readTitle: string;
   emptyNote?: string;
+  /** A series label to bring forward (the side row under the pointer); the rest step back. */
+  highlight?: string | null;
 }): ReactElement {
   const uid = useId().replace(/:/g, "");
+  const dim = (label: string) => highlight != null && label !== highlight;
   const [hover, setHover] = useState<number | null>(null);
   const n = Math.max(0, ...series.map((s) => s.values.length));
   const totals = Array.from({ length: n }, (_, i) => series.reduce((t, s) => t + (s.values[i] ?? 0), 0));
@@ -307,7 +311,12 @@ export function AreaChart({
                 ))}
               </defs>
               {geo.map((g, si) => (
-                <path key={`a${si}`} d={g.area} fill={`url(#${uid}-a${si})`} style={glide(g.area)} />
+                <path
+                  key={`a${si}`}
+                  d={g.area}
+                  fill={`url(#${uid}-a${si})`}
+                  style={{ ...glide(g.area), opacity: dim(series[si].label) ? 0.15 : 1, transition: "opacity 200ms ease" }}
+                />
               ))}
               {geo.map((g, si) => (
                 <path
@@ -315,11 +324,11 @@ export function AreaChart({
                   d={g.line}
                   fill="none"
                   stroke={series[si].color}
-                  strokeWidth={1.75}
+                  strokeWidth={highlight === series[si].label ? 2.75 : 1.75}
                   strokeLinejoin="round"
                   strokeLinecap="round"
                   vectorEffect="non-scaling-stroke"
-                  style={glide(g.line)}
+                  style={{ ...glide(g.line), opacity: dim(series[si].label) ? 0.25 : 1, transition: "opacity 200ms ease" }}
                 />
               ))}
             </svg>
@@ -408,6 +417,10 @@ export interface SideRow {
   color: string;
   title?: string;
   onClick?: () => void;
+  /** A mark before the label, e.g. the org's logo. */
+  icon?: ReactNode;
+  /** A hover / focus card for the row: who this is and what the number means. */
+  card?: ReactNode;
 }
 
 /** A chart section: the area chart on the left, its side column (share, funnel, mix) on the
@@ -420,29 +433,40 @@ export function ChartSection({
   sideTitle,
   side,
   sideFoot,
+  sideLimit,
 }: {
   title: string;
   legend?: ReactNode;
-  chart: ReactNode;
+  /** The chart, or a function of the side row under the pointer so the chart can bring it forward. */
+  chart: ReactNode | ((hot: string | null) => ReactNode);
   foot?: ReactNode;
   sideTitle: string;
   side: SideRow[];
   sideFoot?: ReactNode;
+  /** Show this many side rows until "Show all" is pressed. */
+  sideLimit?: number;
 }): ReactElement {
+  const [hot, setHot] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  const limited = sideLimit != null && side.length > sideLimit;
+  const rows = limited && !all ? side.slice(0, sideLimit) : side;
   return (
     <Section title={title} right={legend}>
       <Rules className="flex flex-wrap">
         <div className="min-w-0 flex-[2_1_460px] py-5 pr-6">
-          {chart}
+          {typeof chart === "function" ? chart(hot) : chart}
           {foot && <div className="mt-3 text-[12.5px] text-faint">{foot}</div>}
         </div>
         <div className="flex min-w-0 flex-[1_1_240px] flex-col gap-0.5 py-5 pl-6 shadow-[-1px_0_0_var(--border)]">
           <div className="mb-2 text-[13px] text-muted">{sideTitle}</div>
-          {side.map((row) => {
+          {rows.map((row) => {
             const body = (
               <>
-                <span className="flex w-full items-baseline justify-between gap-3">
-                  <span className="min-w-0 truncate text-[13.5px]">{row.label}</span>
+                <span className="flex w-full items-center justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-2">
+                    {row.icon}
+                    <span className="min-w-0 truncate text-[13.5px]">{row.label}</span>
+                  </span>
                   <span className="whitespace-nowrap text-[13px] tabular-nums">
                     {row.value} {row.note && <span className="text-faint">{row.note}</span>}
                   </span>
@@ -452,23 +476,57 @@ export function ChartSection({
                 </span>
               </>
             );
+            const isHot = hot === row.label;
+            const hover = {
+              onMouseEnter: () => setHot(row.label),
+              onMouseLeave: () => setHot((h) => (h === row.label ? null : h)),
+              onFocus: () => setHot(row.label),
+              onBlur: () => setHot((h) => (h === row.label ? null : h)),
+            };
+            const card = row.card && isHot && (
+              <div
+                role="tooltip"
+                className="v3-pop pointer-events-none absolute right-[calc(100%+12px)] top-1/2 z-20 w-[260px] -translate-y-1/2 animate-[ck-in_140ms_ease-out_both] rounded-xl border border-border-strong p-3 text-left shadow-[0_16px_48px_rgb(0_0_0/0.35)]"
+              >
+                {row.card}
+              </div>
+            );
+            const rowClass = `relative flex flex-col gap-2 rounded-md px-1.5 py-2.5 -mx-1.5 transition-[background-color,opacity] ${hot != null && !isHot ? "opacity-55" : ""} ${isHot ? "bg-panel-2" : ""}`;
             return row.onClick ? (
               <button
                 key={row.label}
                 type="button"
-                title={row.title}
+                title={row.card ? undefined : row.title}
+                aria-label={row.title ? `${row.label}: ${row.title}` : undefined}
                 onClick={row.onClick}
-                className="flex cursor-pointer flex-col gap-2 border-0 bg-transparent px-0 py-2.5 text-left hover:opacity-80"
+                {...hover}
+                className={`${rowClass} cursor-pointer border-0 bg-transparent text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
               >
                 {body}
+                {card}
               </button>
             ) : (
-              <div key={row.label} title={row.title} className="flex flex-col gap-2 py-2.5">
+              <div key={row.label} title={row.card ? undefined : row.title} tabIndex={row.card ? 0 : undefined} {...hover} className={rowClass}>
                 {body}
+                {card}
               </div>
             );
           })}
-          {sideFoot && <div className="mt-auto pt-3 text-[12.5px] text-faint">{sideFoot}</div>}
+          {(limited || sideFoot) && (
+            <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-3 text-[12.5px] text-faint">
+              {limited && (
+                <button
+                  type="button"
+                  aria-expanded={all}
+                  onClick={() => setAll((a) => !a)}
+                  className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:border-border-strong hover:text-text"
+                >
+                  {all ? "Show less" : `Show all ${side.length} workspaces`}
+                </button>
+              )}
+              {sideFoot && <span>{sideFoot}</span>}
+            </div>
+          )}
         </div>
       </Rules>
     </Section>

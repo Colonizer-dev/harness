@@ -189,6 +189,28 @@ describe("ChartSection", () => {
     expect(html.match(/<button/g)).toHaveLength(1);
     expect(html).toContain("All workspaces shown");
   });
+
+  it("lists the first sideLimit rows with a Show all toggle, and hands the chart the hovered row", () => {
+    const side = Array.from({ length: 7 }, (_, i) => ({ label: `org${i}`, value: 7 - i, share: 10, color: "red", icon: <i>logo{i}</i> }));
+    let seen: string | null | undefined;
+    const html = renderToStaticMarkup(
+      <ChartSection
+        title="Merged PRs per day"
+        chart={(hot) => {
+          seen = hot;
+          return <div>CHART</div>;
+        }}
+        sideTitle="Share by workspace"
+        side={side}
+        sideLimit={5}
+      />,
+    );
+    expect(html).toContain("org4");
+    expect(html).not.toContain("org5");
+    expect(html).toContain("logo0");
+    expect(html).toContain("Show all 7 workspaces");
+    expect(seen).toBeNull();
+  });
 });
 
 describe("ShareBar", () => {

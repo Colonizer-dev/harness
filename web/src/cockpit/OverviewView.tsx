@@ -403,24 +403,16 @@ export function OverviewView({
         <ChartSection
           title="Merged PRs per day"
           legend={
-            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[12.5px] text-muted">
-              {workspaces.map((o, i) => (
-                <span key={o.org} className="inline-flex items-center gap-1.5">
-                  <span aria-hidden="true" className="h-2 w-2 rounded-[2px]" style={{ background: chartColor(i) }} />
-                  <OrgTile org={o.org} avatar={o.avatar} size={14} />
-                  {o.org}
-                </span>
-              ))}
-              {ghost && (
-                <span className="inline-flex items-center gap-1.5">
-                  <span aria-hidden="true" className="h-0 w-3 border-t border-dashed border-muted" />
-                  prev {range}d
-                </span>
-              )}
-            </div>
+            ghost ? (
+              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted">
+                <span aria-hidden="true" className="h-0 w-3 border-t border-dashed border-muted" />
+                prev {range}d
+              </span>
+            ) : undefined
           }
-          chart={
+          chart={(hot) => (
             <AreaChart
+              highlight={hot}
               series={mergedSeries}
               labels={dayLabels}
               ghost={ghost}
@@ -429,18 +421,40 @@ export function OverviewView({
               readTitle={`Last ${range} days`}
               emptyNote="no merged PRs in range"
             />
-          }
+          )}
           foot={`${mergedCur.length} merged in ${range}d · by merge date${ghost ? ` · dashed: previous ${range}d` : ""}`}
           sideTitle="Share by workspace"
-          side={compared.map((c) => ({
-            label: c.org,
-            value: c.merged,
-            note: mergedAll > 0 ? `${Math.round((c.merged / mergedAll) * 100)}%` : "—",
-            share: mergedAll > 0 ? (c.merged / mergedAll) * 100 : 0,
-            color: c.color,
-            title: `open the ${c.org} dashboard`,
-            onClick: () => setDashOrg(c.org),
-          }))}
+          sideLimit={SHARE_LIMIT}
+          side={[...compared]
+            .sort((a, b) => b.merged - a.merged)
+            .map((c) => {
+              const share = mergedAll > 0 ? (c.merged / mergedAll) * 100 : 0;
+              const entry = workspaces.find((o) => sameOrg(o.org, c.org));
+              return {
+                label: c.org,
+                value: c.merged,
+                note: mergedAll > 0 ? `${Math.round(share)}%` : "—",
+                share,
+                color: c.color,
+                title: `open the ${c.org} dashboard`,
+                onClick: () => setDashOrg(c.org),
+                icon: <OrgTile org={c.org} avatar={c.avatar} size={18} />,
+                card: (
+                  <ShareCard
+                    org={c.org}
+                    avatar={c.avatar}
+                    color={c.color}
+                    description={entry?.description}
+                    merged={c.merged}
+                    share={mergedAll > 0 ? share : null}
+                    range={range}
+                    live={entry?.live ?? 0}
+                    total={entry?.total ?? 0}
+                    need={c.need}
+                  />
+                ),
+              };
+            })}
           sideFoot={hiddenOrgs.length > 0 ? `+ ${hiddenOrgs.length} hidden ${hiddenOrgs.length === 1 ? "org" : "orgs"} not counted` : "All workspaces shown"}
         />
 
@@ -630,3 +644,68 @@ export function OverviewView({
 
 /** The workspaces table's grid, shared by its header and rows. */
 const WS_GRID = "grid grid-cols-[minmax(0,1.6fr)_64px_84px_64px_64px_84px_minmax(48px,1fr)] items-center gap-4";
+
+/** How many workspaces "Share by workspace" lists before "Show all". */
+const SHARE_LIMIT = 5;
+
+/** The hover card on a "Share by workspace" row: who the org is and what its number means. */
+function ShareCard({
+  org,
+  avatar,
+  color,
+  description,
+  merged,
+  share,
+  range,
+  live,
+  total,
+  need,
+}: {
+  org: string;
+  avatar: string | null;
+  color: string;
+  description?: string;
+  merged: number;
+  share: number | null;
+  range: number;
+  live: number;
+  total: number;
+  need: number;
+}): ReactElement {
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-2.5">
+        <OrgTile org={org} avatar={avatar} size={32} />
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] font-semibold text-text">{org}</div>
+          {description ? (
+            <div className="line-clamp-2 text-[12px] leading-snug text-muted">{description}</div>
+          ) : (
+            <div className="text-[12px] text-faint">No GitHub description</div>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-2 border-t border-border pt-2.5 tabular-nums">
+        <div>
+          <div className="text-[15px] font-semibold text-text">{merged}</div>
+          <div className="text-[11px] text-faint">merged · {range}d</div>
+        </div>
+        <div>
+          <div className="text-[15px] font-semibold" style={{ color }}>
+            {share == null ? "—" : `${Math.round(share)}%`}
+          </div>
+          <div className="text-[11px] text-faint">of all merged</div>
+        </div>
+        <div>
+          <div className="text-[15px] font-semibold text-text">
+            {live}
+            <span className="text-[12px] font-normal text-faint">/{total}</span>
+          </div>
+          <div className="text-[11px] text-faint">live / colonies</div>
+        </div>
+      </div>
+      {need > 0 && <div className="text-[12px] text-warn">{need} need you</div>}
+      <div className="text-[11.5px] text-faint">Click to open the {org} dashboard</div>
+    </div>
+  );
+}
