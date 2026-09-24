@@ -254,7 +254,20 @@ function CreatePrDialog({
   );
 }
 
-export default function CodeEditor({ repo, onClose, onCreated, onOpenColony }: { repo: string; onClose: () => void; onCreated: (s: Session) => void; onOpenColony: (id: string) => void }): ReactElement {
+export default function CodeEditor({
+  repo,
+  initialPath,
+  onClose,
+  onCreated,
+  onOpenColony,
+}: {
+  repo: string;
+  /** A file to open once the tree has loaded (the Chat view's "open in Code"). */
+  initialPath?: string | null;
+  onClose: () => void;
+  onCreated: (s: Session) => void;
+  onOpenColony: (id: string) => void;
+}): ReactElement {
   const api = useApi();
   const toast = useToast();
   const narrow = useMediaQuery("(max-width: 899px)");
@@ -356,6 +369,14 @@ export default function CodeEditor({ repo, onClose, onCreated, onOpenColony }: {
     },
     [api, repo, ref, tabs, toast],
   );
+
+  // The file another view asked for, once the tree it lives in has loaded.
+  const openedInitial = useRef<string | null>(null);
+  useEffect(() => {
+    if (!initialPath || !tree || openedInitial.current === initialPath) return;
+    openedInitial.current = initialPath;
+    void open(initialPath);
+  }, [initialPath, tree, open]);
 
   const persist = useCallback(
     (t: Tab) => {

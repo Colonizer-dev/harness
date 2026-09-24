@@ -15,6 +15,8 @@ import type {
   ChatMessage,
   ChatMeta,
   ChatModels,
+  ChatCompareRequest,
+  ChatPatch,
   ChatSendRequest,
   ChatStreamEvent,
   MapFileDetail,
@@ -271,12 +273,22 @@ export interface Api {
   /** Chat (docs/protocol.md): direct conversations with a model, stored on the mothership. */
   chats(): Promise<{ chats: ChatMeta[] }>;
   chatModels(): Promise<ChatModels>;
-  createChat(body: { title?: string; model?: string; system?: string; max_tokens?: number; workspace?: string }): Promise<ChatMeta>;
+  createChat(body: { title?: string; model?: string; system?: string; max_tokens?: number; temperature?: number; persona?: string; workspace?: string }): Promise<ChatMeta>;
   chat(id: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }>;
-  patchChat(id: string, body: Partial<Pick<ChatMeta, "title" | "model" | "system" | "max_tokens" | "workspace">>): Promise<ChatMeta>;
+  patchChat(id: string, body: ChatPatch): Promise<ChatMeta>;
   deleteChat(id: string): Promise<unknown>;
   /** Streams the reply; `onEvent` gets each line; aborting `signal` stops the reply (kept as stopped). */
   sendChat(id: string, body: ChatSendRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** One message to two models at once; every streamed line carries its `lane`. */
+  compareChat(id: string, body: ChatCompareRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** Keeps one compare reply and drops its sibling. */
+  pickChat(id: string, messageId: string): Promise<{ messages: ChatMessage[] }>;
+  /** A new conversation with the messages up to (`include`) or just before one of this one's. */
+  forkChat(id: string, messageId: string, include: boolean): Promise<ChatMeta>;
+  retitleChat(id: string): Promise<ChatMeta>;
+  /** The URL of the conversation's Markdown export (a download). */
+  chatExportUrl(id: string): string;
+  chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string }>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
@@ -368,6 +380,37 @@ export function splitNdjson(buffer: string): { events: ChatStreamEvent[]; rest: 
     }
   }
   return { events, rest };
+}
+
+/** POSTs `body` and hands each line of the newline-delimited JSON answer to `onEvent` as it lands. */
+async function streamNdjson(url: string, body: unknown, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    let message = text || res.statusText;
+    try {
+      message = String((JSON.parse(text) as { error?: unknown }).error ?? message);
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let rest = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const split = splitNdjson(rest + decoder.decode(value, { stream: true }));
+    rest = split.rest;
+    for (const event of split.events) onEvent(event);
+  }
+  for (const event of splitNdjson(rest + "\n").events) onEvent(event);
 }
 
 function wsUrl(path: string): string {
@@ -477,35 +520,13 @@ export const httpApi: Api = {
   chat: (id) => request(`/api/chat/${enc(id)}`),
   patchChat: (id, body) => request(`/api/chat/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteChat: (id) => del(`/api/chat/${enc(id)}`),
-  sendChat: async (id, body, onEvent, signal) => {
-    const res = await fetch(`/api/chat/${enc(id)}/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => "");
-      let message = text || res.statusText;
-      try {
-        message = String((JSON.parse(text) as { error?: unknown }).error ?? message);
-      } catch {
-        /* not JSON */
-      }
-      throw new ApiError(message, res.status);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let rest = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const split = splitNdjson(rest + decoder.decode(value, { stream: true }));
-      rest = split.rest;
-      for (const event of split.events) onEvent(event);
-    }
-    for (const event of splitNdjson(rest + "\n").events) onEvent(event);
-  },
+  sendChat: (id, body, onEvent, signal) => streamNdjson(`/api/chat/${enc(id)}/messages`, body, onEvent, signal),
+  compareChat: (id, body, onEvent, signal) => streamNdjson(`/api/chat/${enc(id)}/compare`, body, onEvent, signal),
+  pickChat: (id, messageId) => post(`/api/chat/${enc(id)}/pick`, { message_id: messageId }),
+  forkChat: (id, messageId, include) => post(`/api/chat/${enc(id)}/fork`, { message_id: messageId, include }),
+  retitleChat: (id) => post(`/api/chat/${enc(id)}/title`),
+  chatExportUrl: (id) => `/api/chat/${enc(id)}/export`,
+  chatIssue: (id, body) => post(`/api/chat/${enc(id)}/issue`, body),
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),
