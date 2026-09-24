@@ -37,6 +37,7 @@ import type {
   UpdateStatus,
   UsageStatus,
   VoiceStatus,
+  LoginItemStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
@@ -58,6 +59,7 @@ import { ProviderMark } from "./providerMark";
 import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
+import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
@@ -68,7 +70,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -368,6 +370,11 @@ export function SettingsBody({
           // The badge follows the two opt-in channels; the in-tab layer is on by default and needs no advertising.
           badge: notifications.sound || notifications.browser ? "On" : "Off",
         },
+        {
+          id: "desktop",
+          label: "Desktop",
+          hint: "Install the cockpit as an app, start the mothership at login",
+        },
       ],
     },
     {
@@ -497,6 +504,7 @@ export function SettingsBody({
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
   else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
+  else if (active === "desktop") pane = <DesktopPane back={back} />;
   else if (active === "providers") {
     pane = (
       <ProvidersPane
@@ -1456,6 +1464,106 @@ function UsagePane({
           </div>
         </div>
       )}
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Desktop: the cockpit as an installed app, and the mothership started at login.
+// ---------------------------------------------------------------------------
+
+function DesktopPane({ back }: { back?: () => void }) {
+  const api = useApi();
+  const toast = useToast();
+  const { available, install } = useInstallPrompt();
+  const standalone = runningStandalone();
+  const [login, setLogin] = useState<LoginItemStatus | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .loginItem()
+      .then((s) => !cancelled && setLogin(s))
+      .catch((e) => !cancelled && setLoginError(errorMessage(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  const setEnabled = async (enabled: boolean) => {
+    setSaving(true);
+    try {
+      const next = await api.setLoginItem(enabled);
+      setLogin(next);
+      toast(enabled ? "The mothership now starts when you log in" : "It no longer starts at login; the running mothership keeps running");
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Pane title="Desktop" subtitle="The cockpit as an app, and the mothership always there" back={back}>
+      <div className="space-y-5">
+        <section className="space-y-2">
+          <h4 className="text-[12.5px] font-semibold">Install the cockpit as an app</h4>
+          {standalone ? (
+            <p className="text-[12.5px] text-muted">You are using the installed app.</p>
+          ) : available ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="primary" onClick={() => void install()}>
+                Install app
+              </Button>
+              <span className="text-[12.5px] text-muted">Its own window and Dock/taskbar icon; same cockpit, same sign-in.</span>
+            </div>
+          ) : isSafari() ? (
+            <p className="text-[12.5px] text-muted">
+              In Safari: <Code>File → Add to Dock</Code>. It opens in its own window with the Colonizer icon.
+            </p>
+          ) : (
+            <p className="text-[12.5px] text-muted">
+              Your browser has not offered to install yet. In Chrome or Edge use the install icon in the address bar (or{" "}
+              <Code>⋮ → Cast, save and share → Install page as app</Code>); in Safari, <Code>File → Add to Dock</Code>.
+            </p>
+          )}
+        </section>
+
+        <section className="space-y-2">
+          <h4 className="text-[12.5px] font-semibold">Start at login</h4>
+          {loginError ? (
+            <p className="text-[12.5px] text-err">{loginError}</p>
+          ) : !login ? (
+            <p className="flex items-center gap-2 text-[13px] text-muted">
+              <Spinner /> Loading…
+            </p>
+          ) : login.platform === "unsupported" ? (
+            <p className="text-[12.5px] text-muted">Start at login is available on macOS and Linux.</p>
+          ) : (
+            <>
+              <Row id="login-item-switch" label="Start Colonizer at login" inline>
+                <Switch
+                  id="login-item-switch"
+                  labelledBy="login-item-switch-label"
+                  label="Start Colonizer at login"
+                  checked={login.enabled}
+                  disabled={saving}
+                  onChange={(checked) => void setEnabled(checked)}
+                />
+              </Row>
+              <p className="text-[12.5px] text-muted">
+                {login.platform === "macos" ? "A LaunchAgent" : "A systemd user unit"} runs <Code>{login.binary}</Code> when you log in and
+                restarts it only if it crashes; it logs to <Code>{login.log}</Code>.{" "}
+                {login.pid ? `Running now as pid ${login.pid}.` : ""} Turning it off never stops the running mothership or its colonies.
+                Same as <Code>colonizer login-item enable|disable</Code>.
+              </p>
+              {login.note && <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">{login.note}</p>}
+            </>
+          )}
+        </section>
+      </div>
     </Pane>
   );
 }

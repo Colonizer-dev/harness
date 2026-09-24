@@ -1379,3 +1379,15 @@ export interface Draft {
   base_sha: string;
   saved_at: string;
 }
+
+/** GET/POST /api/login-item: whether the mothership starts at login (a LaunchAgent or systemd user unit). */
+export interface LoginItemStatus {
+  platform: "macos" | "linux" | "unsupported";
+  installed: boolean;
+  enabled: boolean;
+  pid: number | null;
+  definition: string;
+  binary: string;
+  log: string;
+  note: string | null;
+}

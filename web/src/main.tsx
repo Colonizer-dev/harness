@@ -4,6 +4,7 @@ import { loadApi } from "./api";
 import { App } from "./App";
 import { ApiContext, ToastProvider } from "./context";
 import "./index.css";
+import { setupInstallApp } from "./installApp";
 
 // A tab left open across a mothership update still runs the old build, whose lazily loaded chunks
 // the new build no longer has. Vite reports that as a preload error: reload once to pick up the new
@@ -25,6 +26,8 @@ window.addEventListener("vite:preloadError", (event) => {
   event.preventDefault();
   window.location.reload();
 });
+
+setupInstallApp();
 
 const root = createRoot(document.getElementById("root")!);
 
