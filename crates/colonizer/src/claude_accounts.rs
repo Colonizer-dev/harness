@@ -6,7 +6,7 @@
 
 use crate::{
     ApiResult, Shared, client_error,
-    util::{read_trimmed, write_secret},
+    util::{read_trimmed, short_id, write_secret},
 };
 use axum::{
     Json,
@@ -69,17 +69,55 @@ pub fn load_meta(config_dir: &FsPath) -> AccountsMeta {
         .unwrap_or_default()
 }
 
-pub fn save_meta(config_dir: &FsPath, meta: &AccountsMeta) -> anyhow::Result<()> {
+/// Writes `meta` to a fresh temp beside the record and returns its path. The temp carries a
+/// per-call id, as `write_atomic`'s does: two writers sharing one fixed temp rename each other's
+/// file away, and whichever renames second fails. Sync, rather than `write_atomic` itself, because
+/// the migration that saves here runs on the sync credential hot path (`App::claude_cred_for`).
+fn write_meta_temp(config_dir: &FsPath, meta: &AccountsMeta) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(config_dir)?;
     let path = meta_file(config_dir);
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        short_id()
+    ));
     std::fs::write(&tmp, serde_json::to_vec_pretty(meta)?)?;
-    std::fs::rename(&tmp, &path)?;
+    Ok(tmp)
+}
+
+/// The record saves of `create` and `delete` run under the config-write lock, so a plain rename
+/// publishes exclusively.
+pub fn save_meta(config_dir: &FsPath, meta: &AccountsMeta) -> anyhow::Result<()> {
+    let tmp = write_meta_temp(config_dir, meta)?;
+    std::fs::rename(&tmp, meta_file(config_dir))?;
     Ok(())
 }
 
+/// The migration's publish of the record: create-if-absent, so it cannot write over a record that
+/// appeared while the migration ran — a `create` saving on the config-write lock lands in the gap
+/// between `migrate_legacy`'s exists check and here, and its account must survive. `hard_link`
+/// refuses an existing target with `AlreadyExists`, which is the same "someone else migrated"
+/// answer the exists check gives, without the gap; the caller then leaves the legacy token for the
+/// record's owner, as it does for any record already on disk. Returns whether it published; the
+/// temp is removed either way.
+fn publish_meta_no_clobber(config_dir: &FsPath, meta: &AccountsMeta) -> anyhow::Result<bool> {
+    let tmp = write_meta_temp(config_dir, meta)?;
+    let published = match std::fs::hard_link(&tmp, meta_file(config_dir)) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    };
+    let _ = std::fs::remove_file(&tmp);
+    Ok(published)
+}
+
 /// Moves a pre-accounts `<config>/claude-token` into the `default` account. Idempotent: when the
-/// metadata file already exists there is nothing to migrate. Returns true only when it migrated.
+/// metadata file already exists there is nothing to migrate, and the publish is create-if-absent,
+/// so a record that appears mid-migration is not written over either. Returns true only when it
+/// migrated.
 pub fn migrate_legacy(config_dir: &FsPath) -> anyhow::Result<bool> {
     if meta_file(config_dir).exists() {
         return Ok(false);
@@ -100,7 +138,9 @@ pub fn migrate_legacy(config_dir: &FsPath) -> anyhow::Result<bool> {
         )]),
     };
     write_secret(&account_file(config_dir, "default"), &token)?;
-    save_meta(config_dir, &meta)?;
+    if !publish_meta_no_clobber(config_dir, &meta)? {
+        return Ok(false);
+    }
     let _ = std::fs::remove_file(&legacy);
     Ok(true)
 }
@@ -227,6 +267,9 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<CreateAccount>) -
             slug
         }
     };
+    // The read-modify-write of claude-accounts.json is one critical section over `config_write`,
+    // like the settings saves: two accounts created at once cannot lose each other's entry.
+    let _config = app.config_write.lock().await;
     let _ = migrate_legacy(&app.cfg.config_dir);
     let mut meta = load_meta(&app.cfg.config_dir);
     let label = req
@@ -262,6 +305,10 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<CreateAccount>) -
 }
 
 pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    // Same critical section as `create`: the removal's read and its save cannot lose an account a
+    // concurrent create added. The checks in between read other state only, so the section spans
+    // nothing that takes `config_write` itself.
+    let _config = app.config_write.lock().await;
     let _ = migrate_legacy(&app.cfg.config_dir);
     let meta = load_meta(&app.cfg.config_dir);
     if !meta.accounts.contains_key(&id) {
@@ -370,5 +417,162 @@ mod tests {
             in_use_msg(false, &[], &["abc123".into()]).is_some_and(|m| m.contains("abc123")),
             "a live colony names the colony"
         );
+    }
+
+    fn account_app() -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-accounts-app-{}", short_id()));
+        (crate::tests::test_app(&root), root)
+    }
+
+    /// `delete` reads the index and then parks on the sessions read while it checks the account is
+    /// not live, so a create that ran during that pause used to be erased by delete's save of its
+    /// older copy. Inside the config-write section the parked delete saves first and the create
+    /// re-reads what it saved, so its account survives — and the account delete came for still goes.
+    #[tokio::test]
+    async fn a_delete_parked_on_its_checks_does_not_lose_a_concurrent_create() {
+        let (app, root) = account_app();
+        for id in ["a", "x"] {
+            let Json(created) = create(
+                State(app.clone()),
+                Json(CreateAccount {
+                    id: Some(id.into()),
+                    label: None,
+                    token: Some(format!("sk-ant-oat-{id}")),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(created["id"], *id);
+        }
+        // Hold the sessions lock so `delete` parks mid-handler, and let the create run there.
+        let sessions = app.sessions.write().await;
+        let del = tokio::spawn(delete(State(app.clone()), Path("x".to_string())));
+        tokio::task::yield_now().await;
+        let add = tokio::spawn(create(
+            State(app.clone()),
+            Json(CreateAccount {
+                id: Some("b".into()),
+                label: None,
+                token: Some("sk-ant-oat-b".into()),
+            }),
+        ));
+        tokio::task::yield_now().await;
+        drop(sessions);
+        let Json(_) = del.await.unwrap().unwrap();
+        let Json(_) = add.await.unwrap().unwrap();
+        let meta = load_meta(&app.cfg.config_dir);
+        assert!(
+            meta.accounts.contains_key("b"),
+            "the create that ran while delete was parked survives delete's save, got {:?}",
+            meta.accounts.keys().collect::<Vec<_>>()
+        );
+        assert!(meta.accounts.contains_key("a"), "the untouched account stays");
+        assert!(!meta.accounts.contains_key("x"), "the account delete came for still goes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `save_meta` writes a temp beside the target before renaming it into place. Four threads
+    /// saving at once must share no temp file: a fixed one made whichever renamed second find the
+    /// file already consumed — a failed save with nothing wrong with its contents.
+    #[test]
+    fn concurrent_saves_share_no_temp_file() {
+        let dir = temp_config();
+        let errors = std::sync::Mutex::new(Vec::<String>::new());
+        std::thread::scope(|scope| {
+            for t in 0..4 {
+                let dir = dir.clone();
+                let errors = &errors;
+                scope.spawn(move || {
+                    for r in 0..25 {
+                        let id = format!("t{t}-r{r}");
+                        let meta = AccountsMeta {
+                            default: id.clone(),
+                            accounts: BTreeMap::from([(
+                                id.clone(),
+                                AccountMeta {
+                                    label: id.clone(),
+                                    added_at: Utc::now(),
+                                },
+                            )]),
+                        };
+                        if let Err(e) = save_meta(&dir, &meta) {
+                            errors.lock().unwrap().push(format!("{id}: {e:#}"));
+                        }
+                    }
+                });
+            }
+        });
+        let errors = errors.into_inner().unwrap();
+        assert!(
+            errors.is_empty(),
+            "every save succeeds on its own temp, got: {}",
+            errors.join("; ")
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp is left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The migration's publish is create-if-absent. `migrate_legacy` checks for the record, then
+    /// reads the legacy token and writes the secret before publishing, and a locked `create` can
+    /// save the record in that gap — the migration's copy of just `default` must not write over
+    /// it. The gap itself has no hook to pause on, so this drives the publish helper with the
+    /// record already there, which is the state the migration is in when it reaches the publish.
+    #[test]
+    fn a_migration_publish_does_not_clobber_a_record_that_landed_mid_migration() {
+        let dir = temp_config();
+        // The `create` wins the gap: its account is in the record before the migration publishes.
+        save_meta(
+            &dir,
+            &AccountsMeta {
+                default: "new".to_string(),
+                accounts: BTreeMap::from([(
+                    "new".to_string(),
+                    AccountMeta {
+                        label: "new".to_string(),
+                        added_at: Utc::now(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+        // The migration, still holding its pre-gap view that the record is absent, publishes.
+        let migrated = publish_meta_no_clobber(
+            &dir,
+            &AccountsMeta {
+                default: "default".to_string(),
+                accounts: BTreeMap::from([(
+                    "default".to_string(),
+                    AccountMeta {
+                        label: "default".to_string(),
+                        added_at: Utc::now(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+        assert!(
+            !migrated,
+            "a record that exists is nothing to migrate, not something to replace"
+        );
+        let meta = load_meta(&dir);
+        assert_eq!(meta.accounts.len(), 1, "the migration's copy did not merge in");
+        assert_eq!(
+            meta.accounts["new"].label, "new",
+            "the concurrent create survives the migration"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "the refused temp is cleaned up: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1439,7 +1439,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // avatar from the pending sighting is recorded with it, so the org does not fall back to its
     // initial for the minutes until the next refresh re-records it.
     let pending_avatar = app.new_orgs.read().await.get(owner).cloned().flatten();
-    app.mark_org_known(owner, pending_avatar.as_deref());
+    app.mark_org_known(owner, pending_avatar.as_deref()).await;
     Ok(Json(session))
 }
 
