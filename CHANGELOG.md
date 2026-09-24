@@ -35,7 +35,7 @@ setting) is called out under **Take care** rather than left for you to find.
   repository and actor plus search, 50 rows a page with older activity on request, runs of quiet
   events folded into one expandable row ("12 colonies finished with nothing to change, 00:15–00:16"),
   and each row linking to its colony, pull request or settings section. See
-  [docs/protocol.md](docs/protocol.md) §6.9. ([#HISTORY_PR])
+  [docs/protocol.md](docs/protocol.md) §6.9. ([#527])
 - **Cached views survive a restart and a GitHub outage.** The Packages tab, repository meta,
   lines of code and registry facts are kept on disk (`<data>/cache`, capped, least-recently-used
   first out) and served at once after a restart with "updated 5m ago · refreshing" and a Refresh
@@ -90,7 +90,7 @@ setting) is called out under **Take care** rather than left for you to find.
   restart touching every colony — so one sweep re-dated days-old outcomes to "just now" and drew them as
   a burst of identical lines, and three colonies launched on the same issue read as one event repeated.
   Outcomes now come from the activity log at the time they happened; a colony that finished before the
-  log existed is shown once, with its time marked approximate, and every row names its colony. ([#HISTORY_PR])
+  log existed is shown once, with its time marked approximate, and every row names its colony. ([#527])
 - **Misconfiguration refuses with a name and a fix instead of degrading silently.** A settings save
   refuses an unknown key, naming it and the settings the module does take (a key already stored still
   passes, or a provider switch would lock you out of saving); an enum refusal lists the options; a
@@ -707,7 +707,7 @@ Macs. ([#74])
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
 [#321]: https://github.com/Colonizer-dev/harness/issues/321
 [#519]: https://github.com/Colonizer-dev/harness/pull/519
-[#HISTORY_PR]: https://github.com/Colonizer-dev/harness/pull/HISTORY_PR
+[#527]: https://github.com/Colonizer-dev/harness/pull/527
 [#329]: https://github.com/Colonizer-dev/harness/issues/329
 [#331]: https://github.com/Colonizer-dev/harness/issues/331
 [#326]: https://github.com/Colonizer-dev/harness/issues/326
