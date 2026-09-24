@@ -1637,13 +1637,37 @@ fn strip_nested_git(root: &FsPath) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-/// Reads `pr.md` written by the VM. It must be a regular file (not a symlink to a host secret).
+/// Opens and reads a file the VM may have written, through a single handle it cannot redirect.
+/// `O_NOFOLLOW` refuses a symlinked final component outright, and the handle is fstat'ed before
+/// anything is read, so only a regular file within `cap` bytes is ever decoded — the fstat is the
+/// fast reject, and the read itself is bounded by `take`, so a VM appending after it cannot grow
+/// the buffer past the cap. `O_NONBLOCK` is for the same trick with a FIFO: opening one for reading
+/// blocks until a writer turns up, and a publisher parked on that would hang; it is a no-op on the
+/// regular files that get this far.
+fn read_regular_file(path: &FsPath, cap: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() > cap {
+        return Err(std::io::Error::other("not a regular file within the size cap"));
+    }
+    let mut content = String::new();
+    file.take(cap + 1).read_to_string(&mut content)?;
+    if content.len() > cap as usize {
+        return Err(std::io::Error::other("grew past the size cap while being read"));
+    }
+    Ok(content)
+}
+
+/// Reads `pr.md` written by the VM. It must be a regular file (not a symlink to a host secret):
+/// [`read_regular_file`] opens and reads through one handle, so the VM — which can write `out`
+/// while the colony is live, including while a retry publishes — has no check-then-read window.
+/// Every failure reads as "no content" here, matching a file that was never written.
 fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
-    let path = out.join("pr.md");
-    let content = match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_file() && meta.len() <= 256_000 => std::fs::read_to_string(&path).ok(),
-        _ => None,
-    };
+    let content = read_regular_file(&out.join("pr.md"), 256_000).ok();
     let default_title = match s.issue {
         Some(number) => format!("Fix #{number}: {}", s.issue_title),
         None => format!("Changes from Colonizer session {}", s.id),
@@ -2399,6 +2423,62 @@ mod tests {
         std::fs::write(&target, "not a PR description").unwrap();
         std::os::unix::fs::symlink(&target, &pr).unwrap();
         assert_eq!(pr_description_mark(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pr_description_is_read_only_from_a_regular_file() {
+        let dir = std::env::temp_dir().join(format!("colonizer-github-test-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
+        let fallback = ("Fix #14: PDF rendering".to_string(), String::new());
+        let pr = dir.join("pr.md");
+
+        std::fs::write(&pr, "# A title\n\nThe body\n").unwrap();
+        assert_eq!(
+            read_pr_description(&dir, &s),
+            ("A title".to_string(), "The body".to_string()),
+            "a plain file's first line is the title, the rest the body"
+        );
+
+        // Anything else falls back to the default title and an empty body, having read nothing.
+        let secret = dir.join("secret");
+        std::fs::write(&secret, "Title\n\nhost-only content").unwrap();
+        std::fs::remove_file(&pr).unwrap();
+        std::os::unix::fs::symlink(&secret, &pr).unwrap();
+        assert_eq!(read_pr_description(&dir, &s), fallback.clone(), "a symlink to a host file");
+
+        std::fs::remove_file(&pr).unwrap();
+        let cpath = std::ffi::CString::new(pr.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `cpath` is a valid NUL-terminated path to this test's own temp dir, owned here,
+        // and mkfifo only reads it.
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o644 as _) }, 0);
+        assert_eq!(
+            read_pr_description(&dir, &s),
+            fallback.clone(),
+            "a FIFO, without blocking on its open"
+        );
+
+        std::fs::remove_file(&pr).unwrap();
+        std::fs::create_dir(&pr).unwrap();
+        assert_eq!(read_pr_description(&dir, &s), fallback.clone(), "a directory");
+
+        std::fs::remove_dir(&pr).unwrap();
+        // The cap itself still passes; only the byte past it does not.
+        std::fs::write(&pr, "x".repeat(256_000)).unwrap();
+        let (title, body) = read_pr_description(&dir, &s);
+        assert_eq!(
+            (title, body),
+            (format!("{}…", "x".repeat(200)), String::new()),
+            "a file exactly at the cap is read, its lone line truncated to the title"
+        );
+
+        std::fs::write(&pr, "x".repeat(256_001)).unwrap();
+        assert_eq!(
+            read_pr_description(&dir, &s),
+            fallback,
+            "a file past the cap is as good as absent"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
