@@ -55,6 +55,13 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: VENDOR_KINDS="plugin prompt" sh scripts/fetch-vendor.sh
 
+      # The staged packs against the full skill-pack rule set, the same step CI runs: a pin whose
+      # staged copy fails validation never becomes a proposal either (the updater already skipped
+      # the pins it could check from their archives).
+      - name: Validate the staged packs
+        if: steps.check.outputs.changed == 'true'
+        run: node scripts/validate-plugins.mjs dist/plugins/*
+
       - name: Propose
         if: steps.check.outputs.changed == 'true'
         run: |

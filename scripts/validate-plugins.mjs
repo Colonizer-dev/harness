@@ -9,15 +9,18 @@
 // absent) | manifest-name (plain name a la is_plain_name in plugins.rs; NOT required to
 // match the dir basename, so temp/staging checkouts validate) | manifest-version (semver)
 // | manifest-description | manifest-skills (must be an array) | skill-missing (listed skill
-// lacks skills/<name>/SKILL.md) | skill-name | skill-frontmatter | skill-duplicate
+// lacks skills/<name>/SKILL.md) | skill-name (a legacy directory-style entry like `./skills/`
+// is accepted, mirroring is_skill_tree in plugins.rs) | skill-frontmatter | skill-duplicate
 // (case-insensitive, within the manifest list or within skills/) | mcp-parse | mcp-shape
 // | mcp-server (needs a stdio command or remote url) | mcp-remote-hosts (a remote url needs
 // non-empty hosts/allowedHosts, so the sandbox gate keeps working).
 //
-// Hook point (NOT yet wired; issue #370): in scripts/update-vendored-plugins.mjs main(), after
-// diffSkills(...) and before applyUpdate(...), extract the `after` archive to a temp dir
-// and call validatePack(topDir), skipping the pin when !ok. Plumbing the extracted tree
-// through is more than a <10-line hook, so this stays standalone:
+// Wired in at every gate (issue #370): the vendored-plugin updater runs validatePack on the new
+// archive of each pin it stages from that archive and skips the pin when !ok
+// (scripts/update-vendored-plugins.mjs); CI and the updater's proposal workflow stage the pinned
+// packs (VENDOR_KINDS="plugin prompt" sh scripts/fetch-vendor.sh) and run this CLI over
+// dist/plugins/*; and the Rust boot path (crates/colonizer/src/plugins.rs) enforces the mcp-server
+// and mcp-remote-hosts rules with the same accepted shapes. Standalone use:
 // `node scripts/validate-plugins.mjs <dir>...`.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -27,6 +30,63 @@ const err = (file, rule, message) => ({ file, rule, message });
 
 /** Plain names only, mirroring `is_plain_name` in crates/colonizer/src/util.rs. */
 const isPlainName = (name) => typeof name === 'string' && /^(?!\.)(?!.*\.\.)[^/\\:,\0]+$/.test(name);
+
+const isFileAt = (path) => {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+};
+
+const isDirectory = (path) => {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/** Directory entries of `dir` as paths, following symlinks (a linked directory counts, an
+ * unreadable or dangling one is skipped) — the semantics of `is_dir()` on the path in Rust,
+ * not the lstat a Dirent carries. */
+const subdirectories = (dir) => {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const dirs = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    try {
+      if (statSync(path).isDirectory()) dirs.push(path);
+    } catch {
+      // Dangling symlink or unreadable: not a directory we can walk.
+    }
+  }
+  return dirs;
+};
+
+/** A legacy directory-style manifest entry (`"./skills/"`, `"skills/"`, `"."`): "every skill under
+ * that directory", the shape upstream ecc ships. Accepted exactly as `is_skill_tree` in
+ * crates/colonizer/src/plugins.rs accepts it: `rel` (leading `./` and slashes already stripped,
+ * never containing `..`) resolves under `dir` to a directory holding a `SKILL.md` at most two
+ * levels beneath it. */
+function isSkillTree(dir, rel) {
+  if (rel.includes('..')) return false;
+  const base = rel === '.' ? dir : join(dir, rel);
+  if (!isDirectory(base)) return false;
+  const stack = [[base, 0]];
+  while (stack.length > 0) {
+    const [sub, depth] = stack.pop();
+    if (isFileAt(join(sub, 'SKILL.md'))) return true;
+    if (depth >= 2) continue;
+    for (const child of subdirectories(sub)) stack.push([child, depth + 1]);
+  }
+  return false;
+}
 
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
@@ -116,6 +176,11 @@ export function validatePack(dir) {
   const onDiskNames = new Set();
   for (const entry of listed) {
     const name = typeof entry === 'string' ? entry : entry?.name;
+    // A legacy directory-style entry means "every skill under that directory", accepted exactly
+    // as plugins.rs's is_skill_tree accepts it (same normalization: trim, strip a leading `./`
+    // and slashes), so both checkers agree on the packs that actually ship.
+    const rel = typeof name === 'string' ? name.trim().replace(/^(\.\/)+/, '').replace(/^\/+|\/+$/g, '') : '';
+    if (rel !== '' && isSkillTree(dir, rel)) continue;
     if (!isPlainName(name)) {
       errors.push(err('plugin.json', 'skill-name', `listed skill ${JSON.stringify(entry)} is not a plain, filesystem-safe name`));
       continue;

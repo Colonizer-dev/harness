@@ -10,10 +10,13 @@
 // A pin follows its upstream the way it was pinned: a codeload `refs/tags/<tag>` URL follows the latest
 // GitHub release, and a codeload `<commit>` URL follows the default branch. The report lists skills added,
 // removed and changed between the pinned archive and the new one, so a reviewer sees what an agent would
-// now be told to do, not just a new hash. Nothing here decides to trust an update: scripts/fetch-vendor.sh
+// now be told to do, not just a new hash. Nothing here decides to trust an update on its own: the new
+// archive has to pass skill-pack validation (below) for the pin to be rewritten, scripts/fetch-vendor.sh
 // still has to stage it, and a person merges it.
 //
 // Uses GH_TOKEN or GITHUB_TOKEN when set (a higher API rate limit); works without one.
+
+import { validatePack } from './validate-plugins.mjs';
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -47,14 +50,20 @@ async function download(url) {
 
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 
+/** An archive extracted to a temp dir: `root` is its single top-level entry, `dir` what to remove. */
+function extract(archive) {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-vendor-'));
+  writeFileSync(join(dir, 'archive.tgz'), archive);
+  execFileSync('tar', ['-xzf', 'archive.tgz'], { cwd: dir });
+  const top = readdirSync(dir).find((name) => name !== 'archive.tgz');
+  return { dir, root: join(dir, top) };
+}
+
 /** Every skill in an archive, as `<dir under skills/>` → a hash of all its files. */
 function skillsIn(archive) {
-  const dir = mkdtempSync(join(tmpdir(), 'colonizer-vendor-'));
+  const { dir, root } = extract(archive);
   try {
-    writeFileSync(join(dir, 'archive.tgz'), archive);
-    execFileSync('tar', ['-xzf', 'archive.tgz'], { cwd: dir });
-    const top = readdirSync(dir).find((name) => name !== 'archive.tgz');
-    const base = join(dir, top, 'skills');
+    const base = join(root, 'skills');
     const skills = new Map();
     const walk = (current) => {
       let entries;
@@ -92,6 +101,25 @@ function diffSkills(before, after) {
   const removed = [...before.keys()].filter((k) => !after.has(k)).sort();
   const changed = [...after.keys()].filter((k) => before.has(k) && before.get(k) !== after.get(k)).sort();
   return { added, removed, changed, total: after.size };
+}
+
+// The plugin pins scripts/fetch-vendor.sh stages into dist/plugins/<name> straight from the archive's
+// top-level directory, so that directory is the pack a colony would mount. Not here: google-skills,
+// whose staged pack is synthesized at stage time (a generated manifest, Colonizer's finder, a rewritten
+// catalog) and so has no pack in the archive to validate — CI validates the staged copy instead — and
+// pins of other kinds (caveman's prompt text, fast-jev-compaction's hook), which stage no pack at all.
+const ARCHIVE_STAGED_PACKS = new Set(['ecc', 'superpowers']);
+
+/** validatePack on the pack a pin's archive stages into dist/plugins, or null for a pin that stages no
+ * pack from its archive. The temp extraction is gone by the time this returns. */
+export function validateArchivePack(name, kind, archive) {
+  if (kind !== 'plugin' || !ARCHIVE_STAGED_PACKS.has(name)) return null;
+  const { dir, root } = extract(archive);
+  try {
+    return validatePack(root);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** The newest upstream pin for a lock entry, or null when it is already current. */
@@ -166,10 +194,21 @@ function section(entry, next, diff) {
   ].join('\n');
 }
 
+/** A summary block for an update not adopted: what moved, and which rules the new archive broke. */
+function skippedSection(entry, next, errors) {
+  return [
+    `### \`${entry.name}\`: skipped, stays at ${entry.version}`,
+    '',
+    `[${next.label}](${next.link}) fails skill-pack validation, so the lock line was not rewritten. [Upstream diff](${next.compare}).`,
+    ...errors.map((e) => `- \`${e.file}\` [${e.rule}] ${e.message}`),
+  ].join('\n');
+}
+
 async function main() {
   const text = readFileSync(lockPath, 'utf8');
   const { lines, entries } = parseLock(text);
   const sections = [];
+  const skipped = [];
   for (const entry of entries) {
     const next = await latest(entry);
     if (!next) {
@@ -183,6 +222,13 @@ async function main() {
     }
     const diff = diffSkills(skillsIn(before), skillsIn(after));
     console.log(`  skills: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length} (${diff.total} total)`);
+    const pack = validateArchivePack(entry.name, entry.kind, after);
+    if (pack && !pack.ok) {
+      console.log('  skipped: the new archive fails skill-pack validation');
+      for (const e of pack.errors) console.log(`    ${e.file} [${e.rule}] ${e.message}`);
+      skipped.push(skippedSection(entry, next, pack.errors));
+      continue;
+    }
     applyUpdate(lines, entry, next, sha256(after));
     sections.push(section(entry, next, diff));
   }
@@ -197,13 +243,16 @@ async function main() {
     mkdirSync(dirname(summary), { recursive: true });
     writeFileSync(
       summary,
-      changed
+      changed || skipped.length > 0
         ? [
-            'Upstream moved for these vendored plugins. `vendor/vendor.lock` below pins the new archives, and `scripts/fetch-vendor.sh` staged them with its checks (no hooks, no MCP servers, the Google finder still local).',
+            changed
+              ? 'Upstream moved for these vendored plugins. `vendor/vendor.lock` below pins the new archives, and `scripts/fetch-vendor.sh` staged them with its checks (no hooks, no MCP servers, the Google finder still local).'
+              : 'Upstream moved, but every proposed pin below failed skill-pack validation, so `vendor/vendor.lock` is unchanged.',
             '',
             'These skills are instructions to an agent that can push: read what changed before merging.',
             '',
             ...sections,
+            ...skipped,
             '',
             '_Opened by `.github/workflows/vendored-plugin-updates.yml`._',
           ].join('\n')
@@ -211,10 +260,22 @@ async function main() {
     );
   }
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed}\n`);
-  if (!changed) console.log('no updates');
+  if (!changed) {
+    if (skipped.length > 0) {
+      // Red, not "no updates": upstream moved, and every proposal was refused. The workflow's
+      // happy paths must not report the plugins as current when they are not.
+      console.error('every proposed update failed skill-pack validation; the lock is unchanged');
+      process.exitCode = 1;
+    } else {
+      console.log('no updates');
+    }
+  }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+const invoked = process.argv[1] && import.meta.url.endsWith(encodeURI(process.argv[1].split('/').pop()));
+if (invoked) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

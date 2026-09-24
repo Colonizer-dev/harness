@@ -107,11 +107,12 @@ fn is_skill_tree(dir: &Path, rel: &str) -> bool {
 /// Boot-time structural validation for a plugin directory, run from
 /// [`resolve`]: the manifest must exist and parse (root or legacy path),
 /// every `skills/*/` directory carrying a `SKILL.md` must have a safe plain
-/// name, and every skill the manifest's `skills` array lists must exist on
-/// disk. A pack that fails any of these blocks its colony's launch with the
-/// named error rather than mounting a degraded colony. The deeper rule set —
-/// notably `mcp.json` host-gating — lives in `scripts/validate-plugins.mjs`
-/// and is deliberately not duplicated here.
+/// name, every skill the manifest's `skills` array lists must exist on disk,
+/// and an optional `mcp.json` must give every server a stdio `command` or a
+/// remote `url` with declared hosts ([`mcp_hosts`]). A pack that fails any of
+/// these blocks its colony's launch with the named error rather than mounting
+/// a degraded colony. The deeper rule set — semver, SKILL.md frontmatter,
+/// duplicate names within a pack — lives in `scripts/validate-plugins.mjs`.
 pub fn validate(dir: &Path) -> Result<()> {
     let manifest_path = manifest_file(dir);
     let data = match std::fs::read(&manifest_path) {
@@ -165,7 +166,95 @@ pub fn validate(dir: &Path) -> Result<()> {
             }
         }
     }
+    // The mcp.json rules `scripts/validate-plugins.mjs` enforces at stage time, enforced here on
+    // the pack's own `mcp.json` (not Claude Code's `.mcp.json` spelling, which this does not
+    // read): boot refuses what staging would refuse.
+    mcp_hosts(dir)?;
     Ok(())
+}
+
+/// The server map an `mcp.json` document carries: `mcpServers`/`servers` when either key holds an
+/// object, otherwise the document itself. `None` when the document is not an object at all.
+/// Mirrors `serverMap` in `scripts/validate-plugins.mjs`, so both checkers read the same shapes.
+fn server_map(doc: &Value) -> Option<&Value> {
+    let object = doc.as_object()?;
+    for key in ["mcpServers", "servers"] {
+        if let Some(map) = object.get(key).filter(|value| value.as_object().is_some()) {
+            return Some(map);
+        }
+    }
+    Some(doc)
+}
+
+/// The non-empty strings a `hosts`/`allowedHosts` declaration lists: the non-empty entries of an
+/// array, or one non-empty string. Absent, `null` or any other shape declares nothing — the same
+/// reading `scripts/validate-plugins.mjs` gives the field.
+fn declared_hosts(hosts: Option<&Value>) -> Vec<String> {
+    match hosts {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str().filter(|host| !host.is_empty()))
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(host)) if !host.is_empty() => vec![host.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// The hosts a pack's optional `mcp.json` declares for its servers, under the same rules
+/// `scripts/validate-plugins.mjs` applies: the file parses, the server map (the document, or its
+/// `mcpServers`/`servers`) is an object of server entries, every server has a non-empty stdio
+/// `command` or a non-empty remote `url`, and a remote one declares a non-empty
+/// `hosts`/`allowedHosts`. A pack with no `mcp.json` declares nothing.
+///
+/// Nothing enforces the hosts yet — colonies boot with `--net public` — but this is the reader the
+/// egress allowlist of #304 consumes, so the declaration is checked where the pack is validated
+/// ([`validate`]) rather than trusted later.
+pub(crate) fn mcp_hosts(dir: &Path) -> Result<Vec<String>> {
+    let path = dir.join("mcp.json");
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        // No tool servers: nothing declared, nothing to gate.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => bail!("{}: invalid mcp.json: {err}", path.display()),
+    };
+    let doc: Value = match serde_json::from_slice(&data) {
+        Ok(doc) => doc,
+        Err(err) => bail!("{}: invalid mcp.json: {err}", path.display()),
+    };
+    let Some(servers) = server_map(&doc).and_then(Value::as_object) else {
+        bail!(
+            "{}: mcp.json must be an object of server entries (or one under mcpServers/servers)",
+            path.display()
+        );
+    };
+    let mut hosts = Vec::new();
+    for (server, config) in servers {
+        let Some(cfg) = config.as_object() else {
+            bail!("{}: server {server:?} must be an object", path.display());
+        };
+        let command = cfg.get("command").and_then(Value::as_str).is_some_and(|c| !c.is_empty());
+        let url = cfg.get("url").and_then(Value::as_str).is_some_and(|u| !u.is_empty());
+        // `hosts` falls through to `allowedHosts` only when absent or null, as `??` does there.
+        let declared = declared_hosts(
+            cfg.get("hosts")
+                .filter(|value| !value.is_null())
+                .or_else(|| cfg.get("allowedHosts").filter(|value| !value.is_null())),
+        );
+        if !command && !url {
+            bail!("{}: server {server:?} needs a stdio command or a remote url", path.display());
+        }
+        if url && !command && declared.is_empty() {
+            bail!(
+                "{}: remote server {server:?} needs a non-empty hosts/allowedHosts declaration",
+                path.display()
+            );
+        }
+        hosts.extend(declared);
+    }
+    hosts.sort();
+    hosts.dedup();
+    Ok(hosts)
 }
 
 /// Skill names across the enabled packs must be unique: the model addresses a
@@ -414,6 +503,71 @@ mod tests {
         std::fs::write(dir.join("skills/.hidden/SKILL.md"), "---\n").unwrap();
         let err = resolve(&cfg, "unsafe-pack").unwrap_err().to_string();
         assert!(err.contains(".hidden"), "names the directory: {err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_remote_mcp_server_without_hosts_fails_naming_the_rule() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/remote-pack");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(dir.join("mcp.json"), r#"{"greeter": {"url": "https://api.example/mcp"}}"#).unwrap();
+        let err = resolve(&cfg, "remote-pack").unwrap_err().to_string();
+        assert!(err.contains("mcp.json"), "names the file: {err}");
+        assert!(
+            err.contains("remote server \"greeter\" needs a non-empty hosts"),
+            "names the rule: {err}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_remote_mcp_server_with_hosts_passes_and_mcp_hosts_lists_them() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/remote-pack");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"mcpServers": {
+                "a": {"url": "https://api.example/mcp", "hosts": ["api.example", ""]},
+                "b": {"url": "https://b.example/mcp", "allowedHosts": "b.example"}}}"#,
+        )
+        .unwrap();
+        assert!(resolve(&cfg, "remote-pack").is_ok());
+        // Both spellings read, empty entries dropped, the result sorted and deduplicated.
+        assert_eq!(mcp_hosts(&dir).unwrap(), ["api.example", "b.example"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_stdio_mcp_server_passes_and_a_pack_without_mcp_json_passes() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/stdio-pack");
+        plugin(&dir, "1.0.0", &[], &[]);
+        assert!(resolve(&cfg, "stdio-pack").is_ok(), "a pack with no mcp.json at all is fine");
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"mcpServers": {"local": {"command": "node", "args": ["server.js"]}}}"#,
+        )
+        .unwrap();
+        assert!(resolve(&cfg, "stdio-pack").is_ok());
+        assert_eq!(mcp_hosts(&dir).unwrap(), Vec::<String>::new());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_malformed_mcp_json_fails_naming_the_file() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/broken-mcp");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(dir.join("mcp.json"), "{broken").unwrap();
+        let err = resolve(&cfg, "broken-mcp").unwrap_err().to_string();
+        assert!(err.contains("mcp.json"), "names the file: {err}");
+        assert!(err.contains("invalid mcp.json"), "names the rule: {err}");
+        // A server that is neither stdio nor remote has its own rule.
+        std::fs::write(dir.join("mcp.json"), r#"{"mcpServers": {"weird": {"args": []}}}"#).unwrap();
+        let err = resolve(&cfg, "broken-mcp").unwrap_err().to_string();
+        assert!(err.contains("needs a stdio command or a remote url"), "names the rule: {err}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
