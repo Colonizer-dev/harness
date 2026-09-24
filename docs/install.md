@@ -144,6 +144,49 @@ runs with userspace networking and a SOCKS5 listener, so a Mac needs no TUN devi
 special entitlements: Go's linker signs the binaries ad hoc, which is all Apple Silicon requires.
 If the three mesh binaries are absent, colonies fall back to a loopback port, as before.
 
+## Desktop: install the cockpit as an app, start at login
+
+**The cockpit as an app.** The cockpit is an installable web app: its own window, a Dock or
+taskbar icon, the same sign-in.
+
+- **Chrome or Edge:** use the install icon in the address bar, or **Settings → Desktop → Install
+  app**.
+- **Safari:** **File → Add to Dock**.
+
+A small service worker caches the build's hashed `/assets` files and shows an offline page when
+the mothership isn't running. It never touches `/api`, writes or the sign-in link. The manifest,
+service worker, offline page and icons load before sign-in; they contain nothing private.
+
+**Start at login.**
+
+```sh
+colonizer login-item enable    # start the mothership when you log in
+colonizer login-item status    # installed? enabled? which pid?
+colonizer login-item disable   # stop doing that (the running mothership keeps running)
+```
+
+The same switch is at **Settings → Desktop → Start Colonizer at login**.
+
+- **macOS:** a LaunchAgent at `~/Library/LaunchAgents/dev.colonizer.mothership.plist`.
+- **Linux:** a systemd user unit at `~/.config/systemd/user/colonizer.service`. On a headless
+  host, run `loginctl enable-linger` so it starts at boot, not only when you log in.
+
+Either way, it:
+
+- runs `~/.local/bin/colonizer` with `COLONIZER_NO_BROWSER=1`
+- restarts it only after a crash
+- appends to `mothership.out` in the data directory
+- carries over this shell's `PATH` and `COLONIZER_*` settings, never anything named like a key,
+  token, secret or password
+
+Disabling removes the agent and never stops a running mothership, so it never interrupts a
+colony.
+
+**One mothership at a time.** A mothership binds its port before anything else. A second one,
+say one started at login while another already runs by hand, says the port is taken and stops
+without touching any colony. Started by the login agent, it exits cleanly, so the agent doesn't
+retry it.
+
 ## Where things live
 
 | What | Where | Change it with |

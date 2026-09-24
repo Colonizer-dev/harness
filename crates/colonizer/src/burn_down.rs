@@ -43,17 +43,22 @@ impl Cfg {
     /// Settings snapshot. `enabled` carries the module's on/off switch; a module that was never
     /// configured reads as off with every setting at its schema default. A `reset_time` that
     /// never parses is encoded as an impossible time (`and_hms_opt` refuses hour > 23), so
-    /// `next_reset` reads null and the window never opens.
+    /// `next_reset` reads null and the window never opens. Numbers read clamped into the ranges
+    /// the save path enforces: modules.json is not re-validated on load, `lead_hours` becomes a
+    /// `Duration::hours`, which panics out of bounds, and a provider this build doesn't ship
+    /// resolves to no schema at all — no bounds to read and no default — so the clamps are
+    /// literal. `spend_usd_per_colony` stays raw: `decide` holds on a non-positive one by design,
+    /// and nothing downstream of it can panic.
     fn from_choice(choice: &ModuleChoice, schema: &Value) -> Cfg {
         Cfg {
             enabled: choice.enabled,
             reset_weekday: parse_weekday(&setting_str(choice, schema, "reset_weekday")).unwrap_or(7),
             reset_time: parse_time(&setting_str(choice, schema, "reset_time")).unwrap_or((u32::MAX, u32::MAX)),
-            lead_hours: setting_f64(choice, schema, "lead_hours"),
-            reserve_pct: setting_f64(choice, schema, "reserve_pct"),
+            lead_hours: setting_f64(choice, schema, "lead_hours").clamp(1.0, 168.0),
+            reserve_pct: setting_f64(choice, schema, "reserve_pct").clamp(0.0, 90.0),
             allowance_usd: setting(choice, schema, "allowance_usd").and_then(Value::as_f64),
             spend_usd_per_colony: setting_f64(choice, schema, "spend_usd_per_colony"),
-            max_live: setting_u64(choice, schema, "max_live") as usize,
+            max_live: setting_u64(choice, schema, "max_live").clamp(1, 8) as usize,
             repos: setting_str(choice, schema, "repos")
                 .split(',')
                 .map(str::trim)
@@ -526,6 +531,46 @@ mod tests {
         let mut c = cfg();
         c.reset_time = (u32::MAX, u32::MAX);
         assert_eq!(decide(&c, monday(12, 0), &NO_OBS), Decision::OutsideWindow);
+    }
+
+    /// A hand-edited or restored modules.json is read as-is — `validate_settings` only guards the
+    /// API save path — so the read must hold the schema's range: the window arithmetic is
+    /// `Duration::hours`, which panics out of bounds and would take `GET /api/burn-down` and the
+    /// tick with it.
+    #[test]
+    fn an_out_of_range_lead_hours_from_the_file_is_clamped_to_the_schema_range() {
+        let schema = modules::schema_for("burn_down", "default", &[]);
+        let mut choice = ModuleChoice {
+            provider: "default".into(),
+            enabled: true,
+            settings: Map::new(),
+        };
+        choice.settings.insert("lead_hours".into(), json!(1e30));
+        choice.settings.insert("repos".into(), json!("acme/app"));
+        choice.settings.insert("allowance_usd".into(), json!(100.0));
+        choice.settings.insert("spend_usd_per_colony".into(), json!(25.0));
+        let cfg = Cfg::from_choice(&choice, &schema);
+        assert_eq!(cfg.lead_hours, 168.0, "clamped to the schema maximum");
+        // The window arithmetic the status API and the tick both run, over the whole payload.
+        let value = status_at(&cfg, monday(0, 0) - Duration::days(2), &[]);
+        assert_eq!(value["state"], "burning", "{value}");
+        assert!(value["window_start"].is_string(), "{value}");
+        choice.settings.insert("lead_hours".into(), json!(-5.0));
+        assert_eq!(
+            Cfg::from_choice(&choice, &schema).lead_hours,
+            1.0,
+            "clamped to the schema minimum"
+        );
+        // A provider this build doesn't ship resolves to no schema at all — no bounds to read and
+        // no default, the reset schedule included, so no window ever opens — and the window
+        // arithmetic must still hold.
+        let mut bogus = choice.clone();
+        bogus.provider = "bogus".into();
+        bogus.settings.insert("lead_hours".into(), json!(1e30));
+        let cfg = Cfg::from_choice(&bogus, &modules::schema_for("burn_down", "bogus", &[]));
+        assert_eq!(cfg.lead_hours, 168.0, "clamped with no schema to read bounds from");
+        let value = status_at(&cfg, monday(0, 0) - Duration::days(2), &[]);
+        assert_eq!(value["state"], "outside_window", "{value}");
     }
 
     #[test]

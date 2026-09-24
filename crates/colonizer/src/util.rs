@@ -56,6 +56,20 @@ pub async fn exec_within(limit: Duration, cmd: &mut Command) -> Result<String> {
         .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
 }
 
+/// Runs a command with a deadline and returns `(stdout, stderr)` whatever the exit status: `gh api
+/// -i` prints a 304's head on stdout and then exits 1.
+pub async fn exec_capture(limit: Duration, cmd: &mut Command) -> Result<(String, String)> {
+    let desc = describe(cmd);
+    let out = tokio::time::timeout(limit, cmd.stdin(Stdio::null()).kill_on_drop(true).output())
+        .await
+        .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
+        .with_context(|| format!("failed to start `{desc}`"))?;
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+}
+
 /// Runs a command for its exit status only.
 pub async fn exec_status(cmd: &mut Command) -> Result<bool> {
     let desc = describe(cmd);
@@ -193,7 +207,7 @@ const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 /// Standard base64 (alphabet `A–Z a–z 0–9 + /` with `=` padding), implemented by hand so no
 /// new crate is needed.
-fn b64_encode(bytes: &[u8]) -> String {
+pub(crate) fn b64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < bytes.len() {
@@ -220,7 +234,7 @@ fn b64_encode(bytes: &[u8]) -> String {
 
 /// Inverse of [`b64_encode`]. Outer whitespace is trimmed first; anything else outside the
 /// standard alphabet (including inner whitespace) is rejected with `None`.
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
         match c {
             b'A'..=b'Z' => Some((c - b'A') as u32),
@@ -621,6 +635,53 @@ pub fn is_plain_name(name: &str) -> bool {
         && !name.contains(':')
         && !name.contains(',')
         && !name.contains('\0')
+}
+
+/// Lowercase hex of `bytes`.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Streams `url` into `part`, checking its sha256 against `sha256` (lowercase hex). `progress` is told the
+/// content length once and the running byte count about every megabyte. Redirects are followed: GitHub release
+/// downloads redirect to object storage. A 404 says the file is not published, which is the usual reason a
+/// freshly pinned release is not there yet. Leaves `part` behind on failure; the caller removes it.
+pub async fn download_sha256<F, Fut>(url: &str, sha256: &str, part: &Path, progress: F) -> Result<()>
+where
+    F: Fn(Option<u64>, u64) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use futures_util::StreamExt;
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).build()?;
+    let response = client.get(url).send().await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        bail!("{url} is not published (404): the pinned release may not have been built yet");
+    }
+    let response = response.error_for_status()?;
+    progress(response.content_length(), 0).await;
+    let mut file = tokio::fs::File::create(part).await?;
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut stream = response.bytes_stream();
+    let mut bytes = 0u64;
+    let mut reported = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("the download was interrupted")?;
+        digest.update(&chunk);
+        file.write_all(&chunk).await?;
+        bytes += chunk.len() as u64;
+        if bytes - reported >= 1 << 20 {
+            reported = bytes;
+            progress(None, bytes).await;
+        }
+    }
+    file.flush().await?;
+    drop(file);
+    progress(None, bytes).await;
+    let got = hex(digest.finish().as_ref());
+    if got != sha256 {
+        bail!("checksum mismatch: expected {sha256}, got {got}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

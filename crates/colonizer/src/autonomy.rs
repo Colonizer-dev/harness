@@ -243,7 +243,7 @@ fn context_lines(tail: &str, keep: usize) -> Vec<String> {
 /// The colony's last few events as context lines. Reads the tail of the event log only — the file
 /// grows for as long as the colony lives — and reads nothing at all rather than failing loudly: this
 /// is context, and a judge without it is still a judge.
-async fn event_context(events_path: &Path) -> Vec<String> {
+pub(crate) async fn event_context(events_path: &Path) -> Vec<String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let Ok(mut file) = tokio::fs::File::open(events_path).await else {
         return Vec::new();
@@ -327,7 +327,7 @@ pub fn decide(reply: &str, questions: &[Value], free_text: bool) -> Result<(Map<
 /// judge sends its own requests, and has no Claude Code in front of it to resolve aliases for it —
 /// while every other provider gets the model verbatim, because `opus` there means whatever that
 /// provider calls it.
-fn route<'a>(model: &str, providers: &'a [Provider]) -> Result<(&'a Provider, String)> {
+pub(crate) fn route<'a>(model: &str, providers: &'a [Provider]) -> Result<(&'a Provider, String)> {
     // Hosts compare case-insensitively, so a base URL saved as `API.anthropic.com` still resolves.
     let is_anthropic =
         |p: &Provider| split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST));
@@ -368,18 +368,18 @@ fn judge_body(model: &str, prompt: &str) -> Value {
 /// and the body bytes (`openai`-wire bodies already translated), plus what translating the reply back
 /// will need. [`outbound_request`] builds it, pure, so tests can pin what actually goes upstream
 /// without a provider on the other end.
-struct Outbound {
-    url: String,
-    headers: Vec<(&'static str, String)>,
-    body: Vec<u8>,
+pub(crate) struct Outbound {
+    pub(crate) url: String,
+    pub(crate) headers: Vec<(&'static str, String)>,
+    pub(crate) body: Vec<u8>,
     /// Set on the `openai` wire, whose reply has to be translated back.
-    openai: Option<crate::openai::RequestInfo>,
+    pub(crate) openai: Option<crate::openai::RequestInfo>,
 }
 
 /// What one judged request looks like on the wire, credential aside. The Anthropic wire posts the
 /// body as-is to `/v1/messages` and carries `anthropic-version`, which the API rejects requests
 /// without; the `openai` wire translates the body first and posts it to the translated path.
-fn outbound_request(provider: &Provider, body: &Value) -> Result<Outbound> {
+pub(crate) fn outbound_request(provider: &Provider, body: &Value) -> Result<Outbound> {
     let base = provider.base_url.trim_end_matches('/');
     match provider.wire {
         Wire::Anthropic => Ok(Outbound {

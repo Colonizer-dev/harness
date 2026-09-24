@@ -11,7 +11,7 @@ import type { OrgEntry } from "../orgs";
 import type { UpdateStatus } from "../types";
 import { needFor } from "./feed";
 
-export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory" | "host" | "secrets";
+export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "loops" | "settings" | "memory" | "host" | "secrets" | "code" | "chat";
 
 const EXPANDED_KEY = "colonizer.sidebarExpanded";
 
@@ -31,7 +31,10 @@ export function navTabs({ liveCount, pendingMemory }: { needCount: number; liveC
   return [
     { view: "overview", label: "Overview", count: "" },
     { view: "home", label: "Nest", count: liveCount || "" },
+    { view: "chat", label: "Chat", count: "" },
+    { view: "code", label: "Code", count: "" },
     { view: "history", label: "History", count: "" },
+    { view: "loops", label: "Loops", count: "" },
     { view: "memory", label: "Memory", count: pendingMemory || "", urgent: pendingMemory > 0 },
     { view: "host", label: "Host", count: "" },
     { view: "secrets", label: "Secrets", count: "" },
@@ -81,6 +84,26 @@ const GLYPH: Record<string, ReactNode> = {
       <path d="M7 7.25h.01M7 16.75h.01M11 7.25h6M11 16.75h6" />
     </>
   ),
+  code: (
+    <>
+      <path d="m8.5 8-4 4 4 4M15.5 8l4 4-4 4" />
+      <path d="m13.5 5-3 14" />
+    </>
+  ),
+  loops: (
+    <>
+      <path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.5" />
+      <path d="M20 4v4.5h-4.5" />
+      <path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.5" />
+      <path d="M4 20v-4.5h4.5" />
+    </>
+  ),
+  chat: (
+    <>
+      <path d="M4.5 6.5A2 2 0 0 1 6.5 4.5h11a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H11l-4 3.5v-3.5H6.5a2 2 0 0 1-2-2z" />
+      <path d="M8.5 9.5h7M8.5 12.5h4.5" />
+    </>
+  ),
   secrets: (
     <>
       <circle cx="8" cy="15" r="4" />
@@ -121,13 +144,13 @@ const GLYPH: Record<string, ReactNode> = {
 /** ⌘B on a Mac, Ctrl+B elsewhere — what the toggle's tooltip names. */
 const SHORTCUT = typeof navigator !== "undefined" && /Mac|iP(hone|ad)/.test(navigator.platform) ? "⌘B" : "Ctrl+B";
 
-/** The outpost: a hexagon with a beacon, on the accent tile. */
+/** The outpost, drawn exactly as colonizer.dev draws it: a hexagon outline with a beacon, no tile. */
 function BrandMark(): ReactElement {
   return (
-    <span className="v3-brand grid h-8 w-8 shrink-0 place-items-center rounded-[10px] text-accent">
-      <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
-        <circle cx="12" cy="12" r="2.6" fill="currentColor" />
+    <span className="grid h-8 w-8 shrink-0 place-items-center text-accent [filter:drop-shadow(0_0_6px_color-mix(in_oklab,var(--accent)_45%,transparent))]">
+      <svg width="24" height="24" viewBox="0 0 26 26" aria-hidden="true">
+        <polygon points="13,2 23,7.5 23,18.5 13,24 3,18.5 3,7.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+        <circle cx="13" cy="13" r="3" fill="currentColor" />
       </svg>
     </span>
   );
@@ -261,7 +284,7 @@ export function NavRail(props: {
               className="flex h-10 min-w-0 cursor-pointer items-center gap-2.5 rounded-[10px] border-0 bg-transparent px-1.5"
             >
               <BrandMark />
-              <span className="text-[15px] font-semibold tracking-[-0.02em] text-text">Colonizer</span>
+              <span className="text-[18px] font-semibold lowercase leading-none tracking-[-0.035em] text-text">colonizer</span>
             </button>
             <Tip label={`Minimise sidebar · ${SHORTCUT}`} show>
               <button

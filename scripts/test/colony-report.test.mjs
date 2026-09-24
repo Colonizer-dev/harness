@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { analyze, formatReport, formatTranscript, reasons, redact, summarize, totalCost } from '../colony-report.mjs';
+import { analyze, formatReport, formatTranscript, loadColonies, reasons, redact, summarize, totalCost } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -197,6 +200,71 @@ test('a failed review is worth reading, a rejection is not', () => {
   assert.deepEqual(reasons(rejectedOnly), []);
 });
 
+/** A colony whose final turn claimed completion; the mothership then verified the claim on its own. */
+const claimed = (verification) => ({
+  mothership: 'test',
+  session: { id: 'verif01', repo: 'acme/webshop', issue: 11, status: 'pr_opened', pr_url: 'https://…/2' },
+  events: [
+    { type: 'status', state: 'working', ts: at(0) },
+    { type: 'assistant_text', message_id: 'm1', text: 'Done: the scanner now honours llms.txt, and the tests pass.', ts: at(280) },
+    { type: 'turn_end', is_error: false, duration_ms: 300_000, cost_usd: 0.4, ts: at(300) },
+    { type: 'verification', ...verification, ts: at(360) },
+  ],
+});
+
+const confirmed = {
+  verdict: 'confirmed', by_declaration: false, summary: '`npm test` green in a fresh checkout', contradictions: [],
+  command: 'npm test', command_source: 'package.json', exit_code: 0, tests_ms: 8_100, commits: 2,
+  files_changed: ['src/scan.rs', 'src/llms.txt', 'test/scan.rs', 'README.md'], snapshot: 'deadbeef', ms: 12_345,
+};
+const contradicted = {
+  verdict: 'contradicted', by_declaration: false, summary: '`npm test` exited 1 in a fresh checkout',
+  contradictions: ['described `x.rs` is not on the branch'], command: 'npm test', command_source: 'package.json',
+  exit_code: 1, tests_ms: 38_000, commits: 3, files_changed: ['a', 'b'], snapshot: 'deadbeef', ms: 41_234,
+};
+const noCommand = {
+  verdict: 'unverifiable', by_declaration: false, summary: 'no test command known for this repository', contradictions: [],
+  command: null, command_source: null, exit_code: null, tests_ms: null, commits: 1, files_changed: ['a'], snapshot: null, ms: 900,
+};
+const byDeclaration = {
+  verdict: 'unverifiable', by_declaration: true, summary: 'verify is none for this colony', contradictions: [],
+  command: null, command_source: null, exit_code: null, tests_ms: null, commits: 1, files_changed: ['a'], snapshot: null, ms: 12,
+};
+
+test('a verification is counted, keeps the last verdict, and a contradicted claim is worth reading', () => {
+  const r = analyze(claimed(confirmed));
+  assert.equal(r.verifications, 1);
+  assert.equal(r.verification_verdict, 'confirmed');
+  assert.equal(r.verification_ms, 12_345);
+  assert.deepEqual(reasons(r), []);
+  const c = analyze(claimed(contradicted));
+  assert.equal(c.contradicted_claims, 1);
+  assert.deepEqual(reasons(c), ['1 contradicted completion claim']);
+});
+
+test('the summary counts verifications and the report names them', () => {
+  const reports = [
+    analyze(claimed(confirmed)),
+    analyze(claimed(contradicted)),
+    analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] }),
+  ];
+  const s = summarize(reports);
+  assert.equal(s.verifications, 2);
+  assert.equal(s.contradicted_claims, 1);
+  assert.match(formatReport(s, reports), /Verifications: 2, 1 contradicted\./);
+  const quiet = summarize([reports[2]]);
+  assert.match(formatReport(quiet, [reports[2]]), /Verifications: 0\./);
+});
+
+test('a transcript sets the claim and its verdict side by side, one line per verdict', () => {
+  const text = formatTranscript(claimed(confirmed));
+  assert.match(text, /says: Done: the scanner now honours llms\.txt/);
+  assert.match(text, /∎ verification: CONFIRMED — `npm test` green in a fresh checkout, 4 files, 2 commits \(12\.3s\)/);
+  assert.match(formatTranscript(claimed(contradicted)), /∎ verification: CONTRADICTED — `npm test` exited 1 in a fresh checkout; described `x\.rs` is not on the branch \(41\.2s\)/);
+  assert.match(formatTranscript(claimed(noCommand)), /∎ verification: UNVERIFIABLE — no test command known for this repository, 1 file, 1 commit \(0\.9s\)/);
+  assert.match(formatTranscript(claimed(byDeclaration)), /∎ verification: unverifiable by declaration \(verify: none\)/);
+});
+
 test('the summary adds up the finding chain and names it in the report', () => {
   const s = summarize([analyze(chain), analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })]);
   assert.equal(s.findings, 1);
@@ -244,4 +312,27 @@ test('routed provider cost is carried beside Claude’s, and the total adds both
 test('the top-quarter cost reason counts routed spend', () => {
   const cheapClaude = { ...analyze({ session: { id: 'r', cost_usd: 0.05, routed_cost_usd: 2 }, events: [] }) };
   assert.deepEqual(reasons(cheapClaude, 1), ['cost $2.05 (top quarter)']);
+});
+
+/** A data dir whose one colony is known only from its sessions/ directory; removed after the test. */
+function dataDir(t, sessionsJson) {
+  const dir = mkdtempSync(join(tmpdir(), 'colony-report-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'sessions.json'), sessionsJson);
+  mkdirSync(join(dir, 'sessions', 'lost'), { recursive: true });
+  return dir;
+}
+
+test('a sessions.json that is valid JSON but not an array is treated as corrupt, not fatal', (t) => {
+  for (const body of ['{}', 'null', '"x"', '{broken']) {
+    const [colony] = loadColonies(dataDir(t, body), 'd');
+    assert.deepEqual(colony, { mothership: 'd', session: { id: 'lost' }, events: [], logs: [] });
+  }
+});
+
+test('a colony with more events than Math.max can take still reports its span', () => {
+  const n = 200_000;
+  const events = Array.from({ length: n }, (_, i) => ({ type: 'tool_call', tool_call_id: `t${i}`, name: 'Read', input: {}, ts: at(i) }));
+  const r = analyze({ session: { id: 'big' }, events, logs: [] });
+  assert.equal(r.wall_ms, (n - 1) * 1000);
 });

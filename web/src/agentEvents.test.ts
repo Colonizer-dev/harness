@@ -32,7 +32,12 @@ const WEB_TYPES = {
   model_changed: true,
   memory_proposal: true,
   finding: true,
+  verification: true,
 } satisfies Record<AgentEventBody["type"], true>;
+
+// Host events the mothership appends to events.jsonl itself (§6.3 Autopilot, §6.6): the runner never
+// emits them, so the runner-event schema does not list them, but they arrive on the same stream.
+const HOST_TYPES = new Set(["verification"]);
 
 describe("agent event types", () => {
   it("cover every event the schema defines, and nothing else", () => {
@@ -42,7 +47,7 @@ describe("agent event types", () => {
     const schemaTypes = Object.values(schema.$defs)
       .map((def) => def.properties?.type?.const)
       .filter((t): t is string => typeof t === "string");
-    expect(schemaTypes.sort()).toEqual(Object.keys(WEB_TYPES).sort());
+    expect(schemaTypes.sort()).toEqual(Object.keys(WEB_TYPES).filter((t) => !HOST_TYPES.has(t)).sort());
   });
 
   it("cover every line of the runner's fixture", () => {

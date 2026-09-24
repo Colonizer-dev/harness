@@ -502,6 +502,41 @@ describe("reduceFrame", () => {
     });
   });
 
+  describe("verification (issue #328)", () => {
+    const verdict = (body: Partial<Extract<AgentEventBody, { type: "verification" }>>) =>
+      event({
+        type: "verification",
+        verdict: "confirmed",
+        by_declaration: false,
+        summary: "`npm test` green in a fresh checkout",
+        contradictions: [],
+        command: "npm test",
+        command_source: "package.json",
+        exit_code: 0,
+        tests_ms: 8100,
+        commits: 2,
+        files_changed: ["src/scan.rs"],
+        snapshot: "deadbeef",
+        ms: 12345,
+        ...body,
+      });
+
+    it("is one harness line in the activity log, info when the claim held up", () => {
+      const s = send(colony(), verdict({}));
+      expect(s.logs).toEqual([{ source: "harness", level: "info", message: "verification: CONFIRMED — `npm test` green in a fresh checkout (12.3s)", ts: SENT_AT }]);
+    });
+
+    it("warns when the claim was contradicted, and says why plainly", () => {
+      const s = send(colony(), verdict({ verdict: "contradicted", summary: "`npm test` exited 1 in a fresh checkout", contradictions: ["described `x.rs` is not on the branch"], exit_code: 1, ms: 41234 }));
+      expect(s.logs[0]).toMatchObject({ source: "harness", level: "warn", message: "verification: CONTRADICTED — `npm test` exited 1 in a fresh checkout; described `x.rs` is not on the branch (41.2s)" });
+    });
+
+    it("verify: none is unverifiable by declaration, with nothing measured", () => {
+      const s = send(colony(), verdict({ verdict: "unverifiable", by_declaration: true, command: null, command_source: null, exit_code: null, tests_ms: null, snapshot: null, ms: 12 }));
+      expect(s.logs[0]).toMatchObject({ level: "info", message: "verification: unverifiable by declaration (verify: none)" });
+    });
+  });
+
   it("event types the colony does not know change nothing in the transcript", () => {
     const s = send(colony(), event({ type: "mystery" } as unknown as AgentEventBody));
     expect(s.messages).toEqual([]);

@@ -1,5 +1,26 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  Draft,
+  EditsRequest,
+  FileCommit,
+  RepoBlame,
+  RepoBlob,
+  RepoBranches,
+  RepoCoverage,
+  RepoGitSummary,
+  RepoLoc,
+  RepoTree,
+  Loop,
+  NewLoop,
+  ChatMessage,
+  ChatMeta,
+  ChatModels,
+  ChatCompareRequest,
+  ChatImageRef,
+  ChatPrefs,
+  ChatPatch,
+  ChatSendRequest,
+  ChatStreamEvent,
   MapFileDetail,
   RepoPackages,
   BurnDownStatus,
@@ -8,6 +29,10 @@ import type {
   SecretsListing,
   RepoMap,
   RepoMeta,
+  PackagesPublished,
+  PackagesDependencies,
+  SupplyChain,
+  ScanPending,
   TouchedFiles,
   FleetHost,
   FindingRecord,
@@ -29,6 +54,7 @@ import type {
   OrgInfo,
   OrgSettings,
   PluginListing,
+  DownloadableSkillset,
   ProviderHealth,
   PullStatus,
   RedTeamRun,
@@ -46,6 +72,7 @@ import type {
   UpdateStatus,
   UsageStatus,
   VoiceStatus,
+  LoginItemStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -141,6 +168,10 @@ export interface Api {
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
   usage(): Promise<UsageStatus>;
   setUsage(enabled: boolean): Promise<UsageStatus>;
+  /** GET /api/login-item. */
+  loginItem(): Promise<LoginItemStatus>;
+  /** POST /api/login-item: start the mothership at login, or stop doing so (never stops a running one). */
+  setLoginItem(enabled: boolean): Promise<LoginItemStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** GET /api/repos/{owner}/{repo}/packages: monorepo detection. */
@@ -177,6 +208,10 @@ export interface Api {
   claudeLoginCode(code: string): Promise<LoginView>;
   claudeLoginCancel(): Promise<LoginView>;
   plugins(): Promise<PluginListing>;
+  /** GET /api/plugins/graft */
+  graftSkillset(): Promise<DownloadableSkillset>;
+  /** POST /api/plugins/graft/download: start (or join) the download; poll graftSkillset for progress. */
+  graftDownload(): Promise<DownloadableSkillset>;
   providers(): Promise<ModelProvider[]>;
   saveProvider(id: string, body: SaveProviderRequest): Promise<ModelProvider>;
   deleteProvider(id: string): Promise<unknown>;
@@ -213,6 +248,60 @@ export interface Api {
   repoMap(repo: string): Promise<RepoMap>;
   /** GET /api/repos/{owner}/{repo}/meta: description, languages, weekly commits, contributors. */
   repoMeta(repo: string): Promise<RepoMeta>;
+  /** GET /api/orgs/{org}/packages/published: what the workspace's repositories define and publish.
+   *  These three answer from the mothership's cache; `refresh` asks it to recompute behind the answer. */
+  orgPublished(org: string, refresh?: boolean): Promise<PackagesPublished | ScanPending>;
+  /** GET /api/orgs/{org}/packages/dependencies: what they depend on, from their lockfiles. */
+  orgDependencies(org: string, refresh?: boolean): Promise<PackagesDependencies | ScanPending>;
+  /** GET /api/orgs/{org}/packages/supply-chain: risky dependencies, with reasons. */
+  orgSupplyChain(org: string, refresh?: boolean): Promise<SupplyChain | ScanPending>;
+  // The Code page (code.rs), read from the mothership's bare clone.
+  repoLoc(repo: string): Promise<RepoLoc>;
+  repoCoverage(repo: string): Promise<RepoCoverage>;
+  repoGitSummary(repo: string): Promise<RepoGitSummary>;
+  repoBranches(repo: string): Promise<RepoBranches>;
+  repoTree(repo: string, ref?: string): Promise<RepoTree>;
+  repoBlob(repo: string, path: string, ref?: string): Promise<RepoBlob>;
+  fileHistory(repo: string, path: string, ref?: string): Promise<{ path: string; ref: string; commits: FileCommit[] }>;
+  fileBlame(repo: string, path: string, ref?: string): Promise<RepoBlame>;
+  /** Commits edited files to a new branch and opens a pull request; only after an explicit confirm. */
+  createEdits(repo: string, body: EditsRequest): Promise<{ url: string; branch: string; base: string }>;
+  /** A quick answer about a file from the cheap summary model. */
+  askFile(repo: string, body: { path: string; question: string; content: string; selection?: [number, number] | null }): Promise<{ answer: string; model: string }>;
+  drafts(repo: string, ref?: string): Promise<{ repo: string; autosave: boolean; drafts: Draft[] }>;
+  saveDraft(repo: string, body: { ref: string; path: string; content: string; base_sha: string }): Promise<{ saved_at: string }>;
+  deleteDrafts(repo: string, ref: string, path?: string): Promise<{ removed: number }>;
+  editorSettings(): Promise<{ autosave: boolean }>;
+  saveEditorSettings(body: { autosave: boolean }): Promise<{ autosave: boolean }>;
+  /** Chat (docs/protocol.md): direct conversations with a model, stored on the mothership. */
+  chats(): Promise<{ chats: ChatMeta[] }>;
+  chatModels(): Promise<ChatModels>;
+  createChat(body: { title?: string; model?: string; system?: string; max_tokens?: number; temperature?: number; persona?: string; workspace?: string }): Promise<ChatMeta>;
+  chat(id: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }>;
+  patchChat(id: string, body: ChatPatch): Promise<ChatMeta>;
+  deleteChat(id: string): Promise<unknown>;
+  /** Streams the reply; `onEvent` gets each line; aborting `signal` stops the reply (kept as stopped). */
+  sendChat(id: string, body: ChatSendRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** One message to two models at once; every streamed line carries its `lane`. */
+  compareChat(id: string, body: ChatCompareRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** Keeps one compare reply and drops its sibling. */
+  pickChat(id: string, messageId: string): Promise<{ messages: ChatMessage[] }>;
+  /** A new conversation with the messages up to (`include`) or just before one of this one's. */
+  forkChat(id: string, messageId: string, include: boolean): Promise<ChatMeta>;
+  retitleChat(id: string): Promise<ChatMeta>;
+  /** The URL of the conversation's Markdown export (a download). */
+  /** The Markdown export; `zip` packs it with the conversation's images beside it. */
+  chatExportUrl(id: string, zip?: boolean): string;
+  /** POST /api/chat/attachments: stores one image (checked by its bytes, metadata stripped) and answers its reference. */
+  uploadChatImage(file: Blob, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<ChatImageRef>;
+  /** GET /api/chat/attachments/{sha}: where a stored image is served. */
+  chatImageUrl(sha: string): string;
+  chatPrefs(): Promise<ChatPrefs>;
+  /** Saves a persona preset's system prompt; `null` goes back to the built-in one. */
+  saveChatPersona(id: string, system: string | null): Promise<ChatPrefs>;
+  /** Keeps a note on a reply; `null` clears it. */
+  saveChatFeedback(messageId: string, note: string | null): Promise<ChatPrefs>;
+  chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string }>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
@@ -231,6 +320,15 @@ export interface Api {
   redTeamRuns(): Promise<RedTeamRun[]>;
   startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
   stopRedTeamRun(id: string): Promise<RedTeamRun>;
+  /** GET /api/loops: the scheduled colonies. */
+  loops(): Promise<Loop[]>;
+  createLoop(body: NewLoop): Promise<Loop>;
+  updateLoop(id: string, body: NewLoop): Promise<Loop>;
+  deleteLoop(id: string): Promise<void>;
+  /** POST /api/loops/{id}/run-now: start the next run now (409 while the previous run is live). */
+  runLoopNow(id: string): Promise<Session>;
+  /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
+  loopRuns(id: string): Promise<Session[]>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
   createRedTeamSchedule(body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
   updateRedTeamSchedule(id: string, body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
@@ -270,8 +368,95 @@ const post = <T>(path: string, body?: unknown) =>
 const put = <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body: JSON.stringify(body) });
 
 const del = <T>(path: string) => request<T>(path, { method: "DELETE" });
+const repoPath = (repo: string) => `/api/repos/${repo.split("/").map(encodeURIComponent).join("/")}`;
+/** `?a=1&b=2` from the defined values, or "". */
+const query = (params: Record<string, string | undefined | null>) => {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v != null && v !== "") q.set(k, v);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+};
 
 const enc = encodeURIComponent;
+
+/** Splits newline-delimited JSON: the complete lines parsed, and the unfinished tail to carry over. */
+export function splitNdjson(buffer: string): { events: ChatStreamEvent[]; rest: string } {
+  const lines = buffer.split("\n");
+  const rest = lines.pop() ?? "";
+  const events: ChatStreamEvent[] = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line) as ChatStreamEvent);
+    } catch {
+      /* a torn line: skipped */
+    }
+  }
+  return { events, rest };
+}
+
+/** POSTs a file as the raw body, reporting upload progress (fetch cannot), and answers the JSON reply. */
+function uploadWithProgress<T>(url: string, file: Blob, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data: unknown = null;
+      try {
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        data = xhr.responseText;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data as T);
+      else
+        reject(
+          new ApiError(
+            data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : xhr.statusText || `upload failed (${xhr.status})`,
+            xhr.status,
+          ),
+        );
+    };
+    xhr.onerror = () => reject(new ApiError("the upload failed", 0));
+    xhr.onabort = () => reject(new DOMException("aborted", "AbortError"));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(file);
+  });
+}
+
+/** POSTs `body` and hands each line of the newline-delimited JSON answer to `onEvent` as it lands. */
+async function streamNdjson(url: string, body: unknown, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    let message = text || res.statusText;
+    try {
+      message = String((JSON.parse(text) as { error?: unknown }).error ?? message);
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let rest = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const split = splitNdjson(rest + decoder.decode(value, { stream: true }));
+    rest = split.rest;
+    for (const event of split.events) onEvent(event);
+  }
+  for (const event of splitNdjson(rest + "\n").events) onEvent(event);
+}
 
 function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -295,6 +480,8 @@ export const httpApi: Api = {
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
   usage: () => request("/api/telemetry/usage"),
   setUsage: (enabled) => put("/api/telemetry/usage", { enabled }),
+  loginItem: () => request("/api/login-item"),
+  setLoginItem: (enabled) => post("/api/login-item", { enabled }),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");
@@ -328,6 +515,8 @@ export const httpApi: Api = {
   claudeLoginCode: (code) => post("/api/claude-login/code", { code }),
   claudeLoginCancel: () => post("/api/claude-login/cancel"),
   plugins: () => request("/api/plugins"),
+  graftSkillset: () => request("/api/plugins/graft"),
+  graftDownload: () => post("/api/plugins/graft/download"),
   providers: () => request("/api/providers"),
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),
@@ -352,6 +541,42 @@ export const httpApi: Api = {
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   repoMeta: (repo) => request(`/api/repos/${repo.split("/").map(enc).join("/")}/meta`),
+  orgPublished: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/published${refresh ? "?refresh=1" : ""}`),
+  orgDependencies: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/dependencies${refresh ? "?refresh=1" : ""}`),
+  orgSupplyChain: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/supply-chain${refresh ? "?refresh=1" : ""}`),
+  repoLoc: (repo) => request(`${repoPath(repo)}/loc`),
+  repoCoverage: (repo) => request(`${repoPath(repo)}/coverage`),
+  repoGitSummary: (repo) => request(`${repoPath(repo)}/git-summary`),
+  repoBranches: (repo) => request(`${repoPath(repo)}/branches`),
+  repoTree: (repo, ref) => request(`${repoPath(repo)}/tree${query({ ref })}`),
+  repoBlob: (repo, path, ref) => request(`${repoPath(repo)}/blob${query({ path, ref })}`),
+  fileHistory: (repo, path, ref) => request(`${repoPath(repo)}/history${query({ path, ref })}`),
+  fileBlame: (repo, path, ref) => request(`${repoPath(repo)}/blame${query({ path, ref })}`),
+  createEdits: (repo, body) => post(`${repoPath(repo)}/edits`, body),
+  askFile: (repo, body) => post(`${repoPath(repo)}/ask`, body),
+  drafts: (repo, ref) => request(`${repoPath(repo)}/drafts${query({ ref })}`),
+  saveDraft: (repo, body) => put(`${repoPath(repo)}/drafts`, body),
+  deleteDrafts: (repo, ref, path) => del(`${repoPath(repo)}/drafts${query({ ref, path })}`),
+  editorSettings: () => request("/api/editor/settings"),
+  saveEditorSettings: (body) => put("/api/editor/settings", body),
+  chats: () => request("/api/chat"),
+  chatModels: () => request("/api/chat/models"),
+  createChat: (body) => post("/api/chat", body),
+  chat: (id) => request(`/api/chat/${enc(id)}`),
+  patchChat: (id, body) => request(`/api/chat/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteChat: (id) => del(`/api/chat/${enc(id)}`),
+  sendChat: (id, body, onEvent, signal) => streamNdjson(`/api/chat/${enc(id)}/messages`, body, onEvent, signal),
+  compareChat: (id, body, onEvent, signal) => streamNdjson(`/api/chat/${enc(id)}/compare`, body, onEvent, signal),
+  pickChat: (id, messageId) => post(`/api/chat/${enc(id)}/pick`, { message_id: messageId }),
+  forkChat: (id, messageId, include) => post(`/api/chat/${enc(id)}/fork`, { message_id: messageId, include }),
+  retitleChat: (id) => post(`/api/chat/${enc(id)}/title`),
+  chatExportUrl: (id, zip) => `/api/chat/${enc(id)}/export${zip ? "?format=zip" : ""}`,
+  uploadChatImage: (file, onProgress, signal) => uploadWithProgress("/api/chat/attachments", file, onProgress, signal),
+  chatImageUrl: (sha) => `/api/chat/attachments/${enc(sha)}`,
+  chatPrefs: () => request("/api/chat/prefs"),
+  saveChatPersona: (id, system) => put(`/api/chat/prefs/personas/${enc(id)}`, { system }),
+  saveChatFeedback: (messageId, note) => put(`/api/chat/prefs/feedback/${enc(messageId)}`, { note }),
+  chatIssue: (id, body) => post(`/api/chat/${enc(id)}/issue`, body),
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),
@@ -364,6 +589,12 @@ export const httpApi: Api = {
   redTeamRuns: () => request("/api/redteam/runs"),
   startRedTeamRun: (body) => post("/api/redteam/runs", body),
   stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),
+  loops: () => request("/api/loops"),
+  createLoop: (body) => post("/api/loops", body),
+  updateLoop: (id, body) => put(`/api/loops/${enc(id)}`, body),
+  deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
+  runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
+  loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),
   updateRedTeamSchedule: (id, body) => put(`/api/redteam/schedules/${enc(id)}`, body),

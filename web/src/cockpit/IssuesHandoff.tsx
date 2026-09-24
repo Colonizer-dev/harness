@@ -3,6 +3,7 @@
 // GET /api/repos/{o}/{r}/issues, which the mothership already narrows by the Source module's label
 // filter; the badge is GitHub's own count until the pane has loaded the filtered one.
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { createPortal } from "react-dom";
 
 import { ApiError, heldByFor } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
@@ -135,15 +136,16 @@ export function IssuesButton({ variant = "compact", ...props }: IssuesActions & 
         disabled={!props.githubConnected}
         onClick={() => setOpen((o) => !o)}
         className={cx(
+          // The dashboard's primary action: solid accent, the one orange button on the page.
           variant === "header"
-            ? "inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-border-strong bg-panel px-3 text-[13px] font-medium text-text transition-colors hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
+            ? "inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 text-[13px] font-semibold text-on-accent shadow-[0_1px_0_rgb(0_0_0/0.15)] transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-transparent px-2.5 text-[12.5px] font-medium text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50",
-          open && "border-border-strong bg-panel-2 text-text",
+          open && (variant === "header" ? "brightness-110" : "border-border-strong bg-panel-2 text-text"),
         )}
       >
         <GitHubMark size={variant === "header" ? 16 : 14} />
-        {variant === "header" && <span>Issues</span>}
-        <span className={cx("tabular-nums", variant === "header" && "rounded-full bg-panel-3 px-2 py-px text-[12px]")}>{count > 999 ? "999+" : count}</span>
+        {variant === "header" && <span>Send colonies</span>}
+        <span className={cx("tabular-nums", variant === "header" && "rounded-full bg-black/20 px-2 py-px text-[12px]")}>{count > 999 ? "999+" : count}</span>
       </button>
       {open && (
         <IssuesPane
@@ -284,16 +286,18 @@ function IssuesPane({
 
   const repoChoices = repoQuery.trim() ? scope.filter((r) => r.full_name.toLowerCase().includes(repoQuery.trim().toLowerCase())) : scope;
 
-  return (
+  // Portalled to <body>: rendered in place it sat inside the page's own stacking context, below the
+  // top bar, whose avatars and bell then covered the pane's title.
+  return createPortal(
     <>
-      <div aria-hidden="true" className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
+      <div aria-hidden="true" className="fixed inset-0 z-[60] bg-black/30" onClick={onClose} />
       <div
         ref={panel}
         role="dialog"
         aria-modal="true"
         aria-label="hand off issues to colonies"
         tabIndex={-1}
-        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[480px] animate-[ck-in_160ms_ease-out_both] flex-col border-l border-border-strong bg-panel text-text shadow-[-16px_0_48px_rgb(0_0_0/0.35)] outline-none"
+        className="fixed inset-y-0 right-0 z-[61] flex w-full max-w-[480px] animate-[ck-in_160ms_ease-out_both] flex-col border-l border-border-strong bg-panel text-text shadow-[-16px_0_48px_rgb(0_0_0/0.35)] outline-none"
       >
         <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-3">
           <span className="grid size-8 place-items-center rounded-lg bg-panel-2 text-text">
@@ -483,7 +487,8 @@ function IssuesPane({
           </div>
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 

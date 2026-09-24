@@ -3,7 +3,17 @@ import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import type {
+  PackagesPublished,
+  PackagesDependencies,
+  SupplyChain,
   ArchMap,
+  ChatAttachment,
+  ChatAttachmentNote,
+  ChatImageRef,
+  ChatPrefs,
+  ChatMessage,
+  ChatMeta,
+  ChatStreamEvent,
   RepoMap,
   AgentEvent,
   AgentEventBody,
@@ -14,6 +24,7 @@ import type {
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
+  DownloadableSkillset,
   Issue,
   LogLevel,
   LoginView,
@@ -33,6 +44,8 @@ import type {
   Question,
   RedTeamRun,
   RedTeamSchedule,
+  Loop,
+  NewLoop,
   NewRedTeamSchedule,
   RedTeamCadence,
   Repo,
@@ -47,6 +60,7 @@ import type {
   TelemetryStatus,
   UpdateStatus,
   UsageStatus,
+  LoginItemStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -876,6 +890,19 @@ const MOCK_PRESET_IMAGES: Record<string, string> = {
 const mockPulled = new Set<string>(["node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0"]);
 let mockPull: PullStatus = { image: "", state: "idle", started_at: null, finished_at: null, error: null };
 // Headroom's bundle: a few seconds of download progress, then installed.
+let mockGraft: DownloadableSkillset = { name: "graft", release: "0.19.0-1", installed_release: null, state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
+const GRAFT_BYTES = 84_213_760;
+/** Advances the mock graft download: about four seconds from start to installed. */
+function tickGraft(): DownloadableSkillset {
+  if (mockGraft.state === "downloading" && mockGraft.started_at) {
+    const bytes = Math.min(GRAFT_BYTES, Math.round(((Date.now() - Date.parse(mockGraft.started_at)) / 4000) * GRAFT_BYTES));
+    mockGraft =
+      bytes >= GRAFT_BYTES
+        ? { ...mockGraft, state: "installed", installed_release: mockGraft.release, bytes, total: GRAFT_BYTES, finished_at: new Date().toISOString() }
+        : { ...mockGraft, bytes, total: GRAFT_BYTES };
+  }
+  return mockGraft;
+}
 let mockHeadroom: HeadroomStatus = { release: "0.37.0-1", state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 
 // The live map: not asked yet, so the prompt shows.
@@ -1100,6 +1127,7 @@ let mockTelemetry: TelemetryStatus = {
 // The usage batch: reporting is on by default, so `enabled` arrives already resolved to true — the
 // "never answered" distinction lives only in usage.json and is not exposed over the API. This build
 // has no sender; the batch is only collected and shown.
+let mockLoginItem = false;
 let mockUsage: UsageStatus = {
   enabled: true,
   blocked_by: null,
@@ -1205,6 +1233,42 @@ export function createMockApi(): Api {
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
   const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
   const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
+  const mockChats = new Map<string, { meta: ChatMeta; messages: ChatMessage[] }>();
+  const mockId = () => Math.random().toString(16).slice(2, 10);
+  // Chat images: object URLs by a made-up sha, standing in for the mothership's store.
+  const mockImages = new Map<string, { url: string; ref: ChatImageRef }>();
+  const mockPrefs: ChatPrefs = { personas: {}, feedback: {} };
+  const mockNote = (a: ChatAttachment): ChatAttachmentNote => {
+    if (a.kind === "image" && "sha" in a) return { kind: "image", label: a.name || "image", ...mockImages.get(a.sha)?.ref };
+    return {
+      kind: a.kind,
+      label: a.kind === "file" ? `${a.repo}/${a.path}` : a.kind === "snippet" ? a.label || "snippet" : a.kind === "colony" ? a.id : a.kind === "image" ? a.name || a.media_type : a.kind === "map" ? `${a.repo} map` : a.kind === "map_component" ? `${a.repo} · ${a.component}` : a.kind === "merged_prs" ? "merged PRs" : "today's colonies",
+    };
+  };
+
+  async function mockReply(c: { meta: ChatMeta; messages: ChatMessage[] }, model: string, parent: string | undefined, lane: number | undefined, onEvent: (e: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+    const started = Date.now();
+    const tag = <T extends object>(e: T) => (lane === undefined ? e : { ...e, lane });
+    const answer = `*(mock reply from ${model})* You asked: **${c.messages.at(-1)?.content.slice(0, 80) ?? ""}**\n\nSee \`src/main.rs\` for the entry point.\n\n\`\`\`rust\nfn main() {\n    let answer: u32 = 42; // the answer\n    println!("{answer}");\n}\n\`\`\``;
+    let text = "";
+    let first: number | undefined;
+    for (const word of answer.split(/(?<= )/)) {
+      if (signal?.aborted) break;
+      await sleep(lane === 1 ? 45 : 30);
+      first ??= Date.now() - started;
+      text += word;
+      onEvent(tag({ type: "delta" as const, text: word }));
+    }
+    const message: ChatMessage = { id: mockId(), role: "assistant", content: text, ts: new Date().toISOString(), model, input_tokens: 120, output_tokens: 40, cost_usd: 0.0004, stopped: Boolean(signal?.aborted), parent_id: parent, first_token_ms: first, latency_ms: Date.now() - started, candidate: lane !== undefined || undefined, lane };
+    c.messages.push(message);
+    c.meta = { ...c.meta, updated_at: message.ts };
+    let chat: ChatMeta | undefined;
+    if (c.meta.auto_title && lane === undefined && c.messages.filter((m) => m.role === "assistant").length === 1) {
+      c.meta = { ...c.meta, title: `About ${c.messages[0]?.content.slice(0, 24) ?? "this"}`, auto_title: false };
+      chat = c.meta;
+    }
+    onEvent(tag({ type: "done" as const, message, chat }));
+  }
   const repoMap = (repo: string): RepoMap => {
     const map = maps.get(repo);
     return {
@@ -1952,6 +2016,28 @@ export function createMockApi(): Api {
   ];
 
   const redSchedules: RedTeamSchedule[] = [];
+  const loopList: Loop[] = [];
+  const loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
+    id,
+    name: body.name,
+    org: body.repo.split("/")[0],
+    repo: body.repo,
+    prompt: body.prompt,
+    cadence: body.cadence,
+    tz_offset_minutes: body.tz_offset_minutes ?? 0,
+    model: body.model ?? null,
+    subagent_model: body.subagent_model ?? null,
+    autopilot: body.autopilot ?? true,
+    max_runs: body.max_runs ?? null,
+    end_at: body.end_at ?? null,
+    enabled: body.enabled ?? true,
+    next_run_at: body.enabled === false ? null : new Date(Date.now() + 3600_000).toISOString(),
+    runs,
+    last_run: null,
+    last_note: null,
+    ended_reason: null,
+    created_at: created,
+  });
   /** The first time `cadence` fires after `from`, in UTC — the server's rule, month-end clamp included. */
   const nextRun = (cadence: RedTeamCadence, from: Date): string => {
     const at = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d, cadence.hour, cadence.minute));
@@ -2143,6 +2229,13 @@ export function createMockApi(): Api {
       }, 2500);
       return { started: true };
     },
+    graftSkillset: async () => clone(tickGraft()),
+    graftDownload: async () => {
+      if (mockGraft.state === "idle" || mockGraft.state === "failed") {
+        mockGraft = { ...mockGraft, state: "downloading", bytes: 0, total: GRAFT_BYTES, started_at: new Date().toISOString(), finished_at: null, error: null };
+      }
+      return clone(mockGraft);
+    },
     headroom: async () => {
       if (mockHeadroom.state === "downloading" && mockHeadroom.started_at) {
     const total = 231_330_241;
@@ -2180,6 +2273,13 @@ export function createMockApi(): Api {
       return clone(mockTelemetry);
     },
     usage: async () => clone(mockUsage),
+    loginItem: () =>
+      later(() => ({ platform: "macos", installed: mockLoginItem, enabled: mockLoginItem, pid: mockLoginItem ? 4242 : null, definition: "~/Library/LaunchAgents/dev.colonizer.mothership.plist", binary: "~/.local/bin/colonizer", log: "~/.local/share/colonizer/mothership.out", note: null }) as LoginItemStatus),
+    setLoginItem: (enabled) =>
+      later(() => {
+        mockLoginItem = enabled;
+        return { platform: "macos", installed: enabled, enabled, pid: enabled ? 4242 : null, definition: "~/Library/LaunchAgents/dev.colonizer.mothership.plist", binary: "~/.local/bin/colonizer", log: "~/.local/share/colonizer/mothership.out", note: null } as LoginItemStatus;
+      }),
     setUsage: async (enabled) => {
       await sleep(250);
       if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);
@@ -2459,7 +2559,12 @@ export function createMockApi(): Api {
         agents: 0,
         commands: 1,
       },
+      // Once downloaded, graft is an ordinary local skillset.
+      ...(tickGraft().state === "installed"
+        ? [{ name: "graft", description: "A code map of the colony's repository (graft by Nanonets)", version: "0.19.0", source: "local" as const, shadows_vendored: false, skills: 1, agents: 0, commands: 0 }]
+        : []),
     ],
+    downloadable: [clone(tickGraft())],
       })),
     providers: () => later(() => providers),
     saveProvider: async (id, body) => {
@@ -2720,6 +2825,201 @@ export function createMockApi(): Api {
       return { ...mem0 };
     },
     repoMap: (repo) => later(() => repoMap(repo)),
+    repoLoc: () =>
+      later(() => ({
+        ref: "main",
+        sha: "a".repeat(40),
+        total: 48210,
+        by_language: [
+          { name: "Rust", files: 88, code: 31200, blank: 3100 },
+          { name: "TSX", files: 120, code: 12400, blank: 1200 },
+          { name: "TypeScript", files: 40, code: 3610, blank: 300 },
+          { name: "Shell", files: 12, code: 1000, blank: 90 },
+        ],
+      })),
+    repoCoverage: () => later(() => ({ measured: false as const, reason: "no coverage report found in CI artifacts" })),
+    repoGitSummary: (repo) => later(() => ({ repo, branches: 14, open_prs: 3, release: { tagName: "v0.1.9", name: "v0.1.9", publishedAt: "2026-09-24T14:00:00Z" }, latest_tag: null })),
+    repoBranches: (repo) =>
+      later(() => ({
+        repo,
+        default: "main",
+        branches: [
+          { name: "main", sha: "a".repeat(40), date: "2026-09-24T14:00:00Z", author: "Ann", message: "Release v0.1.9", default: true, protected: true, colony: false, ahead: 0, behind: 0, pr: null },
+          { name: "colonizer/issue-12-ab", sha: "b".repeat(40), date: "2026-09-24T13:00:00Z", author: "Colony", message: "Fix the thing", default: false, protected: false, colony: true, ahead: 2, behind: 1, pr: { number: 501, title: "Fix the thing", url: "https://github.com/x/y/pull/501", isDraft: false } },
+        ],
+      })),
+    repoTree: (repo, ref) => later(() => ({ repo, ref: ref ?? "main", sha: "a".repeat(40), paths: ["README.md", "src/main.rs", "src/lib.rs", "web/src/App.tsx"], truncated: false })),
+    repoBlob: (_repo, path, ref) => later(() => ({ path, ref: ref ?? "main", sha: "a".repeat(40), size: 40, binary: false, too_large: false, text: `// ${path}\nfn main() {\n    println!("hello");\n}\n` })),
+    fileHistory: (_repo, path, ref) => later(() => ({ path, ref: ref ?? "main", commits: [{ sha: "a".repeat(40), author: "Ann", date: "2026-09-24T10:00:00Z", message: "Add main" }] })),
+    fileBlame: (_repo, path, ref) => later(() => ({ path, ref: ref ?? "main", sha: "a".repeat(40), commits: { ["a".repeat(40)]: { author: "Ann", time: 1790000000, summary: "Add main" } }, lines: Array(4).fill("a".repeat(40)) })),
+    createEdits: async (repo, body) => ({ url: `https://github.com/${repo}/pull/999`, branch: body.branch, base: body.base ?? "main" }),
+    askFile: async (_repo, body) => ({ answer: `*(mock)* \`${body.path}\` answers: ${body.question}`, model: "mock/model" }),
+    drafts: async (repo) => ({ repo, autosave: true, drafts: [] }),
+    saveDraft: async () => ({ saved_at: new Date().toISOString() }),
+    deleteDrafts: async () => ({ removed: 0 }),
+    editorSettings: async () => ({ autosave: true }),
+    saveEditorSettings: async (body) => body,
+    chats: () => later(() => ({ chats: [...mockChats.values()].map((c) => c.meta).sort((a, b) => b.updated_at.localeCompare(a.updated_at)) })),
+    chatModels: () =>
+      later(() => ({
+        default: "zai/glm-5.3-flash",
+        claude: { available: false, reason: "a Claude model needs an Anthropic API key (sk-ant-api…) or an Anthropic model provider; the Claude subscription login is only used by colonies" },
+        providers: [
+          { id: "zai", name: "Z.AI", models: ["glm-5.3-flash", "glm-5.3"], preset: "zai", wire: "anthropic" as const, has_key: true, pricing: { input_per_mtok: 0.6, output_per_mtok: 2.2 } },
+          { id: "deepseek", name: "DeepSeek", models: ["deepseek-chat", "deepseek-reasoner"], preset: "deepseek", wire: "openai" as const, has_key: false, pricing: null },
+        ],
+      })),
+    createChat: (body) =>
+      later(() => {
+        const at = new Date().toISOString();
+        const meta = { id: Math.random().toString(16).slice(2, 10), title: body.title ?? "", model: body.model || "zai/glm-5.3-flash", system: body.system, max_tokens: body.max_tokens ?? 4096, workspace: body.workspace, created_at: at, updated_at: at };
+        mockChats.set(meta.id, { meta, messages: [] });
+        return meta;
+      }),
+    chat: (id) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        return { chat: c.meta, messages: [...c.messages] };
+      }),
+    patchChat: (id, body) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        c.meta = { ...c.meta, ...body, updated_at: new Date().toISOString() };
+        return c.meta;
+      }),
+    deleteChat: (id) => later(() => mockChats.delete(id)),
+    sendChat: async (id, body, onEvent, signal) => {
+      const c = mockChats.get(id);
+      if (!c) throw new Error("no such conversation");
+      let parent: string | undefined;
+      if (body.regenerate) {
+        while (c.messages.at(-1)?.role === "assistant") c.messages.pop();
+        parent = c.messages.at(-1)?.id;
+      } else if (body.content) {
+        const user: ChatMessage = { id: mockId(), role: "user", content: body.content, ts: new Date().toISOString(), input_tokens: 0, output_tokens: 0, stopped: false, attachments: (body.attachments ?? []).map(mockNote) };
+        c.messages.push(user);
+        parent = user.id;
+      }
+      if (!c.meta.title && body.content) c.meta = { ...c.meta, title: body.content.slice(0, 60), auto_title: true };
+      await mockReply(c, body.model ?? c.meta.model, parent, undefined, onEvent, signal);
+    },
+    compareChat: async (id, body, onEvent, signal) => {
+      const c = mockChats.get(id);
+      if (!c) throw new Error("no such conversation");
+      const user: ChatMessage = { id: mockId(), role: "user", content: body.content, ts: new Date().toISOString(), input_tokens: 0, output_tokens: 0, stopped: false, attachments: (body.attachments ?? []).map(mockNote) };
+      c.messages.push(user);
+      if (!c.meta.title) c.meta = { ...c.meta, title: body.content.slice(0, 60) };
+      await Promise.all(body.models.map((m, lane) => mockReply(c, m, user.id, lane, onEvent, signal)));
+    },
+    pickChat: (id, messageId) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        const pick = c.messages.find((m) => m.id === messageId && m.candidate);
+        if (!pick) throw new Error("no such compare reply");
+        c.messages = c.messages
+          .filter((m) => !(m.candidate && m.parent_id === pick.parent_id && m.id !== messageId))
+          .map((m) => (m.id === messageId ? { ...m, candidate: false, lane: undefined } : m));
+        return { messages: [...c.messages] };
+      }),
+    forkChat: (id, messageId, include) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        const at = c.messages.findIndex((m) => m.id === messageId);
+        if (at < 0) throw new Error("no such message");
+        const now = new Date().toISOString();
+        const meta: ChatMeta = { ...c.meta, id: mockId(), title: `${c.meta.title || "conversation"} (branch)`, pinned: false, auto_title: false, created_at: now, updated_at: now, forked_from: { chat: id, message: messageId } };
+        mockChats.set(meta.id, { meta, messages: c.messages.slice(0, include ? at + 1 : at).filter((m) => !m.candidate) });
+        return meta;
+      }),
+    retitleChat: (id) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        c.meta = { ...c.meta, title: `Mock title for ${c.messages[0]?.content.slice(0, 20) ?? "chat"}`, auto_title: false };
+        return c.meta;
+      }),
+    chatExportUrl: (id) => `data:text/markdown,${encodeURIComponent(`# ${mockChats.get(id)?.meta.title ?? "Conversation"}\n`)}`,
+    uploadChatImage: async (file, onProgress) => {
+      for (const f of [0.25, 0.6, 1]) {
+        await sleep(120);
+        onProgress?.(f);
+      }
+      const sha = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const ref: ChatImageRef = { sha, mime: file.type || "image/png", width: 0, height: 0, bytes: file.size };
+      mockImages.set(sha, { url: URL.createObjectURL(file), ref });
+      return ref;
+    },
+    chatImageUrl: (sha) => mockImages.get(sha)?.url ?? "",
+    chatPrefs: () => later(() => structuredClone(mockPrefs)),
+    saveChatPersona: (id, system) =>
+      later(() => {
+        if (system === null) delete mockPrefs.personas[id];
+        else mockPrefs.personas[id] = system;
+        return structuredClone(mockPrefs);
+      }),
+    saveChatFeedback: (messageId, note) =>
+      later(() => {
+        if (note === null) delete mockPrefs.feedback[messageId];
+        else mockPrefs.feedback[messageId] = note;
+        return structuredClone(mockPrefs);
+      }),
+    chatIssue: async (_id, body) => ({ url: `https://github.com/${body.repo}/issues/999` }),
+    orgPublished: (org) =>
+      later(
+        (): PackagesPublished => ({
+          org,
+          scanned_at: new Date().toISOString(),
+          repos: [{ repo: `${org}/web`, sha: "abc1234", defined: 3 }],
+          packages: [
+            { ecosystem: "npm", name: `@${org.toLowerCase()}/sdk`, version: "1.4.0", repo: `${org}/web`, path: "packages/sdk", private: false, registry: null, status: "published", unreleased_changes: true, published: { latest: "1.3.2", published_at: "2026-09-20T10:00:00Z", downloads: 1240, downloads_period: "last week", url: "https://www.npmjs.com/" } },
+            { ecosystem: "npm", name: "pwa", version: "0.0.0", repo: `${org}/web`, path: "apps/pwa", private: true, registry: null, status: "private", unreleased_changes: false, published: null },
+            { ecosystem: "cargo", name: "colonizer-harness", version: "0.1.9", repo: `${org}/harness`, path: "crates/colonizer", private: false, registry: null, status: "published", unreleased_changes: false, published: { latest: "0.1.9", published_at: "2026-09-24T13:59:00Z", downloads: 310, downloads_period: "90 days", url: "https://crates.io/" } },
+          ],
+          github_packages: { packages: [{ name: "mothership", type: "container", visibility: "private", versions: 12, updated_at: "2026-09-23T08:00:00Z", url: null, repo: `${org}/harness` }], note: null },
+        }),
+        300,
+      ),
+    orgDependencies: (org) =>
+      later(
+        (): PackagesDependencies => ({
+          org,
+          scanned_at: new Date().toISOString(),
+          repos: [{ repo: `${org}/web`, sha: "abc1234", lockfiles: ["bun.lock"] }],
+          ecosystems: [
+            { ecosystem: "npm", direct: 2, transitive: 1 },
+            { ecosystem: "cargo", direct: 1, transitive: 0 },
+          ],
+          totals: { direct: 3, transitive: 1, outdated: 1, vulnerable: 1 },
+          packages: [
+            { ecosystem: "npm", name: "react", direct: true, dev: false, latest: "19.1.1", outdated: true, vulnerable: false, drift: true, versions: [{ version: "19.1.0", behind: true, users: [{ repo: `${org}/web`, path: "bun.lock" }], vulns: [] }, { version: "18.3.1", behind: true, users: [{ repo: `${org}/app`, path: "package-lock.json" }], vulns: [] }] },
+            { ecosystem: "npm", name: "lodash", direct: false, dev: false, latest: null, outdated: false, vulnerable: true, drift: false, versions: [{ version: "4.17.20", behind: false, users: [{ repo: `${org}/web`, path: "bun.lock" }], vulns: [{ id: "GHSA-35jh-r3h4-6jhm", summary: "Command injection in lodash", severity: "high", fixed: "4.17.21", url: "https://osv.dev/vulnerability/GHSA-35jh-r3h4-6jhm" }] }] },
+            { ecosystem: "cargo", name: "serde", direct: true, dev: false, latest: "1.0.210", outdated: false, vulnerable: false, drift: false, versions: [{ version: "1.0.210", behind: false, users: [{ repo: `${org}/harness`, path: "Cargo.lock" }], vulns: [] }] },
+          ],
+        }),
+        300,
+      ),
+    orgSupplyChain: (org) =>
+      later(
+        (): SupplyChain => ({
+          org,
+          scanned_at: new Date().toISOString(),
+          repos: [{ repo: `${org}/web`, sha: "abc1234", lockfiles: ["bun.lock"] }],
+          counts: { high: 2, moderate: 1, low: 1 },
+          fixable: 1,
+          risks: [
+            { severity: "high", kind: "vulnerability", ecosystem: "npm", name: "lodash", version: "4.17.20", reason: "GHSA-35jh-r3h4-6jhm: Command injection in lodash", fix: { available: true, version: "4.17.21" }, url: "https://osv.dev/vulnerability/GHSA-35jh-r3h4-6jhm", direct: false, via: ["some-lib"], users: [{ repo: `${org}/web`, path: "bun.lock" }] },
+            { severity: "high", kind: "typosquat", ecosystem: "npm", name: "expres", version: "1.0.0", reason: "name is one or two letters from the popular \"express\" — check it is the package you meant", fix: { available: false }, url: "https://www.npmjs.com/package/expres", direct: true, via: [], users: [{ repo: `${org}/web`, path: "package-lock.json" }] },
+            { severity: "moderate", kind: "install-script", ecosystem: "npm", name: "esbuild", version: "0.23.0", reason: "runs code on install — review: postinstall: node install.js", fix: { available: false }, url: "https://www.npmjs.com/package/esbuild", direct: true, via: [], users: [{ repo: `${org}/web`, path: "bun.lock" }] },
+            { severity: "low", kind: "missing-integrity", ecosystem: "npm", name: "left-pad", version: null, reason: "no integrity hash in package-lock.json", fix: { available: false }, url: "", direct: true, via: [], users: [{ repo: `${org}/app`, path: "package-lock.json" }] },
+          ],
+          note: "registry facts for up to 300 direct or vulnerable versions; advisories from OSV.dev",
+        }),
+        300,
+      ),
     repoMeta: (repo) =>
       later(() => ({
         full_name: repo,
@@ -2865,6 +3165,32 @@ export function createMockApi(): Api {
       redRuns.unshift(run);
       return clone(run);
     },
+    loops: () => later(() => loopList.map(clone)),
+    createLoop: async (body) => {
+      await sleep(200);
+      const l = loopOf(body, `loop_${Math.random().toString(16).slice(2, 8)}`, now());
+      loopList.push(l);
+      return clone(l);
+    },
+    updateLoop: async (id, body) => {
+      await sleep(150);
+      const at = loopList.findIndex((l) => l.id === id);
+      if (at < 0) throw new ApiError("no such loop", 404);
+      loopList[at] = { ...loopOf(body, id, loopList[at].created_at, loopList[at].runs), last_run: loopList[at].last_run };
+      return clone(loopList[at]);
+    },
+    deleteLoop: async (id) => {
+      await sleep(120);
+      const at = loopList.findIndex((l) => l.id === id);
+      if (at >= 0) loopList.splice(at, 1);
+    },
+    runLoopNow: async (id) => {
+      await sleep(200);
+      const l = loopList.find((x) => x.id === id);
+      if (!l) throw new ApiError("no such loop", 404);
+      throw new ApiError("the mock mothership does not launch colonies from loops", 409);
+    },
+    loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),
     createRedTeamSchedule: async (body) => {
       await sleep(250);

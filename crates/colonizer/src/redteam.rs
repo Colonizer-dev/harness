@@ -17,7 +17,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -222,7 +222,7 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
         }
         Ok(data) => data,
     };
-    match serde_json::from_slice::<Vec<RedTeamRun>>(&data) {
+    let mut runs = match serde_json::from_slice::<Vec<RedTeamRun>>(&data) {
         Ok(runs) => runs,
         Err(e) => {
             eprintln!(
@@ -231,7 +231,16 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
             );
             Vec::new()
         }
+    };
+    // `create` never stores an empty module list — it coerces one to the default — but this file
+    // is trusted on load, and a run carrying an empty one would panic the tick on `i % 0` the
+    // moment it launched the swarm. Read it the way `create` would have written it.
+    for run in &mut runs {
+        if run.modules.is_empty() {
+            run.modules = vec![DEFAULT_MODULE.to_string()];
+        }
     }
+    runs
 }
 
 /// The gate: how many colonies of every org are live right now.
@@ -836,82 +845,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
 // Schedules: a run every week or every month
 // ---------------------------------------------------------------------------
 
-/// When a schedule fires, in UTC: the cockpit converts the operator's local choice before saving.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "every", rename_all = "snake_case")]
-pub enum Cadence {
-    /// `weekday` 0 = Monday … 6 = Sunday.
-    Weekly { weekday: u32, hour: u32, minute: u32 },
-    /// `day` 1–31; a day past the month's end fires on its last day (31 → 30 April, 28/29 February).
-    Monthly { day: u32, hour: u32, minute: u32 },
-}
-
-impl Cadence {
-    fn check(&self) -> Result<(), String> {
-        let (hour, minute) = match self {
-            Cadence::Weekly { weekday, hour, minute } => {
-                if *weekday > 6 {
-                    return Err(format!("weekday must be 0 (Monday) to 6 (Sunday), got {weekday}"));
-                }
-                (*hour, *minute)
-            }
-            Cadence::Monthly { day, hour, minute } => {
-                if !(1..=31).contains(day) {
-                    return Err(format!("day must be 1 to 31, got {day}"));
-                }
-                (*hour, *minute)
-            }
-        };
-        if hour > 23 || minute > 59 {
-            return Err(format!("time must be 00:00 to 23:59 UTC, got {hour:02}:{minute:02}"));
-        }
-        Ok(())
-    }
-}
-
-fn last_day_of_month(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-    NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .and_then(|d| d.pred_opt())
-        .map(|d| d.day())
-        .unwrap_or(28)
-}
-
-fn at(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
-    date.and_hms_opt(hour, minute, 0).map(|t| Utc.from_utc_datetime(&t))
-}
-
-/// The first time the cadence fires strictly after `after`. Pure, so the month-end and week-wrap
-/// rules are tested with fixed dates.
-pub fn next_run_after(cadence: &Cadence, after: DateTime<Utc>) -> DateTime<Utc> {
-    let today = after.date_naive();
-    match *cadence {
-        Cadence::Weekly { weekday, hour, minute } => {
-            let ahead = (weekday + 7 - today.weekday().num_days_from_monday()) % 7;
-            for extra in [0, 7] {
-                if let Some(when) = at(today + ChronoDuration::days(i64::from(ahead + extra)), hour, minute)
-                    && when > after
-                {
-                    return when;
-                }
-            }
-            after + ChronoDuration::days(7)
-        }
-        Cadence::Monthly { day, hour, minute } => {
-            let (mut year, mut month) = (today.year(), today.month());
-            for _ in 0..3 {
-                let d = day.min(last_day_of_month(year, month));
-                if let Some(when) = NaiveDate::from_ymd_opt(year, month, d).and_then(|date| at(date, hour, minute))
-                    && when > after
-                {
-                    return when;
-                }
-                (year, month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-            }
-            after + ChronoDuration::days(28)
-        }
-    }
-}
+pub use crate::schedule::{Cadence, next_run_after};
 
 /// A recurring red-team run over some of an org's repositories.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1023,6 +957,9 @@ fn schedule_from(
         return Err(bad(&format!("swarm_size must be 1..={MAX_SWARM}, got {swarm_size}")));
     }
     req.cadence.check().map_err(|e| bad(&e))?;
+    if !matches!(req.cadence, Cadence::Weekly { .. } | Cadence::Monthly { .. }) {
+        return Err(bad("a red-team schedule runs weekly or monthly"));
+    }
     let model = crate::sessions::launch_model(app, req.model.as_deref(), "model")?;
     let subagent_model = crate::sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
     Ok(RedTeamSchedule {
@@ -1155,6 +1092,7 @@ mod tests {
     use super::*;
     use crate::sessions::tests::colony;
     use crate::tests::test_app;
+    use chrono::{Duration as ChronoDuration, TimeZone};
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("colonizer-redteam-{}", short_id()));
@@ -1317,6 +1255,37 @@ mod tests {
         let run = get(State(app.clone()), Path(run.id)).await.unwrap().0;
         assert_eq!(run.state, RedTeamState::Running, "a started hunter takes the run live");
         assert!(run.gate_reason.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `create` never stores an empty `modules` (it coerces the empty request field to the
+    /// default), but `redteam.json` is trusted on load, so a run written by hand or by an older
+    /// build can carry one — and the tick's launch would panic on `i % 0` before the first hunter
+    /// brief was built. It must read the way `create` would have written it.
+    #[tokio::test]
+    async fn a_persisted_run_with_no_modules_is_read_as_the_default_module() {
+        let root = temp_root();
+        let run = RedTeamRun {
+            id: "rt_mods".into(),
+            repo: "acme/repo".into(),
+            org: "acme".into(),
+            state: RedTeamState::Armed,
+            swarm_size: 3,
+            modules: Vec::new(),
+            ..RedTeamRun::default()
+        };
+        std::fs::write(
+            root.join("data").join("redteam.json"),
+            serde_json::to_vec(&vec![run]).unwrap(),
+        )
+        .unwrap();
+        let app = test_app(&root);
+        assert_eq!(app.redteam.runs.read().await.len(), 1, "the run survived the load");
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path("rt_mods".into())).await.unwrap().0;
+        assert_eq!(run.modules, vec![DEFAULT_MODULE], "read as the default module");
+        assert_eq!(run.state, RedTeamState::Running);
+        assert_eq!(run.hunters.len(), 3, "the swarm launched on the default module");
         let _ = std::fs::remove_dir_all(root);
     }
 

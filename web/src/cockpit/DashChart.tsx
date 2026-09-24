@@ -17,6 +17,7 @@ import type { Session } from "../types";
 import { colX, monotonePath, orgColorFor, RANGES, type ChartPoint, type RangeDays } from "./dash";
 import { LiveCost, TweenedValue } from "./Live";
 import { taskLine } from "../summary";
+import { LoopBadge } from "./LoopsView";
 
 /** A section: the 14px heading with its faint meta, an optional right slot, and the body. */
 export function Section({
@@ -819,6 +820,7 @@ export function ColonyRow({
         className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-[13.5px] text-text hover:opacity-80"
       >
         {taskLine(session, short)} <span className="font-mono text-[12px] text-faint">{short}</span>
+        <LoopBadge session={session} />
       </button>
       <span className="flex min-w-0 items-center gap-1.5 text-[13px] text-faint">
         {showOrg && (

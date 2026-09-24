@@ -3,7 +3,8 @@
 // It owns only what is its own — which view is showing, what the inspector is looking at, and the
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { CodeView } from "./CodeView";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
@@ -22,6 +23,7 @@ import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
+import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
@@ -32,11 +34,14 @@ import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuot
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
 
+// The Chat view (and its highlighter, which it loads later still) stays out of the main bundle.
+const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
+
 const VIEW_KEY = "colonizer.cockpitView";
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host", "secrets"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code", "chat"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -135,6 +140,10 @@ export function Cockpit({
   const api = useApi();
   const toast = useToast();
   const [view, setView] = useState<CockpitView>(storedView);
+  // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
+  const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
+  // A file the Chat view asked the Code page to open.
+  const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -378,8 +387,47 @@ export function Cockpit({
             onOpenSettings={() => onOpenSettings("setup")}
           />
         );
+      case "code":
+        return (
+          <CodeView
+            orgs={orgs}
+            repos={repos}
+            sessions={sessions}
+            selectedOrg={selectedOrg}
+            onSelectOrg={onSelectOrg}
+            onCreated={onCreated}
+            onOpenColony={openColonyById}
+            openRequest={codeRequest}
+          />
+        );
+      case "loops":
+        return <LoopsView org={selectedOrg} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
       case "secrets":
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
+      case "chat":
+        return (
+          <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
+            <ChatView
+              org={selectedOrg}
+              repos={repos}
+              sessions={sessions}
+              autopilotDefault={autopilotDefault}
+              initialPrompt={askPrompt}
+              onPromptTaken={() => setAskPrompt(null)}
+              onCreated={(session) => {
+                onCreated(session);
+                setView("home");
+              }}
+              workspaces={workspaces}
+              onOpenFile={(repo, path) => {
+                const owner = repo.split("/")[0];
+                if (!sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+                setCodeRequest((r) => ({ repo, path, n: (r?.n ?? 0) + 1 }));
+                setView("code");
+              }}
+            />
+          </Suspense>
+        );
       case "host":
         return (
           <HostView
@@ -461,6 +509,13 @@ export function Cockpit({
         needByOrg={needByOrg}
         statusError={statusError}
         connection={liveConnection}
+        user={{
+          login: status?.github.connected ? (status.github.login ?? null) : null,
+          name: status?.github.name ?? null,
+          avatarUrl: status?.github.avatar_url ?? null,
+          onOpenSettings: () => onOpenSettings(),
+          onOpenSecrets: () => navigate("secrets"),
+        }}
         inbox={{
           sessions,
           onOpenColony: openColonyById,
@@ -492,6 +547,10 @@ export function Cockpit({
               onCreated={(session) => {
                 onCreated(session);
                 setView("home");
+              }}
+              onAsk={(text) => {
+                setAskPrompt({ text, n: Date.now() });
+                setView("chat");
               }}
             />
           )}
