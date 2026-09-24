@@ -159,9 +159,27 @@ impl Drop for Counted {
 struct Reserved(Arc<AtomicU64>, u64);
 
 impl Reserved {
+    /// An unconditional claim, for tests that set up an outstanding total; requests use [`Reserved::try_new`].
+    #[cfg(test)]
     fn new(reserved: &Arc<AtomicU64>, micro_usd: u64) -> Self {
         reserved.fetch_add(micro_usd, Ordering::SeqCst);
         Self(reserved.clone(), micro_usd)
+    }
+
+    /// Adds `micro_usd` to `reserved` only while `fits(outstanding)` holds for the value it adds to,
+    /// in one compare-and-swap: two parallel requests cannot both read the same outstanding total and
+    /// both pass. `Err(outstanding)` is the total that did not fit.
+    fn try_new(reserved: &Arc<AtomicU64>, micro_usd: u64, fits: impl Fn(u64) -> bool) -> Result<Self, u64> {
+        let mut current = reserved.load(Ordering::SeqCst);
+        loop {
+            if !fits(current) {
+                return Err(current);
+            }
+            match reserved.compare_exchange(current, current + micro_usd, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Ok(Self(reserved.clone(), micro_usd)),
+                Err(seen) => current = seen,
+            }
+        }
     }
 }
 
@@ -887,10 +905,10 @@ fn usage_recorder(app: &Shared, colony: &str, provider: &Provider, reservation: 
     let (app, colony, provider) = (app.clone(), colony.to_string(), provider.clone());
     Box::new(move |usage| {
         tokio::spawn(async move {
-            crate::lifecycle::record_routed_usage(&app, &colony, &provider, usage).await;
-            // Only now, with the real cost landed (or the recording itself failed), does the
-            // estimate go back. The explicit drop also keeps the guard captured until here.
-            drop(reservation);
+            // The estimate goes back in the same critical section that adds the real cost, so no
+            // reader ever counts both (or neither). If the cost is never recorded (zero, or the
+            // colony is gone) the closure is dropped unrun and the guard goes with it.
+            crate::lifecycle::record_routed_usage(&app, &colony, &provider, usage, move || drop(reservation)).await;
         });
     })
 }
@@ -1127,20 +1145,32 @@ async fn proxy(
     let budget = orgs::budget_usd(&modules, &app.org_settings(&session.org));
     let estimate = estimate_request_cost_usd(&provider, &body);
     let reserved = app.gateway.colony_reserved(&colony);
-    let outstanding = reserved.load(Ordering::SeqCst) as f64 / 1_000_000.0;
-    if budget > 0.0 && session.total_cost_usd() + outstanding + estimate > budget {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "permission_error",
-            format!(
-                "colonizer gateway: colony {colony} has ${:.2} recorded plus ${:.2} estimated in flight, and this request's estimated ${estimate:.2} would pass its spend budget of ${budget:.2}; wait for the in-flight requests to finish or raise the budget",
-                session.total_cost_usd(),
-                outstanding
-            ),
-            None,
-        );
-    }
-    let reservation = Reserved::new(&reserved, micro_usd(estimate));
+    // Recorded spend and the reservation are read and claimed together, under the sessions read
+    // lock: a recorder hands its estimate back under the write lock in the same step that adds the
+    // real cost (`record_routed_usage`), so this check never sees a cost twice or not at all, and the
+    // compare-and-swap in `try_new` keeps parallel requests from both passing on one total.
+    let reservation = {
+        let sessions = app.sessions.read().await;
+        let recorded = sessions
+            .iter()
+            .find(|s| s.id == colony)
+            .map_or(session.total_cost_usd(), |s| s.total_cost_usd());
+        let fits = |outstanding: u64| budget <= 0.0 || recorded + outstanding as f64 / 1_000_000.0 + estimate <= budget;
+        match Reserved::try_new(&reserved, micro_usd(estimate), fits) {
+            Ok(reservation) => reservation,
+            Err(outstanding) => {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "permission_error",
+                    format!(
+                        "colonizer gateway: colony {colony} has ${recorded:.2} recorded plus ${:.2} estimated in flight, and this request's estimated ${estimate:.2} would pass its spend budget of ${budget:.2}; wait for the in-flight requests to finish or raise the budget",
+                        outstanding as f64 / 1_000_000.0
+                    ),
+                    None,
+                );
+            }
+        }
+    };
     let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
     // Everything that can refuse the request happens here, before it waits for a slot. The anthropic wire
     // never parses the body; the openai wire has to rebuild it.
@@ -2051,6 +2081,33 @@ mod tests {
     /// sessions write lock parks the recorder's task inside `record_routed_usage`, so the ordering
     /// is observed deterministically instead of raced; releasing the lock lets the cost land, and
     /// only then the reservation go.
+    #[test]
+    fn a_reservation_is_claimed_only_while_it_fits_and_parallel_claims_cannot_share_a_total() {
+        let reserved = Arc::new(AtomicU64::new(0));
+        // Budget room for one 600-unit request, not two.
+        let fits = |outstanding: u64| outstanding + 600 <= 1_000;
+        let first = Reserved::try_new(&reserved, 600, fits).expect("the first fits");
+        assert_eq!(reserved.load(Ordering::SeqCst), 600);
+        assert_eq!(
+            Reserved::try_new(&reserved, 600, fits).err(),
+            Some(600),
+            "the second sees the first"
+        );
+        drop(first);
+        assert_eq!(reserved.load(Ordering::SeqCst), 0, "a dropped claim is handed back");
+
+        // Many threads racing for room for exactly three claims: exactly three get one.
+        let room = |outstanding: u64| outstanding + 100 <= 300;
+        let won = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| scope.spawn(|| Reserved::try_new(&reserved, 100, room).ok()))
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert_eq!(won.len(), 3);
+        assert_eq!(reserved.load(Ordering::SeqCst), 300);
+    }
+
     #[tokio::test]
     async fn the_reservation_outlives_the_streamed_body_until_its_cost_is_recorded() {
         let router = Router::new().route(
