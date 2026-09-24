@@ -1381,6 +1381,7 @@ async fn serve() -> Result<()> {
         )
         .route("/api/repos", get(github::list_repos))
         .route("/api/maps/{owner}/{name}", get(maps::get).post(maps::create))
+        .route("/api/maps/{owner}/{name}/files", get(maps::files))
         .route("/api/touched", get(maps::touched))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))

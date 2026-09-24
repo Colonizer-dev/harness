@@ -11,6 +11,7 @@ import { SESSION_STATUS, isLive, store, stored, timeAgo } from "../components/ui
 import { errorMessage, useApi, useToast } from "../context";
 import type { RepoMap, Session } from "../types";
 import { SURFACE_Y, normalizeBox, surfaceGrass, type NestBox } from "./nest";
+import { FileTreePane } from "./FileTreePane";
 import { antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
 
 const REPO_KEY = "colonizer.mapRepo";
@@ -72,6 +73,7 @@ export function NestMapView({
   const [touched, setTouched] = useState<Record<string, string[]>>(initialTouched ?? {});
   const [open, setOpen] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
   const plotRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<NestBox>(() => normalizeBox(960, 560));
 
@@ -156,6 +158,24 @@ export function NestMapView({
   const tunnels = useMemo(() => (map && layout ? tunnelPaths(map, layout) : []), [map, layout]);
   const entry = map && layout ? entryComponent(map, layout) : null;
   const inRepo = sessions.filter((s) => s.repo === repo);
+  // The explorer pane's files: fetched once per repository, when a component is first opened.
+  const [files, setFiles] = useState<{ repo: string; revision: string | null; paths: string[] | null; error: string | null } | null>(null);
+  const wantFiles = open != null && repo != null && files?.repo !== repo;
+  useEffect(() => {
+    if (!wantFiles || !repo) return;
+    let cancelled = false;
+    setFiles({ repo, revision: null, paths: null, error: null });
+    api
+      .repoMapFiles(repo)
+      .then((r) => !cancelled && setFiles({ repo, revision: r.revision, paths: r.paths, error: null }))
+      .catch((e) => !cancelled && setFiles({ repo, revision: null, paths: null, error: errorMessage(e) }));
+    return () => {
+      cancelled = true;
+    };
+  }, [wantFiles, repo, api]);
+  const openComponent = open && map ? map.components.find((c) => c.id === open) : undefined;
+  const markedPaths = useMemo(() => new Set((openComponent?.sources ?? []).map((s) => s.path.replace(/\/+$/, ""))), [openComponent]);
+  const changingPaths = useMemo(() => new Set(inRepo.flatMap((s) => touched[s.id] ?? [])), [inRepo, touched]);
   const places: ReturnType<typeof colonyPlaces> = map ? colonyPlaces(inRepo, touched, map) : { byChamber: new Map(), waiting: [] };
   const openChamber = open && layout ? layout.byId.get(open) : null;
 
@@ -182,20 +202,38 @@ export function NestMapView({
           <span className="font-mono text-[12.5px] text-text">{repo}</span>
         ) : null}
         {stored_ && (
-          <span className="text-faint">
-            {map?.subtitle ? `${map.subtitle} · ` : ""}drawn {timeAgo(stored_.generated_at)}
+          <span className="text-faint" title={new Date(stored_.generated_at).toLocaleString()}>
+            {map?.subtitle ? `${map.subtitle} · ` : ""}drawn {formatWhen(stored_.generated_at)} ({timeAgo(stored_.generated_at)})
             {stored_.revision ? ` at ${stored_.revision.slice(0, 7)}` : ""}
+            {stored_.session && (
+              <>
+                {" · by "}
+                <button type="button" onClick={() => onOpen(stored_.session)} className="cursor-pointer border-0 bg-transparent p-0 font-mono text-faint underline decoration-dotted underline-offset-2 hover:text-text">
+                  colony {stored_.session.slice(0, 8)}
+                </button>
+              </>
+            )}
           </span>
         )}
         <div className="flex-1" />
-        {stored_ && !drawing && !drawingQueued && (
-          <button type="button" disabled={starting} onClick={() => void drawMap()} className="cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-muted hover:text-text disabled:opacity-50">
-            Redraw map
-          </button>
+        {stored_ && (
+          <div className="flex shrink-0 items-center gap-2">
+            <button type="button" onClick={() => setRawOpen(true)} className={MAP_BUTTON}>
+              <span aria-hidden="true" className="font-mono text-[11px]">{"{ }"}</span>
+              Raw JSON
+            </button>
+            {!drawing && !drawingQueued && (
+              <button type="button" disabled={starting} onClick={() => void drawMap()} className={MAP_BUTTON}>
+                Redraw map
+              </button>
+            )}
+          </div>
         )}
       </div>
+      {rawOpen && stored_ && <RawMapDialog value={stored_} onClose={() => setRawOpen(false)} />}
 
-      <div ref={plotRef} className="map-plot relative min-h-[420px] flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1">
+      <div ref={plotRef} className="map-plot relative min-h-[420px] min-w-0 flex-1 overflow-hidden">
         {/* Sky and soil, as in the nest. */}
         <div
           aria-hidden="true"
@@ -368,6 +406,19 @@ export function NestMapView({
           )
         )}
       </div>
+      {openChamber && repo && (
+        <FileTreePane
+          repo={repo}
+          revision={files?.repo === repo ? files.revision : (stored_?.revision ?? null)}
+          paths={files?.repo === repo ? files.paths : null}
+          error={files?.repo === repo ? files.error : null}
+          title={openChamber.component.label}
+          marked={markedPaths}
+          changing={changingPaths}
+          onClose={() => setOpen(null)}
+        />
+      )}
+      </div>
     </div>
   );
 }
@@ -493,3 +544,65 @@ function ChamberPanel({
 }
 
 type RepoMapComponent = NonNullable<RepoMap["map"]>["map"]["components"][number];
+
+const MAP_BUTTON =
+  "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-3 text-[12.5px] text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50";
+
+/** When a map was drawn, as a local date and time ("24 Sep, 15:58"). */
+function formatWhen(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/** The stored map as the mothership keeps it, pretty-printed, with copy and download. */
+function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; onClose: () => void }): ReactElement {
+  const ref = useRef<HTMLDialogElement>(null);
+  const toast = useToast();
+  const text = useMemo(() => JSON.stringify(value, null, 2), [value]);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (dialog && !dialog.open) dialog.showModal();
+  }, []);
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${value.repo.replace("/", "-")}-architecture${value.revision ? `-${value.revision.slice(0, 7)}` : ""}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <dialog
+      ref={ref}
+      onClose={onClose}
+      aria-labelledby="raw-map-title"
+      className="m-auto w-[min(860px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
+    >
+      <div className="flex items-center gap-3 border-b border-border px-5 py-3">
+        <h2 id="raw-map-title" className="min-w-0 flex-1 truncate text-[15px] font-semibold">
+          Raw map · <span className="font-mono text-[13px] text-muted">{value.repo}</span>
+        </h2>
+        <button
+          type="button"
+          className={MAP_BUTTON}
+          onClick={() => {
+            void navigator.clipboard?.writeText(text).then(
+              () => toast("Map JSON copied"),
+              () => toast("Could not copy", "error"),
+            );
+          }}
+        >
+          Copy
+        </button>
+        <button type="button" className={MAP_BUTTON} onClick={download}>
+          Download
+        </button>
+        <button type="button" aria-label="Close" className={MAP_BUTTON} onClick={() => ref.current?.close()}>
+          ×
+        </button>
+      </div>
+      <pre className="scroll-thin m-0 max-h-[70vh] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed text-muted">{text}</pre>
+    </dialog>
+  );
+}

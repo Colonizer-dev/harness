@@ -367,6 +367,41 @@ pub async fn get(State(app): State<Shared>, Path((owner, name)): Path<(String, S
     })))
 }
 
+/// Most paths the file tree sends; a larger repository is cut off with `truncated: true`.
+const TREE_LIMIT: usize = 20_000;
+
+/// `GET /api/maps/{owner}/{repo}/files`: every file path in the repository at the stored map's
+/// revision (else the mothership's cached HEAD), read with `git ls-tree` from the local bare clone —
+/// no GitHub call. The cockpit draws it as an explorer tree with the chosen component's files marked.
+pub async fn files(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let revision = read_stored(&app, &repo)
+        .and_then(|m| m.get("revision").and_then(Value::as_str).map(str::to_string))
+        .filter(|r| r.chars().all(|c| c.is_ascii_hexdigit()) && !r.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+    let bare = app.bare_repo(&repo);
+    if !bare.is_dir() {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "this repository has no local clone yet; launch a colony on it first",
+        ));
+    }
+    let mut cmd = app.git(&bare);
+    cmd.args(["ls-tree", "-r", "--name-only", "-z", &revision]);
+    let out = exec_within(Duration::from_secs(10), &mut cmd)
+        .await
+        .map_err(|e| client_error(StatusCode::NOT_FOUND, &format!("could not list {repo} at {revision}: {e:#}")))?;
+    let mut paths: Vec<&str> = out.split('\0').filter(|p| !p.is_empty()).collect();
+    let truncated = paths.len() > TREE_LIMIT;
+    paths.truncate(TREE_LIMIT);
+    Ok(Json(
+        json!({"repo": repo, "revision": revision, "paths": paths, "truncated": truncated}),
+    ))
+}
+
 /// `POST /api/maps/{owner}/{repo}`: launches a mapping colony through the ordinary admission path.
 pub async fn create(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
     let repo = format!("{owner}/{name}");

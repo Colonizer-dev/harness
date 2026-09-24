@@ -209,6 +209,8 @@ export interface Api {
   checkMem0(): Promise<Mem0Check>;
   /** A repository's architecture map and the newest colony drawing it. */
   repoMap(repo: string): Promise<RepoMap>;
+  /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
+  repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** Launches a colony that draws the repository with archify (or returns the one already drawing). */
   mapRepo(repo: string): Promise<RepoMap>;
   /** The files each live colony's worktree has changed. */
@@ -343,6 +345,7 @@ export const httpApi: Api = {
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
+  repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   touched: () => request("/api/touched"),
   voice: () => request("/api/voice"),

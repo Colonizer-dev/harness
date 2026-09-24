@@ -2706,6 +2706,12 @@ export function createMockApi(): Api {
       return { ...mem0 };
     },
     repoMap: (repo) => later(() => repoMap(repo)),
+    repoMapFiles: (repo) =>
+      later(() => {
+        const map = repoMap(repo).map;
+        const paths = [...new Set((map?.map.components ?? []).flatMap((c) => c.sources.map((s) => s.path)).concat(["README.md", "Cargo.toml"]))];
+        return { repo, revision: map?.revision ?? "HEAD", paths, truncated: false };
+      }),
     mapRepo: async (repo) => {
       await sleep(250);
       if (!maps.has(repo) && !mappings.has(repo)) {
