@@ -1,10 +1,13 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import type {
+  MapFileDetail,
   RepoPackages,
   BurnDownStatus,
   SecretRow,
   ColonySecretRequest,
   SecretsListing,
+  RepoMap,
+  TouchedFiles,
   FleetHost,
   FindingRecord,
   HarnessStatus,
@@ -205,6 +208,16 @@ export interface Api {
   saveMem0Key(apiKey: string): Promise<Mem0Status>;
   /** Tries the saved key against the configured endpoint. */
   checkMem0(): Promise<Mem0Check>;
+  /** A repository's architecture map and the newest colony drawing it. */
+  repoMap(repo: string): Promise<RepoMap>;
+  /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
+  repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
+  /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
+  repoMapFile(repo: string, path: string): Promise<MapFileDetail>;
+  /** Launches a colony that draws the repository with archify (or returns the one already drawing). */
+  mapRepo(repo: string): Promise<RepoMap>;
+  /** The files each live colony's worktree has changed. */
+  touched(): Promise<TouchedFiles>;
   /** The voice module's active speech-to-text service. */
   voice(): Promise<VoiceStatus>;
   /** Saves a voice service's key on the Mothership; an empty string removes it. */
@@ -334,6 +347,11 @@ export const httpApi: Api = {
   mem0Status: () => request("/api/memory/mem0"),
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),
+  repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
+  repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
+  repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
+  mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),
+  touched: () => request("/api/touched"),
   voice: () => request("/api/voice"),
   saveVoiceKey: (provider, apiKey) => put("/api/voice/key", { provider, api_key: apiKey }),
   transcribe: (audio) =>

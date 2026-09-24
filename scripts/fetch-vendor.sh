@@ -166,6 +166,36 @@ while read -r name version plat kind sha url; do
       grep -q '"name": "fast-jev-compaction"' "$dest/.claude-plugin/plugin.json" || { echo "fast-jev-compaction $version: plugin.json is not the fast-jev-compaction plugin" >&2; exit 1; }
       rm -rf "$tmp"
       ;;
+    archify)
+      # Staged at dist/plugins/archify as a one-skill plugin: upstream's archify/ directory is the
+      # skill itself (SKILL.md beside the schemas/, examples/, renderers/ and bin/ it reads by relative
+      # path), so it goes under skills/archify/ unchanged except for what a colony must not run:
+      #   test/                     upstream's test suite, not read by the skill
+      #   scripts/check-update.mjs  a network update check; SKILL.md says to continue silently when it
+      #                             cannot run, and a colony has no business phoning home for an update
+      # The CLI has no runtime dependencies (package.json lists devDependencies only), so the colony
+      # runs `node bin/archify.mjs validate …` straight from the read-only mount.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/archify-*)
+      dest="$root/dist/plugins/archify"
+      rm -rf "$dest"
+      mkdir -p "$dest/.claude-plugin" "$dest/skills"
+      for need in archify/SKILL.md archify/bin/archify.mjs archify/schemas/architecture.schema.json LICENSE THIRD_PARTY_NOTICES.md; do
+        [ -e "$src/$need" ] || { echo "archify $version has no $need" >&2; exit 1; }
+      done
+      cp -R "$src/archify" "$dest/skills/archify"
+      rm -rf "$dest/skills/archify/test" "$dest/skills/archify/scripts/check-update.mjs"
+      cp "$src/LICENSE" "$dest/LICENSE"
+      cp "$src/THIRD_PARTY_NOTICES.md" "$dest/THIRD_PARTY_NOTICES.md"
+      printf '{\n  "name": "archify",\n  "version": "%s",\n  "description": "Architecture diagrams as typed JSON (github.com/tt-a1i/archify); mapping colonies use it to draw a repository",\n  "license": "MIT"\n}\n' "$version" > "$dest/.claude-plugin/plugin.json"
+      printf '{\n  "name": "archify",\n  "version": "%s",\n  "description": "Architecture diagrams as typed JSON (github.com/tt-a1i/archify); mapping colonies use it to draw a repository",\n  "skills": ["archify"]\n}\n' "$version" > "$dest/plugin.json"
+      if [ -n "$(find "$dest" \( -name hooks -o -name hooks.json -o -name .mcp.json -o -name mcp.json \) -print -quit)" ]; then
+        echo "archify staging leaked a hook or an MCP server configuration" >&2; exit 1
+      fi
+      [ ! -e "$dest/skills/archify/scripts/check-update.mjs" ] || { echo "archify staging kept the update check" >&2; exit 1; }
+      rm -rf "$tmp"
+      ;;
     google-skills)
       # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
       # of google/skills would put ~17k tokens of skill descriptions into every

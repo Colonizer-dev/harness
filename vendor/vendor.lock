@@ -51,6 +51,13 @@ caveman      2.7.0     any           prompt  0f8b833ef65be67b565573d075264b7acab
 # catalog of the other 146. The finder never fetches from GitHub; see scripts/fetch-vendor.sh.
 google-skills 2026.09.21-6e3838f any       plugin  9f2825b72bd391de1302d550f5ac2226a9b96d522d348ca94f0b661363b09d21  https://codeload.github.com/google/skills/tar.gz/6e3838f1152fafc05a36a9a3a4995ec15c07ef33
 
+# archify is github.com/tt-a1i/archify at commit 9e35d2b (2026-09-23, 2.17.0-dev.1); pinned by commit because
+# the skill ships from main. MIT (LICENSE and THIRD_PARTY_NOTICES.md are staged with it). Staged as a
+# one-skill plugin (skills/archify/): the skill's schemas, examples, renderers and its dependency-free
+# node CLI (validate/deliver), which mapping colonies run against the worktree (crates/colonizer/src/maps.rs).
+# Not staged: test/ and scripts/check-update.mjs, the skill's network update check.
+archify      2026.09.23-9e35d2b any       plugin  24b38bf7ea6de8d2d77d32c1a7320caa34846b83e96da393ebe2a66015a2fb1b  https://codeload.github.com/tt-a1i/archify/tar.gz/9e35d2b0b39b155553ba9fcfe0b4f2a5198dd993
+
 # fast-jev-compaction is github.com/tamaratran/fast-jev-compaction at commit e3f262a: Jev-scored
 # deletion of stale tool calls for colonies that switch compaction on. Pinned as a commit tarball,
 # not the npm fast-jev-compaction@0.4.0 release, which ships only the library dist/ (not the plugin

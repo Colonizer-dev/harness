@@ -14,7 +14,7 @@ export type SessionStatus =
   | "stopped"
   | "failed";
 
-export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted" | "autopilot_held" | "provider_quota_exhausted" | "hold_timeout";
+export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted" | "autopilot_held" | "provider_quota_exhausted" | "hold_timeout" | "model_error";
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
@@ -1198,4 +1198,68 @@ export interface KeychainHealth {
 export interface SecretsListing {
   keychain: KeychainHealth;
   secrets: SecretRow[];
+}
+
+/** One component of a repository's architecture map (GET /api/maps/{owner}/{repo}, from an archify
+ *  architecture diagram): archify's own layout (`pos` top-left, `size`), and the repository files
+ *  it lives in. */
+export interface ArchComponent {
+  id: string;
+  type: string;
+  label: string;
+  sublabel?: string | null;
+  pos: [number, number];
+  size: [number, number];
+  sources: { path: string; line?: number; label?: string }[];
+}
+
+/** The fields of an archify architecture diagram the cockpit draws, as the mothership stores them. */
+export interface ArchMap {
+  title: string;
+  subtitle?: string | null;
+  components: ArchComponent[];
+  connections: { from: string; to: string; label?: string }[];
+  boundaries: { label: string; wraps: string[] }[];
+}
+
+/** GET /api/maps/{owner}/{repo}: the stored map, if any, and the newest mapping colony, if any. */
+/** One tool call a colony made on a file (GET /api/maps/{owner}/{repo}/file). */
+export interface MapFileActivity {
+  ts: string;
+  tool: string;
+  summary: string;
+  /** The subagent (settler) the call ran in, when the event says. */
+  agent: string | null;
+}
+
+/** A live colony on one file: what it did there, and its diff of it. */
+export interface MapFileColony {
+  id: string;
+  title: string;
+  issue: number | null;
+  status: SessionStatus;
+  mode: "changing" | "reading";
+  activity: MapFileActivity[];
+  diff: string | null;
+  diff_truncated: boolean;
+}
+
+/** GET /api/maps/{owner}/{repo}/file?path=…: every live colony changing or reading one file. */
+export interface MapFileDetail {
+  repo: string;
+  path: string;
+  colonies: MapFileColony[];
+}
+
+export interface RepoMap {
+  repo: string;
+  map: { repo: string; revision: string | null; generated_at: string; session: string; map: ArchMap } | null;
+  mapping: { id: string; status: SessionStatus; created_at: string } | null;
+}
+
+/** GET /api/touched: the files each live colony's worktree has changed, keyed by session id. */
+export interface TouchedFiles {
+  sessions: Record<string, string[]>;
+  /** The files each live colony's recent tool calls looked at, newest first; absent from an older mothership. */
+  reading?: Record<string, string[]>;
 }

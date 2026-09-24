@@ -977,6 +977,31 @@ pub(crate) async fn flag_model_error(app: &Shared, colony: &str) {
     .await;
 }
 
+/// Lifts a `model_error` flag once the colony's provider answers again: the error the flag named is
+/// over, so it no longer needs anyone. Any other reason (the watchdog's, autopilot's) is left alone.
+/// Without this a colony that recovered from one failed call stayed on the needs-you list for good,
+/// and one whose calls alternate between failing and succeeding flickered on and off it.
+pub(crate) async fn clear_model_error(app: &Shared, colony: &str) {
+    let flagged = app
+        .session(colony)
+        .await
+        .and_then(|s| s.attention)
+        .is_some_and(|a| a.get("reason").and_then(serde_json::Value::as_str) == Some(MODEL_ERROR_REASON));
+    if flagged {
+        app.update_session(colony, |x| {
+            if x.attention
+                .as_ref()
+                .and_then(|a| a.get("reason"))
+                .and_then(serde_json::Value::as_str)
+                == Some(MODEL_ERROR_REASON)
+            {
+                x.attention = None;
+            }
+        })
+        .await;
+    }
+}
+
 /// Rewrites an Anthropic-wire request body for a provider with dialect quirks
 /// ([`Provider::quirks`]). Returns `None` when the body needs nothing changed, so the caller keeps
 /// the original bytes and the passthrough stays byte-identical for providers without quirks. A body
@@ -1330,6 +1355,7 @@ async fn proxy(
     // A 2xx from upstream proves the plan is back: a quota record from an earlier error lapses now,
     // so the queue unpauses and parked colonies resume on the next tick.
     app.gateway.clear_quota_on_success(&id);
+    clear_model_error(&app, &colony).await;
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
         if !DROP_RESPONSE_HEADERS.contains(&name.as_str()) {
@@ -1471,6 +1497,9 @@ async fn openai_response(
     if status.is_success() && info.stream {
         // Streaming 2xx headers prove the plan is back, as below.
         gateway.clear_quota_on_success(id);
+        if let Some((app, colony)) = attention {
+            clear_model_error(app, colony).await;
+        }
         let body = stream_body(
             openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record),
             guards,
@@ -1513,6 +1542,9 @@ async fn openai_response(
             Ok((message, priced)) => {
                 // A translated 2xx proves the plan is back: the quota record lapses now.
                 gateway.clear_quota_on_success(id);
+                if let Some((app, colony)) = attention {
+                    clear_model_error(app, colony).await;
+                }
                 record(priced);
                 (StatusCode::OK, Json(message)).into_response()
             }

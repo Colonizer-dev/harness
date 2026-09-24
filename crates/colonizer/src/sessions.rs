@@ -1780,7 +1780,23 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &colony_secrets.iter().map(|(meta, _)| meta).collect::<Vec<_>>(),
     ));
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
-    let agent_choice = orgs::effective_agent(&modules, &org_settings);
+    let mut agent_choice = orgs::effective_agent(&modules, &org_settings);
+    // A mapping colony draws with archify whatever its org has switched on (maps.rs).
+    if s.origin.as_deref() == Some(crate::maps::MAP_ORIGIN) {
+        let plugins = agent_choice
+            .settings
+            .get("plugins")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let with = crate::maps::with_archify(plugins);
+        agent_choice.settings.insert("plugins".into(), Value::String(with));
+        // A map is one bounded job — read the repository, write one validated JSON file — so it
+        // runs as a single agent on a fast model rather than an orchestrator at full effort
+        // handing every grep to a subagent and waiting on it.
+        for (key, value) in crate::maps::MAP_AGENT_SETTINGS {
+            agent_choice.settings.insert((*key).into(), Value::String((*value).into()));
+        }
+    }
     let mut runner_env = agent_env(&agent, &agent_choice);
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when

@@ -15,6 +15,13 @@ Each resolves to `<data>/plugins/<name>` or the vendored `<COLONIZER_HOME>/plugi
 mounts read-only at `/opt/colonizer/plugins/<name>`, and loads into Claude Code as one
 `{type: 'local', path}` plugin entry.
 
+One pack is loaded by purpose rather than by setting: `archify` (vendored from
+[tt-a1i/archify](https://github.com/tt-a1i/archify), MIT) is added to every mapping colony's
+packs, whatever its org has switched on, because drawing the repository is that colony's whole
+task (docs/protocol.md, "Architecture maps"). It is a one-skill pack: upstream's skill directory,
+which reads its schemas and runs its own `bin/archify.mjs` by relative path, staged unchanged under
+`skills/archify/`.
+
 ## plugin.json
 
 The manifest. Canonical readers (the validator, boot validation) prefer the root

@@ -594,7 +594,7 @@ pub fn siblings_of(sessions: &[Session], s: &Session, touched: &HashMap<String, 
 /// NUL (`XY NEW\0OLD`) — the NEW path is the one the sibling is moving towards, so that is what
 /// we keep. With `-z` nothing is quoted or escaped, so any name survives as git saw it. A
 /// truncated or otherwise unusable entry names no path.
-fn porcelain_paths(out: &str) -> Vec<String> {
+pub(crate) fn porcelain_paths(out: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut fields = out.split('\0');
     while let Some(entry) = fields.next() {

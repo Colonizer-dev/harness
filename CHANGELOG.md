@@ -16,6 +16,15 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **The nest as a map of the software.** The nest has a Map mode: a repository's
+  architecture — drawn by a mapping colony with the newly vendored
+  [archify](https://github.com/tt-a1i/archify) skill (MIT) and stored by the
+  mothership — becomes the nest, with components as chambers, boundaries as mounds
+  and connections as tunnels, and each live colony's ants walking to the chambers
+  whose files it is changing. "Map this repo" launches the mapping colony, which
+  leaves the repository untouched and ends in `no_changes`; `GET /api/touched`
+  reports every live colony's changed files. Run `scripts/fetch-vendor.sh` (or
+  install a release) to stage the `archify` skillset.
 - **Configurable free-disk thresholds.** The sandbox module's `warn_free_disk`
   (default 10G) warns in the cockpit when the data dir's volume runs low, and
   `min_free_disk` (default 5G) pauses queue admission until space returns —

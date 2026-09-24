@@ -117,6 +117,10 @@ pub async fn publish_session(app: Shared, id: String) {
             }
         }
     }
+    // A mapping colony's product is its architecture map, not a pull request (maps.rs).
+    if let Some(ended) = app.session(&id).await {
+        crate::maps::on_colony_end(&app, &ended).await;
+    }
 }
 
 /// Colonies whose pull request still needs watching. `merged` is final; a closed PR can be reopened,

@@ -144,12 +144,17 @@ pub fn summarize(event: &Value) -> Option<RecentEvent> {
 /// The last lines of `events.jsonl`: at most the last 64 KiB, seeked, dropping the partial first
 /// line the seek can land mid-way through.
 pub(crate) async fn tail_events(path: &Path) -> Vec<Value> {
+    tail_events_within(path, TAIL_BYTES).await
+}
+
+/// [`tail_events`] with its own byte budget: the last `bytes` of the file, whole lines only.
+pub(crate) async fn tail_events_within(path: &Path, bytes: u64) -> Vec<Value> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let Ok(mut file) = tokio::fs::File::open(path).await else {
         return Vec::new();
     };
     let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(TAIL_BYTES);
+    let start = len.saturating_sub(bytes);
     // A seek landing exactly on a line start keeps every line; only a mid-line landing drops the
     // partial head. The byte before the seek tells which: a newline means a boundary.
     let mut boundary = start == 0;
