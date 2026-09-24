@@ -12,7 +12,8 @@ import type { Session } from "../types";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { feedEntries, type FeedKind } from "./feed";
 
-const READ_AT = "colonizer.inboxReadAt";
+/** The local "read up to" mark, shared by the inbox and the header's notifications panel. */
+export const READ_AT = "colonizer.inboxReadAt";
 
 /** The dot beside a line. Kept in step with the timeline's, so one colony reads the same in both. */
 export const KIND_DOT: Record<FeedKind, string> = {
@@ -146,7 +147,7 @@ export function InboxView({
 }
 
 /** Short enough for the right-hand column: "3m", "2h", "4d". */
-function relative(at: string): string {
+export function relative(at: string): string {
   const seconds = Math.max(0, (Date.now() - Date.parse(at)) / 1000);
   if (Number.isNaN(seconds)) return "";
   if (seconds < 60) return "now";

@@ -442,6 +442,12 @@ export function Cockpit({
         needByOrg={needByOrg}
         statusError={statusError}
         connection={liveConnection}
+        inbox={{
+          sessions,
+          onOpenColony: openColonyById,
+          onOpenInbox: () => navigate("inbox"),
+          onOpenNotificationSettings: () => onOpenSettings("notifications"),
+        }}
       />
       <div className="relative z-[1] flex min-h-0 min-w-0">
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">

@@ -26,11 +26,11 @@ export interface NavTab {
 
 /** The views, top to bottom. Launch has its own button and settings sits in the foot; the colony
  *  view has no item — it is reached by opening a colony. */
-export function navTabs({ needCount, liveCount, pendingMemory }: { needCount: number; liveCount: number; pendingMemory: number }): NavTab[] {
+/** The inbox is not here: it lives behind the bell at the top right (NotificationsBell). */
+export function navTabs({ liveCount, pendingMemory }: { needCount: number; liveCount: number; pendingMemory: number }): NavTab[] {
   return [
     { view: "overview", label: "Overview", count: "" },
     { view: "home", label: "Nest", count: liveCount || "" },
-    { view: "inbox", label: "Inbox", count: needCount || "", urgent: needCount > 0 },
     { view: "history", label: "History", count: "" },
     { view: "memory", label: "Memory", count: pendingMemory || "", urgent: pendingMemory > 0 },
     { view: "host", label: "Host", count: "" },

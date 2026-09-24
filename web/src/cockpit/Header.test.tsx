@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { OrgEntry } from "../orgs";
+import type { Session } from "../types";
 import { actionError } from "./Cockpit";
 import { Header, runningOrgs } from "./Header";
 import { NavRail, navTabs, type CockpitView } from "./NavRail";
@@ -95,18 +96,46 @@ describe("Header running workspaces", () => {
   });
 });
 
+describe("Header notifications bell", () => {
+  const colony = (id: string, status: string): Session =>
+    ({ id, repo: "acme/web", issue: 7, issue_title: "t", status, created_at: "2026-09-24T00:00:00Z", updated_at: "2026-09-24T00:00:00Z" }) as unknown as Session;
+  const withBell = (sessions: Session[]) =>
+    renderToStaticMarkup(
+      <Header
+        orgs={[]}
+        selectedOrg={null}
+        onSelectOrg={() => {}}
+        needByOrg={{}}
+        statusError={false}
+        inbox={{ sessions, onOpenColony: () => {}, onOpenInbox: () => {}, onOpenNotificationSettings: () => {} }}
+      />,
+    );
+
+  it("sits at the right of the bar, closed, counting the colonies that need you", () => {
+    const html = withBell([colony("a", "waiting_for_answer"), colony("b", "waiting_for_answer"), colony("c", "running")]);
+    expect(html).toMatch(/aria-label="notifications · 2 need you[^"]*" aria-haspopup="dialog" aria-expanded="false"/);
+    expect(html).toContain(">2</span>");
+    expect(html).not.toContain('role="dialog"');
+  });
+
+  it("is absent without an inbox, and quiet when nothing waits", () => {
+    expect(header()).not.toContain("notifications");
+    expect(withBell([colony("c", "running")])).not.toContain("need you");
+  });
+});
+
 describe("NavRail views", () => {
   it("lists the views in order; launch and settings have their own buttons", () => {
-    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "inbox", "history", "memory", "host"]);
+    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "history", "memory", "host"]);
     const html = rail();
     expect(html).toContain('aria-label="launch a colony"');
     expect(html).toContain('aria-label="settings"');
   });
 
-  it("marks the current view and counts the inbox and memory", () => {
+  it("marks the current view and counts memory; the inbox is the header's bell, not a rail item", () => {
     const html = rail({ view: "memory", pendingMemory: 3, inboxCount: 2 });
     expect(html).toMatch(/aria-label="Memory · 3" aria-current="page"/);
-    expect(html).toContain('aria-label="Inbox · 2"');
+    expect(html).not.toContain("Inbox");
   });
 
   it("keeps the theme toggle and the collapse control", () => {
