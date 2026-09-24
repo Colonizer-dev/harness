@@ -1,12 +1,13 @@
-# Runs the checks every pull request has to pass: the Rust tests and lint, the Claude Code runner's
-# tests, the live map's receiver's tests, and the web UI's build and tests. Each piece is its own job
-# so a red run names what broke.
+# Runs the checks every pull request has to pass: the Rust tests and lint, the agent modules'
+# runner tests, the live map's receiver's tests, and the web UI's build and tests. Each piece is
+# its own job so a red run names what broke.
 #
 # `cargo fmt --all --check` gates the tree, which was formatted in one pass against the `rustfmt.toml`
 # at the repository root (width 130 — the style the tree was already written in).
 #
 # Node 24 is what every other workflow pins and what the colony image (node:24-bookworm) runs;
-# engines floors at 20, and CI checks the newest runtime people actually run.
+# engines floors differ per module (claude-code at 20, pi at 22.19), and CI checks the newest
+# runtime people actually run.
 name: CI
 
 on:
@@ -65,12 +66,18 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+  # One leg per agent module, so a red run names the module: the Claude Code adapter (driven through
+  # a fake SDK) and the Pi adapter (driven through a fake Pi process). Neither touches the network.
   runner:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [claude-code, pi]
     defaults:
       run:
-        working-directory: modules/agents/claude-code
+        working-directory: modules/agents/${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,7 +85,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: modules/agents/claude-code/package-lock.json
+          cache-dependency-path: modules/agents/${{ matrix.module }}/package-lock.json
 
       - name: Install dependencies
         run: npm ci

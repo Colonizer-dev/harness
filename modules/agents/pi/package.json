@@ -1,0 +1,18 @@
+{
+  "name": "colonizer-agent-pi",
+  "version": "0.1.0",
+  "description": "Colonizer agent module: the Pi coding agent over its RPC mode",
+  "scripts": {
+    "test": "node --test",
+    "start": "node runner.mjs"
+  },
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

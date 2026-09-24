@@ -519,6 +519,27 @@ mod tests {
     }
 
     #[test]
+    fn the_pi_manifest_is_discovered_as_an_agent_that_needs_no_claude() {
+        // `modules/agents/pi/module.json` ships beside claude-code's and must ride the
+        // same discovery: still a `node` runner to mount, but an agent that reaches
+        // models only through the provider gateway — no `claude` binary and no Claude
+        // login — so it cannot need Claude, and its one model setting is the whole split.
+        const MANIFEST: &str = include_str!("../../../modules/agents/pi/module.json");
+        let root = std::env::temp_dir().join(format!("colonizer-pi-manifest-{}", crate::util::short_id()));
+        let dir = root.join("modules/agents/pi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("module.json"), MANIFEST).unwrap();
+        std::fs::write(dir.join("runner.mjs"), "// test fixture").unwrap();
+        let (modules, problems) = discover_agents(Some(&root));
+        assert!(problems.is_empty(), "{problems:?}");
+        let pi = modules.iter().find(|m| m.id == "pi").expect("the pi manifest is discovered");
+        assert!(!pi.needs_claude, "pi holds no claude binary and no Claude credential");
+        assert_eq!(pi.vm_command(), ["node", "/opt/colonizer/agent/runner.mjs"]);
+        assert_eq!(pi.schema["properties"]["model"]["env"], "COLONIZER_MODEL");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_broken_agent_manifest_is_reported_by_path_and_cause_instead_of_vanishing() {
         let root = std::env::temp_dir().join(format!("colonizer-discover-{}", crate::util::short_id()));
         let agents = root.join("modules/agents");
