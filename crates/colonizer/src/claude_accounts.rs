@@ -353,6 +353,21 @@ mod tests {
     }
 
     #[test]
+    fn traversal_style_ids_never_survive_resolution_into_a_path() {
+        // `sessions::create` resolves the request's explicit account and refuses anything `valid_id`
+        // rejects, so a traversal-style id is never joined under the claude-accounts directory.
+        for bad in ["..", "../foo", "a/b", "../../etc/hostname"] {
+            let resolved = resolve_account(Some(bad), None, &AccountsMeta::default());
+            assert!(!valid_id(&resolved), "{bad:?} should be rejected");
+        }
+        assert!(valid_id(&resolve_account(Some("acme-corp"), None, &AccountsMeta::default())));
+        assert!(
+            valid_id(&resolve_account(None, None, &AccountsMeta::default())),
+            "no account specified still resolves to an acceptable default"
+        );
+    }
+
+    #[test]
     fn tokens_sniff_to_the_same_env_and_source_as_before() {
         assert_eq!(sniff("sk-ant-api-123"), ("ANTHROPIC_API_KEY", "saved API key"));
         assert_eq!(sniff("sk-ant-oat-123"), ("CLAUDE_CODE_OAUTH_TOKEN", "Claude subscription"));
