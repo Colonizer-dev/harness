@@ -190,40 +190,107 @@ jobs:
       - name: Test
         run: node --test scripts/test/colony-report.test.mjs
 
-  # This job does not run by default, and until the repository has the runner it wants, it has never
-  # run. A colony boot needs nested virtualisation: microsandbox starts KVM microVMs, GitHub-hosted
-  # runners have no /dev/kvm, so even the rust:1-alpine build VM inside `scripts/build-agentd.sh`
-  # cannot start there. The job is therefore written for a self-hosted runner labelled `kvm` and is
-  # skipped unless the repository variable COLONIZER_KVM_RUNNER is set — without the guard it would
-  # sit queued forever on a repo with no such runner, and with it, it never gates a pull request and
-  # is deliberately not a required check. A permanently skipped job is not coverage: until one runs,
-  # the boot path is exercised only by unit tests plus the no-KVM smoke test in the rust job (real
-  # agentd binary, host process, loopback, stub agent), and `scripts/build-agentd.sh --smoke` on
-  # whichever machine has KVM and someone to run it.
+  # A real colony, end to end, on every pull request (issue #368): a real mothership (`colonizer
+  # serve`), a real microVM through the vendored msb, real agentd, the real claude-code runner module
+  # and the real Claude Code CLI, against a scratch git repository and a stub Anthropic-wire model
+  # server — no GitHub writes, no paid model, no secrets. scripts/colony-e2e.mjs is the whole
+  # harness: it launches everything, points the colony at the stub, and asserts it comes back
+  # `no_changes` (the agent writes only /harness/out/pr.md, so there is nothing to commit). Like
+  # every job here it runs on PRs and pushes to main, but it is deliberately not a required check: a
+  # KVM-dependent job can flake on a runner difference, and a retry is cheaper than a blocked PR.
   #
-  # What a run needs is satisfied inside these steps: microsandbox comes pinned and sha256-verified
-  # from vendor/vendor.lock (`VENDOR_KINDS=msb`, no host install), build-agentd.sh targets the
-  # runner's own architecture for the guest build, and the agent is a stub module — with a fake
-  # runner there is no Claude credential to check and no mesh, so the mothership's credential gate
-  # (crates/colonizer/src/sessions.rs, "log in with Claude in Settings first", hit when the selected
-  # agent module needs Claude and no credential is saved) is never reached.
-  colony-smoke:
-    runs-on: [self-hosted, kvm]
-    timeout-minutes: 30
-    if: ${{ vars.COLONIZER_KVM_RUNNER == '1' }}
+  # install.sh itself is not run: a bundle drags in the web build, rtk and fetch-at-install
+  # bookkeeping, none of which a colony boot reads. What is staged below is exactly what the
+  # mothership resolves at boot — vendored msb, the pinned guest runtimes, the agent module — plus a
+  # dummy Claude credential through the API, which the mothership only prefix-checks.
+  colony-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Same toolchain the release builds use; assumes the runner has rustup, as self-hosted Rust
-      # runners do.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # Same toolchain the release builds use: stable, minimal profile.
       - name: Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      # Shares the rust job's cache family (its restore key is the fallback), so the mothership and
+      # agentd builds start from a warm target/ (target/alpine* is the agentd build below) and registry.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-e2e-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # Hosted runners do have /dev/kvm but keep it from the runner user (root:kvm 0660), and msb's
+      # libkrun needs it. release.yml's installer job does the same chmod.
+      - name: Let the runner user use /dev/kvm
+        run: sudo chmod 0666 /dev/kvm
 
       - name: Vendored microsandbox
         run: VENDOR_KINDS=msb scripts/fetch-vendor.sh
 
-      # Builds agentd inside a rust:1-alpine microVM, then boots it inside a node:24-bookworm
-      # microVM with a stub agent on 127.0.0.1:7070 and checks --version, an authenticated
-      # /v1/health and an unauthenticated 401: two real microVM boots per run.
-      - name: Smoke
-        run: MSB="$PWD/dist/vendor/microsandbox/bin/msb" scripts/build-agentd.sh --smoke
+      # agentd is built the way install.sh builds it — inside a rust:1-alpine microVM, static musl —
+      # because it runs in the colony's glibc 2.36 bookworm image and a host build on this glibc
+      # 2.39 runner could demand symbol versions the image has not got (scripts/build-agentd.sh).
+      - name: colonizer-agentd (static musl, built in a microVM)
+        run: MSB="$PWD/dist/vendor/microsandbox/bin/msb" scripts/build-agentd.sh
+
+      # The guest runtimes install.sh fetches from the host's own install: the Node the runner
+      # command starts with, and the Claude Code CLI the runner drives (both sha256-pinned).
+      - name: Guest runtimes (pinned Node and Claude Code)
+        run: |
+          scripts/fetch-node-binary.sh
+          scripts/fetch-agent-binary.sh
+
+      # install.sh's module staging, for the one module the run needs: the mothership discovers
+      # agents under <assets>/modules/agents. --omit=optional as in a bundle: the colony runs the
+      # Claude Code binary mounted at /opt/claude/bin/claude, not the SDK's platform package.
+      - name: Stage the claude-code agent module
+        run: |
+          mkdir -p dist/modules/agents/claude-code
+          (cd modules/agents/claude-code && tar --exclude=./node_modules --exclude=./test -cf - .) | tar -xf - -C dist/modules/agents/claude-code
+          (cd dist/modules/agents/claude-code && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
+
+      # The exe resolves its assets from dist/ in the checkout (config.rs, resolve_assets), so no
+      # install step is needed; --locked, like the rust job.
+      - name: Build the mothership
+        run: cargo build --release --locked -p colonizer-harness
+
+      # The pinned colony image (the same digest install.sh --pull-image resolves), pulled up front
+      # so a broken pin or a broken pull fails here, at a named step, instead of as a colony boot
+      # timeout. msb caches images under $HOME/.microsandbox and the driver points the mothership's
+      # HOME at the work dir, so the pull must target that same HOME or the boot re-downloads.
+      - name: Pull the pinned colony image
+        run: |
+          image=$(awk '$1 !~ /^#/ && $6 == "node:24-bookworm" && $4 == "image" { print $6 "@sha256:" $5; exit }' crates/colonizer/images.lock)
+          mkdir -p "$RUNNER_TEMP/colony-e2e/home"
+          HOME="$RUNNER_TEMP/colony-e2e/home" dist/vendor/microsandbox/bin/msb pull "$image"
+
+      # The driver prints a failure report itself and exits non-zero unless the colony reached
+      # no_changes.
+      - name: Run a colony end to end
+        run: node scripts/colony-e2e.mjs --work "$RUNNER_TEMP/colony-e2e" --timeout-mins 20
+
+      # The diagnostics the driver's failure report cites, not the whole work dir: home/ holds the
+      # gigabyte msb image cache, and the scratch repo and worktrees say nothing the session logs
+      # do not. The driver's own stdout (the full report) is in the step log regardless.
+      - name: Upload the run's logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colony-e2e-logs
+          path: |
+            ${{ runner.temp }}/colony-e2e/serve.log
+            ${{ runner.temp }}/colony-e2e/gh-calls.log
+            ${{ runner.temp }}/colony-e2e/data/sessions
+          if-no-files-found: ignore
+          retention-days: 7

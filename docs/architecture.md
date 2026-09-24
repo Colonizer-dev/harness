@@ -220,11 +220,14 @@ smoke` runs just the single boot-path pass of those.
 
 What it does not cover is the colony around agentd: the `msb run` boot itself, the session directory
 the mothership writes (plugin mounts, `boot.sh`, the mesh key), subagent model resolution and cost
-accounting: everything that needs a real microVM and a real model. `scripts/build-agentd.sh --smoke`
-runs agentd's boot checks inside a real microVM on a machine with `/dev/kvm`, and CI's `colony-smoke`
-job runs that on a self-hosted KVM runner, skipped until the repository has one (set the
-`COLONIZER_KVM_RUNNER` repository variable when it does), so the boot path stays covered by unit
-tests only until then.
+accounting: everything that needs a real microVM and a real model. Two things cover that:
+`scripts/build-agentd.sh --smoke` runs agentd's boot checks inside a real microVM on any machine with
+`/dev/kvm`, and CI's `colony-e2e` job boots a whole colony end to end on every pull request — a real
+mothership, microVM, agentd, claude-code runner and Claude Code CLI against a scratch git repository
+and a stub Anthropic-wire model server (`scripts/colony-e2e.mjs`), asserting the colony publishes and
+comes back `no_changes`. GitHub-hosted runners do have `/dev/kvm` (the job chmods it for the runner
+user), so this needs no self-hosted hardware; what it still does not cover is anything a real model
+or a real GitHub write would do.
 
 ## Packaging
 
