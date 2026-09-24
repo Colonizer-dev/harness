@@ -38,6 +38,53 @@ use tokio::sync::Mutex;
 const MAX_TITLE: usize = 200;
 const MAX_CONTENT: usize = 20_000;
 
+/// Who is asking something of shared memory, as a proposal event's `origin` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    Orchestrator,
+    Subagent,
+    Background,
+}
+
+/// What it is asking to do. Only `Propose` arrives over the wire today; the other two exist so the
+/// matrix can state the whole policy, which the test below then holds in every cell.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    Read,
+    Propose,
+    Write,
+}
+
+/// The shared-memory access matrix (docs/architecture.md, "Shared memory access"): everyone mounted
+/// reads, only the orchestrator proposes (and its proposals still go through review), and no colony
+/// ever writes a note directly. A background task sees only its repository's scope.
+pub(crate) fn allowed(role: Role, action: Access, scope: &str) -> bool {
+    match (action, role) {
+        // Writing is the operator's, through this module's own handlers; a colony's way in is a
+        // proposal, which is review, not a write.
+        (Access::Write, _) => false,
+        (Access::Read, Role::Background) => scope == "repo",
+        (Access::Read, _) => true,
+        (Access::Propose, Role::Orchestrator) => true,
+        (Access::Propose, _) => false,
+    }
+}
+
+/// The [`Role`] an `origin` string names: `orchestrator`, `subagent` or `subagent:<name>`,
+/// `background` or `background:<name>`. Anything else is None — an origin this build does not know
+/// is refused, not taken for the orchestrator it has not proved to be.
+pub(crate) fn role_of(origin: &str) -> Option<Role> {
+    let kind = origin.split(':').next()?;
+    match kind {
+        // The orchestrator has no name to carry; a subagent or background task may.
+        "orchestrator" if !origin.contains(':') => Some(Role::Orchestrator),
+        "subagent" => Some(Role::Subagent),
+        "background" => Some(Role::Background),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub id: String,
@@ -645,6 +692,40 @@ pub async fn check_mem0(State(app): State<Shared>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every cell of the matrix, against the table in docs/architecture.md ("Shared memory access").
+    #[test]
+    fn the_access_matrix_holds_in_every_cell() {
+        let expected = [
+            //                action,           repo,  org, global
+            (Role::Orchestrator, Access::Read, [true, true, true]),
+            (Role::Subagent, Access::Read, [true, true, true]),
+            (Role::Background, Access::Read, [true, false, false]),
+            (Role::Orchestrator, Access::Propose, [true, true, true]),
+            (Role::Subagent, Access::Propose, [false, false, false]),
+            (Role::Background, Access::Propose, [false, false, false]),
+            (Role::Orchestrator, Access::Write, [false, false, false]),
+            (Role::Subagent, Access::Write, [false, false, false]),
+            (Role::Background, Access::Write, [false, false, false]),
+        ];
+        for (role, action, scopes) in expected {
+            for (scope, ok) in ["repo", "org", "global"].iter().zip(scopes) {
+                assert_eq!(allowed(role, action, scope), ok, "{role:?} {action:?} {scope}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_origin_names_a_role_and_nothing_else_does() {
+        assert_eq!(role_of("orchestrator"), Some(Role::Orchestrator));
+        assert_eq!(role_of("subagent"), Some(Role::Subagent));
+        assert_eq!(role_of("subagent:Explore"), Some(Role::Subagent));
+        assert_eq!(role_of("background"), Some(Role::Background));
+        assert_eq!(role_of("background:issue-324"), Some(Role::Background));
+        assert_eq!(role_of("orchestrator:x"), None, "the orchestrator has no name to carry");
+        assert_eq!(role_of("agent"), None);
+        assert_eq!(role_of(""), None);
+    }
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("colonizer-memory-test-{}", short_id()));

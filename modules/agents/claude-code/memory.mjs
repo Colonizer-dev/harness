@@ -20,7 +20,7 @@ export const MEMORY_PROMPT_APPEND = [
 /** Why a memory_propose call is refused, or null. Subagents read shared memory; only the orchestrator proposes. */
 export function memoryDecision(toolName, hookInput = {}) {
   if (toolName !== MEMORY_PROPOSE_TOOL || !hookInput.agent_id) return null;
-  return 'Only the orchestrator proposes shared memory. Put this learning in your report, and the orchestrator will decide whether to propose it.';
+  return 'memory_read_only: only the orchestrator proposes shared memory. Put this learning in your report, and the orchestrator will decide whether to propose it.';
 }
 
 const MAX_RESULTS = 10;
@@ -97,7 +97,9 @@ export function createMemoryServer({ dir, emit, createSdkMcpServer, tool, z }) {
       tags: z.array(z.string().min(1).max(40)).max(10).optional(),
     },
     async ({ scope, title, content, tags }) => {
-      emit({ type: 'memory_proposal', scope, title, content, tags: tags ?? [] });
+      // Only the orchestrator reaches this handler (the hook refuses subagents), so the event says so;
+      // the mothership re-checks the origin before it touches a store.
+      emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title, content, tags: tags ?? [] });
       return text(PROPOSED_REPLY);
     },
   );

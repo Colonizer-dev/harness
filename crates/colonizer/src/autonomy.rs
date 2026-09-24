@@ -9,7 +9,8 @@
 //! that keeps this bounded: a colony reads repository content, content can carry instructions, and a
 //! judge reading the same content can be steered by it. So a reply that is not one of the offered
 //! labels is not an answer — it escalates to the person instead of guessing — free text is refused
-//! unless it is switched on, and a colony that keeps asking is flagged rather than driven.
+//! unless it is switched on, a colony that keeps asking is flagged rather than driven, and a risk
+//! ceiling keeps the riskier questions with the person however long the colony waits.
 //!
 //! Every judged answer is recorded as judged: in the session log with the model and the reason, and
 //! in the answer the colony receives, so a pull request that came out of autonomous mode reads as
@@ -17,8 +18,9 @@
 
 use crate::{
     App, Shared,
-    config::{ModulesConfig, setting_str, setting_u64},
+    config::{ModulesConfig, setting, setting_str, setting_u64},
     modules::schema_for,
+    protocol::QuestionRisk,
     providers::{Provider, Wire, api_model, split_url},
     sessions::SessionStatus,
     util::truncate,
@@ -53,6 +55,9 @@ pub struct Judge {
     pub after_minutes: u64,
     pub max_answers: u64,
     pub free_text: bool,
+    /// The highest risk class the judge may answer (protocol.rs `QuestionRisk`): anything above it
+    /// waits for the person however long.
+    pub risk_ceiling: QuestionRisk,
 }
 
 /// The judge this install is configured with, or `None` when autonomous mode is off or has no model.
@@ -66,11 +71,13 @@ pub fn judge(modules: &ModulesConfig, agents: &[crate::modules::AgentModule]) ->
     if model.is_empty() {
         return None;
     }
+    let risk_ceiling = setting(choice, &schema, "risk_ceiling");
     Some(Judge {
         model,
         after_minutes: setting_u64(choice, &schema, "after_minutes"),
         max_answers: setting_u64(choice, &schema, "max_answers"),
         free_text: choice.settings.get("free_text").and_then(Value::as_bool).unwrap_or(false),
+        risk_ceiling: QuestionRisk::from_wire(risk_ceiling),
     })
 }
 
@@ -131,6 +138,42 @@ fn escalates(failure: &JudgeError, consecutive_failures: u64) -> bool {
     match failure {
         JudgeError::Refused(_) => true,
         JudgeError::Unreachable(_) => consecutive_failures >= MAX_TRANSPORT_FAILURES,
+    }
+}
+
+/// Whether the judge may answer a question of this risk class: at or below its ceiling. A class a
+/// newer runner knows sorts above every known one (protocol.rs), so a question outside the
+/// vocabulary is never answered — and since the derived order puts `Unknown` highest, an unknown
+/// ceiling needs stating separately: it is the one ceiling that answers nothing at all.
+fn within_ceiling(risk: QuestionRisk, ceiling: QuestionRisk) -> bool {
+    match (risk, ceiling) {
+        (QuestionRisk::Unknown, _) | (_, QuestionRisk::Unknown) => false,
+        (risk, ceiling) => risk <= ceiling,
+    }
+}
+
+/// What one tick does with a colony's open question, decided as a pure function so the policy is
+/// testable apart from the loop that acts on it (the `autopilot_step` pattern).
+#[derive(Debug, PartialEq)]
+enum Plan {
+    /// Ask the judge.
+    Answer,
+    /// Above the ceiling: never answered, and never charged to the colony's answers, so a later
+    /// question within the ceiling is judged as usual.
+    Left {
+        /// Whether the "left for you" line still has to go out — once per question id, not once
+        /// per tick.
+        announce: bool,
+    },
+}
+
+fn plan(risk: QuestionRisk, ceiling: QuestionRisk, announced: Option<&str>, question_id: &str) -> Plan {
+    if within_ceiling(risk, ceiling) {
+        Plan::Answer
+    } else {
+        Plan::Left {
+            announce: announced != Some(question_id),
+        }
     }
 }
 
@@ -517,9 +560,30 @@ pub async fn run(app: Shared) {
             if judged >= judge.max_answers {
                 continue;
             }
-            let Some((question_id, questions)) = rt.open_question().await else {
+            let Some((question_id, questions, risk)) = rt.open_question().await else {
                 continue;
             };
+            let announced = rt.activity.lock().await.risk_announced.clone();
+            if let Plan::Left { announce } = plan(risk, judge.risk_ceiling, announced.as_deref(), &question_id) {
+                // Above the ceiling the judge never answers, so this degrades to notify-only: the
+                // person is told once per question, through the same "left this question for you"
+                // line a refusal takes — but unlike a refusal it is not charged to the colony's
+                // answers, so the next question within the ceiling is still judged.
+                if announce {
+                    rt.activity.lock().await.risk_announced = Some(question_id);
+                    app.session_log(
+                        &s.id,
+                        "warn",
+                        format!(
+                            "autonomous: left this question for you (risk {} is above the {} ceiling)",
+                            risk.as_str(),
+                            judge.risk_ceiling.as_str()
+                        ),
+                    )
+                    .await;
+                }
+                continue;
+            }
             let task = crate::memory::task_query(&s.issue_title, None, &s.instructions);
             match judge_one(&app, &s.id, &judge, &task, &question_id, &questions).await {
                 Ok(line) => {
@@ -679,6 +743,7 @@ mod tests {
         let picked = judge(&modules, &[]).expect("configured");
         assert_eq!(picked.model, "fable");
         assert!(!picked.free_text, "free text stays off unless asked for");
+        assert_eq!(picked.risk_ceiling, QuestionRisk::WorkspaceWrite, "the ceiling's default");
 
         modules.autonomy = Some(ModuleChoice {
             provider: "judge".into(),
@@ -686,6 +751,95 @@ mod tests {
             settings,
         });
         assert!(judge(&modules, &[]).is_none(), "switched off");
+    }
+
+    #[test]
+    fn the_ceiling_answers_at_or_below_it_and_nothing_above() {
+        assert!(within_ceiling(QuestionRisk::ReadOnly, QuestionRisk::ReadOnly));
+        assert!(within_ceiling(QuestionRisk::ReadOnly, QuestionRisk::WorkspaceWrite));
+        assert!(!within_ceiling(QuestionRisk::PublishAffecting, QuestionRisk::WorkspaceWrite));
+        assert!(!within_ceiling(
+            QuestionRisk::CredentialAdjacent,
+            QuestionRisk::PublishAffecting
+        ));
+
+        // The vocabulary's order, not the string: a class this build does not know is above every
+        // known ceiling, so a future runner's question is left for the person whatever the setting.
+        assert!(!within_ceiling(QuestionRisk::Unknown, QuestionRisk::CredentialAdjacent));
+    }
+
+    #[test]
+    fn an_above_ceiling_question_is_announced_once_per_question_and_never_spends_the_colonys_answers() {
+        // Left for the person, with the line going out once per question id: the tick repeats,
+        // the line does not, and a different question gets its own.
+        assert_eq!(
+            plan(QuestionRisk::PublishAffecting, QuestionRisk::WorkspaceWrite, None, "q1"),
+            Plan::Left { announce: true }
+        );
+        assert_eq!(
+            plan(QuestionRisk::PublishAffecting, QuestionRisk::WorkspaceWrite, Some("q1"), "q1"),
+            Plan::Left { announce: false }
+        );
+        assert_eq!(
+            plan(
+                QuestionRisk::CredentialAdjacent,
+                QuestionRisk::WorkspaceWrite,
+                Some("q1"),
+                "q2"
+            ),
+            Plan::Left { announce: true }
+        );
+
+        // The point of not charging it: a later question within the ceiling is judged as usual.
+        // `plan` takes no `judged` at all — leaving a question costs the colony nothing.
+        assert_eq!(
+            plan(QuestionRisk::ReadOnly, QuestionRisk::WorkspaceWrite, Some("q1"), "q2"),
+            Plan::Answer
+        );
+    }
+
+    #[test]
+    fn a_ceiling_setting_outside_the_vocabulary_answers_nothing() {
+        use crate::config::ModuleChoice;
+        let choice = |risk_ceiling: Value| ModuleChoice {
+            provider: "judge".into(),
+            enabled: true,
+            settings: Map::from_iter([("model".into(), json!("fable")), ("risk_ceiling".into(), risk_ceiling)]),
+        };
+        let ceiling = |setting: Value| {
+            judge(
+                &ModulesConfig {
+                    autonomy: Some(choice(setting)),
+                    ..ModulesConfig::default()
+                },
+                &[],
+            )
+            .expect("configured")
+            .risk_ceiling
+        };
+        assert_eq!(ceiling(json!("credential_adjacent")), QuestionRisk::CredentialAdjacent);
+        assert_eq!(ceiling(json!("hold_my_beer")), QuestionRisk::Unknown, "not one of the four");
+        assert_eq!(ceiling(json!(3)), QuestionRisk::Unknown, "not even a string");
+
+        // And Unknown is the one ceiling that answers nothing at all — the derived order alone
+        // would make it the most permissive, which is exactly backwards.
+        for risk in [
+            QuestionRisk::ReadOnly,
+            QuestionRisk::WorkspaceWrite,
+            QuestionRisk::PublishAffecting,
+            QuestionRisk::CredentialAdjacent,
+            QuestionRisk::Unknown,
+        ] {
+            assert!(
+                !within_ceiling(risk, QuestionRisk::Unknown),
+                "{risk:?} is not within an unknown ceiling"
+            );
+        }
+        assert_eq!(
+            plan(QuestionRisk::CredentialAdjacent, QuestionRisk::Unknown, None, "q1"),
+            Plan::Left { announce: true },
+            "even a credential question waits, under an unknown ceiling"
+        );
     }
 
     fn provider(id: &str, base_url: &str) -> Provider {

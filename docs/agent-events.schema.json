@@ -146,6 +146,7 @@
         "type": { "const": "question" },
         "question_id": { "type": "string" },
         "message_id": { "type": ["string", "null"] },
+        "risk": { "type": "string", "enum": ["read_only", "workspace_write", "publish_affecting", "credential_adjacent"], "description": "The question's risk class (§2 rules), assigned by the runner and enforced by the Mothership's autonomy judge (§6.2b). Absent means workspace_write; a value outside the vocabulary is treated as above every ceiling and is never answered automatically." },
         "questions": { "type": "array", "items": { "$ref": "#/$defs/question_shape" }, "description": "Forwarded as the model produced them, so it can be empty or hold fewer options than the §2 rules ask the model for." }
       },
       "required": ["type", "question_id", "questions"]
@@ -199,13 +200,14 @@
     },
     "memory_proposal": {
       "type": "object",
-      "description": "A proposed shared-memory note (§6.2); nothing is written inside the colony. Absent scope means repo; absent tags mean none.",
+      "description": "A proposed shared-memory note (§6.2); nothing is written inside the colony. Absent scope means repo; absent tags mean none. The mothership refuses any proposal whose origin is not the orchestrator's, before it touches a store.",
       "properties": {
         "type": { "const": "memory_proposal" },
         "scope": { "enum": ["repo", "org", "global"], "default": "repo" },
         "title": { "type": "string" },
         "content": { "type": "string" },
-        "tags": { "type": "array", "items": { "type": "string" }, "default": [] }
+        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." }
       },
       "required": ["type", "title", "content"]
     },
