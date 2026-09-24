@@ -87,12 +87,12 @@ export function relDelta(cur: number | null, prev: number | null): number | null
 }
 
 /**
- * The delta chip for a compared figure: "new" when the previous period had nothing and this one has
- * something (a percentage over zero means nothing), the usual +/-% otherwise, and undefined when
- * neither period has anything to compare.
+ * The delta chip for a compared figure: the usual +/-%, or undefined when there is nothing to
+ * compare against — a previous period with nothing in it gets no chip (a percentage over zero means
+ * nothing, and the Compare switch's tooltip already says the previous period is empty).
  */
 export function compareDelta(cur: number | null, prev: number | null): { text: string; d: number | null } | undefined {
-  if ((prev == null || prev === 0) && cur != null && cur > 0) return { text: "new", d: 1 };
+  if (prev == null || prev === 0) return undefined;
   const d = relDelta(cur, prev);
   return d == null ? undefined : { text: formatDelta(d), d };
 }

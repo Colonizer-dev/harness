@@ -743,7 +743,6 @@ export function RangePicker({
       >
         <Switch on={compare} />
         Compare
-        {compare && emptyPrevious && <span className="text-[11.5px] text-faint">· prev {range}d empty</span>}
       </button>
     </div>
   );

@@ -193,17 +193,18 @@ describe("the overview's workspace rows", () => {
     expect(html).not.toContain("arm one above");
   });
 
-  it("Compare with an empty previous period says so instead of showing nothing", () => {
+  it("Compare with an empty previous period says so in the tooltip and the ghost key, not on every figure", () => {
     const html = overview();
     expect(html).toContain('role="switch" aria-checked="true"');
     expect(html).toContain("No activity in the previous 30d yet");
     expect(html).toContain("prev 30d · no activity");
-    expect(html).toContain(">new<");
+    expect(html).not.toContain(">new<");
+    expect(html).not.toContain("prev 30d empty");
   });
 
-  it("compareDelta reads new over an empty previous period and a percentage otherwise", () => {
-    expect(compareDelta(3, 0)).toEqual({ text: "new", d: 1 });
-    expect(compareDelta(3, null)).toEqual({ text: "new", d: 1 });
+  it("compareDelta gives no chip over an empty previous period and a percentage otherwise", () => {
+    expect(compareDelta(3, 0)).toBeUndefined();
+    expect(compareDelta(3, null)).toBeUndefined();
     expect(compareDelta(0, 0)).toBeUndefined();
     expect(compareDelta(6, 3)?.text).toBe("+100%");
   });
