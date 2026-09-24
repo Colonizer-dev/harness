@@ -76,6 +76,11 @@ const ALL_OFF: EventSwitches = { question: false, attention: false, failed: fals
 // ---------------------------------------------------------------------------
 
 describe("needsYou", () => {
+  it("does not flag a working colony for a provider error it may recover from, only a stopped one", () => {
+    const flag = { reason: "model_error", since: "2026-09-24T08:20:00Z" };
+    expect(needsYou(session({ status: "running", attention: flag }))).toBe(false);
+    expect(needsYou(session({ status: "idle", attention: flag }))).toBe(true);
+  });
   it("is true when a question waits on a person", () => {
     expect(needsYou(session({ status: "waiting_for_answer" }))).toBe(true);
   });

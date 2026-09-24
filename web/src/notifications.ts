@@ -47,7 +47,13 @@ export function isTerminal(status: SessionStatus): boolean {
  */
 export function needsYou(session: Session): boolean {
   if (isTerminal(session.status)) return false;
-  return Boolean(session.attention) || session.status === "waiting_for_answer";
+  if (session.status === "waiting_for_answer") return true;
+  if (!session.attention) return false;
+  // A provider error on a colony that is still working is not yours to act on yet: its next
+  // request may succeed (the gateway then lifts the flag). It needs you once the turn has stopped.
+  const reason = (session.attention as { reason?: string }).reason;
+  if (reason === "model_error" && (session.status === "running" || session.status === "starting")) return false;
+  return true;
 }
 
 /** `(2) Colonizer` while colonies wait; at zero, exactly the title index.html ships with. */
