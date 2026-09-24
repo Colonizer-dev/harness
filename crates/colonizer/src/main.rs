@@ -47,6 +47,7 @@ mod queue;
 mod rebase;
 mod reclaim;
 mod redteam;
+mod repo_meta;
 mod restack;
 mod routing;
 mod runtime;
@@ -1388,6 +1389,7 @@ async fn serve() -> Result<()> {
         .route("/api/touched", get(maps::touched))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
+        .route("/api/repos/{owner}/{name}/meta", get(repo_meta::meta))
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))
@@ -2581,6 +2583,28 @@ pub struct AnswerCache {
 /// as is; past it the cached value is still returned at once and one background refresh is started
 /// (never two for the same key); with nothing cached the caller waits for the first computation. A
 /// failed computation keeps the last good value and reports the error only when there is none.
+impl App {
+    /// Whether a boolean mark kept beside the answer cache is set (see [`Self::answer_cache_mark`]).
+    pub fn answer_cache_has(&self, key: &str) -> bool {
+        self.answer_cache
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(key)
+            .is_some_and(|(_, v)| v.as_bool() == Some(true))
+    }
+
+    /// Sets or clears a boolean mark next to the cached answers — e.g. "this answer was made while
+    /// GitHub was still computing, refresh it soon".
+    pub fn answer_cache_mark(&self, key: &str, on: bool) {
+        self.answer_cache
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.to_string(), (Instant::now(), serde_json::Value::Bool(on)));
+    }
+}
+
 pub async fn cached_answer<F, Fut>(
     app: &Shared,
     key: impl Into<String>,
