@@ -496,6 +496,10 @@ async fn run_tests(
         ],
         env: Vec::new(),
         secrets: Vec::new(),
+        // The same public-internet profile a colony boots with (sessions.rs `colony_network`), so
+        // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
+        // to nothing of the harness's. Left empty, msb's own default would decide instead.
+        net_profiles: vec!["public".into()],
         command: vec![
             "sh".into(),
             "-c".into(),
@@ -624,6 +628,9 @@ mod tests {
     /// has the guest's report file say so — the number the verdict trusts.
     fn fake_runner(sandbox: i32, reported: Option<i32>) -> VmRunner {
         Arc::new(move |spec| {
+            // Every fresh-checkout VM: the public profile only, no host rules, no secrets.
+            assert_eq!(spec.net_profiles, ["public"]);
+            assert!(spec.net_rules.is_empty() && spec.secrets.is_empty() && spec.env.is_empty());
             Box::pin(async move {
                 if let (Some(dir), Some(code)) = (spec.mounts.iter().find(|m| m.target == "/colonizer-verify"), reported) {
                     tokio::fs::write(dir.source.join("exit"), code.to_string()).await?;
