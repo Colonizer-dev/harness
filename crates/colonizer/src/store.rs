@@ -208,9 +208,13 @@ impl SessionStore for LocalDirStore {
                     if kind.is_symlink() {
                         continue;
                     }
+                    // The child is `dir/name`: `dir` already carries `prefix`, so joining the
+                    // relative path instead would double it and silently skip anything two or more
+                    // levels down.
+                    let child = dir.join(&name);
                     let relative = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
                     if kind.is_dir() {
-                        pending.push((dir.join(relative.clone()), relative));
+                        pending.push((child, relative));
                     } else {
                         files.push(relative);
                     }
@@ -582,8 +586,13 @@ mod tests {
         assert_eq!(replay(&raw), vec![event(1), event(2)], "{label}: replay drops the repeat");
         // The listing is the whole session, nested files included, sorted.
         s.write_file("a", "harness.jsonl", b"{}\n").await.unwrap();
+        s.write_file("a", "out/deep/er/note.md", b"deep").await.unwrap();
         let listed = files(s, "a").await;
-        assert_eq!(listed, ["events.jsonl", "harness.jsonl", "vm/token"], "{label}: sorted");
+        assert_eq!(
+            listed,
+            ["events.jsonl", "harness.jsonl", "out/deep/er/note.md", "vm/token"],
+            "{label}: sorted, however deep"
+        );
         assert!(files(s, "ghost").await.is_empty(), "{label}: unknown session lists as empty");
         // A second session shows up, sorted.
         s.write_file("b", "out/pr.md", b"# Title\n").await.unwrap();
