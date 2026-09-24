@@ -226,7 +226,7 @@ impl App {
         self.cfg.config_dir.join("providers.json")
     }
 
-    fn provider_key_file(&self, id: &str) -> PathBuf {
+    pub(crate) fn provider_key_file(&self, id: &str) -> PathBuf {
         self.cfg.config_dir.join("provider-keys").join(id)
     }
 

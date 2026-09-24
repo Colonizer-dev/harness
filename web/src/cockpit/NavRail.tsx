@@ -11,7 +11,7 @@ import type { OrgEntry } from "../orgs";
 import type { UpdateStatus } from "../types";
 import { needFor } from "./feed";
 
-export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory" | "host";
+export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "settings" | "memory" | "host" | "secrets";
 
 const EXPANDED_KEY = "colonizer.sidebarExpanded";
 
@@ -34,6 +34,7 @@ export function navTabs({ liveCount, pendingMemory }: { needCount: number; liveC
     { view: "history", label: "History", count: "" },
     { view: "memory", label: "Memory", count: pendingMemory || "", urgent: pendingMemory > 0 },
     { view: "host", label: "Host", count: "" },
+    { view: "secrets", label: "Secrets", count: "" },
   ];
 }
 
@@ -78,6 +79,12 @@ const GLYPH: Record<string, ReactNode> = {
       <rect x="3.5" y="4" width="17" height="6.5" rx="2" />
       <rect x="3.5" y="13.5" width="17" height="6.5" rx="2" />
       <path d="M7 7.25h.01M7 16.75h.01M11 7.25h6M11 16.75h6" />
+    </>
+  ),
+  secrets: (
+    <>
+      <circle cx="8" cy="15" r="4" />
+      <path d="m10.8 12.2 8.2-8.2M16 7l2.5 2.5M13.5 9.5l2 2" />
     </>
   ),
   settings: (

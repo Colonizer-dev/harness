@@ -126,7 +126,7 @@ describe("Header notifications bell", () => {
 
 describe("NavRail views", () => {
   it("lists the views in order; launch and settings have their own buttons", () => {
-    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "history", "memory", "host"]);
+    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "history", "memory", "host", "secrets"]);
     const html = rail();
     expect(html).toContain('aria-label="launch a colony"');
     expect(html).toContain('aria-label="settings"');

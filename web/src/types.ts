@@ -1143,3 +1143,39 @@ export interface RepoPackages {
   tool: string | null;
   packages: { name: string; path: string }[];
 }
+
+// ---------------------------------------------------------------------------
+// Saved secrets (GET /api/secrets): where each key lives, never its value
+// ---------------------------------------------------------------------------
+
+export type SecretLocation = "keychain" | "file" | "env" | "unset";
+export type SecretGroup = "providers" | "connections" | "integrations";
+
+export interface SecretRow {
+  /** Stable id, e.g. `provider-keys:zai`; the path segment for PUT/DELETE/move. */
+  id: string;
+  label: string;
+  group: SecretGroup;
+  used_by: string;
+  icon: string;
+  location: SecretLocation;
+  /** The environment variable that can also supply it, if any. */
+  env: string | null;
+  env_set: boolean;
+  updated_at: string | null;
+  /** False for secrets managed elsewhere (environment-only, or read by the CLI off disk). */
+  editable: boolean;
+}
+
+export interface KeychainHealth {
+  available: boolean;
+  /** "macOS Keychain", "Secret Service", or "none". */
+  backend: string;
+  reason: string | null;
+  checked_at: string | null;
+}
+
+export interface SecretsListing {
+  keychain: KeychainHealth;
+  secrets: SecretRow[];
+}

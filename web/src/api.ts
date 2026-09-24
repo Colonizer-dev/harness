@@ -2,6 +2,8 @@
 import type {
   RepoPackages,
   BurnDownStatus,
+  SecretRow,
+  SecretsListing,
   FleetHost,
   FindingRecord,
   HarnessStatus,
@@ -181,6 +183,13 @@ export interface Api {
   spendHistory(days?: number): Promise<SpendHistory>;
   /** Returns `{org, settings}`; colony and memory counts come from the next `orgs()`. */
   saveOrg(org: string, settings: OrgSettings): Promise<Pick<OrgInfo, "org" | "settings">>;
+  /** GET /api/secrets: every saved secret and where it lives; values never leave the mothership. */
+  secrets(): Promise<SecretsListing>;
+  /** PUT /api/secrets/{id}: sets or replaces a secret; `location` also moves it there. */
+  saveSecret(id: string, value: string, location?: "keychain" | "file"): Promise<SecretRow>;
+  deleteSecret(id: string): Promise<SecretRow>;
+  /** POST /api/secrets/{id}/move: between the system keychain and the 0600 file. */
+  moveSecret(id: string, to: "keychain" | "file"): Promise<SecretRow>;
   memory(scope: MemoryScope, key: string): Promise<MemoryListing>;
   memoryProposals(): Promise<MemoryProposal[]>;
   approveProposal(id: string, edits?: { title?: string; content?: string }): Promise<MemoryNote>;
@@ -307,6 +316,10 @@ export const httpApi: Api = {
   orgs: () => request("/api/orgs"),
   spendHistory: (days) => request(`/api/spend/history?days=${days ?? 30}`),
   saveOrg: (org, settings) => put(`/api/orgs/${enc(org)}`, { settings }),
+  secrets: () => request("/api/secrets"),
+  saveSecret: (id, value, location) => put(`/api/secrets/${enc(id)}`, location ? { value, location } : { value }),
+  deleteSecret: (id) => del(`/api/secrets/${enc(id)}`),
+  moveSecret: (id, to) => post(`/api/secrets/${enc(id)}/move`, { to }),
   memory: (scope, key) => request(`/api/memory?scope=${enc(scope)}&key=${enc(key)}`),
   memoryProposals: () => request("/api/memory/proposals"),
   approveProposal: (id, edits) => post(`/api/memory/proposals/${enc(id)}/approve`, edits ?? {}),

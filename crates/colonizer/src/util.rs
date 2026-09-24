@@ -89,7 +89,24 @@ pub fn read_trimmed(path: &Path) -> Option<String> {
 /// a copy of the config dir needs the same `COLONIZER_MASTER_KEY` or its copy is dead by design.
 /// Rotation means setting a new key value and re-saving each secret; if the old key is lost,
 /// delete the `.enc` files and re-enter the secrets.
+///
+/// With the secret store installed (secrets.rs), a secret that lives in the system keychain — or a
+/// new one while the keychain is available — is saved there instead, and no file is written.
 pub fn write_secret(path: &Path, value: &str) -> Result<()> {
+    if let Some(store) = crate::secrets::global() {
+        if store.write(path, value)? {
+            return Ok(());
+        }
+        write_file_secret(path, value)?;
+        store.note_file(path);
+        return Ok(());
+    }
+    write_file_secret(path, value)
+}
+
+/// The file half of [`write_secret`]: plaintext 0600, or the `.enc` envelope under
+/// `COLONIZER_MASTER_KEY`. The secret store calls it directly when it moves a secret to its file.
+pub fn write_file_secret(path: &Path, value: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
@@ -109,6 +126,9 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
 /// ignoring errors. Every secret delete must go through here: removing only the plaintext
 /// would leave the `.enc` behind shadowing (and resurrecting) the secret.
 pub fn delete_secret(path: &Path) {
+    if let Some(store) = crate::secrets::global() {
+        store.forget(path);
+    }
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(enc_path(path));
 }
@@ -119,6 +139,15 @@ pub fn delete_secret(path: &Path) {
 /// were the key (which would surface as silent 401s). With no `.enc` file the plaintext at
 /// `path` is read, so pre-encryption secrets keep working.
 pub fn read_secret(path: &Path) -> Option<String> {
+    if let Some(value) = crate::secrets::global().and_then(|store| store.read(path)) {
+        return value;
+    }
+    read_file_secret(path)
+}
+
+/// The file half of [`read_secret`], which the secret store also uses to move a file into the
+/// keychain.
+pub fn read_file_secret(path: &Path) -> Option<String> {
     let enc = enc_path(path);
     match std::fs::read(&enc) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

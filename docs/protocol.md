@@ -973,6 +973,34 @@ Byte-for-byte proxy of agentd `/v1/pty` (same binary/text frame rules).
 
 ---
 
+### Saved secrets: `/api/secrets`
+
+Every saved secret — the GitHub and Claude tokens, Claude accounts, model-provider keys, voice,
+mem0 and notification keys — lives either in the **system keychain** (Keychain on macOS, the Secret
+Service on Linux; service `dev.colonizer`, account = the secret's path under the config directory,
+e.g. `provider-keys/zai`) or in its **0600 file** under the config directory (the `.enc` envelope
+under `COLONIZER_MASTER_KEY`). `<config>/secrets.json` records which, and when it last changed; it
+never holds a value. At startup the mothership writes, reads back and deletes a canary item (each
+call bounded at 5 s) to decide whether the keychain is usable; a headless Linux host without a
+D-Bus session or with a locked keyring fails it and keeps using files.
+
+Nothing moves on its own: a secret already on file stays there until it is moved. A secret saved
+for the first time goes to the keychain when the probe passed, else to its file. Reads of keychain
+items are cached in memory after the first one.
+
+- `GET /api/secrets` → `{"keychain": {available, backend, reason, checked_at}, "secrets": [{id,
+  label, group: "providers"|"connections"|"integrations", used_by, icon, location:
+  "keychain"|"file"|"env"|"unset", env, env_set, updated_at, editable}]}`. Values are never
+  returned. `id` is the path with `/` as `:` (`provider-keys:zai`).
+- `GET /api/secrets/health` → the `keychain` object alone.
+- `PUT /api/secrets/{id}` `{"value": "…", "location"?: "keychain"|"file"}` → the row. One line, at
+  most 16 KB. Without `location` the secret stays where it is (a new one follows the rule above).
+- `DELETE /api/secrets/{id}` → the row; removes the keychain item and the file.
+- `POST /api/secrets/{id}/move` `{"to": "keychain"|"file"}` → the row; carries the value across and
+  deletes the other copy. 409 when the keychain is unavailable or nothing is saved.
+- Not editable here (`editable: false`): the cockpit API token (the CLI reads it off disk) and keys
+  only an environment variable supplies (`JEV_API_KEY`).
+
 ## 5. Web UI contract
 
 - Stack: Vite + React + TypeScript + Tailwind v4 + assistant-ui (`useExternalStoreRuntime`) + xterm.js.
