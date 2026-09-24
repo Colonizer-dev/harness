@@ -149,9 +149,11 @@ pub struct App {
     pub redteam: redteam::RedTeamStore,
     session_persist: Mutex<()>,
     /// Serialises the read-modify-write of `orgs.json` and `providers.json` (`orgs::put`,
-    /// `providers::put`/`delete`): one strict read, the modify, and the save happen as one
-    /// critical section, so two settings saves at once cannot lose each other's orgs or
-    /// providers, and no save ever follows a read that failed (#408).
+    /// `providers::put`/`delete`), of `known-orgs.json` (`orgs::record_known_sightings`, which
+    /// `mark_org_known` and the refresh's record update go through) and of `claude-accounts.json`
+    /// (`claude_accounts::create`/`delete`): one read, the modify, and the save happen as one
+    /// critical section, so two saves at once cannot lose each other's orgs, providers, known
+    /// orgs or accounts, and no settings save ever follows a read that failed (#408).
     pub config_write: Mutex<()>,
     /// The `LoadDamage` a strict read of `orgs.json` or `providers.json` raised, recorded by
     /// [`App::read_config_loud`]. A std mutex because those readers are sync and hot (the

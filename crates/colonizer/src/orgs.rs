@@ -161,26 +161,42 @@ impl App {
 
     /// Crate-private rather than module-private because `github::refresh_orgs` applies its
     /// reconciliation's record update through it.
-    pub(crate) fn save_known_orgs(&self, all: &BTreeMap<String, KnownOrg>) -> anyhow::Result<()> {
+    pub(crate) async fn save_known_orgs(&self, all: &BTreeMap<String, KnownOrg>) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
-        let path = self.known_orgs_file();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(all)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_atomic(&self.known_orgs_file(), &serde_json::to_vec_pretty(all)?).await
     }
 
-    /// Records an org as seen, refreshing its avatar when the sighting carries one. Best effort: the
-    /// record exists so the operator is asked once and the list has avatars, so a failed write is
-    /// logged rather than escalated, and an unchanged record is not written again.
-    pub fn mark_org_known(&self, org: &str, avatar_url: Option<&str>) {
+    /// Records sightings of orgs as seen and saves the record when it changed. `mark_org_known`'s
+    /// single sighting and the refresh's batch (`github::refresh_orgs`) land here, because both
+    /// are read-merge-writes of the record that must not lose each other's orgs, so the whole
+    /// thing is one critical section over `config_write` — and the record is read under the lock
+    /// rather than carried over from the refresh's earlier snapshot, so a colony that marked its
+    /// org known while the poll ran survives the save. Only a change is written — `first_run` is
+    /// the exception, since the record's existence is what marks the first run done. Best effort:
+    /// the record exists so the operator is asked once and the list has avatars, so a failed write
+    /// is logged rather than escalated.
+    pub(crate) async fn record_known_sightings(
+        &self,
+        sightings: impl IntoIterator<Item = (String, Option<String>)>,
+        first_run: bool,
+    ) {
+        let _config = self.config_write.lock().await;
         let mut all = self.known_orgs().unwrap_or_default();
-        if !merge_known(&mut all, org, avatar_url) {
-            return;
+        let mut changed = first_run;
+        for (org, avatar) in sightings {
+            if merge_known(&mut all, &org, avatar.as_deref()) {
+                changed = true;
+            }
         }
-        if let Err(e) = self.save_known_orgs(&all) {
+        if changed && let Err(e) = self.save_known_orgs(&all).await {
             eprintln!("orgs: could not save {}: {e:#}", self.known_orgs_file().display());
         }
+    }
+
+    /// Records an org as seen, refreshing its avatar when the sighting carries one.
+    pub async fn mark_org_known(&self, org: &str, avatar_url: Option<&str>) {
+        self.record_known_sightings([(org.to_string(), avatar_url.map(String::from))], false)
+            .await;
     }
 }
 
@@ -747,7 +763,7 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     // avatars of decided orgs up to date, but a declined one is never fetched as adopted again, so
     // this is its picture's only ride across.
     let pending_avatar = app.new_orgs.read().await.get(&org).cloned().flatten();
-    app.mark_org_known(&org, pending_avatar.as_deref());
+    app.mark_org_known(&org, pending_avatar.as_deref()).await;
     app.new_orgs.write().await.remove(&org);
     if org_enabled(&req.settings) {
         app.repo_owners.write().await.insert(org.clone());
@@ -1497,22 +1513,22 @@ mod tests {
         (crate::tests::test_app(&root), root)
     }
 
-    #[test]
-    fn marking_an_org_known_keeps_a_saved_avatar_when_the_next_sighting_has_none() {
+    #[tokio::test]
+    async fn marking_an_org_known_keeps_a_saved_avatar_when_the_next_sighting_has_none() {
         let (app, root) = org_app();
         assert!(app.known_orgs().is_none(), "no record yet is what a first run is");
-        app.mark_org_known("acme", Some("https://a/acme.png"));
+        app.mark_org_known("acme", Some("https://a/acme.png")).await;
         let known = app.known_orgs().unwrap();
         assert_eq!(known.get("acme").unwrap().avatar_url.as_deref(), Some("https://a/acme.png"));
 
         // GitHub answering without the field is not evidence the org lost its picture.
-        app.mark_org_known("acme", None);
+        app.mark_org_known("acme", None).await;
         let known = app.known_orgs().unwrap();
         assert_eq!(known.get("acme").unwrap().avatar_url.as_deref(), Some("https://a/acme.png"));
 
         // A new avatar replaces an old one; a brand-new org is recorded without one.
-        app.mark_org_known("acme", Some("https://a/newer.png"));
-        app.mark_org_known("team", None);
+        app.mark_org_known("acme", Some("https://a/newer.png")).await;
+        app.mark_org_known("team", None).await;
         let known = app.known_orgs().unwrap();
         assert_eq!(known.get("acme").unwrap().avatar_url.as_deref(), Some("https://a/newer.png"));
         assert_eq!(known.get("team").unwrap().avatar_url, None);
@@ -1520,10 +1536,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn marking_an_org_known_writes_nothing_when_the_record_is_already_current() {
+    #[tokio::test]
+    async fn marking_an_org_known_writes_nothing_when_the_record_is_already_current() {
         let (app, root) = org_app();
-        app.mark_org_known("acme", Some("https://a/acme.png"));
+        app.mark_org_known("acme", Some("https://a/acme.png")).await;
         let before = app.known_orgs().unwrap();
         assert!(
             !merge_known(&mut before.clone(), "acme", Some("https://a/acme.png")),
@@ -1542,15 +1558,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn a_corrupt_known_orgs_file_reads_as_a_first_run_rather_than_an_error() {
+    #[tokio::test]
+    async fn a_corrupt_known_orgs_file_reads_as_a_first_run_rather_than_an_error() {
         let (app, root) = org_app();
         std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
         std::fs::write(app.known_orgs_file(), b"this is not json").unwrap();
         assert_eq!(app.known_orgs(), None);
         // And writing the record again heals it.
-        app.mark_org_known("acme", None);
+        app.mark_org_known("acme", None).await;
         assert!(app.known_orgs().unwrap().contains_key("acme"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A burst of sightings at once — every colony create is one (`sessions::create`). While the
+    /// config-write section is held, none of the marks may touch the record: a mark that ran
+    /// outside the section was a read-merge-write that could lose every org but its own. Once the
+    /// section frees, each queued mark lands, and the record ends up with all of them.
+    #[tokio::test]
+    async fn concurrent_mark_org_known_keeps_every_org() {
+        let (app, root) = org_app();
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        let held = app.config_write.lock().await;
+        let marks: Vec<_> = (0..8)
+            .map(|i| {
+                let app = app.clone();
+                tokio::spawn(async move { app.mark_org_known(&format!("org-{i}"), None).await })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        assert!(
+            app.known_orgs().is_none(),
+            "no sighting may run inside another writer's section: {:?}",
+            app.known_orgs().map(|known| known.keys().cloned().collect::<Vec<_>>())
+        );
+        drop(held);
+        for mark in marks {
+            mark.await.unwrap();
+        }
+        let known = app.known_orgs().unwrap_or_default();
+        assert_eq!(
+            known.len(),
+            8,
+            "every queued sighting lands, got {:?}",
+            known.keys().collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The five-minute refresh saves a record it snapshotted before the poll (`known_before`), so
+    /// a colony created mid-refresh — its `mark_org_known` landing while the save is in flight —
+    /// used to be written over by the stale copy. The record update re-reads under the config-write
+    /// section instead, so the mark survives whatever order the two save in.
+    #[tokio::test]
+    async fn a_refresh_record_update_does_not_overwrite_a_concurrent_mark_org_known() {
+        let (app, root) = org_app();
+        std::fs::create_dir_all(app.cfg.config_dir.clone()).unwrap();
+        let update = tokio::spawn({
+            let app = app.clone();
+            async move { app.record_known_sightings([("stale".to_string(), None)], false).await }
+        });
+        let mark = tokio::spawn({
+            let app = app.clone();
+            async move { app.mark_org_known("fresh", Some("https://a/fresh.png")).await }
+        });
+        update.await.unwrap();
+        mark.await.unwrap();
+        let known = app.known_orgs().unwrap_or_default();
+        assert!(
+            known.contains_key("stale") && known.contains_key("fresh"),
+            "the refresh's sighting and the mid-save mark both land, got {:?}",
+            known.keys().collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1571,6 +1649,7 @@ mod tests {
             ("off".to_string(), seen("off")),
             ("acme".to_string(), seen("acme")),
         ]))
+        .await
         .unwrap();
         // Only the switched-off org has settings of its own; the left one has nothing to hold its
         // place. The refresh prunes both from the owners, and only `off` is meant to survive that.

@@ -1976,17 +1976,15 @@ pub async fn refresh_orgs(app: &App) {
     // recording may not cross — an org still awaiting an answer — is
     // [`orgs::recordable_sightings`]'s to hold, since writing that sighting would make the next
     // refresh adopt the org without ever asking. A first run writes even when it saw nothing: the
-    // record's existence is what marks the first run done.
-    let mut known = known_before.unwrap_or_default();
-    let mut known_changed = first_run;
-    for login in orgs::recordable_sightings(&fetched, &plan) {
-        if orgs::merge_known(&mut known, login, fetched.get(login).and_then(|avatar| avatar.as_deref())) {
-            known_changed = true;
-        }
-    }
-    if known_changed && let Err(e) = app.save_known_orgs(&known) {
-        eprintln!("orgs: could not save {}: {e:#}", app.known_orgs_file().display());
-    }
+    // record's existence is what marks the first run done. The recording is one config-write
+    // section together with any `mark_org_known` a colony create made while this poll ran, so the
+    // save reads the record as it stands now rather than writing over it from the snapshot above.
+    app.record_known_sightings(
+        orgs::recordable_sightings(&fetched, &plan)
+            .map(|login| (login.clone(), fetched.get(login).and_then(|avatar| avatar.clone()))),
+        first_run,
+    )
+    .await;
     // Owners of repositories the account merely collaborates on come from `list_repos` and are not
     // ours to prune, so only this refresh's adoptions and drops are applied.
     {
