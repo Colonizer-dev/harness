@@ -4,6 +4,7 @@
 //! function of the task's signals and the colony's settings, so it can be tested apart from the
 //! boot path that applies it.
 
+use crate::providers;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -217,6 +218,55 @@ pub fn model_for<'a>(tier: Tier, low: &'a str, model: &'a str, high: &'a str) ->
     // setting is that model already, so the fallback cannot change its answer.
     let resolved = if own.trim().is_empty() { model } else { own };
     if resolved.trim().is_empty() { "" } else { resolved }
+}
+
+/// Token volumes behind a routed subtask's cost estimate: X (context the cheaper model must load
+/// before it can start), Y (its output), and Z (extra tokens the direct model re-reads afterward to
+/// pick up what changed). All three are operator-supplied estimates for now — there is no live
+/// per-colony measurement of them yet (see the token-breakdown work planned for #469).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct RoutingCostTokens {
+    pub context_tokens: u64,
+    pub output_tokens: u64,
+    pub reread_tokens: u64,
+}
+
+/// What routing a subtask down is estimated to cost, in dollars, against doing it directly on the
+/// module's own model.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct RoutingCostEstimate {
+    pub direct_usd: f64,
+    pub routed_usd: f64,
+}
+
+impl RoutingCostEstimate {
+    /// Whether the estimate favors routing down.
+    pub fn worth_routing(&self) -> bool {
+        self.routed_usd < self.direct_usd
+    }
+}
+
+/// Prices a routed subtask against doing it directly. The direct model pays for the output and for
+/// re-reading what changed afterward (`Z`); routing down additionally makes the cheaper model pay to
+/// load the context (`X`) the direct model already held, on top of its own output. This is a
+/// simplification of the note behind #470 — it does not split `Y`/`Z` between the two models the way
+/// the note's own worked numbers do, for lack of a measured split — but it keeps the one term the
+/// issue is about: a routed subtask pays for context the direct model would not have had to reload.
+pub fn estimate_cost(direct: providers::Pricing, routed: providers::Pricing, tokens: RoutingCostTokens) -> RoutingCostEstimate {
+    let direct_usd = direct.cost_usd(providers::Usage {
+        output_tokens: tokens.output_tokens,
+        input_tokens: tokens.reread_tokens,
+        ..Default::default()
+    });
+    let routed_usd = routed.cost_usd(providers::Usage {
+        input_tokens: tokens.context_tokens,
+        output_tokens: tokens.output_tokens,
+        ..Default::default()
+    }) + direct.cost_usd(providers::Usage {
+        input_tokens: tokens.reread_tokens,
+        ..Default::default()
+    });
+    RoutingCostEstimate { direct_usd, routed_usd }
 }
 
 /// The rule's score for a task: one point per unit of bulk, plus one for crossing directories, plus
@@ -876,5 +926,86 @@ mod tests {
         );
         assert_eq!(overridden.rule, Tier::Low);
         assert_eq!(overridden.jev_agrees(), Some(false));
+    }
+
+    #[test]
+    fn a_small_context_and_a_big_output_price_gap_make_routing_down_worth_it() {
+        // A task that is nearly all output, on a routed model whose output price is far below the
+        // direct one: the context reload is a rounding error next to what the output saves.
+        let direct = providers::Pricing {
+            input_per_mtok: 5.0,
+            output_per_mtok: 60.0,
+            ..Default::default()
+        };
+        let routed = providers::Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 5.0,
+            ..Default::default()
+        };
+        let tokens = RoutingCostTokens {
+            context_tokens: 10,
+            output_tokens: 1_000,
+            reread_tokens: 20,
+        };
+        let estimate = estimate_cost(direct, routed, tokens);
+        assert!(estimate.routed_usd < estimate.direct_usd);
+        assert!(estimate.worth_routing());
+    }
+
+    #[test]
+    fn routing_down_pays_for_the_context_reload_and_the_issues_own_numbers_land_on_not_worth_it() {
+        // The issue's worked shape (X=0.65, Y=0.12, Z=0.23) as whole-number tokens — same ratios, so
+        // the arithmetic reads directly. The direct model pays for the output plus re-reading what
+        // changed; routing down also pays to load the context the direct model already held, and
+        // that extra term tips it over. This is the issue's central point: the cheaper model is not
+        // always the cheaper run.
+        let direct = providers::Pricing {
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            ..Default::default()
+        };
+        let routed = providers::Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            ..Default::default()
+        };
+        let tokens = RoutingCostTokens {
+            context_tokens: 65,
+            output_tokens: 12,
+            reread_tokens: 23,
+        };
+        let estimate = estimate_cost(direct, routed, tokens);
+        // Direct: 12 output at 25 + 23 re-read at 5. Routed: 65 context at 3 + 12 output at 15, plus
+        // the direct model's 23 re-read at 5 afterwards.
+        assert!(
+            (estimate.direct_usd - 415.0 / 1_000_000.0).abs() < 1e-12,
+            "{}",
+            estimate.direct_usd
+        );
+        assert!(
+            (estimate.routed_usd - 490.0 / 1_000_000.0).abs() < 1e-12,
+            "{}",
+            estimate.routed_usd
+        );
+        assert!(
+            !estimate.worth_routing(),
+            "the context reload makes routing down the dearer run"
+        );
+    }
+
+    #[test]
+    fn zero_pricing_estimates_nothing_and_equal_costs_are_never_worth_routing() {
+        let tokens = RoutingCostTokens {
+            context_tokens: 100,
+            output_tokens: 50,
+            reread_tokens: 25,
+        };
+        let estimate = estimate_cost(providers::Pricing::default(), providers::Pricing::default(), tokens);
+        assert_eq!(estimate.direct_usd, 0.0);
+        assert_eq!(estimate.routed_usd, 0.0);
+        assert!(
+            !estimate.worth_routing(),
+            "a tie keeps the colony on its own model: only strictly cheaper routes"
+        );
     }
 }

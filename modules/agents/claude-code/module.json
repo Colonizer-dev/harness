@@ -92,6 +92,33 @@
         "default": "",
         "env": "COLONIZER_MODEL_HIGH"
       },
+      "route_cost_gate": {
+        "type": "boolean",
+        "title": "Gate routing down on cost",
+        "description": "Before the rule routes this colony down to the small-task model, estimate the whole cost of the routed task — the context that cheaper model has to load from scratch, its output, and what the orchestrator model re-reads afterwards — and keep the colony on the orchestrator model when routing down would not actually come out cheaper. An explicit tier chosen for the colony is never second-guessed. On by default; it only has something to say once the three token estimates below are set.",
+        "default": true
+      },
+      "route_cost_context_tokens": {
+        "type": "integer",
+        "title": "Routed task context estimate (X)",
+        "description": "Estimated context tokens (X) the cheaper tier has to reload for a routed subtask, if this colony's shape is known. 0 = unknown; the cost gate is skipped while unset.",
+        "minimum": 0,
+        "default": 0
+      },
+      "route_cost_output_tokens": {
+        "type": "integer",
+        "title": "Routed task output estimate (Y)",
+        "description": "Estimated output tokens (Y) a routed subtask produces. Used by the cost gate; 0 leaves it unset.",
+        "minimum": 0,
+        "default": 0
+      },
+      "route_cost_reread_tokens": {
+        "type": "integer",
+        "title": "Routed task re-read estimate (Z)",
+        "description": "Estimated tokens (Z) the orchestrator model has to re-read afterwards to pick up what a routed subtask changed. Used by the cost gate; 0 leaves it unset.",
+        "minimum": 0,
+        "default": 0
+      },
       "jev_shadow_mode": {
         "type": "boolean",
         "title": "Jev shadow mode (experimental)",

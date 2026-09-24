@@ -1209,6 +1209,10 @@ model call, no network, no new dependency: the same shape as the other pure deci
 | `route_per_task` | true | Off: every colony without its own `model_tier` runs on `model` |
 | `model_low` | none | Model for the `low` tier: a Claude alias or ID, or `<provider>/<model>`, in the same forms as `model` |
 | `model_high` | none | Model for the `high` tier, in the same forms as `model` |
+| `route_cost_gate` | true | Price routing down against running the task on `model` directly (below), and keep the colony on `model` when routing down would not actually come out cheaper. Only the rule's own `low` pick is gated; an operator's `model_tier` is an instruction, never second-guessed |
+| `route_cost_context_tokens` | 0 | Estimated context tokens (X) the cheaper tier has to reload for a routed subtask; 0 leaves it unknown |
+| `route_cost_output_tokens` | 0 | Estimated output tokens (Y) a routed subtask produces |
+| `route_cost_reread_tokens` | 0 | Estimated tokens (Z) `model` re-reads afterwards to pick up what the subtask changed |
 
 `medium` runs on the existing `model` setting. A tier whose setting is blank falls back to `model`,
 so with neither tier model set nothing changes about which model a colony runs on. Only the
@@ -1217,17 +1221,31 @@ models resolve through the same provider routes as `model` (§6.5's `used_by` co
 env variables are stripped from the colony's environment once the tier is chosen, so only the
 provider actually in use is probed at boot.
 
+Routing down is not always the cheaper run: the cheaper model reloads the task's context from
+scratch at its input price, which sometimes costs more than the output saved. When all three token
+estimates are set and both models have pricing on file, the cost gate prices the two ways of running
+the task — on `model` directly, its output plus the re-read afterwards; routed down, the cheaper
+model's context reload and output, plus `model`'s re-read at `model`'s rate — and gates only when
+the routed estimate is not strictly cheaper. Until real per-colony token volumes are measured
+(Token savings), the estimates are operator-supplied, and all-zero ones skip the gate entirely.
+
 The decision is recorded three ways:
 
 - an `info` line in the colony's session log (`model routing: low tier, score 0: a 180-character
-  body, no checklist items, 1 path named`), naming the model when it differs from `model`, and the
-  rule's tier when an override disagrees;
+  body, no checklist items, 1 path named`), naming the model when it differs from `model`, the
+  cost gate when it kept the colony on `model`, and the rule's tier when an override disagrees;
 - a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
-  misroute, signals}`, where `source` is `off`/`rule`/`override`, `model` is set only when the tier
-  changed it, `misroute` is true when an operator override lands somewhere the rule did not want,
-  and `signals` is what the rule read off the issue;
-- one JSON line per boot appended to `routing.jsonl` in the mothership's data directory — the
-  recorded set a future replacement for the heuristic could be evaluated against.
+  misroute, signals, jev, cost}`, where `source` is `off`/`rule`/`override`, `model` is set only
+  when the tier changed it, `misroute` is true when an operator override lands somewhere the rule
+  did not want, `signals` is what the rule read off the issue, `jev` is the shadow opinion when one
+  was asked for (§6.1c), and `cost` is the gate's estimate — the three token counts, both dollar
+  figures, whether routing was worth it and whether the gate fired — or `null` when the gate had
+  nothing to say;
+- one JSON line per boot appended to `routing.jsonl` in the mothership's data directory, tagged
+  `"kind": "decision"` — the recorded set a future replacement for the heuristic could be evaluated
+  against. When a colony that went through routing reaches a terminal state, a second line, tagged
+  `"kind": "actual"`, appends the session's real `total_cost_usd` next to that boot's estimate, so
+  the estimate can be checked against what the colony actually spent.
 
 An operator override is §4's `model_tier` on `POST /api/sessions`; it wins over the rule for that
 colony, whether or not routing is on.

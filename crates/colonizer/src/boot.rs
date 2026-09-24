@@ -404,8 +404,48 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    if !routed_model.is_empty() {
-        runner_env.insert("COLONIZER_MODEL".into(), Value::String(routed_model.into()));
+    // Cost gate (issue #470): routing down makes the cheaper tier reload the task's context at
+    // input price, which sometimes costs more than running the task directly would have. Opt-in —
+    // until real per-colony token volumes are measured (#469) the operator supplies the estimate,
+    // and an all-zero one skips the gate entirely, so every colony that has not opted in boots
+    // exactly as before. Only the rule's own low pick is gated: medium is the module's model and
+    // high an escalation, neither with a context-reload tradeoff, and an operator's explicit tier
+    // is an instruction a cost estimate must never second-guess.
+    let mut cost_record = Value::Null;
+    let mut gated = false;
+    let mut effective_model = routed_model.to_string();
+    if tier_decision.tier == crate::routing::Tier::Low {
+        let tokens = crate::routing::RoutingCostTokens {
+            context_tokens: setting_u64(&agent_choice, &agent.schema, "route_cost_context_tokens"),
+            output_tokens: setting_u64(&agent_choice, &agent.schema, "route_cost_output_tokens"),
+            reread_tokens: setting_u64(&agent_choice, &agent.schema, "route_cost_reread_tokens"),
+        };
+        if tokens != crate::routing::RoutingCostTokens::default() {
+            let provider_list = app.providers();
+            let direct_pricing = providers::pricing_for(&provider_list, &module_model);
+            let routed_pricing = providers::pricing_for(&provider_list, routed_model);
+            if let (Some(direct_pricing), Some(routed_pricing)) = (direct_pricing, routed_pricing) {
+                let estimate = crate::routing::estimate_cost(direct_pricing, routed_pricing, tokens);
+                gated = setting(&agent_choice, &agent.schema, "route_cost_gate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+                    && !estimate.worth_routing()
+                    && tier_decision.source == crate::routing::Source::Rule;
+                if gated {
+                    effective_model = module_model.clone();
+                }
+                cost_record = json!({
+                    "tokens": tokens,
+                    "direct_usd": estimate.direct_usd,
+                    "routed_usd": estimate.routed_usd,
+                    "worth_routing": estimate.worth_routing(),
+                    "gated": gated,
+                });
+            }
+        }
+    }
+    if !effective_model.is_empty() {
+        runner_env.insert("COLONIZER_MODEL".into(), Value::String(effective_model.clone()));
     }
     // A model the operator named at launch beats routing: it is what they asked this colony to run.
     if let Some(model) = s.model_override.as_deref() {
@@ -418,10 +458,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
     runner_env.remove("COLONIZER_MODEL_LOW");
     runner_env.remove("COLONIZER_MODEL_HIGH");
-    let model_changed = !routed_model.is_empty() && routed_model != module_model;
+    let model_changed = !effective_model.is_empty() && effective_model != module_model;
     let mut message = format!("model routing: {}", tier_decision.reason);
     if model_changed {
-        message.push_str(&format!("; running on {routed_model}"));
+        message.push_str(&format!("; running on {effective_model}"));
+    }
+    if gated {
+        message.push_str("; cost gate: routing down would cost more, so the colony stays on its module model");
     }
     if tier_decision.misroute() {
         message.push_str(&format!("; misroute: the rule wants {}", tier_decision.rule.as_str()));
@@ -443,14 +486,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "source": tier_decision.source,
         "score": tier_decision.score,
         "reason": tier_decision.reason,
-        "model": if model_changed { json!(routed_model) } else { Value::Null },
+        "model": if model_changed { json!(effective_model) } else { Value::Null },
         "misroute": tier_decision.misroute(),
         "signals": task_signals,
         "jev": tier_decision.jev,
+        "cost": cost_record,
     });
     app.update_session(id, |x| x.model_routing = Some(record.clone())).await;
     let line = json!({
         "ts": Utc::now(),
+        "kind": "decision",
         "session": id,
         "repo": s.repo.clone(),
         "issue": s.issue,
