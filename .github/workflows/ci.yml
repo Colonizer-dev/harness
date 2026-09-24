@@ -105,6 +105,12 @@ jobs:
       - name: Test the OpenCode runner
         run: node --test modules/agents/opencode/test/*.test.mjs
 
+      # The Grok Build runner has no dependencies either: its tests drive the real runner.mjs over
+      # stdio against a stub grok CLI, so `npm test` is a bare `node --test`.
+      - name: Test the Grok Build runner
+        working-directory: modules/agents/grok-build
+        run: npm test
+
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
   # either, and none of the tests touch a mothership, a colony or the network; the job's one
   # network step is the staged-pack validation below, which downloads the pinned archives the

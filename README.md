@@ -185,6 +185,13 @@ that ends in a question mark.
 small contracts, selected in the UI and saved in `modules.json`. The agent contract is a JSON Lines
 protocol on stdio, so an agent module can be written in anything.
 
+The agent modules so far:
+
+| Agent | What it is | Status |
+| :--- | :--- | :--- |
+| [`claude-code`](modules/agents/claude-code) | Anthropic's Claude Code via the Claude Agent SDK, with questions to the user as choice cards | `SHIPPING` |
+| [`grok-build`](modules/agents/grok-build) | xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session | `PLANNED` |
+
 ---
 
 ## What changed
