@@ -50,6 +50,7 @@ setting) is called out under **Take care** rather than left for you to find.
   opt-in, Linux only. Strix `vulnerabilities.json` + SARIF parsers exist but no scan runs yet;
   Shannon ships as a manifest-only stub. See
   [docs/security-hunters.md](docs/security-hunters.md). ([#440])
+- **A script makes CI a required check on `main`.** `scripts/require-ci-checks.mjs` prints — and with `--apply`, sends through `gh api` — a repository ruleset requiring the six CI jobs that run on every pull request, each pinned to the GitHub Actions app so only a real run's report satisfies it. `colony-smoke`, the supply-chain jobs and the release jobs stay optional, and docs/audit.md says why, along with the two settings that travel with the ruleset: "Allow auto-merge" on (a colony pull request held for checks is queued with `gh pr merge --squash --auto`), and no merge queue (no workflow has a `merge_group` trigger). Applying it still takes a repository admin, which is why it is a script rather than a change this repository can commit. ([#367])
 
 ### Fixed
 
@@ -450,6 +451,7 @@ Macs. ([#74])
 [#370]: https://github.com/Colonizer-dev/harness/issues/370
 [#440]: https://github.com/Colonizer-dev/harness/pull/440
 [#442]: https://github.com/Colonizer-dev/harness/issues/442
+[#367]: https://github.com/Colonizer-dev/harness/issues/367
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
