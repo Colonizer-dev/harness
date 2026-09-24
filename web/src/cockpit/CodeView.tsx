@@ -245,7 +245,7 @@ export function CodeView({
       {orgRepos.length === 0 ? (
         <p className="mt-6 text-[13px] text-faint">No repositories in {org.org} that this GitHub login can see.</p>
       ) : (
-        <div className="mt-6 grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-4">
+        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
           {orgRepos.map((repo) => (
             <RepoCodeCard
               key={repo}
