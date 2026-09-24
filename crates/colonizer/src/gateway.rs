@@ -4,7 +4,7 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    ApiResult, App, Shared, client_error, openai, provider_quota,
+    ApiResult, App, Shared, client_error, openai, orgs, provider_quota,
     providers::{Provider, ProviderQuirks, Usage, Wire, strip_oauth_betas},
     util::read_trimmed,
 };
@@ -149,6 +149,25 @@ impl Counted {
 impl Drop for Counted {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Gives back what it took when dropped: one request's reservation of estimated spend against the
+/// colony's budget, added on dispatch (see [`proxy`]) and subtracted only once the response's real
+/// cost has been recorded — the recorder's task holds it across the gap between "body streamed"
+/// and "cost landed" that `enforce_budget` cannot see into (issue #409).
+struct Reserved(Arc<AtomicU64>, u64);
+
+impl Reserved {
+    fn new(reserved: &Arc<AtomicU64>, micro_usd: u64) -> Self {
+        reserved.fetch_add(micro_usd, Ordering::SeqCst);
+        Self(reserved.clone(), micro_usd)
+    }
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.0.fetch_sub(self.1, Ordering::SeqCst);
     }
 }
 
@@ -299,6 +318,11 @@ pub struct Gateway {
     limits: Mutex<HashMap<String, Limit>>,
     /// Requests each colony has open through the gateway, queued or streaming.
     colonies: Mutex<HashMap<String, Arc<AtomicU64>>>,
+    /// Estimated spend each colony has in flight but not yet recorded, in micro-dollars (`usd * 1e6`
+    /// rounded) so a running dollar total fits an atomic: the per-request reservations that close the
+    /// gap between dispatch and `record_routed_usage`, without which parallel requests each pass the
+    /// budget check before any of them records its cost (issue #409).
+    reserved: Mutex<HashMap<String, Arc<AtomicU64>>>,
     /// Cumulative usage per provider, seeded from `usage_file` at startup and written back to it when dirty.
     usage: Mutex<HashMap<String, Arc<UsageCounters>>>,
     usage_file: PathBuf,
@@ -340,6 +364,7 @@ impl Gateway {
             stats: Default::default(),
             limits: Default::default(),
             colonies: Default::default(),
+            reserved: Default::default(),
             usage: Mutex::new(usage),
             usage_file,
             quota: Mutex::new(quota),
@@ -528,6 +553,11 @@ impl Gateway {
         self.colonies.lock().unwrap().entry(colony.to_string()).or_default().clone()
     }
 
+    /// The colony's outstanding spend reservations, in micro-dollars (see [`Gateway::reserved`]).
+    fn colony_reserved(&self, colony: &str) -> Arc<AtomicU64> {
+        self.reserved.lock().unwrap().entry(colony.to_string()).or_default().clone()
+    }
+
     /// True while the colony is waiting on a model through the gateway; the watchdog counts that as progress.
     pub fn colony_busy(&self, colony: &str) -> bool {
         self.colonies
@@ -564,8 +594,9 @@ impl App {
         self.session_dir(session).join("gateway-token")
     }
 
-    /// The live colony a gateway token belongs to.
-    async fn colony_for_token(&self, token: &str) -> Option<String> {
+    /// The live colony a gateway token belongs to, record and all: `proxy` needs the session itself,
+    /// not just the id, to check which providers the colony may spend on.
+    async fn colony_for_token(&self, token: &str) -> Option<crate::sessions::Session> {
         if token.len() < 32 {
             return None;
         }
@@ -576,7 +607,7 @@ impl App {
             .find(|s| {
                 read_trimmed(&self.gateway_token_file(&s.id)).is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
             })
-            .map(|s| s.id.clone())
+            .cloned()
     }
 }
 
@@ -616,8 +647,9 @@ fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallbac
     response
 }
 
-/// Busy/in-flight counters, the provider's concurrency permit and the usage timer, held for as long as
-/// the response body.
+/// Busy/in-flight counters, the provider's concurrency permit and the usage timer, held for as long
+/// as the response body. The spend reservation is deliberately absent: it rides inside the usage
+/// recorder instead, outliving the body until the cost it estimates has actually been recorded.
 type Guards = (Counted, Counted, Option<OwnedSemaphorePermit>, Timed);
 
 /// Streams `chunks` downstream, translating provider errors and enforcing `timeout` as an overall
@@ -846,11 +878,20 @@ fn counted_body(
 }
 
 /// The body-end callback for a routed response: add its spend to the colony and re-check its budget.
-/// That runs as its own task, so accounting never delays the colony's bytes.
-fn usage_recorder(app: &Shared, colony: &str, provider: &Provider) -> Recorder {
+/// That runs as its own task, so accounting never delays the colony's bytes. The task owns the
+/// request's [`Reserved`] estimate and gives it back only once the real cost has landed, so no
+/// window is left where a new request could see neither the reservation nor the recorded spend.
+/// A recorder that is dropped without ever running (an uncounted body, an abandoned stream) still
+/// drops the reservation it carries, at that moment.
+fn usage_recorder(app: &Shared, colony: &str, provider: &Provider, reservation: Reserved) -> Recorder {
     let (app, colony, provider) = (app.clone(), colony.to_string(), provider.clone());
     Box::new(move |usage| {
-        tokio::spawn(async move { crate::lifecycle::record_routed_usage(&app, &colony, &provider, usage).await });
+        tokio::spawn(async move {
+            crate::lifecycle::record_routed_usage(&app, &colony, &provider, usage).await;
+            // Only now, with the real cost landed (or the recording itself failed), does the
+            // estimate go back. The explicit drop also keeps the guard captured until here.
+            drop(reservation);
+        });
     })
 }
 
@@ -981,6 +1022,38 @@ fn strip_cache_ttl(value: &mut Value, stripped: &mut u64) {
     }
 }
 
+/// The output side assumed for a request that names no cap of its own (or whose body is not JSON).
+const ESTIMATED_MAX_TOKENS: u64 = 4096;
+
+/// Dollars as micro-dollars, the fixed-point form the reservation counter keeps: floats have no
+/// stable-Rust atomics, and a sixth of a cent is finer than any estimate here claims to be.
+fn micro_usd(usd: f64) -> u64 {
+    (usd * 1_000_000.0).round().max(0.0) as u64
+}
+
+/// What one request is estimated to spend, so its cost can be reserved before dispatch. Intentionally
+/// approximate (issue #409): the estimate bounds how far a burst of parallel requests can overshoot
+/// the budget before any of them records its real cost, and is never billed. The output side reads
+/// the request's own `max_tokens` — `max_completion_tokens` in OpenAI's spelling — falling back to
+/// [`ESTIMATED_MAX_TOKENS`] when it names neither or is not JSON; the input side is the body's bytes
+/// over four, the usual tokens-per-byte rule of thumb. A provider without pricing estimates at $0,
+/// exactly what recording it would cost.
+fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> f64 {
+    let request: Value = serde_json::from_slice(body).unwrap_or_default();
+    let output_tokens = request
+        .get("max_tokens")
+        .or_else(|| request.get("max_completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(ESTIMATED_MAX_TOKENS);
+    provider.cost_usd(Usage {
+        input_tokens: body.len() as u64 / 4,
+        output_tokens,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        thinking_tokens: 0,
+    })
+}
+
 async fn proxy(
     State(app): State<Shared>,
     Path((id, _)): Path<(String, String)>,
@@ -990,7 +1063,7 @@ async fn proxy(
     body: Bytes,
 ) -> Response {
     let token = headers.get(COLONY_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    let Some(colony) = app.colony_for_token(token).await else {
+    let Some(session) = app.colony_for_token(token).await else {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
@@ -998,6 +1071,7 @@ async fn proxy(
             None,
         );
     };
+    let colony = session.id.clone();
     let Some(provider) = app.providers().into_iter().find(|p| p.id == id) else {
         return api_error(
             StatusCode::NOT_FOUND,
@@ -1006,6 +1080,20 @@ async fn proxy(
             None,
         );
     };
+    // A configured provider is not necessarily this colony's (issue #409): providers.json is
+    // mothership-wide, so the token alone must not open one the colony's model settings never
+    // routed to. Refused with the other local refusals — before credentials, budget, or any
+    // upstream call — and like the budget 403, one Claude Code does not retry in a loop.
+    if !session.allowed_providers.contains(&id) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            format!(
+                "colonizer gateway: provider \"{id}\" is not routed to colony {colony}; a colony spends only on the providers its model settings route to"
+            ),
+            None,
+        );
+    }
     // A keyed provider with no saved key would otherwise be sent the request with no credential at all,
     // and answer with a bare 401 that says nothing about why. Refused here instead, before any upstream
     // call, naming the provider and where the key goes.
@@ -1029,6 +1117,30 @@ async fn proxy(
             None,
         );
     }
+    // The budget check above has a blind spot (issue #409): it compares spend already recorded, and a
+    // gateway request's cost is only recorded once its response has finished streaming, so parallel
+    // requests each pass before any of them lands. Reserve an estimate of this one's cost for as long
+    // as it is in flight; when recorded spend plus outstanding reservations plus this estimate would
+    // tip a currently healthy colony past the cap, refuse this one request — stopping the colony stays
+    // `enforce_budget`'s job, for overspend that has actually been recorded.
+    let modules = app.modules.read().await.clone();
+    let budget = orgs::budget_usd(&modules, &app.org_settings(&session.org));
+    let estimate = estimate_request_cost_usd(&provider, &body);
+    let reserved = app.gateway.colony_reserved(&colony);
+    let outstanding = reserved.load(Ordering::SeqCst) as f64 / 1_000_000.0;
+    if budget > 0.0 && session.total_cost_usd() + outstanding + estimate > budget {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            format!(
+                "colonizer gateway: colony {colony} has ${:.2} recorded plus ${:.2} estimated in flight, and this request's estimated ${estimate:.2} would pass its spend budget of ${budget:.2}; wait for the in-flight requests to finish or raise the budget",
+                session.total_cost_usd(),
+                outstanding
+            ),
+            None,
+        );
+    }
+    let reservation = Reserved::new(&reserved, micro_usd(estimate));
     let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
     // Everything that can refuse the request happens here, before it waits for a slot. The anthropic wire
     // never parses the body; the openai wire has to rebuild it.
@@ -1149,10 +1261,12 @@ async fn proxy(
         }
     };
 
-    // The guards live as long as the body, so slots and activity cover the whole streamed response.
+    // The in-flight guards live as long as the body, covering slots and activity over the whole
+    // streamed response; the spend reservation deliberately lives longer, inside the recorder,
+    // until the real cost has replaced the estimate.
     let guards = (busy, in_flight, permit, timed);
     if let Some(info) = translation {
-        let record = usage_recorder(&app, &colony, &provider);
+        let record = usage_recorder(&app, &colony, &provider, reservation);
         // The fallback is decided here, where the provider's `fallback_model` is in reach: set means
         // quota failover is on for this role, unset opts it out, and the env opts out globally.
         let quota_fallback =
@@ -1177,7 +1291,7 @@ async fn proxy(
     if status.as_u16() >= 400 {
         // Buffered, not streamed: the body still forwards verbatim, but only a buffered error can
         // be classified for quota exhaustion before answering.
-        return anthropic_error(&app, &colony, upstream, guards, usage, &provider, timeout).await;
+        return anthropic_error(&app, &colony, upstream, guards, reservation, usage, &provider, timeout).await;
     }
     // A 2xx from upstream proves the plan is back: a quota record from an earlier error lapses now,
     // so the queue unpauses and parked colonies resume on the next tick.
@@ -1199,7 +1313,7 @@ async fn proxy(
     let body = counted_body(
         stream_body(upstream.bytes_stream(), guards, timeout, is_sse),
         UsageTap::anthropic(is_sse),
-        Some(usage_recorder(&app, &colony, &provider)),
+        Some(usage_recorder(&app, &colony, &provider, reservation)),
     );
     let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = status;
@@ -1212,11 +1326,13 @@ async fn proxy(
 /// hit additionally records the provider as exhausted and names it in headers, offering the Claude
 /// fallback exactly when the provider has a `fallback_model` (unset is the per-role opt-out) and
 /// `COLONIZER_QUOTA_FALLBACK` keeps failover on.
+#[allow(clippy::too_many_arguments)]
 async fn anthropic_error(
     app: &Shared,
     colony: &str,
     upstream: reqwest::Response,
     guards: Guards,
+    reservation: Reserved,
     usage: Arc<UsageCounters>,
     provider: &Provider,
     timeout: Duration,
@@ -1244,7 +1360,8 @@ async fn anthropic_error(
     };
     drop(guards);
     // Errors carry no usage, but the recorder ran on them when they streamed past — keep it fed.
-    usage_recorder(app, colony, provider)(Usage::default());
+    // The recorder takes the reservation, so even this zero-cost record releases it only once landed.
+    usage_recorder(app, colony, provider, reservation)(Usage::default());
     let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
     let kind = body["error"]["type"].as_str().unwrap_or("api_error");
     let message = body["error"]["message"]
@@ -1622,6 +1739,8 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
+        // Routed to deepseek, so the allowlist lets it by and the missing key is what refuses.
+        colony.allowed_providers = vec!["deepseek".into()];
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -1658,6 +1777,367 @@ mod tests {
             app.gateway.usage_counters("deepseek").snapshot().requests,
             0,
             "refused locally, so nothing counts as provider usage"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A configured provider the colony's model settings never routed to is refused before any
+    /// upstream call: providers.json is mothership-wide, and one colony's token must not open
+    /// another colony's provider (issue #409).
+    #[tokio::test]
+    async fn a_provider_outside_the_colonys_routing_is_refused_before_any_upstream_call() {
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-allowlist-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        // Routed to kimi only: deepseek is configured on the mothership but not this colony's.
+        colony.allowed_providers = vec!["kimi".into()];
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // Port 9 (discard) is never reached: nothing may be sent upstream. Both providers are
+        // auth "none" so the missing-key refusal cannot mask the one under test.
+        std::fs::write(
+            root.join("config/providers.json"),
+            r#"[{"id":"kimi","name":"Kimi","base_url":"http://127.0.0.1:9","auth":"none"},{"id":"deepseek","name":"DeepSeek","base_url":"http://127.0.0.1:9","auth":"none"}]"#,
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(&token).unwrap());
+        let response = proxy(
+            State(app.clone()),
+            Path(("deepseek".into(), "v1/messages".into())),
+            Method::POST,
+            "/providers/deepseek/v1/messages".parse().unwrap(),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "permission_error");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("\"deepseek\""), "names the provider: {message}");
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            0,
+            "refused locally, so nothing counts as provider usage"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The allowlist admits the provider the colony is routed to: the request dispatches and
+    /// counts as usage instead of coming back 403 (issue #409).
+    #[tokio::test]
+    async fn a_provider_within_the_colonys_routing_is_still_dispatched() {
+        let router = Router::new().route("/v1/messages", axum::routing::post(|| async { axum::Json(json!({})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-routed-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = vec!["deepseek".into()];
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(&[json!({
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "base_url": format!("http://{addr}"),
+                "auth": "none",
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(&token).unwrap());
+        let response = proxy(
+            State(app.clone()),
+            Path(("deepseek".into(), "v1/messages".into())),
+            Method::POST,
+            "/providers/deepseek/v1/messages".parse().unwrap(),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "routed provider is not refused");
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            1,
+            "passed the allowlist, so the request dispatched"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The estimate reads the request's own `max_tokens` (OpenAI's `max_completion_tokens` too) and
+    /// falls back to the documented constant when the body names neither, is not JSON, or the provider
+    /// carries no pricing at all — which estimates, like it records, at nothing (issue #409).
+    #[test]
+    fn cost_estimates_read_the_requests_own_cap_and_fall_back_without_one() {
+        let priced = Provider {
+            pricing: Some(crate::providers::Pricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 2.0,
+                ..Default::default()
+            }),
+            ..provider("strix", None)
+        };
+        let expected =
+            |body: &Bytes, output: u64| (body.len() as u64 / 4) as f64 * 1.0 / 1_000_000.0 + output as f64 * 2.0 / 1_000_000.0;
+
+        let anthropic = Bytes::from(r#"{"model":"m","max_tokens":3000,"messages":[]}"#);
+        assert!(
+            (estimate_request_cost_usd(&priced, &anthropic) - expected(&anthropic, 3000)).abs() < 1e-12,
+            "the request's own max_tokens is the estimated output"
+        );
+        let openai = Bytes::from(r#"{"model":"gpt-5.5","max_completion_tokens":500,"messages":[]}"#);
+        assert!(
+            (estimate_request_cost_usd(&priced, &openai) - expected(&openai, 500)).abs() < 1e-12,
+            "the OpenAI spelling of the same cap is read too"
+        );
+
+        // No cap named, or not JSON at all: the documented fallback bounds the output side.
+        let bare = Bytes::from(r#"{"model":"m","messages":[]}"#);
+        assert!((estimate_request_cost_usd(&priced, &bare) - expected(&bare, ESTIMATED_MAX_TOKENS)).abs() < 1e-12);
+        let junk = Bytes::from("not json");
+        assert!((estimate_request_cost_usd(&priced, &junk) - expected(&junk, ESTIMATED_MAX_TOKENS)).abs() < 1e-12);
+
+        // No pricing configured: nothing to reserve, exactly as recording it costs nothing.
+        assert_eq!(estimate_request_cost_usd(&provider("strix", None), &anthropic), 0.0);
+    }
+
+    /// A reservation holds until its guard drops: while held it counts against the cap, and once
+    /// dropped the same reservation fits again — the mechanism `proxy` leans on (issue #409).
+    #[test]
+    fn a_reservation_holds_until_its_guard_drops() {
+        let gateway = usage_gateway(&std::env::temp_dir().join(format!("colonizer-reserve-{}", uuid::Uuid::new_v4())));
+        let reserved = gateway.colony_reserved("c1");
+        assert_eq!(reserved.load(Ordering::SeqCst), 0, "nothing in flight, nothing reserved");
+
+        let held = Reserved::new(&reserved, micro_usd(0.60));
+        assert_eq!(
+            reserved.load(Ordering::SeqCst),
+            micro_usd(0.60),
+            "the guard's creation reserves"
+        );
+        // The decision `proxy` makes: recorded spend plus outstanding reservations plus this estimate
+        // against the cap.
+        let (spent, budget) = (0.30, 1.00);
+        assert!(
+            spent + reserved.load(Ordering::SeqCst) as f64 / 1_000_000.0 + 0.20 > budget,
+            "a request that fits alone is tipped over by the held reservation"
+        );
+
+        drop(held);
+        assert_eq!(
+            reserved.load(Ordering::SeqCst),
+            0,
+            "the guard's drop gives the reservation back"
+        );
+        assert!(spent + 0.20 <= budget, "the same request fits again once the guard is gone");
+        assert_eq!(micro_usd(-1.0), 0, "a negative estimate reserves nothing");
+    }
+
+    /// Two requests that each fit the budget cannot burst past it together (issue #409): the first
+    /// reserves its estimate until its response has streamed, so a second arriving while that
+    /// reservation is held is refused 403 instead of dispatched — and the colony is not stopped, which
+    /// stays `enforce_budget`'s consequence for overspend that has actually been recorded. The first
+    /// response going away ends its reservation, and the same request fits again.
+    #[tokio::test]
+    async fn parallel_requests_cannot_burst_past_the_budget() {
+        let router = Router::new().route("/v1/messages", axum::routing::post(|| async { axum::Json(json!({})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-reserve-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = vec!["deepseek".into()];
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            pricing: Some(crate::providers::Pricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 1.0,
+                ..Default::default()
+            }),
+            ..provider("deepseek", None)
+        };
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(std::slice::from_ref(&provider)).unwrap(),
+        )
+        .unwrap();
+        // A budget one request fits and two never do: 1.5x the estimate leaves room for the first
+        // alone, and the first plus the second's estimate crosses it.
+        let body = Bytes::from(r#"{"model":"m","max_tokens":3000,"messages":[]}"#);
+        let budget = estimate_request_cost_usd(&provider, &body) * 1.5;
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("budget_usd".into(), json!(budget));
+
+        async fn call(app: &Shared, token: &str, body: Bytes) -> Response {
+            let mut headers = HeaderMap::new();
+            headers.insert(COLONY_HEADER, HeaderValue::from_str(token).unwrap());
+            proxy(
+                State(app.clone()),
+                Path(("deepseek".into(), "v1/messages".into())),
+                Method::POST,
+                "/providers/deepseek/v1/messages".parse().unwrap(),
+                headers,
+                body,
+            )
+            .await
+        }
+
+        // The first dispatches; its reservation lives in the response body it returns.
+        let first = call(&app, &token, body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // The same request again, while the first's reservation is still held: refused, not dispatched.
+        let second = call(&app, &token, body.clone()).await;
+        assert_eq!(second.status(), StatusCode::FORBIDDEN);
+        let refused: Value =
+            serde_json::from_slice(&axum::body::to_bytes(second.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(refused["error"]["type"], "permission_error");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains("budget"), "names the budget: {message}");
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            1,
+            "the refused request never reached the provider or counted as usage"
+        );
+        assert!(
+            app.session("c1").await.is_some_and(|s| s.status.is_live()),
+            "a refused request stops nothing; that is enforce_budget's consequence"
+        );
+
+        // The first response going away ends its reservation: the same request fits again.
+        drop(first);
+        let third = call(&app, &token, body.clone()).await;
+        assert_eq!(third.status(), StatusCode::OK);
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            2,
+            "only dispatched requests count"
+        );
+        let _ = axum::body::to_bytes(third.into_body(), usize::MAX).await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The reservation outlives the body (issue #409): the cost is recorded by a task spawned when
+    /// the body ends, and until that lands the reservation still counts against the budget — a
+    /// response that has fully streamed is not yet a response whose cost is visible. Holding the
+    /// sessions write lock parks the recorder's task inside `record_routed_usage`, so the ordering
+    /// is observed deterministically instead of raced; releasing the lock lets the cost land, and
+    /// only then the reservation go.
+    #[tokio::test]
+    async fn the_reservation_outlives_the_streamed_body_until_its_cost_is_recorded() {
+        let router = Router::new().route(
+            "/v1/messages",
+            axum::routing::post(|| async { axum::Json(json!({"usage": {"input_tokens": 100, "output_tokens": 50}})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-outlive-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = vec!["deepseek".into()];
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let provider = Provider {
+            base_url: format!("http://{addr}"),
+            pricing: Some(crate::providers::Pricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 1.0,
+                ..Default::default()
+            }),
+            ..provider("deepseek", None)
+        };
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(std::slice::from_ref(&provider)).unwrap(),
+        )
+        .unwrap();
+        // No budget is needed: the reservation exists whenever the provider is priced.
+        let body = Bytes::from(r#"{"model":"m","max_tokens":3000,"messages":[]}"#);
+
+        async fn call(app: &Shared, token: &str, body: Bytes) -> Response {
+            let mut headers = HeaderMap::new();
+            headers.insert(COLONY_HEADER, HeaderValue::from_str(token).unwrap());
+            proxy(
+                State(app.clone()),
+                Path(("deepseek".into(), "v1/messages".into())),
+                Method::POST,
+                "/providers/deepseek/v1/messages".parse().unwrap(),
+                headers,
+                body,
+            )
+            .await
+        }
+
+        let response = call(&app, &token, body.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Park the recorder's task before the body ends: record_routed_usage cannot take the
+        // sessions write lock this test holds, so the cost cannot land while it is held.
+        let sessions = app.sessions.write().await;
+        let streamed = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            streamed,
+            Bytes::from(r#"{"usage":{"input_tokens":100,"output_tokens":50}}"#),
+            "the body forwarded verbatim"
+        );
+        assert_eq!(
+            app.gateway.colony_reserved("c1").load(Ordering::SeqCst),
+            micro_usd(estimate_request_cost_usd(&provider, &body)),
+            "the body has fully streamed, yet the reservation is held until the cost lands"
+        );
+        drop(sessions);
+
+        // The cost lands, and only then does the reservation go.
+        let mut recorded = None;
+        for _ in 0..1000 {
+            if let Some(cost) = app.session("c1").await.and_then(|s| s.routed_cost_usd) {
+                recorded = Some(cost);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(recorded.is_some_and(|cost| cost > 0.0), "the streamed usage was recorded");
+        assert_eq!(
+            app.gateway.colony_reserved("c1").load(Ordering::SeqCst),
+            0,
+            "the reservation is released once the recorded cost replaces the estimate"
+        );
+        assert!(
+            app.session("c1").await.is_some_and(|s| s.status.is_live()),
+            "recording a cost well under any budget stops nothing"
         );
         let _ = std::fs::remove_dir_all(root);
     }

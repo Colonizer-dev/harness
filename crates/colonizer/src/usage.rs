@@ -713,6 +713,7 @@ mod tests {
             model_tier: None,
             claude_account: None,
             model_routing: None,
+            allowed_providers: Vec::new(),
             cleaned_up: false,
             keep_worktree: false,
             attention: None,
