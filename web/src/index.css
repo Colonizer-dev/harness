@@ -50,7 +50,7 @@
   --chart-5: #c2410c;
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-  --pop: rgb(255 255 255 / 0.8);
+  --pop: rgb(255 255 255);
   --hdr: rgb(247 247 248 / 0.7);
   --halo: rgb(120 140 255 / 0.12);
   --halo2: rgb(255 255 255 / 0.9);
@@ -100,7 +100,7 @@
     --chart-3: #ffd08a;
     --chart-4: #a8401c;
     --chart-5: #f76707;
-    --pop: rgb(18 18 22 / 0.78);
+    --pop: rgb(18 18 22);
     --hdr: rgb(8 8 10 / 0.6);
     --halo: rgb(120 140 255 / 0.1);
     --halo2: rgb(255 255 255 / 0.05);
@@ -1095,7 +1095,7 @@ body {
   --chart-3: #f7c98a;
   --chart-4: #8a2e0a;
   --chart-5: #c2410c;
-  --pop: rgb(255 255 255 / 0.8);
+  --pop: rgb(255 255 255);
   --hdr: rgb(247 247 248 / 0.7);
   --halo: rgb(120 140 255 / 0.12);
   --halo2: rgb(255 255 255 / 0.9);
@@ -1150,7 +1150,7 @@ body {
   --chart-3: #ffd08a;
   --chart-4: #a8401c;
   --chart-5: #f76707;
-  --pop: rgb(18 18 22 / 0.78);
+  --pop: rgb(18 18 22);
   --hdr: rgb(8 8 10 / 0.6);
   --halo: rgb(120 140 255 / 0.1);
   --halo2: rgb(255 255 255 / 0.05);

@@ -23,6 +23,7 @@ import type {
   ModelProvider,
   ModelSetting,
   ModuleInfo,
+  OrgInfo,
   ProviderAuth,
   ProviderHealth,
   ProviderLimits,
@@ -67,14 +68,16 @@ import {
 import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
-import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
+import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { orgEnabled } from "../orgs";
+import { Badge, Button, InfoButton, ModelInput, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Shell: a section list on the left, the selected section on the right.
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -207,6 +210,8 @@ export function SettingsBody({
   onSetupShown,
   onSetupDismissed,
   onClose,
+  orgs,
+  onOrgSaved,
 }: {
   /** Rendered inside the cockpit rather than a dialog: no title bar of its own, and it fills its column. */
   embedded?: boolean;
@@ -227,6 +232,9 @@ export function SettingsBody({
   onSetupShown: () => void;
   onSetupDismissed: () => void;
   onClose: () => void;
+  /** The workspaces, for a Workspaces group of per-org settings; the cockpit passes them, the old dialog does not. */
+  orgs?: OrgInfo[];
+  onOrgSaved?: (saved: OrgInfo) => void;
 }) {
   const api = useApi();
   const narrow = useMediaQuery("(max-width: 699px)");
@@ -371,6 +379,21 @@ export function SettingsBody({
         dirty: isDirty(m, drafts[m.kind]),
       })),
     },
+    ...(orgs && orgs.length > 0
+      ? [
+          {
+            label: "Workspaces",
+            items: orgs
+              .filter((o) => !o.awaiting_decision)
+              .map((o) => ({
+                id: `org:${o.org}` as const,
+                label: o.org,
+                hint: `${o.colonies.live} live · ${o.colonies.total} ${o.colonies.total === 1 ? "colony" : "colonies"}`,
+                badge: orgEnabled(o.settings) ? undefined : "Off",
+              })),
+          },
+        ]
+      : []),
   ];
 
   const back = narrow ? () => setSection(null) : undefined;
@@ -411,6 +434,18 @@ export function SettingsBody({
         models={models}
         onOpenConnections={() => select("connections")}
         back={back}
+      />
+    );
+  } else if (active?.startsWith("org:")) {
+    const org = active.slice("org:".length);
+    pane = (
+      <OrgSettingsForm
+        key={org}
+        embedded
+        org={org}
+        info={orgs?.find((o) => sameOrg(o.org, org))}
+        onClose={() => {}}
+        onSaved={(saved) => onOrgSaved?.(saved)}
       />
     );
   } else if (active?.startsWith("module:")) {

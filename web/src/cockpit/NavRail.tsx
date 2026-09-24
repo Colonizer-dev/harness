@@ -575,7 +575,7 @@ function ScopeSwitcher({
                 />
               </div>
             )}
-            {!q && <ScopeRow label="All workspaces" note={needTotal > 0 ? `${needTotal} need you` : String(orgs.length)} urgent={needTotal > 0} active={selectedOrg === null} icon={<AllMark size={22} />} onClick={() => pick(null)} />}
+            {!q && <ScopeRow label="All workspaces" sub={scopeStats(orgs.reduce((a, o) => a + o.live, 0), orgs.reduce((a, o) => a + o.queued, 0), orgs.reduce((a, o) => a + o.total, 0), `${orgs.length} workspaces`)} note={needTotal > 0 ? `${needTotal} need you` : ""} urgent={needTotal > 0} active={selectedOrg === null} icon={<AllMark size={28} />} onClick={() => pick(null)} />}
             {!q && orgs.length > 0 && <div role="separator" className="my-1 h-px bg-border" />}
             {q && shown.length === 0 && shownHidden.length === 0 && <div className="px-2 py-3 text-[13px] text-faint">No workspace matches “{query.trim()}”.</div>}
             {shown.map((o) => {
@@ -584,10 +584,11 @@ function ScopeSwitcher({
                 <ScopeRow
                   key={o.org}
                   label={o.org}
-                  note={need > 0 ? `${need} need you` : o.live > 0 ? `${o.live} live` : ""}
+                  sub={scopeStats(o.live, o.queued, o.total)}
+                  note={need > 0 ? `${need} need you` : ""}
                   urgent={need > 0}
                   active={sameOrg(o.org, selectedOrg)}
-                  icon={<Avatar name={o.org} src={o.avatar ?? undefined} size={22} rounded="full" />}
+                  icon={<Avatar name={o.org} src={o.avatar ?? undefined} size={28} rounded="full" />}
                   match
                   onClick={() => pick(o.org)}
                 />
@@ -637,7 +638,14 @@ function ScopeSwitcher({
 }
 
 /** One choice in the switcher. */
-function ScopeRow({ label, note, urgent, active, icon, match = false, onClick }: { label: string; note: string; urgent: boolean; active: boolean; icon: ReactElement; match?: boolean; onClick: () => void }): ReactElement {
+/** A workspace's second line in the switcher: what runs, what waits, how many in all. */
+function scopeStats(live: number, queued: number, total: number, lead?: string): string {
+  const parts = [lead, live > 0 ? `${live} live` : null, queued > 0 ? `${queued} queued` : null, `${total} ${total === 1 ? "colony" : "colonies"}`];
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** One choice in the switcher: the name, and its colony counts beneath. */
+function ScopeRow({ label, sub, note, urgent, active, icon, match = false, onClick }: { label: string; sub: string; note: string; urgent: boolean; active: boolean; icon: ReactElement; match?: boolean; onClick: () => void }): ReactElement {
   return (
     <button
       type="button"
@@ -647,10 +655,13 @@ function ScopeRow({ label, note, urgent, active, icon, match = false, onClick }:
       // Roving focus: the arrows move between rows, so Tab leaves the menu instead of walking it.
       tabIndex={-1}
       onClick={onClick}
-      className={`grid w-full cursor-pointer grid-cols-[22px_minmax(0,1fr)_auto_14px] items-center gap-2.5 rounded-md border-0 p-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${active ? "bg-panel-2" : "bg-transparent hover:bg-panel-2 focus-visible:bg-panel-2"}`}
+      className={`grid w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto_14px] items-center gap-2.5 rounded-md border-0 px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${active ? "bg-panel-2" : "bg-transparent hover:bg-panel-2 focus-visible:bg-panel-2"}`}
     >
       {icon}
-      <span className="truncate text-[13.5px] text-text">{label}</span>
+      <span className="min-w-0">
+        <span className="block truncate text-[13.5px] text-text">{label}</span>
+        <span className="block truncate text-[11.5px] tabular-nums text-faint">{sub}</span>
+      </span>
       <span className={`text-[12px] tabular-nums ${urgent ? "text-warn" : "text-faint"}`}>{note}</span>
       <span aria-hidden="true" className="text-accent">
         {active && (

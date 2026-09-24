@@ -280,16 +280,22 @@ export function OrgSettingsDialog({
   );
 }
 
-function OrgSettingsForm({
+/**
+ * One org's workspace settings. The dialog above is one frame for it; the cockpit's Settings →
+ * Workspaces section is the other (`embedded`: no close button, no Cancel, it fills its column).
+ */
+export function OrgSettingsForm({
   org,
   info,
   onClose,
   onSaved,
+  embedded = false,
 }: {
   org: string;
   info: OrgInfo | undefined;
   onClose: () => void;
   onSaved: (saved: OrgInfo) => void;
+  embedded?: boolean;
 }) {
   const api = useApi();
   const toast = useToast();
@@ -383,7 +389,7 @@ function OrgSettingsForm({
   const groups = [...new Set(FIELDS.map((f) => f.group))];
 
   return (
-    <div className="flex max-h-[calc(100dvh-24px)] flex-col">
+    <div className={cx("flex flex-col", embedded ? "h-full min-h-0 min-w-0 flex-1" : "max-h-[calc(100dvh-24px)]")}>
       <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
         <Avatar name={org} src={info?.avatar_url} size={36} rounded="xl" />
         <div className="min-w-0 flex-1">
@@ -394,6 +400,7 @@ function OrgSettingsForm({
             Colonies on {org} repositories use these settings. Inherit follows Settings → Modules.
           </p>
         </div>
+        {!embedded && (
         <button
           type="button"
           onClick={onClose}
@@ -402,6 +409,7 @@ function OrgSettingsForm({
         >
           <IconX size={17} />
         </button>
+        )}
       </div>
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
@@ -569,7 +577,7 @@ function OrgSettingsForm({
             Inherit all
           </Button>
         )}
-        <Button onClick={onClose}>Cancel</Button>
+        {!embedded && <Button onClick={onClose}>Cancel</Button>}
         <Button variant="primary" disabled={!dirty || saving || error !== null} onClick={save}>
           {saving && <Spinner />} Save
         </Button>
