@@ -3,6 +3,7 @@
 // It owns only what is its own — which view is showing, what the inspector is looking at, and the
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
+import { CodeView } from "./CodeView";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
@@ -36,7 +37,7 @@ const VIEW_KEY = "colonizer.cockpitView";
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host", "secrets"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host", "secrets", "code"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -376,6 +377,18 @@ export function Cockpit({
               setView("home");
             }}
             onOpenSettings={() => onOpenSettings("setup")}
+          />
+        );
+      case "code":
+        return (
+          <CodeView
+            orgs={orgs}
+            repos={repos}
+            sessions={sessions}
+            selectedOrg={selectedOrg}
+            onSelectOrg={onSelectOrg}
+            onCreated={onCreated}
+            onOpenColony={openColonyById}
           />
         );
       case "secrets":

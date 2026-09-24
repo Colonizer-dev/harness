@@ -2708,6 +2708,40 @@ export function createMockApi(): Api {
       return { ...mem0 };
     },
     repoMap: (repo) => later(() => repoMap(repo)),
+    repoLoc: () =>
+      later(() => ({
+        ref: "main",
+        sha: "a".repeat(40),
+        total: 48210,
+        by_language: [
+          { name: "Rust", files: 88, code: 31200, blank: 3100 },
+          { name: "TSX", files: 120, code: 12400, blank: 1200 },
+          { name: "TypeScript", files: 40, code: 3610, blank: 300 },
+          { name: "Shell", files: 12, code: 1000, blank: 90 },
+        ],
+      })),
+    repoCoverage: () => later(() => ({ measured: false as const, reason: "no coverage report found in CI artifacts" })),
+    repoGitSummary: (repo) => later(() => ({ repo, branches: 14, open_prs: 3, release: { tagName: "v0.1.9", name: "v0.1.9", publishedAt: "2026-09-24T14:00:00Z" }, latest_tag: null })),
+    repoBranches: (repo) =>
+      later(() => ({
+        repo,
+        default: "main",
+        branches: [
+          { name: "main", sha: "a".repeat(40), date: "2026-09-24T14:00:00Z", author: "Ann", message: "Release v0.1.9", default: true, protected: true, colony: false, ahead: 0, behind: 0, pr: null },
+          { name: "colonizer/issue-12-ab", sha: "b".repeat(40), date: "2026-09-24T13:00:00Z", author: "Colony", message: "Fix the thing", default: false, protected: false, colony: true, ahead: 2, behind: 1, pr: { number: 501, title: "Fix the thing", url: "https://github.com/x/y/pull/501", isDraft: false } },
+        ],
+      })),
+    repoTree: (repo, ref) => later(() => ({ repo, ref: ref ?? "main", sha: "a".repeat(40), paths: ["README.md", "src/main.rs", "src/lib.rs", "web/src/App.tsx"], truncated: false })),
+    repoBlob: (_repo, path, ref) => later(() => ({ path, ref: ref ?? "main", sha: "a".repeat(40), size: 40, binary: false, too_large: false, text: `// ${path}\nfn main() {\n    println!("hello");\n}\n` })),
+    fileHistory: (_repo, path, ref) => later(() => ({ path, ref: ref ?? "main", commits: [{ sha: "a".repeat(40), author: "Ann", date: "2026-09-24T10:00:00Z", message: "Add main" }] })),
+    fileBlame: (_repo, path, ref) => later(() => ({ path, ref: ref ?? "main", sha: "a".repeat(40), commits: { ["a".repeat(40)]: { author: "Ann", time: 1790000000, summary: "Add main" } }, lines: Array(4).fill("a".repeat(40)) })),
+    createEdits: async (repo, body) => ({ url: `https://github.com/${repo}/pull/999`, branch: body.branch, base: body.base ?? "main" }),
+    askFile: async (_repo, body) => ({ answer: `*(mock)* \`${body.path}\` answers: ${body.question}`, model: "mock/model" }),
+    drafts: async (repo) => ({ repo, autosave: true, drafts: [] }),
+    saveDraft: async () => ({ saved_at: new Date().toISOString() }),
+    deleteDrafts: async () => ({ removed: 0 }),
+    editorSettings: async () => ({ autosave: true }),
+    saveEditorSettings: async (body) => body,
     repoMeta: (repo) =>
       later(() => ({
         full_name: repo,

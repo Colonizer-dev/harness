@@ -1281,3 +1281,101 @@ export interface RepoMeta {
   pushed_at: string | null;
   html_url: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// The Code page (code.rs): a repository read from the mothership's bare clone
+// ---------------------------------------------------------------------------
+
+/** GET /api/repos/{o}/{r}/loc: lines of code by language at the default branch. */
+export interface RepoLoc {
+  ref: string;
+  sha: string;
+  total: number;
+  by_language: { name: string; files: number; code: number; blank: number }[];
+}
+
+/** GET /api/repos/{o}/{r}/coverage: line coverage from CI artifacts, or why there is none. */
+export type RepoCoverage =
+  | { measured: true; percent: number; format: string; file: string; artifact: string; run: number; at?: string }
+  | { measured: false; reason: string };
+
+/** GET /api/repos/{o}/{r}/git-summary. */
+export interface RepoGitSummary {
+  repo: string;
+  branches: number;
+  open_prs: number | null;
+  release: { tagName: string; name: string; publishedAt: string } | null;
+  latest_tag: string | null;
+}
+
+export interface RepoBranch {
+  name: string;
+  sha: string;
+  date: string;
+  author: string;
+  message: string;
+  default: boolean;
+  protected: boolean;
+  colony: boolean;
+  ahead: number;
+  behind: number;
+  pr: { number: number; title: string; url: string; isDraft: boolean } | null;
+}
+
+export interface RepoBranches {
+  repo: string;
+  default: string;
+  branches: RepoBranch[];
+}
+
+export interface RepoTree {
+  repo: string;
+  ref: string;
+  sha: string;
+  paths: string[];
+  truncated: boolean;
+}
+
+export interface RepoBlob {
+  path: string;
+  ref: string;
+  sha: string;
+  size: number;
+  binary: boolean;
+  too_large: boolean;
+  text: string | null;
+}
+
+export interface FileCommit {
+  sha: string;
+  author: string;
+  date: string;
+  message: string;
+}
+
+export interface RepoBlame {
+  path: string;
+  ref: string;
+  sha: string;
+  commits: Record<string, { author?: string; time?: number; summary?: string }>;
+  /** Per line (0-based index = line - 1), the commit that last touched it. */
+  lines: string[];
+}
+
+export interface EditsRequest {
+  base?: string;
+  branch: string;
+  message: string;
+  title: string;
+  body: string;
+  files: { path: string; content: string }[];
+}
+
+/** An autosaved edit on the mothership (never on GitHub until a pull request is confirmed). */
+export interface Draft {
+  ref: string;
+  path: string;
+  content: string;
+  base_sha: string;
+  saved_at: string;
+}

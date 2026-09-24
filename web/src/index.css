@@ -1722,3 +1722,11 @@ body {
     offset-distance: 100% !important;
   }
 }
+
+/* The Code editor's blame gutter: author and date before each run of lines one commit touched. */
+.blame-label {
+  color: var(--faint);
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: pre;
+}
