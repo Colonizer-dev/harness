@@ -25,7 +25,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 #[allow(unused_imports)]
 use crate::{events::*, publish::*, queue::*, sessions::*};
@@ -49,17 +49,38 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
     }
 }
 
+/// `sandbox::running` with the restart's patience. A failed `msb ls` says nothing about the
+/// colonies, and this pass runs once — there is no next tick to skip to, as `watch_sandboxes`
+/// skips its own — so it waits for `msb` to answer before it decides anything: unknown must not
+/// read as "nothing is running", which would tear down every live colony's microVM. After a host
+/// reboot the microsandbox daemon can come up after the harness, so the wait is unbounded, with
+/// the agent link's backoff shape (see `events::agent_link`): 1s, doubling, capped at 10s.
+async fn running_or_wait(msb: &str) -> HashSet<String> {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match sandbox::running(msb).await {
+            Ok(running) => return running,
+            Err(e) => eprintln!("recover: `msb ls` failed, asking again in {backoff:?}: {e:#}"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(10));
+    }
+}
+
 /// Reconnects to microVMs that kept running while the harness was down.
 pub async fn recover(app: &Shared) {
-    let running = sandbox::running(&app.cfg.msb).await.unwrap_or_default();
-    // Both this list and the running set above are a snapshot, and the list moves under it while
-    // this loop works down the colonies — the HTTP API keeps serving through a restart. Each
-    // colony is handled the way `watch_sandboxes` handles its own: under the colony's lifecycle
-    // lock, re-read fresh, and only then decide. The `running` check stays on the snapshot — it
-    // is the detection, and a microVM does not come back — but every status flip below is a
-    // compare-and-set, so a publish, resume or stop that claimed the colony in between is not
-    // clobbered.
+    // The list before the wait for `msb`: a resume or the queue can claim a colony while the
+    // daemon is still coming up, and a boot a later list already saw `Starting` reads as
+    // orphaned, so a list taken after the wait would tear down a boot the restart did not
+    // orphan. Both this list and the running set below are a snapshot, and the list moves under
+    // it while this loop works down the colonies — the HTTP API keeps serving through a restart.
+    // Each colony is handled the way `watch_sandboxes` handles its own: under the colony's
+    // lifecycle lock, re-read fresh, and only then decide. The `running` check stays on the
+    // snapshot — it is the detection, and a microVM does not come back — but every status flip
+    // below is a compare-and-set, so a publish, resume or stop that claimed the colony in
+    // between is not clobbered.
     let sessions = app.sessions.read().await.clone();
+    let running = running_or_wait(&app.cfg.msb).await;
     for s in sessions {
         // The snapshot above moves under this loop: the HTTP API admits resumes, stops and
         // publishes while it works down the colonies. Take the colony's lifecycle lock and
@@ -1674,6 +1695,18 @@ mod tests {
 
     // -- recover after a harness restart -------------------------------------------------------
 
+    /// A stand-in `msb` running `body` on every call, so a `recover` pass has a binary to ask —
+    /// as on a real host — instead of waiting out a `PATH` that has none. The pattern is main.rs's
+    /// wedged-probe test: an executable script, then `Arc::get_mut`, which only works before the
+    /// `Shared` is cloned.
+    fn stand_in_msb(app: &mut Shared, root: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let msb = root.join("msb");
+        std::fs::write(&msb, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Arc::get_mut(app).unwrap().cfg.msb = msb.display().to_string();
+    }
+
     /// Parks a `recover` pass behind a colony's lifecycle lock, flips the colony in that window —
     /// as a resume, stop or publish admitted by the HTTP API would — then lets the pass through.
     /// Purely cooperative, so there is no timing bet: each yield lets the pass advance to the
@@ -1697,7 +1730,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_recover_does_not_clobber_a_resume_that_claimed_the_colony_after_its_snapshot() {
-        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let (mut app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        stand_in_msb(&mut app, &root, "exit 0");
         recover_after_a_concurrent_flip(&app, "abc", |x| x.status = SessionStatus::Starting).await;
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.status, SessionStatus::Starting, "the boot in flight keeps its claim");
@@ -1707,7 +1741,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_recover_does_not_clobber_a_publish_that_claimed_the_colony_after_its_snapshot() {
-        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let (mut app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        stand_in_msb(&mut app, &root, "exit 0");
         recover_after_a_concurrent_flip(&app, "abc", |x| x.status = SessionStatus::Publishing).await;
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.status, SessionStatus::Publishing, "the publish keeps its claim");
@@ -1717,7 +1752,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_recover_leaves_a_publishing_colony_alone_once_it_moves_off_publishing() {
-        let (app, root) = app_with_colony("abc", SessionStatus::Publishing).await;
+        let (mut app, root) = app_with_colony("abc", SessionStatus::Publishing).await;
+        stand_in_msb(&mut app, &root, "exit 0");
         recover_after_a_concurrent_flip(&app, "abc", |x| x.status = SessionStatus::Stopped).await;
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.status, SessionStatus::Stopped, "the colony keeps the status it moved to");
@@ -1821,10 +1857,12 @@ mod tests {
     async fn recover_reaps_what_the_restart_orphaned_and_leaves_a_finished_colony_alone() {
         // Safe without KVM: the fixture colonies have no mesh address and no local port, so none
         // is reachable and the reconnect branch (which would spawn the agent link) never runs;
-        // `msb` is absent here, so the running set is empty and the removals fail silently.
+        // the stand-in `msb` answers with nothing running, so the reaps land, and its `rm`
+        // succeeds silently.
         use crate::tests::test_app;
         let root = std::env::temp_dir().join(format!("colonizer-recover-{}", short_id()));
-        let app = test_app(&root);
+        let mut app = test_app(&root);
+        stand_in_msb(&mut app, &root, "exit 0");
         for (id, status) in [
             ("boot", SessionStatus::Starting),
             ("push", SessionStatus::Publishing),
@@ -1862,6 +1900,57 @@ mod tests {
         let done = app.session("done").await.unwrap();
         assert_eq!(done.status, SessionStatus::Stopped, "a finished colony is skipped");
         assert_eq!(done.error, None, "and the skip does not repaint its error");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The restart's own patience: `msb ls` failing says nothing about the colonies, so the pass
+    /// waits for it to answer — the daemon can still be coming up after a host reboot — instead of
+    /// reading the failure as "nothing is running" and reaping every live colony's microVM. The
+    /// stand-in `msb` refuses the first two `ls` calls and then reports the colony as running; a
+    /// counter file is its state across invocations. Paused time fires the backoff's sleeps
+    /// without waiting them out, so the retries cost nothing real.
+    #[tokio::test(start_paused = true)]
+    async fn a_recover_waits_out_an_msb_that_fails_first_and_answers_later() {
+        use crate::tests::test_app;
+        let root = std::env::temp_dir().join(format!("colonizer-recover-wait-{}", short_id()));
+        let mut app = test_app(&root);
+        let mut s = colony("acme", SessionStatus::Running);
+        s.id = "abc".into();
+        s.sandbox = "sandbox-abc".into();
+        // Reachable, so a pass that trusts its `msb ls` answer would reconnect here — the branch
+        // the bug took for the teardown.
+        s.local_port = Some(7070);
+        app.sessions.write().await.push(s);
+        tokio::fs::create_dir_all(app.session_dir("abc")).await.unwrap();
+        let asked = root.join("msb-ls-count");
+        stand_in_msb(
+            &mut app,
+            &root,
+            &format!(
+                "if [ \"$1\" = ls ]; then
+    n=$(cat {asked:?} 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo $n > {asked:?}
+    [ \"$n\" -ge 3 ] || exit 1
+    printf '%s\\n' sandbox-abc
+fi
+exit 0
+"
+            ),
+        );
+        recover(&app).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::Running,
+            "the live colony is neither reaped nor flipped to stopped while `msb ls` fails"
+        );
+        assert_eq!(s.error, None, "no microVM-gone error is painted over it");
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(
+            log.contains("harness restarted: reconnecting to the running microVM"),
+            "the pass reconnected once `msb ls` answered: {log}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
