@@ -339,7 +339,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &colony_secrets.iter().map(|(meta, _)| meta).collect::<Vec<_>>(),
     ));
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
-    let mut agent_choice = orgs::effective_agent(&modules, &org_settings);
+    // The colony's own agent module's settings (issue #201): an org may run its colonies on a
+    // module other than the install's, whose settings are not this module's to read.
+    let mut agent_choice = orgs::effective_agent_for(&modules, &org_settings, &agent.id);
     // A mapping colony draws with archify whatever its org has switched on (maps.rs).
     if s.origin.as_deref() == Some(crate::maps::MAP_ORIGIN) {
         let plugins = agent_choice

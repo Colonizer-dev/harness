@@ -327,7 +327,29 @@ pub(crate) fn parse_org_line(line: &str) -> Option<(String, Option<String>)> {
 
 /// The agent module choice with the org's model and skillset overrides applied.
 pub fn effective_agent(modules: &ModulesConfig, org: &OrgSettings) -> ModuleChoice {
-    let mut choice = modules.agent.clone();
+    with_org_overrides(modules.agent.clone(), org)
+}
+
+/// The settings a colony on agent module `agent_id` boots with (issue #201). The install's
+/// `modules.agent` settings belong to the install's own agent module, so they apply only when the
+/// colony runs on that module; a colony on another module — an org's pick — starts from that
+/// module's schema defaults instead, with the org's overrides on top. Handing a Codex colony the
+/// install's Claude model (or its per-task tier models) would launch it on a model it cannot run.
+pub fn effective_agent_for(modules: &ModulesConfig, org: &OrgSettings, agent_id: &str) -> ModuleChoice {
+    if agent_id == modules.agent.provider {
+        return effective_agent(modules, org);
+    }
+    with_org_overrides(
+        ModuleChoice {
+            provider: agent_id.to_string(),
+            enabled: true,
+            settings: Default::default(),
+        },
+        org,
+    )
+}
+
+fn with_org_overrides(mut choice: ModuleChoice, org: &OrgSettings) -> ModuleChoice {
     if let Some(agent) = &org.agent {
         for (key, value) in [
             ("model", &agent.model),
@@ -865,6 +887,34 @@ mod tests {
             ..Default::default()
         };
         assert!(!effective_memory_enabled(&modules, &disabled));
+    }
+
+    #[test]
+    fn a_colony_on_another_agent_module_does_not_inherit_the_installs_agent_settings() {
+        let mut modules = ModulesConfig::default();
+        modules.agent.settings.insert("model".into(), json!("opus"));
+        modules.agent.settings.insert("model_high".into(), json!("opus"));
+        let org = OrgSettings::default();
+        // On the install's own module the install's settings stand.
+        let own = effective_agent_for(&modules, &org, &modules.agent.provider.clone());
+        assert_eq!(own.settings.get("model"), Some(&json!("opus")));
+        // On an org's pick of another module they are that other module's business, not this one's:
+        // schema defaults, plus whatever the org overrides.
+        let other = effective_agent_for(&modules, &org, "codex");
+        assert_eq!(other.provider, "codex");
+        assert!(other.settings.get("model").is_none() && other.settings.get("model_high").is_none());
+        let org = OrgSettings {
+            agent: Some(AgentOverrides {
+                model: Some("openai/gpt-5.5".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_agent_for(&modules, &org, "codex").settings.get("model"),
+            Some(&json!("openai/gpt-5.5")),
+            "the org's own model override still applies"
+        );
     }
 
     #[test]
