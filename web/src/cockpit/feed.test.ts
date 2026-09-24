@@ -1,4 +1,4 @@
-// The inbox and timeline read the colony list and nothing else, so what matters is that every
+// The inbox reads the colony list and nothing else, so what matters is that every
 // status lands on the right line, that "needs you" beats the status, that the day headings follow
 // the local calendar rather than an elapsed count, and that the order holds between polls.
 import { describe, expect, it } from "vitest";
@@ -11,8 +11,6 @@ import {
   feedKind,
   headlineFor,
   heldSlots,
-  historyRows,
-  matchesFilter,
   matchesOverviewFilter,
   needCountByOrg,
   needFor,
@@ -119,22 +117,6 @@ describe("feedEntries", () => {
   });
 });
 
-describe("matchesFilter", () => {
-  it("lets everything through on all", () => {
-    expect(matchesFilter("queued", "all")).toBe(true);
-    expect(matchesFilter("question", "all")).toBe(true);
-  });
-
-  it("keeps the pills apart", () => {
-    expect(matchesFilter("question", "questions")).toBe(true);
-    expect(matchesFilter("question", "returned")).toBe(false);
-    expect(matchesFilter("returned", "returned")).toBe(true);
-    expect(matchesFilter("failed", "returned")).toBe(true);
-    expect(matchesFilter("launched", "launches")).toBe(true);
-    expect(matchesFilter("stopped", "launches")).toBe(true);
-  });
-});
-
 describe("dayLabel", () => {
   const now = new Date(2026, 8, 18, 10, 0, 0); // 18 Sep 2026, local
 
@@ -152,32 +134,6 @@ describe("dayLabel", () => {
 
   it("does not crash on a timestamp it cannot read", () => {
     expect(dayLabel("not a date", now)).toBe("EARLIER");
-  });
-});
-
-describe("historyRows", () => {
-  const now = new Date(2026, 8, 18, 10, 0, 0);
-
-  it("heads the first entry of each day and no others", () => {
-    const rows = historyRows(
-      [
-        session({ id: "a", updated_at: new Date(2026, 8, 18, 9, 0, 0).toISOString() }),
-        session({ id: "b", updated_at: new Date(2026, 8, 18, 8, 0, 0).toISOString() }),
-        session({ id: "c", updated_at: new Date(2026, 8, 17, 8, 0, 0).toISOString() }),
-      ],
-      "all",
-      now,
-    );
-    expect(rows.map((r) => r.day)).toEqual(["TODAY", null, "YESTERDAY"]);
-  });
-
-  it("drops what the filter excludes", () => {
-    const rows = historyRows(
-      [session({ id: "a", status: "waiting_for_answer" }), session({ id: "b", status: "running" })],
-      "questions",
-      now,
-    );
-    expect(rows.map((r) => r.entry.id)).toEqual(["a"]);
   });
 });
 

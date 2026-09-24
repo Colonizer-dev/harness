@@ -7,6 +7,7 @@
 //! credential is injected by microsandbox's host-side TLS proxy for the API host only, and model
 //! provider keys are added by the mothership's provider gateway.
 
+mod activity;
 mod auth;
 mod authority;
 mod autonomy;
@@ -259,6 +260,8 @@ pub struct App {
     pub usage: usage::Usage,
     /// The `GET /api/stream` push hub: one shared broadcast diff task for all open tabs.
     pub stream: stream::Hub,
+    /// The activity log behind `GET /api/activity` and History (activity.rs).
+    pub activity: activity::ActivityLog,
 }
 
 pub type Shared = Arc<App>;
@@ -945,6 +948,9 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
             }
         }
         req.extensions_mut().insert(auth::Authenticated(true));
+        // Who the activity log says acted: the browser (cookie) or a token holder (the CLI, a script).
+        req.extensions_mut()
+            .insert(if bearer_ok { auth::Via::Api } else { auth::Via::Cockpit });
         return next.run(req).await;
     }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
@@ -1417,6 +1423,7 @@ async fn serve() -> Result<()> {
         updater: update::Updater::new(),
         usage: usage::Usage::new(&cfg.config_dir),
         stream: stream::Hub::new(),
+        activity: activity::ActivityLog::new(),
         api_token,
         cfg,
     });
@@ -1573,7 +1580,12 @@ async fn serve() -> Result<()> {
             put(redteam::update_schedule).delete(redteam::delete_schedule),
         )
         .route("/api/burn-down", get(burn_down::status))
-        .route("/api/burn-down/stop", post(burn_down::stop));
+        .route("/api/burn-down/stop", post(burn_down::stop))
+        .route("/api/activity", get(activity::list))
+        // After every route: records what a person changed through the API (activity.rs). A
+        // route layer, so it sees the matched route, and inside `host_guard`, so only
+        // authenticated requests reach it.
+        .route_layer(middleware::from_fn_with_state(app.clone(), activity::record_actions));
     let router = api
         .merge(web_router(app.cfg.assets.as_deref()))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
@@ -1796,6 +1808,7 @@ pub(crate) mod tests {
             graft: Mutex::new(Default::default()),
             telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
             stream: stream::Hub::new(),
+            activity: activity::ActivityLog::new(),
         })
     }
 

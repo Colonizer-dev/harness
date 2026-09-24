@@ -448,7 +448,19 @@ export function Cockpit({
           />
         );
       case "history":
-        return <HistoryView sessions={inOrg} org={selectedOrg} onOpenColony={openColonyById} />;
+        return (
+          <HistoryView
+            sessions={inOrg}
+            org={selectedOrg}
+            onOpenColony={openColonyById}
+            onOpenSection={(section) => {
+              // A row names where its target lives: a cockpit view, or a settings section.
+              if (section === "secrets" || section === "loops" || section === "memory") setView(section);
+              else if (section === "redteam") setView("overview");
+              else onOpenSettings(section as SectionId);
+            }}
+          />
+        );
       default:
         return (
           <NestView

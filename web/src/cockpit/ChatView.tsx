@@ -988,7 +988,7 @@ export function ChatView({
           initial={handoff}
           onClose={() => setHandoff(null)}
           onLaunch={async (repo, instructions) => {
-            const session = await api.createSession({ repo, instructions, autopilot: autopilotDefault });
+            const session = await api.createSession({ repo, instructions, autopilot: autopilotDefault, origin: "chat" });
             toast(`Colony launched on ${repo}`);
             setHandoff(null);
             onCreated(session);

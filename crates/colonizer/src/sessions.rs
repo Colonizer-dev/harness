@@ -792,11 +792,15 @@ impl App {
             }
             let returned = !was_terminal && session.status.is_terminal();
             session.updated_at = Utc::now();
-            (session.clone(), returned, result)
+            (session.clone(), (returned, before.status), result)
         };
+        let (returned, status_before) = returned;
         if returned {
             spend::record_returned(self, &session.org).await;
         }
+        // The activity log hears the same edge, once: a write that leaves the status alone
+        // (cleanup, the app slot, a restart re-marking a stopped colony) records nothing.
+        crate::activity::record_transition(self, status_before, &session).await;
         self.persist_and_broadcast(&session).await;
         Some((session, result))
     }
@@ -1763,13 +1767,15 @@ pub async fn events_ws(
     State(app): State<Shared>,
     Path(id): Path<String>,
     Query(query): Query<SinceQuery>,
+    via: Option<axum::Extension<crate::auth::Via>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
     app.session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let rt = app.runtime(&id).await;
-    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, socket)))
+    let via = via.map(|axum::Extension(via)| via);
+    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, via, socket)))
 }
 
 /// One replayable line of events.jsonl: the decoded line and its seq, or `None` to skip it.
@@ -1781,7 +1787,15 @@ fn replay_line(chunk: &[u8]) -> Option<(u64, &str)> {
     Some((seq, line))
 }
 
-async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, client_epoch: Option<u64>, socket: WebSocket) {
+async fn events_socket(
+    app: Shared,
+    id: String,
+    rt: Arc<Runtime>,
+    since: u64,
+    client_epoch: Option<u64>,
+    via: Option<crate::auth::Via>,
+    socket: WebSocket,
+) {
     // Before this socket subscribes and the log ring is drained, so its alert lands in the
     // drained history once instead of arriving twice.
     app.report_load_error(&id, &rt).await;
@@ -1895,7 +1909,7 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, cl
                 return;
             },
             message = rx.next() => match message {
-                Some(Ok(Message::Text(body))) => client_command(&app, &id, &rt, body.as_str()).await,
+                Some(Ok(Message::Text(body))) => client_command(&app, &id, &rt, via, body.as_str()).await,
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                 Some(Ok(_)) => {}
             },
@@ -1911,7 +1925,7 @@ fn accepts_commands(status: SessionStatus) -> bool {
     status.is_live()
 }
 
-async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
+async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, via: Option<crate::auth::Via>, body: &str) {
     let Ok(command) = serde_json::from_str::<Value>(body) else {
         return;
     };
@@ -1955,7 +1969,11 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, body: &str) {
         }
         _ => return,
     };
+    let answered = forward["type"] == "answer";
     let _ = rt.commands.send(forward);
+    if answered {
+        crate::activity::record_answer(app, &s, via).await;
+    }
 }
 
 /// The model a `set_model` switches the colony to, trimmed, or `None` to drop the command.

@@ -262,6 +262,7 @@ vendored one — logged when the skillset is saved and again at each colony boot
 | `colonizer.toml` load | `FileConfig::load`: logs file, error and fix, continues with defaults | `load_reads_colonizer_toml_from_the_config_dir` |
 | `COLONIZER_GATEWAY_BIND` | `Settings::parse_gateway_bind` refuses startup (issue #406) | `gateway_bind_defaults_unset_parses_an_ip_port_and_refuses_everything_else` |
 | Colony launch | `sessions::create`: unknown tier, a model naming no configured provider, an uninstalled agent module, missing Claude credentials | none yet (follow-up) |
+| Activity log filters | `activity::list` → `parse_filter`: an unknown kind or actor, or a `limit` outside 1–500, is refused naming the value and the accepted ones | `a_bad_filter_is_refused_by_name` |
 | Spawn | the boot refuses an unrouted `<provider>/` model setting (`ColonyRoutes::unrouted_provider`); the runner's router warns about malformed routes | `unrouted_providers_are_reported_with_the_value_and_prefix`; `router.test.mjs` |
 
 ### Documented fallbacks

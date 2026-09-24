@@ -22,6 +22,20 @@ setting) is called out under **Take care** rather than left for you to find.
   waiter takes over when the holder releases — carrying the GitHub `colonizer:claimed` mark with
   it — and the cockpit's launch form offers the choice beside Allow duplicate, with each waiter's
   place in line on its Inspector card. ([#321])
+- **History shows what happened, and what you did.** The mothership now keeps an activity log
+  (`<data>/activity.jsonl`, rolled over at 2 MB with one previous file kept): every colony outcome —
+  pull request opened, merged or closed, nothing to change, stopped, failed, waiting on an answer —
+  recorded once at the moment it happens, and every change a person makes through the API — launching,
+  stopping, resuming, deleting, answering, Create PR, loops, red-team runs, workspaces switched on or
+  off, providers, modules, secrets and tokens saved or removed — with who (`you` in the cockpit, or the
+  API token) and when. Names only: a secret's id is logged, never its value, and request bodies are
+  never read. `GET /api/activity` pages it (`before`, `limit`) and filters it (`kind`, `actor`, `org`,
+  `repo`, `q`). The History page is rebuilt on it: one timeline with an icon per kind, sticky day
+  headings, counts of pull requests, merges, failures, questions and your actions, filters by kind,
+  repository and actor plus search, 50 rows a page with older activity on request, runs of quiet
+  events folded into one expandable row ("12 colonies finished with nothing to change, 00:15–00:16"),
+  and each row linking to its colony, pull request or settings section. See
+  [docs/protocol.md](docs/protocol.md) §6.9. ([#527])
 - **Cached views survive a restart and a GitHub outage.** The Packages tab, repository meta,
   lines of code and registry facts are kept on disk (`<data>/cache`, capped, least-recently-used
   first out) and served at once after a restart with "updated 5m ago · refreshing" and a Refresh
@@ -79,6 +93,12 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Fixed
 
+- **History no longer repeats or re-dates events.** The page dated each colony by its `updated_at`,
+  which moves on every housekeeping write — a reclaim sweep marking worktrees cleaned up, an update or
+  restart touching every colony — so one sweep re-dated days-old outcomes to "just now" and drew them as
+  a burst of identical lines, and three colonies launched on the same issue read as one event repeated.
+  Outcomes now come from the activity log at the time they happened; a colony that finished before the
+  log existed is shown once, with its time marked approximate, and every row names its colony. ([#527])
 - **Misconfiguration refuses with a name and a fix instead of degrading silently.** A settings save
   refuses an unknown key, naming it and the settings the module does take (a key already stored still
   passes, or a provider switch would lock you out of saving); an enum refusal lists the options; a
@@ -695,6 +715,7 @@ Macs. ([#74])
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
 [#321]: https://github.com/Colonizer-dev/harness/issues/321
 [#519]: https://github.com/Colonizer-dev/harness/pull/519
+[#527]: https://github.com/Colonizer-dev/harness/pull/527
 [#329]: https://github.com/Colonizer-dev/harness/issues/329
 [#331]: https://github.com/Colonizer-dev/harness/issues/331
 [#326]: https://github.com/Colonizer-dev/harness/issues/326

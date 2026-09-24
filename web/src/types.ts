@@ -1061,6 +1061,8 @@ export interface NewSessionRequest {
   after?: string;
   /** Opt in to overlap-aware queueing: queue behind a live same-repo colony that's already touching files, instead of developing against the same paths at once. Off by default. */
   serialize?: boolean;
+  /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, which the activity log records as such. */
+  origin?: string;
 }
 
 /**
@@ -1748,4 +1750,89 @@ export interface SupplyChain extends CacheInfo {
   fixable: number;
   risks: SupplyRisk[];
   note: string;
+}
+
+/** The closed set of kinds an activity line carries (crates/colonizer/src/activity.rs `KINDS`). */
+export type ActivityKind =
+  | "outcome.pr_opened"
+  | "outcome.merged"
+  | "outcome.closed"
+  | "outcome.no_changes"
+  | "outcome.stopped"
+  | "outcome.failed"
+  | "outcome.question"
+  | "colony.launch"
+  | "colony.stop"
+  | "colony.resume"
+  | "colony.delete"
+  | "colony.publish"
+  | "colony.catch_up"
+  | "colony.cleanup"
+  | "colony.retain"
+  | "colony.answer"
+  | "chat.colony"
+  | "chat.issue"
+  | "loop.create"
+  | "loop.update"
+  | "loop.pause"
+  | "loop.resume"
+  | "loop.delete"
+  | "loop.run_now"
+  | "redteam.start"
+  | "redteam.stop"
+  | "redteam.schedule"
+  | "redteam.unschedule"
+  | "workspace.enable"
+  | "workspace.disable"
+  | "workspace.settings"
+  | "settings.save"
+  | "settings.remove"
+  | "memory.review"
+  | "memory.note"
+  | "burn_down.stop"
+  | "app.update"
+  | "map.create";
+
+/**
+ * One line of the mothership's activity log (GET /api/activity, docs/protocol.md §6.9): a colony's
+ * outcome, recorded once at the transition, or something a person did through the API. Names what
+ * changed — never a secret's value.
+ */
+export interface ActivityEntry {
+  seq: number;
+  ts: string;
+  /** A kind this build knows, or a newer one it does not (drawn as a generic action). */
+  kind: ActivityKind | (string & {});
+  /** `you` (whoever holds the API token) or `colony`. */
+  actor: "you" | "colony" | (string & {});
+  /** How `you` reached the mothership: the browser (`cockpit`) or a bearer token (`api`). */
+  via?: "cockpit" | "api" | null;
+  org?: string | null;
+  repo?: string | null;
+  issue?: number | null;
+  colony?: string | null;
+  target?: string | null;
+  /** The cockpit place that shows the target: a settings section id, `secrets`, `loops`, `redteam`, `memory`. */
+  section?: string | null;
+  title?: string | null;
+  pr_url?: string | null;
+  detail?: string | null;
+}
+
+export interface ActivityPage {
+  entries: ActivityEntry[];
+  /** Pass as `before` for the next (older) page; null on the last. */
+  next_before: number | null;
+  /** Lines the read could not parse; they are skipped, and said so. */
+  skipped: number;
+}
+
+export interface ActivityQuery {
+  before?: number;
+  limit?: number;
+  kind?: string;
+  actor?: "you" | "colony";
+  org?: string;
+  repo?: string;
+  q?: string;
 }
