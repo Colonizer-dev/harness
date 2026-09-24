@@ -444,15 +444,24 @@ async fn account_status(app: &App, cred: &ClaudeCred) -> AccountStatus {
                 profile_expires_at: profile_expires_at(&profile),
             }
         }
-        Err(ProfileError::Forbidden) => AccountStatus {
-            fingerprint,
-            looked_up_at: Instant::now(),
-            account: None,
-            account_note: Some(
-                "this token is only allowed to make model requests, so Anthropic will not say which account it belongs to".into(),
-            ),
-            profile_expires_at: None,
-        },
+        Err(ProfileError::Forbidden) => {
+            // A model-requests-only token cannot read its profile, but every API answer names the
+            // organisation it billed. Match that against this machine's own Claude Code login.
+            let (account, account_note) = match fetch_organization(&cred.value).await {
+                Some(org) => identify_org(&org, &local_claude_account()),
+                None => (
+                    None,
+                    Some("this token is only allowed to make model requests, so Anthropic will not say which account it belongs to".into()),
+                ),
+            };
+            AccountStatus {
+                fingerprint,
+                looked_up_at: Instant::now(),
+                account,
+                account_note,
+                profile_expires_at: None,
+            }
+        }
         Err(ProfileError::Unauthorized) => AccountStatus {
             fingerprint,
             looked_up_at: Instant::now(),
@@ -502,6 +511,84 @@ async fn fetch_profile(token: &str) -> Result<Value, ProfileError> {
     }
 }
 
+/// The organisation a token bills, from the `anthropic-organization-id` header of a free token
+/// count — the one identity a `user:inference` token can still reveal. `None` when the request fails
+/// or the header is missing. Bounded like `fetch_profile`.
+async fn fetch_organization(token: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let response = client
+        .post("https://api.anthropic.com/v1/messages/count_tokens")
+        .bearer_auth(token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("anthropic-version", "2023-06-01")
+        .json(&serde_json::json!({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .ok()?;
+    response
+        .headers()
+        .get("anthropic-organization-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// This machine's Claude Code login, from `~/.claude.json` (`oauthAccount`): organisation id,
+/// email and organisation name. Empty when there is none.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct LocalAccount {
+    organization_uuid: Option<String>,
+    email: Option<String>,
+    organization_name: Option<String>,
+}
+
+fn local_claude_account() -> LocalAccount {
+    let Some(home) = std::env::var_os("HOME") else {
+        return LocalAccount::default();
+    };
+    let Ok(text) = std::fs::read_to_string(std::path::Path::new(&home).join(".claude.json")) else {
+        return LocalAccount::default();
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+        return LocalAccount::default();
+    };
+    let field = |k: &str| doc["oauthAccount"][k].as_str().filter(|s| !s.is_empty()).map(String::from);
+    LocalAccount {
+        organization_uuid: field("organizationUuid"),
+        email: field("emailAddress"),
+        organization_name: field("organizationName"),
+    }
+}
+
+/// The account line and note for a token whose organisation is known. When it is the organisation
+/// this machine's Claude Code is signed in to, that login's email (and org name) is shown; otherwise
+/// the organisation id is, so two tokens can still be told apart. Pure, for the tests.
+fn identify_org(org: &str, local: &LocalAccount) -> (Option<String>, Option<String>) {
+    if local.organization_uuid.as_deref() == Some(org) {
+        let label = match (&local.email, &local.organization_name) {
+            (Some(email), Some(name)) => format!("{email} · {name}"),
+            (Some(email), None) => email.clone(),
+            (None, Some(name)) => name.clone(),
+            (None, None) => format!("organization {org}"),
+        };
+        return (
+            Some(label),
+            Some("matched by organization with this Mac's Claude Code login".into()),
+        );
+    }
+    let short: String = org.chars().take(8).collect();
+    (
+        Some(format!("organization {short}…")),
+        Some("Anthropic names the organization this token bills, but not the person; it is not the organization this machine's Claude Code is signed in to".into()),
+    )
+}
+
 /// Pulls a display identity out of the profile response. The exact shape is not documented, so try the
 /// likely paths and fall back to the organisation's name; none of them match, there is no identity.
 fn account_label(profile: &Value) -> Option<String> {
@@ -541,6 +628,27 @@ fn saved_at(app: &App, cred: &ClaudeCred) -> Option<DateTime<Utc>> {
 /// `claude setup-token` mints a token that is valid for one year.
 fn estimated_expiry(saved: DateTime<Utc>) -> DateTime<Utc> {
     saved + chrono::Duration::days(365)
+}
+
+#[cfg(test)]
+mod org_identity_tests {
+    use super::*;
+
+    #[test]
+    fn an_org_matching_the_local_login_shows_its_email_and_name() {
+        let local = LocalAccount {
+            organization_uuid: Some("org-1".into()),
+            email: Some("a@example.com".into()),
+            organization_name: Some("Acme".into()),
+        };
+        let (account, note) = identify_org("org-1", &local);
+        assert_eq!(account.as_deref(), Some("a@example.com · Acme"));
+        assert!(note.unwrap().contains("matched"));
+        let (account, _) = identify_org("org-2abcdefgh", &local);
+        assert_eq!(account.as_deref(), Some("organization org-2abc…"));
+        let (account, _) = identify_org("org-3", &LocalAccount::default());
+        assert!(account.unwrap().starts_with("organization org-3"));
+    }
 }
 
 #[cfg(test)]
