@@ -1,7 +1,7 @@
 // The Chat view's pure parts: grouping and searching conversations, slash commands, model facts
 // (provider, tags, vision, price), token estimates and persona presets. No React here, so the
 // tests reach all of it.
-import type { ChatAttachment, ChatMessage, ChatMeta, ChatModels, ChatProvider } from "../../types";
+import type { ChatAttachment, ChatAttachmentNote, ChatMessage, ChatMeta, ChatModels, ChatProvider } from "../../types";
 
 // ---------------------------------------------------------------------------
 // Conversation list
@@ -236,28 +236,56 @@ export const DEFAULT_PERSONAS: readonly Persona[] = [
   },
 ];
 
-const PERSONA_KEY = "colonizer.chat.personas";
-
-/** The presets with the operator's edits (kept in this browser), defaults for anything unedited. */
-export function loadPersonas(read: (key: string) => string | null): Persona[] {
-  let edits: Record<string, string> = {};
-  try {
-    edits = JSON.parse(read(PERSONA_KEY) ?? "{}") as Record<string, string>;
-  } catch {
-    edits = {};
-  }
+/** The presets with the operator's edits (kept on the mothership), defaults for anything unedited. */
+export function loadPersonas(edits: Readonly<Record<string, string>>): Persona[] {
   return DEFAULT_PERSONAS.map((p) => (typeof edits[p.id] === "string" ? { ...p, system: edits[p.id] } : { ...p }));
 }
 
-export function savePersona(read: (key: string) => string | null, write: (key: string, value: string) => void, id: string, system: string): void {
-  let edits: Record<string, string> = {};
-  try {
-    edits = JSON.parse(read(PERSONA_KEY) ?? "{}") as Record<string, string>;
-  } catch {
-    edits = {};
-  }
+/** What to store for a preset saved with `system`: `null` when it matches the built-in prompt again. */
+export function personaEdit(id: string, system: string): string | null {
   const preset = DEFAULT_PERSONAS.find((p) => p.id === id);
-  if (preset && preset.system === system) delete edits[id];
-  else edits[id] = system;
-  write(PERSONA_KEY, JSON.stringify(edits));
+  return preset && preset.system === system ? null : system;
+}
+
+/** Where earlier versions kept persona edits and reply notes in the browser; moved to the mothership once. */
+export const LEGACY_PERSONA_KEY = "colonizer.chat.personas";
+export const LEGACY_FEEDBACK_KEY = "colonizer.chat.feedback";
+
+/** The entries of a browser-stored JSON map the mothership does not have yet (bad JSON reads as empty). */
+export function legacyEntries(raw: string | null, server: Readonly<Record<string, string>>): [string, string][] {
+  let local: unknown;
+  try {
+    local = JSON.parse(raw ?? "{}");
+  } catch {
+    return [];
+  }
+  if (!local || typeof local !== "object") return [];
+  return Object.entries(local as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string" && !(e[0] in server));
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+/** The mothership's caps (docs/protocol.md, "Chat images"). */
+export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const IMAGES_PER_MESSAGE = 8;
+
+/** Why an image file cannot be attached, or `null`. The mothership checks the bytes again. */
+export function imageProblem(file: { type: string; size: number }, alreadyAttached: number): string | null {
+  if (!(IMAGE_TYPES as readonly string[]).includes(file.type)) return `${file.type || "That file"} is not a supported image (png, jpeg, gif, webp).`;
+  if (file.size > IMAGE_MAX_BYTES) return "Images are limited to 10 MB.";
+  if (alreadyAttached >= IMAGES_PER_MESSAGE) return `At most ${IMAGES_PER_MESSAGE} images on one message.`;
+  return null;
+}
+
+/** The stored images of a message, as attachments to send again (edit and resend). */
+export function storedImages(notes: readonly ChatAttachmentNote[] | undefined): { sha: string; label: string }[] {
+  return (notes ?? []).filter((n) => n.kind === "image" && n.sha).map((n) => ({ sha: n.sha!, label: n.label }));
+}
+
+/** Whether any message carries a stored image (the export then packs a zip). */
+export function hasImages(messages: readonly ChatMessage[]): boolean {
+  return messages.some((m) => storedImages(m.attachments).length > 0);
 }

@@ -193,7 +193,7 @@ const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 /// Standard base64 (alphabet `A–Z a–z 0–9 + /` with `=` padding), implemented by hand so no
 /// new crate is needed.
-fn b64_encode(bytes: &[u8]) -> String {
+pub(crate) fn b64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < bytes.len() {
@@ -220,7 +220,7 @@ fn b64_encode(bytes: &[u8]) -> String {
 
 /// Inverse of [`b64_encode`]. Outer whitespace is trimmed first; anything else outside the
 /// standard alphabet (including inner whitespace) is rejected with `None`.
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
         match c {
             b'A'..=b'Z' => Some((c - b'A') as u32),

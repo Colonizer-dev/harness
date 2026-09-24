@@ -103,6 +103,26 @@ describe("chat", () => {
     expect(html).toContain('aria-label="Create a GitHub issue"');
   });
 
+  it("shows stored images as thumbnails that open full size, and the mothership's note on a reply", () => {
+    const sha = "a".repeat(64);
+    const user = msg("user", "what is this?", { attachments: [{ kind: "image", label: "cat.png", sha, mime: "image/png", width: 640, height: 480, bytes: 1000 }, { kind: "file", label: "acme/web/x.rs" }] });
+    const html = renderToStaticMarkup(
+      <MessageRow m={user} models={null} claudeIds={[]} isLastReply={false} busy={false} hit={null} onAction={() => {}} imageUrl={(s) => `/api/chat/attachments/${s}`} />,
+    );
+    expect(html).toContain(`src="/api/chat/attachments/${sha}"`);
+    expect(html).toContain('aria-label="open image cat.png"');
+    expect(html).toContain("acme/web/x.rs");
+    const reply = renderToStaticMarkup(
+      <MessageRow m={msg("assistant", "a dog")} models={null} claudeIds={[]} isLastReply busy={false} hit={null} onAction={() => {}} note="it is a cat" />,
+    );
+    expect(reply).toContain("Your note: it is a cat");
+  });
+
+  it("tells a colony which images the conversation had", () => {
+    const text = conversationAsInstructions(null, [msg("user", "fix this layout", { attachments: [{ kind: "image", label: "shot.png", sha: "b".repeat(64) }] })]);
+    expect(text).toContain("[image shared in the chat, not attached: shot.png]\nfix this layout");
+  });
+
   it("offers a compare candidate to be picked instead of the usual actions", () => {
     const html = renderToStaticMarkup(
       <MessageRow m={msg("assistant", "A", { candidate: true, lane: 0 })} models={null} claudeIds={[]} isLastReply={false} busy={false} hit={null} onAction={() => {}} />,

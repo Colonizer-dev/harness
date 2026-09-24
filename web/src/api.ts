@@ -16,6 +16,8 @@ import type {
   ChatMeta,
   ChatModels,
   ChatCompareRequest,
+  ChatImageRef,
+  ChatPrefs,
   ChatPatch,
   ChatSendRequest,
   ChatStreamEvent,
@@ -287,7 +289,17 @@ export interface Api {
   forkChat(id: string, messageId: string, include: boolean): Promise<ChatMeta>;
   retitleChat(id: string): Promise<ChatMeta>;
   /** The URL of the conversation's Markdown export (a download). */
-  chatExportUrl(id: string): string;
+  /** The Markdown export; `zip` packs it with the conversation's images beside it. */
+  chatExportUrl(id: string, zip?: boolean): string;
+  /** POST /api/chat/attachments: stores one image (checked by its bytes, metadata stripped) and answers its reference. */
+  uploadChatImage(file: Blob, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<ChatImageRef>;
+  /** GET /api/chat/attachments/{sha}: where a stored image is served. */
+  chatImageUrl(sha: string): string;
+  chatPrefs(): Promise<ChatPrefs>;
+  /** Saves a persona preset's system prompt; `null` goes back to the built-in one. */
+  saveChatPersona(id: string, system: string | null): Promise<ChatPrefs>;
+  /** Keeps a note on a reply; `null` clears it. */
+  saveChatFeedback(messageId: string, note: string | null): Promise<ChatPrefs>;
   chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string }>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
@@ -380,6 +392,38 @@ export function splitNdjson(buffer: string): { events: ChatStreamEvent[]; rest: 
     }
   }
   return { events, rest };
+}
+
+/** POSTs a file as the raw body, reporting upload progress (fetch cannot), and answers the JSON reply. */
+function uploadWithProgress<T>(url: string, file: Blob, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data: unknown = null;
+      try {
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        data = xhr.responseText;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data as T);
+      else
+        reject(
+          new ApiError(
+            data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : xhr.statusText || `upload failed (${xhr.status})`,
+            xhr.status,
+          ),
+        );
+    };
+    xhr.onerror = () => reject(new ApiError("the upload failed", 0));
+    xhr.onabort = () => reject(new DOMException("aborted", "AbortError"));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(file);
+  });
 }
 
 /** POSTs `body` and hands each line of the newline-delimited JSON answer to `onEvent` as it lands. */
@@ -525,7 +569,12 @@ export const httpApi: Api = {
   pickChat: (id, messageId) => post(`/api/chat/${enc(id)}/pick`, { message_id: messageId }),
   forkChat: (id, messageId, include) => post(`/api/chat/${enc(id)}/fork`, { message_id: messageId, include }),
   retitleChat: (id) => post(`/api/chat/${enc(id)}/title`),
-  chatExportUrl: (id) => `/api/chat/${enc(id)}/export`,
+  chatExportUrl: (id, zip) => `/api/chat/${enc(id)}/export${zip ? "?format=zip" : ""}`,
+  uploadChatImage: (file, onProgress, signal) => uploadWithProgress("/api/chat/attachments", file, onProgress, signal),
+  chatImageUrl: (sha) => `/api/chat/attachments/${enc(sha)}`,
+  chatPrefs: () => request("/api/chat/prefs"),
+  saveChatPersona: (id, system) => put(`/api/chat/prefs/personas/${enc(id)}`, { system }),
+  saveChatFeedback: (messageId, note) => put(`/api/chat/prefs/feedback/${enc(messageId)}`, { note }),
   chatIssue: (id, body) => post(`/api/chat/${enc(id)}/issue`, body),
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),

@@ -1484,10 +1484,33 @@ export interface ChatMeta {
   forked_from?: { chat: string; message: string };
 }
 
-/** What an attachment left on the message it came with: never the content, only what it was. */
+/** What an attachment left on the message it came with: never the content, only what it was. An image
+ * also carries its stored reference, so it can be shown and sent to the model again. */
 export interface ChatAttachmentNote {
   kind: string;
   label: string;
+  sha?: string;
+  mime?: string;
+  width?: number;
+  height?: number;
+  bytes?: number;
+}
+
+/** A stored chat image (POST /api/chat/attachments), content-addressed by its sha256. */
+export interface ChatImageRef {
+  sha: string;
+  mime: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/** Persona preset edits and notes on replies, kept on the mothership (GET /api/chat/prefs). */
+export interface ChatPrefs {
+  /** Preset id → the system prompt saved to it. */
+  personas: Record<string, string>;
+  /** Reply message id → the operator's note on it. */
+  feedback: Record<string, string>;
 }
 
 export interface ChatMessage {
@@ -1535,6 +1558,8 @@ export type ChatAttachment =
   | { kind: "map"; repo: string }
   | { kind: "map_component"; repo: string; component: string }
   | { kind: "snippet"; label?: string; text: string }
+  /** A stored image (`sha`), or older clients' inline base64 `data`, which the mothership stores first. */
+  | { kind: "image"; sha: string; name?: string }
   | { kind: "image"; media_type: string; data: string; name?: string }
   | { kind: "colonies_today"; org?: string }
   | { kind: "merged_prs"; org?: string; days?: number };

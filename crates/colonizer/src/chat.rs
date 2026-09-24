@@ -19,7 +19,13 @@
 //! (`POST /api/chat/{id}/pick`); `GET /api/chat/{id}/export` renders it as Markdown. A message can
 //! carry attachments — a colony, a repository file, a map component, a snippet, an image (Anthropic
 //! wire only), today's colonies or the week's merged pull requests — which reach the model as system
-//! context and are recorded on the message by label only.
+//! context and are recorded on the message by label only. Images are the exception: they are stored
+//! on the Mothership ([`crate::chat_images`]) and the message keeps a reference, so every later
+//! request — a regenerate, a branch, an edited resend, a compare — shows the model the image again
+//! (or says it was left out, to a model that cannot read images).
+//!
+//! Persona preset edits and the operator's notes on unhelpful replies live next to the
+//! conversations, in `<data>/chats/_prefs.json` (`GET /api/chat/prefs`).
 
 use crate::{
     ApiResult, App, Shared, client_error,
@@ -194,6 +200,40 @@ pub struct ForkRef {
 pub struct AttachmentNote {
     pub kind: String,
     pub label: String,
+    /// For an image: the stored image it refers to ([`crate::chat_images`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+impl AttachmentNote {
+    fn image(label: String, image: crate::chat_images::ImageRef) -> Self {
+        AttachmentNote {
+            kind: "image".into(),
+            label,
+            sha: Some(image.sha),
+            mime: Some(image.mime),
+            width: Some(image.width),
+            height: Some(image.height),
+            bytes: Some(image.bytes),
+        }
+    }
+}
+
+/// Every stored image the messages refer to.
+pub fn image_shas(messages: &[ChatMessage]) -> std::collections::HashSet<String> {
+    messages
+        .iter()
+        .flat_map(|m| &m.attachments)
+        .filter_map(|a| a.sha.clone())
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -428,13 +468,135 @@ pub async fn patch(State(app): State<Shared>, Path(id): Path<String>, Json(req):
     Ok(Json(meta))
 }
 
-/// `DELETE /api/chat/{id}`: removes both files.
+/// `DELETE /api/chat/{id}`: removes both files, the images no other conversation refers to, and
+/// the operator's notes on its replies. The cockpit holds the request back for its undo window, so
+/// an undone deletion never reaches here.
 pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     check_id(&id)?;
     load_or_404(read_meta(&app, &id).await)?;
+    let messages = read_messages(&app, &id).await;
     let _ = tokio::fs::remove_file(messages_path(&app, &id)).await;
     tokio::fs::remove_file(meta_path(&app, &id)).await?;
-    Ok(Json(json!({"deleted": id})))
+    let images = crate::chat_images::collect_garbage(&app, &image_shas(&messages)).await;
+    let ids: std::collections::HashSet<&str> = messages.iter().map(|m| m.id.as_str()).collect();
+    let _ = update_prefs(&app, |p| p.feedback.retain(|k, _| !ids.contains(k.as_str()))).await;
+    Ok(Json(json!({"deleted": id, "images_removed": images})))
+}
+
+// ---------------------------------------------------------------------------
+// Preferences: persona preset edits and notes on replies
+// ---------------------------------------------------------------------------
+
+/// What the operator changed or noted, kept next to the conversations.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChatPrefs {
+    /// A persona preset's id → the system prompt the operator saved to it.
+    pub personas: std::collections::BTreeMap<String, String>,
+    /// A reply's message id → the operator's note on why it was not helpful.
+    pub feedback: std::collections::BTreeMap<String, String>,
+}
+
+const PERSONA_LIMIT: usize = 20 * 1024;
+const NOTE_LIMIT: usize = 2 * 1024;
+const PREFS_ENTRIES: usize = 5000;
+
+fn prefs_path(app: &App) -> PathBuf {
+    // `_` keeps it out of the conversation list: no conversation id has one.
+    dir(app).join("_prefs.json")
+}
+
+async fn read_prefs(app: &App) -> ChatPrefs {
+    tokio::fs::read(prefs_path(app))
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Read-modify-write under one lock, so two tabs saving at once both land.
+async fn update_prefs(app: &App, change: impl FnOnce(&mut ChatPrefs)) -> Result<ChatPrefs> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _held = LOCK.lock().await;
+    let mut prefs = read_prefs(app).await;
+    let before = prefs.clone();
+    change(&mut prefs);
+    if prefs != before {
+        tokio::fs::create_dir_all(dir(app)).await?;
+        write_atomic(&prefs_path(app), &serde_json::to_vec_pretty(&prefs)?).await?;
+    }
+    Ok(prefs)
+}
+
+/// `GET /api/chat/prefs`: persona preset edits and notes on replies.
+pub async fn prefs(State(app): State<Shared>) -> Json<ChatPrefs> {
+    Json(read_prefs(&app).await)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PutPersona {
+    /// The preset's system prompt; `null` goes back to the built-in one.
+    pub system: Option<String>,
+}
+
+/// `PUT /api/chat/prefs/personas/{id}`: saves (or with `null`, forgets) an edit to a persona preset.
+pub async fn put_persona(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<PutPersona>) -> ApiResult<ChatPrefs> {
+    if !valid_id(&id) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid persona id"));
+    }
+    if req.system.as_ref().is_some_and(|s| s.len() > PERSONA_LIMIT) {
+        return Err(client_error(StatusCode::PAYLOAD_TOO_LARGE, "a system prompt is over 20 KB"));
+    }
+    let prefs = update_prefs(&app, |p| match req.system {
+        Some(system) if p.personas.len() < PREFS_ENTRIES || p.personas.contains_key(&id) => {
+            p.personas.insert(id, system);
+        }
+        Some(_) => {}
+        None => {
+            p.personas.remove(&id);
+        }
+    })
+    .await?;
+    Ok(Json(prefs))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PutFeedback {
+    /// The note; `null` clears it.
+    pub note: Option<String>,
+}
+
+/// `PUT /api/chat/prefs/feedback/{message}`: keeps (or with `null`, clears) a note on a reply.
+pub async fn put_feedback(
+    State(app): State<Shared>,
+    Path(message): Path<String>,
+    Json(req): Json<PutFeedback>,
+) -> ApiResult<ChatPrefs> {
+    if !valid_id(&message) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid message id"));
+    }
+    let note = req.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    if note.as_ref().is_some_and(|n| n.len() > NOTE_LIMIT) {
+        return Err(client_error(StatusCode::PAYLOAD_TOO_LARGE, "a note is over 2 KB"));
+    }
+    let prefs = update_prefs(&app, |p| match note {
+        Some(note) => {
+            if p.feedback.len() >= PREFS_ENTRIES && !p.feedback.contains_key(&message) {
+                // The oldest-looking entry goes: ids carry no time, so any one will do.
+                if let Some(first) = p.feedback.keys().next().cloned() {
+                    p.feedback.remove(&first);
+                }
+            }
+            p.feedback.insert(message, note);
+        }
+        None => {
+            p.feedback.remove(&message);
+        }
+    })
+    .await?;
+    Ok(Json(prefs))
 }
 
 // ---------------------------------------------------------------------------
@@ -496,12 +658,17 @@ pub enum Attachment {
         label: String,
         text: String,
     },
-    /// An image, base64, for models on the Anthropic wire.
+    /// An image, for models on the Anthropic wire: one already stored (`sha`, from
+    /// `POST /api/chat/attachments`), or the image itself as base64 `data`, which is stored first.
     Image {
+        #[serde(default)]
         media_type: String,
+        #[serde(default)]
         data: String,
         #[serde(default)]
         name: String,
+        #[serde(default)]
+        sha: Option<String>,
     },
     /// What the colonies did in the last 24 hours, optionally in one workspace.
     ColoniesToday {
@@ -522,8 +689,8 @@ const FILE_CONTEXT_LIMIT: usize = 60 * 1024;
 /// At most this many attachments on one message, and this much context in all.
 const ATTACHMENT_COUNT: usize = 8;
 const CONTEXT_LIMIT: usize = 240 * 1024;
-/// An image, as base64, at most 5 MB of it.
-const IMAGE_LIMIT: usize = 5 * 1024 * 1024;
+/// An image sent inline, as base64: the stored ceiling, encoded.
+const IMAGE_LIMIT: usize = crate::chat_images::MAX_BYTES / 3 * 4 + 4;
 /// A send or compare body: the message, attachments and room for images, as JSON.
 pub const BODY_LIMIT: usize = 12 * 1024 * 1024;
 const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -552,12 +719,19 @@ pub fn check_attachment(a: &Attachment) -> Result<(), String> {
         Attachment::Map { repo } if !crate::util::valid_repo(repo) => Err(format!("invalid repository {repo:?}")),
         Attachment::Snippet { text, .. } if text.len() > FILE_CONTEXT_LIMIT => Err("a snippet is over 60 KB".into()),
         Attachment::Snippet { text, .. } if text.trim().is_empty() => Err("an empty snippet".into()),
+        Attachment::Image { sha: Some(sha), .. } => {
+            if crate::chat_images::valid_sha(sha) {
+                Ok(())
+            } else {
+                Err("invalid image reference".into())
+            }
+        }
         Attachment::Image { media_type, data, .. } => {
-            if !IMAGE_TYPES.contains(&media_type.as_str()) {
+            if !media_type.is_empty() && !IMAGE_TYPES.contains(&media_type.as_str()) {
                 return Err(format!("{media_type} images are not supported (png, jpeg, gif, webp)"));
             }
             if data.len() > IMAGE_LIMIT {
-                return Err("an image is over 5 MB".into());
+                return Err("an image is over 10 MB".into());
             }
             if data.is_empty()
                 || !data
@@ -578,7 +752,6 @@ pub fn check_attachment(a: &Attachment) -> Result<(), String> {
 struct Built {
     system: String,
     notes: Vec<AttachmentNote>,
-    images: Vec<Value>,
 }
 
 fn in_org(repo: &str, org: Option<&str>) -> bool {
@@ -701,10 +874,17 @@ pub fn describe_map(stored: &Value) -> String {
     out
 }
 
-async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allowed: bool) -> Result<Built, crate::AppError> {
+async fn build_attachments(app: &Shared, attachments: &[Attachment]) -> Result<Built, crate::AppError> {
     let bad = |m: String| client_error(StatusCode::BAD_REQUEST, &m);
     if attachments.len() > ATTACHMENT_COUNT {
         return Err(bad(format!("at most {ATTACHMENT_COUNT} attachments on one message")));
+    }
+    let images = attachments.iter().filter(|a| matches!(a, Attachment::Image { .. })).count();
+    if images > crate::chat_images::MAX_PER_MESSAGE {
+        return Err(bad(format!(
+            "at most {} images on one message",
+            crate::chat_images::MAX_PER_MESSAGE
+        )));
     }
     let mut out = Built::default();
     for a in attachments {
@@ -726,6 +906,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                 out.notes.push(AttachmentNote {
                     kind: "colony".into(),
                     label: crate::util::truncate(&summary, 80).to_string(),
+                    ..AttachmentNote::default()
                 });
             }
             Attachment::File { repo, path, reference } => {
@@ -752,6 +933,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                 out.notes.push(AttachmentNote {
                     kind: "file".into(),
                     label: format!("{repo}/{path}"),
+                    ..AttachmentNote::default()
                 });
             }
             Attachment::Map { repo } => {
@@ -764,6 +946,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                 out.notes.push(AttachmentNote {
                     kind: "map".into(),
                     label: format!("{repo} map"),
+                    ..AttachmentNote::default()
                 });
             }
             Attachment::MapComponent { repo, component } => {
@@ -774,6 +957,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                 out.notes.push(AttachmentNote {
                     kind: "map".into(),
                     label: format!("{repo} · {label}"),
+                    ..AttachmentNote::default()
                 });
             }
             Attachment::Snippet { label, text } => {
@@ -782,25 +966,31 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                 out.notes.push(AttachmentNote {
                     kind: "snippet".into(),
                     label: label.chars().take(60).collect(),
+                    ..AttachmentNote::default()
                 });
             }
-            Attachment::Image { media_type, data, name } => {
-                if !images_allowed {
-                    return Err(bad(
-                        "this model is reached over an OpenAI-style provider, which images are not sent to; pick a Claude or Anthropic-wire model"
-                            .into(),
-                    ));
-                }
-                out.images
-                    .push(json!({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}));
-                out.notes.push(AttachmentNote {
-                    kind: "image".into(),
-                    label: if name.trim().is_empty() {
-                        media_type.clone()
-                    } else {
-                        name.chars().take(60).collect()
-                    },
-                });
+            Attachment::Image { data, name, sha, .. } => {
+                // Stored and recorded whatever the model: one that cannot read images is told an
+                // image was left out (see `history_with_images`), and a later turn with a model
+                // that can will show it. The cockpit keeps new images off such models.
+                let image = match sha {
+                    Some(sha) => {
+                        crate::chat_images::load(app, sha)
+                            .await
+                            .ok_or_else(|| bad("that image is no longer stored; attach it again".into()))?
+                            .1
+                    }
+                    None => {
+                        let bytes = crate::util::b64_decode(data).ok_or_else(|| bad("the image is not base64".into()))?;
+                        crate::chat_images::store(app, &bytes).await?
+                    }
+                };
+                let label = if name.trim().is_empty() {
+                    image.mime.clone()
+                } else {
+                    name.chars().take(60).collect()
+                };
+                out.notes.push(AttachmentNote::image(label, image));
             }
             Attachment::ColoniesToday { org } => {
                 let sessions = app.sessions.read().await.clone();
@@ -816,6 +1006,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                         "today's colonies{}",
                         org.as_deref().map(|o| format!(" · {o}")).unwrap_or_default()
                     ),
+                    ..AttachmentNote::default()
                 });
             }
             Attachment::MergedPrs { org, days } => {
@@ -833,6 +1024,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment], images_allo
                         "merged PRs · {days}d{}",
                         org.as_deref().map(|o| format!(" · {o}")).unwrap_or_default()
                     ),
+                    ..AttachmentNote::default()
                 });
             }
         }
@@ -857,10 +1049,10 @@ fn anthropic_wire(app: &App, route: &Route) -> bool {
     }
 }
 
-/// The Anthropic-shaped message list the model sees: the most recent history (errors and empty
+/// The history's messages, oldest first: the most recent (errors, compare candidates and empty
 /// replies left out), trimmed to [`HISTORY_MESSAGES`] and [`HISTORY_BYTES`], starting on a user turn
-/// as the API requires. Pure, for the tests.
-pub fn history_for_model(messages: &[ChatMessage]) -> Vec<Value> {
+/// as the API requires.
+fn kept_for_model(messages: &[ChatMessage]) -> Vec<&ChatMessage> {
     let usable: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| {
@@ -880,18 +1072,118 @@ pub fn history_for_model(messages: &[ChatMessage]) -> Vec<Value> {
     while kept.first().is_some_and(|m| m.role != "user") {
         kept.remove(0);
     }
-    // Two turns of the same role in a row (a stopped reply followed by a new question) merge, so
-    // the list alternates the way the Messages API wants.
+    kept
+}
+
+/// At most this many images, and this many bytes of them, go in one request; older ones are left
+/// out first. The API takes more, but every image is sent again on every turn.
+const HISTORY_IMAGES: usize = 20;
+const HISTORY_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Which of the history's images to send, newest first until the budget runs out, and why each of
+/// the others is left out. Pure, for the tests.
+pub fn plan_images(messages: &[ChatMessage], vision: bool) -> std::collections::HashMap<String, Result<(), String>> {
+    let mut plan = std::collections::HashMap::new();
+    let (mut count, mut bytes) = (0usize, 0u64);
+    for m in kept_for_model(messages).into_iter().rev() {
+        for note in m.attachments.iter().rev() {
+            let Some(sha) = &note.sha else { continue };
+            if plan.contains_key(sha) {
+                continue;
+            }
+            let size = note.bytes.unwrap_or(0);
+            let verdict = if !vision {
+                Err("model can't read images".to_string())
+            } else if size > crate::chat_images::MODEL_IMAGE_LIMIT {
+                Err("over the model's 5 MB image limit".to_string())
+            } else if count >= HISTORY_IMAGES || bytes + size > HISTORY_IMAGE_BYTES {
+                Err("left out to keep the request small".to_string())
+            } else {
+                count += 1;
+                bytes += size;
+                Ok(())
+            };
+            plan.insert(sha.clone(), verdict);
+        }
+    }
+    plan
+}
+
+/// Each planned image as an Anthropic image block, or why it is left out.
+type ImageBlocks = std::collections::HashMap<String, Result<Value, String>>;
+
+async fn load_images(app: &App, messages: &[ChatMessage], vision: bool) -> ImageBlocks {
+    let mut out = ImageBlocks::new();
+    for (sha, verdict) in plan_images(messages, vision) {
+        let block = match verdict {
+            Ok(()) => match crate::chat_images::load(app, &sha).await {
+                Some((bytes, image)) => Ok(json!({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": image.mime, "data": crate::util::b64_encode(&bytes)},
+                })),
+                None => Err("no longer stored".to_string()),
+            },
+            Err(why) => Err(why),
+        };
+        out.insert(sha, block);
+    }
+    out
+}
+
+/// The Anthropic-shaped message list the model sees, text only.
+#[cfg(test)]
+pub fn history_for_model(messages: &[ChatMessage]) -> Vec<Value> {
+    history_with_images(messages, &ImageBlocks::new())
+}
+
+/// The Anthropic-shaped message list the model sees: [`kept_for_model`]'s messages, each user turn
+/// with its stored images ahead of its text, or a line saying an image was left out and why. A turn
+/// with no image to send stays plain text, which is what the `openai` wire translates. Pure, for
+/// the tests.
+pub fn history_with_images(messages: &[ChatMessage], images: &ImageBlocks) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for m in kept {
+    for m in kept_for_model(messages) {
+        let mut blocks: Vec<Value> = Vec::new();
+        let mut omitted: Vec<String> = Vec::new();
+        for note in &m.attachments {
+            let Some(sha) = &note.sha else { continue };
+            match images.get(sha) {
+                Some(Ok(block)) => blocks.push(block.clone()),
+                Some(Err(why)) => omitted.push(format!("[image omitted: {why} — {}]", note.label)),
+                None => omitted.push(format!("[image omitted: not sent — {}]", note.label)),
+            }
+        }
+        let text = if omitted.is_empty() {
+            m.content.clone()
+        } else {
+            format!("{}\n\n{}", omitted.join("\n"), m.content)
+        };
+        let content = if blocks.is_empty() {
+            json!(text)
+        } else {
+            blocks.push(json!({"type": "text", "text": text}));
+            Value::Array(blocks)
+        };
+        // Two turns of the same role in a row (a stopped reply followed by a new question) merge, so
+        // the list alternates the way the Messages API wants.
         if let Some(last) = out.last_mut()
             && last["role"] == m.role
         {
-            let joined = format!("{}\n\n{}", last["content"].as_str().unwrap_or_default(), m.content);
-            last["content"] = json!(joined);
+            last["content"] = match (last["content"].take(), content) {
+                (Value::String(a), Value::String(b)) => json!(format!("{a}\n\n{b}")),
+                (a, b) => {
+                    let as_blocks = |v: Value| match v {
+                        Value::Array(list) => list,
+                        other => vec![json!({"type": "text", "text": other})],
+                    };
+                    let mut list = as_blocks(a);
+                    list.extend(as_blocks(b));
+                    Value::Array(list)
+                }
+            };
             continue;
         }
-        out.push(json!({"role": m.role, "content": m.content}));
+        out.push(json!({"role": m.role, "content": content}));
     }
     out
 }
@@ -1077,19 +1369,9 @@ async fn push_user(
     Ok(user)
 }
 
-/// The request body: history, system prompt with the attachments' context, temperature, and any
-/// images on the newest user turn.
-fn request_body(meta: &ChatMeta, messages: &[ChatMessage], extra_system: &str, images: &[Value]) -> Value {
-    let mut history = history_for_model(messages);
-    if !images.is_empty()
-        && let Some(last) = history.last_mut()
-        && last["role"] == "user"
-    {
-        let text = last["content"].as_str().unwrap_or_default().to_string();
-        let mut blocks: Vec<Value> = images.to_vec();
-        blocks.push(json!({"type": "text", "text": text}));
-        last["content"] = Value::Array(blocks);
-    }
+/// The request body: history (with its images), system prompt with the attachments' context and
+/// temperature.
+fn request_body(meta: &ChatMeta, history: Vec<Value>, extra_system: &str) -> Value {
     let mut body = json!({"max_tokens": meta.max_tokens, "messages": history});
     let system = format!("{}{}", meta.system.clone().unwrap_or_default(), extra_system);
     if !system.trim().is_empty() {
@@ -1129,7 +1411,8 @@ pub async fn send(State(app): State<Shared>, Path(id): Path<String>, Json(req): 
             });
         }
     }
-    let built = build_attachments(&app, &attachments, anthropic_wire(&app, &route)).await?;
+    let vision = anthropic_wire(&app, &route);
+    let built = build_attachments(&app, &attachments).await?;
 
     let parent = if req.regenerate {
         while messages.last().is_some_and(|m| m.role == "assistant") {
@@ -1147,7 +1430,8 @@ pub async fn send(State(app): State<Shared>, Path(id): Path<String>, Json(req): 
             .id
     };
 
-    let body = request_body(&meta, &messages, &built.system, &built.images);
+    let images = load_images(&app, &messages, vision).await;
+    let body = request_body(&meta, history_with_images(&messages, &images), &built.system);
     let prepared = prepare(&app, &route, &reach, body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
     meta.updated_at = now();
     write_meta(&app, &meta).await?;
@@ -1194,16 +1478,15 @@ pub async fn compare(
     for m in &req.models {
         routes.push(route_for(&app, m).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?);
     }
-    let images_allowed = routes.iter().all(|(r, _)| anthropic_wire(&app, r));
-    let built = build_attachments(&app, &req.attachments, images_allowed).await?;
+    let built = build_attachments(&app, &req.attachments).await?;
     let mut messages = read_messages(&app, &id).await;
     let user = push_user(&app, &mut meta, &mut messages, &req.content, built.notes.clone()).await?;
-    let body = request_body(&meta, &messages, &built.system, &built.images);
+    // Each side sees the stored images only when its model can read them.
     let mut prepared = Vec::new();
     for (route, reach) in &routes {
-        prepared.push(
-            prepare(&app, route, reach, body.clone()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?,
-        );
+        let images = load_images(&app, &messages, anthropic_wire(&app, route)).await;
+        let body = request_body(&meta, history_with_images(&messages, &images), &built.system);
+        prepared.push(prepare(&app, route, reach, body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?);
     }
     meta.updated_at = now();
     write_meta(&app, &meta).await?;
@@ -1313,8 +1596,25 @@ pub async fn fork(State(app): State<Shared>, Path(id): Path<String>, Json(req): 
     Ok(Json(meta))
 }
 
-/// A conversation as Markdown. Pure, for the tests.
-pub fn to_markdown(meta: &ChatMeta, messages: &[ChatMessage]) -> String {
+/// Where an exported conversation's images are: the Mothership's own URL, or files next to the
+/// Markdown in a zip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImageLinks {
+    Mothership,
+    Zip,
+}
+
+fn image_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "jpg",
+    }
+}
+
+/// A conversation as Markdown, its images linked the way `links` says. Pure, for the tests.
+pub fn to_markdown(meta: &ChatMeta, messages: &[ChatMessage], links: ImageLinks) -> String {
     let mut out = format!(
         "# {}\n\n_Model: {} · started {}_\n",
         if meta.title.is_empty() { "Conversation" } else { &meta.title },
@@ -1331,9 +1631,19 @@ pub fn to_markdown(meta: &ChatMeta, messages: &[ChatMessage]) -> String {
             format!("Assistant ({})", m.model.as_deref().unwrap_or("?"))
         };
         out.push_str(&format!("\n## {who}\n\n"));
-        if !m.attachments.is_empty() {
-            let labels: Vec<String> = m.attachments.iter().map(|a| format!("{}: {}", a.kind, a.label)).collect();
+        let (images, others): (Vec<&AttachmentNote>, Vec<&AttachmentNote>) = m.attachments.iter().partition(|a| a.sha.is_some());
+        if !others.is_empty() {
+            let labels: Vec<String> = others.iter().map(|a| format!("{}: {}", a.kind, a.label)).collect();
             out.push_str(&format!("_Attached: {}_\n\n", labels.join(", ")));
+        }
+        for a in images {
+            let sha = a.sha.as_deref().unwrap_or_default();
+            let alt = a.label.replace(['[', ']'], "");
+            let target = match links {
+                ImageLinks::Mothership => format!("/api/chat/attachments/{sha}"),
+                ImageLinks::Zip => format!("images/{sha}.{}", image_ext(a.mime.as_deref().unwrap_or_default())),
+            };
+            out.push_str(&format!("![{alt}]({target})\n\n"));
         }
         out.push_str(m.content.trim());
         out.push('\n');
@@ -1344,16 +1654,107 @@ pub fn to_markdown(meta: &ChatMeta, messages: &[ChatMessage]) -> String {
     out
 }
 
-/// `GET /api/chat/{id}/export`: the conversation as a Markdown download.
-pub async fn export(State(app): State<Shared>, Path(id): Path<String>) -> Result<Response, crate::AppError> {
+/// A zip archive of `files` (name, bytes), stored without compression: images are compressed
+/// already, and the format needs nothing but a CRC. Pure, for the tests.
+pub fn zip_store(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+    let fits = |n: usize| u32::try_from(n).map_err(|_| "the export is too large for a zip".to_string());
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in files {
+        let offset = fits(out.len())?;
+        let size = fits(data.len())?;
+        let crc = crc32(data);
+        let name_len = u16::try_from(name.len()).map_err(|_| "a file name is too long".to_string())?;
+        // Version 2.0, UTF-8 names, stored, 1980-01-01 00:00.
+        let common = |buf: &mut Vec<u8>| {
+            buf.extend_from_slice(&20u16.to_le_bytes());
+            buf.extend_from_slice(&0x0800u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&0x21u16.to_le_bytes());
+            buf.extend_from_slice(&crc.to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&name_len.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+        };
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        common(&mut out);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        common(&mut central);
+        // Comment length, disk, internal and external attributes, then where the entry starts.
+        central.extend_from_slice(&[0; 2 + 2 + 2 + 4]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let count = u16::try_from(files.len()).map_err(|_| "too many files for a zip".to_string())?;
+    let central_at = fits(out.len())?;
+    let central_len = fits(central.len())?;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&central_len.to_le_bytes());
+    out.extend_from_slice(&central_at.to_le_bytes());
+    out.extend_from_slice(&[0; 2]);
+    Ok(out)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ExportQuery {
+    /// `zip`: the Markdown with its images as files next to it.
+    pub format: Option<String>,
+}
+
+/// `GET /api/chat/{id}/export`: the conversation as a Markdown download, its images linked to the
+/// Mothership; `?format=zip` packs the Markdown with the images beside it instead.
+pub async fn export(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Response, crate::AppError> {
     check_id(&id)?;
     let meta = load_or_404(read_meta(&app, &id).await)?;
     let messages = read_messages(&app, &id).await;
-    let md = to_markdown(&meta, &messages);
+    if q.format.as_deref() != Some("zip") {
+        let md = to_markdown(&meta, &messages, ImageLinks::Mothership);
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+            .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"chat-{id}.md\""))
+            .body(Body::from(md))
+            .expect("a fixed response"));
+    }
+    let mut files = vec![(
+        format!("chat-{id}.md"),
+        to_markdown(&meta, &messages, ImageLinks::Zip).into_bytes(),
+    )];
+    let mut shas: Vec<String> = image_shas(&messages).into_iter().collect();
+    shas.sort();
+    for sha in shas {
+        if let Some((bytes, image)) = crate::chat_images::load(&app, &sha).await {
+            files.push((format!("images/{sha}.{}", image_ext(&image.mime)), bytes));
+        }
+    }
+    let zip = zip_store(&files).map_err(|e| client_error(StatusCode::PAYLOAD_TOO_LARGE, &e))?;
     Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"chat-{id}.md\""))
-        .body(Body::from(md))
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"chat-{id}.zip\""))
+        .body(Body::from(zip))
         .expect("a fixed response"))
 }
 
@@ -1766,10 +2167,23 @@ mod tests {
             media_type: t.into(),
             data: d.into(),
             name: String::new(),
+            sha: None,
         };
         assert!(check_attachment(&image("image/png", "iVBORw0KGgo=")).is_ok());
         assert!(check_attachment(&image("image/svg+xml", "PHN2Zz4=")).is_err());
         assert!(check_attachment(&image("image/png", "not base64!")).is_err());
+        assert!(
+            check_attachment(&image("image/png", &"A".repeat(IMAGE_LIMIT + 4))).is_err(),
+            "over 10 MB"
+        );
+        let stored = |sha: &str| Attachment::Image {
+            media_type: String::new(),
+            data: String::new(),
+            name: String::new(),
+            sha: Some(sha.into()),
+        };
+        assert!(check_attachment(&stored(&"a".repeat(64))).is_ok());
+        assert!(check_attachment(&stored("../../etc/passwd")).is_err());
         assert!(
             check_attachment(&Attachment::MergedPrs {
                 org: None,
@@ -1876,10 +2290,11 @@ mod tests {
         user.attachments.push(AttachmentNote {
             kind: "file".into(),
             label: "a/b/x.rs".into(),
+            ..AttachmentNote::default()
         });
         let mut cand = msg("assistant", "CANDIDATE");
         cand.candidate = true;
-        let md = to_markdown(&meta, &[user, reply, cand]);
+        let md = to_markdown(&meta, &[user, reply, cand], ImageLinks::Mothership);
         assert!(md.starts_with("# Plan\n"));
         assert!(md.contains("> **System:** Be brief"));
         assert!(md.contains("## You\n\n_Attached: file: a/b/x.rs_\n\nHelp"));
@@ -1928,5 +2343,323 @@ mod tests {
         assert!(describe_component(&stored, "nosuch").is_none());
         let whole = describe_map(&stored);
         assert_eq!(whole.lines().filter(|l| l.starts_with("- ")).count(), 2);
+    }
+
+    fn image_note(sha: &str, bytes: u64) -> AttachmentNote {
+        AttachmentNote {
+            kind: "image".into(),
+            label: format!("shot-{}.png", &sha[..4]),
+            sha: Some(sha.into()),
+            mime: Some("image/png".into()),
+            width: Some(1),
+            height: Some(1),
+            bytes: Some(bytes),
+        }
+    }
+
+    fn with_images(mut m: ChatMessage, notes: Vec<AttachmentNote>) -> ChatMessage {
+        m.attachments = notes;
+        m
+    }
+
+    #[test]
+    fn stored_images_ride_every_later_turn_or_are_named_as_left_out() {
+        let a = "a".repeat(64);
+        let messages = vec![
+            with_images(msg("user", "what is this?"), vec![image_note(&a, 100)]),
+            msg("assistant", "a cat"),
+            msg("user", "and its colour?"),
+        ];
+        // A vision model: the first turn carries the image ahead of its text, on every later request.
+        let plan = plan_images(&messages, true);
+        assert_eq!(plan.get(&a), Some(&Ok(())));
+        let mut blocks = ImageBlocks::new();
+        blocks.insert(
+            a.clone(),
+            Ok(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}})),
+        );
+        let history = history_with_images(&messages, &blocks);
+        assert_eq!(history[0]["content"][0]["type"], "image");
+        assert_eq!(history[0]["content"][1]["text"], "what is this?");
+        assert_eq!(
+            history[2]["content"], "and its colour?",
+            "a turn with no image stays plain text"
+        );
+
+        // A model that cannot read images is told one was there.
+        let plan = plan_images(&messages, false);
+        let blocks: ImageBlocks = plan.into_iter().map(|(k, v)| (k, v.map(|_| json!(null)))).collect();
+        let history = history_with_images(&messages, &blocks);
+        let text = history[0]["content"].as_str().unwrap();
+        assert!(
+            text.starts_with("[image omitted: model can't read images — shot-aaaa.png]"),
+            "{text}"
+        );
+        assert!(text.ends_with("what is this?"));
+    }
+
+    #[test]
+    fn the_image_budget_keeps_the_newest_and_skips_what_the_api_refuses() {
+        let big = "b".repeat(64);
+        let mut messages = vec![with_images(msg("user", "huge"), vec![image_note(&big, 6 * 1024 * 1024)])];
+        for i in 0..(HISTORY_IMAGES + 2) {
+            messages.push(msg("assistant", "ok"));
+            messages.push(with_images(
+                msg("user", &format!("n{i}")),
+                vec![image_note(&format!("{i:064x}"), 10)],
+            ));
+        }
+        let plan = plan_images(&messages, true);
+        assert_eq!(plan[&big], Err("over the model's 5 MB image limit".into()));
+        let sent = plan.values().filter(|v| v.is_ok()).count();
+        assert_eq!(sent, HISTORY_IMAGES);
+        assert!(plan[&format!("{:064x}", HISTORY_IMAGES + 1)].is_ok(), "the newest is sent");
+        assert_eq!(plan[&format!("{:064x}", 0)], Err("left out to keep the request small".into()));
+    }
+
+    #[test]
+    fn exports_link_images_or_pack_them_beside_the_markdown() {
+        let a = "c".repeat(64);
+        let meta = ChatMeta::default();
+        let messages = vec![with_images(msg("user", "look"), vec![image_note(&a, 3)])];
+        let linked = to_markdown(&meta, &messages, ImageLinks::Mothership);
+        assert!(linked.contains(&format!("![shot-cccc.png](/api/chat/attachments/{a})")));
+        let zipped = to_markdown(&meta, &messages, ImageLinks::Zip);
+        assert!(zipped.contains(&format!("](images/{a}.png)")));
+
+        let zip = zip_store(&[
+            ("chat.md".into(), b"# hi".to_vec()),
+            (format!("images/{a}.png"), vec![1, 2, 3]),
+        ])
+        .unwrap();
+        assert!(zip.starts_with(&0x0403_4b50u32.to_le_bytes()));
+        let eocd = &zip[zip.len() - 22..];
+        assert_eq!(&eocd[..4], &0x0605_4b50u32.to_le_bytes());
+        assert_eq!(u16::from_le_bytes([eocd[10], eocd[11]]), 2, "two entries");
+        let central_at = u32::from_le_bytes(eocd[16..20].try_into().unwrap()) as usize;
+        assert_eq!(&zip[central_at..central_at + 4], &0x0201_4b50u32.to_le_bytes());
+        // CRC-32 of "# hi", as any unzip would check it.
+        assert_eq!(&zip[14..18], &0x32C4_A17Fu32.to_le_bytes());
+    }
+
+    async fn seed(app: &App, title: &str, messages: &[ChatMessage]) -> ChatMeta {
+        let meta = ChatMeta {
+            id: short_id(),
+            title: title.into(),
+            model: "stub/vision-1".into(),
+            max_tokens: 256,
+            ..ChatMeta::default()
+        };
+        write_meta(app, &meta).await.unwrap();
+        rewrite_messages(app, &meta.id, messages).await.unwrap();
+        meta
+    }
+
+    #[tokio::test]
+    async fn deleting_a_conversation_removes_only_the_images_nothing_else_uses() {
+        let root = std::env::temp_dir().join(format!("colonizer-chat-gc-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let shared = crate::chat_images::store(&app, &crate::chat_images::tests::png())
+            .await
+            .unwrap();
+        let only = crate::chat_images::store(&app, &crate::chat_images::tests::jpeg())
+            .await
+            .unwrap();
+        let note = |i: &crate::chat_images::ImageRef| AttachmentNote::image("x".into(), i.clone());
+        let reply = msg("assistant", "noted");
+        let first = seed(
+            &app,
+            "one",
+            &[
+                with_images(msg("user", "both"), vec![note(&shared), note(&only)]),
+                reply.clone(),
+            ],
+        )
+        .await;
+        let second = seed(&app, "two", &[with_images(msg("user", "shared"), vec![note(&shared)])]).await;
+        let _ = put_feedback(
+            State(app.clone()),
+            Path(reply.id.clone()),
+            Json(PutFeedback {
+                note: Some("wrong".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let stored = |sha: &str| {
+            std::fs::read_dir(crate::chat_images::dir(&app))
+                .unwrap()
+                .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(sha))
+        };
+
+        let answer = delete(State(app.clone()), Path(first.id.clone())).await.unwrap().0;
+        assert_eq!(answer["images_removed"], 1);
+        assert!(!stored(&only.sha), "only the deleted conversation used it");
+        assert!(stored(&shared.sha), "the other conversation still shows it");
+        assert!(read_prefs(&app).await.feedback.is_empty(), "notes on its replies go with it");
+
+        let _ = delete(State(app.clone()), Path(second.id.clone())).await.unwrap();
+        assert!(!stored(&shared.sha), "the last reference gone, the file goes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn prefs_keep_persona_edits_and_notes_on_the_mothership() {
+        let root = std::env::temp_dir().join(format!("colonizer-chat-prefs-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let _ = put_persona(
+            State(app.clone()),
+            Path("reviewer".into()),
+            Json(PutPersona {
+                system: Some("Be terse.".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = put_feedback(
+            State(app.clone()),
+            Path("abc123".into()),
+            Json(PutFeedback {
+                note: Some(" too long ".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let got = prefs(State(app.clone())).await.0;
+        assert_eq!(got.personas["reviewer"], "Be terse.");
+        assert_eq!(got.feedback["abc123"], "too long");
+        // The prefs file never shows up as a conversation.
+        assert_eq!(list(State(app.clone())).await.0["chats"].as_array().unwrap().len(), 0);
+        let _ = put_persona(State(app.clone()), Path("reviewer".into()), Json(PutPersona { system: None }))
+            .await
+            .unwrap();
+        let _ = put_feedback(State(app.clone()), Path("abc123".into()), Json(PutFeedback { note: None }))
+            .await
+            .unwrap();
+        assert_eq!(prefs(State(app.clone())).await.0, ChatPrefs::default());
+        assert!(
+            put_persona(State(app.clone()), Path("../x".into()), Json(PutPersona::default()))
+                .await
+                .is_err()
+        );
+        let long = PutFeedback {
+            note: Some("x".repeat(NOTE_LIMIT + 1)),
+        };
+        assert!(
+            put_feedback(State(app.clone()), Path("abc".into()), Json(long))
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn more_than_eight_images_on_a_message_is_refused() {
+        let root = std::env::temp_dir().join(format!("colonizer-chat-cap-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let many: Vec<Attachment> = (0..9)
+            .map(|i| Attachment::Image {
+                media_type: String::new(),
+                data: String::new(),
+                name: String::new(),
+                sha: Some(format!("{i:064x}")),
+            })
+            .collect();
+        let err = build_attachments(&app, &many).await.err().unwrap();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        let missing = build_attachments(&app, &many[..1]).await.err().unwrap();
+        assert!(missing.message().contains("no longer stored"), "{}", missing.message());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A regenerate asks again with the stored image: a vision model (an Anthropic-wire stub) gets the
+    /// image bytes, an OpenAI-wire one gets a line saying the image was left out.
+    #[tokio::test]
+    async fn regenerate_resends_stored_images_to_a_vision_model() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let captured = seen.clone();
+        let router = axum::Router::new().fallback(move |body: Bytes| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let sse = concat!(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"a cat\"}}\n\n",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                );
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from(sse))
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-chat-regen-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(&[
+                json!({"id": "stub", "name": "Stub", "base_url": format!("http://{addr}"), "auth": "none"}),
+                json!({"id": "flat", "name": "Flat", "base_url": format!("http://{addr}"), "auth": "none", "wire": "openai"}),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let image = crate::chat_images::store(&app, &crate::chat_images::tests::png())
+            .await
+            .unwrap();
+        let (stored, _) = crate::chat_images::load(&app, &image.sha).await.unwrap();
+        let meta = seed(
+            &app,
+            "look",
+            &[
+                with_images(
+                    msg("user", "what is this?"),
+                    vec![AttachmentNote::image("cat.png".into(), image.clone())],
+                ),
+                msg("assistant", "a dog"),
+            ],
+        )
+        .await;
+
+        let regenerate = |model: &str| Send {
+            regenerate: true,
+            model: Some(model.into()),
+            ..Send::default()
+        };
+        let response = send(State(app.clone()), Path(meta.id.clone()), Json(regenerate("stub/vision-1")))
+            .await
+            .unwrap();
+        axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = seen.lock().unwrap().pop().expect("the stub was asked");
+        let first = &body["messages"][0]["content"];
+        assert_eq!(first[0]["type"], "image", "{body}");
+        assert_eq!(first[0]["source"]["media_type"], "image/png");
+        assert_eq!(first[0]["source"]["data"], crate::util::b64_encode(&stored));
+        assert_eq!(first[1]["text"], "what is this?");
+        let messages = read_messages(&app, &meta.id).await;
+        assert_eq!(
+            messages.last().unwrap().content,
+            "a cat",
+            "the new reply replaced the old one"
+        );
+        assert_eq!(messages.len(), 2);
+
+        let response = send(State(app.clone()), Path(meta.id.clone()), Json(regenerate("flat/text-1")))
+            .await
+            .unwrap();
+        axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = seen.lock().unwrap().pop().expect("the stub was asked");
+        let text = body.to_string();
+        assert!(text.contains("image omitted: model can't read images"), "{text}");
+        assert!(
+            !text.contains(&crate::util::b64_encode(&stored)),
+            "no image bytes over the openai wire"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

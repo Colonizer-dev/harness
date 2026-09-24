@@ -9,6 +9,8 @@ import type {
   ArchMap,
   ChatAttachment,
   ChatAttachmentNote,
+  ChatImageRef,
+  ChatPrefs,
   ChatMessage,
   ChatMeta,
   ChatStreamEvent,
@@ -1233,10 +1235,16 @@ export function createMockApi(): Api {
   const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
   const mockChats = new Map<string, { meta: ChatMeta; messages: ChatMessage[] }>();
   const mockId = () => Math.random().toString(16).slice(2, 10);
-  const mockNote = (a: ChatAttachment): ChatAttachmentNote => ({
-    kind: a.kind,
-    label: a.kind === "file" ? `${a.repo}/${a.path}` : a.kind === "snippet" ? a.label || "snippet" : a.kind === "colony" ? a.id : a.kind === "image" ? a.name || a.media_type : a.kind === "map" ? `${a.repo} map` : a.kind === "map_component" ? `${a.repo} · ${a.component}` : a.kind === "merged_prs" ? "merged PRs" : "today's colonies",
-  });
+  // Chat images: object URLs by a made-up sha, standing in for the mothership's store.
+  const mockImages = new Map<string, { url: string; ref: ChatImageRef }>();
+  const mockPrefs: ChatPrefs = { personas: {}, feedback: {} };
+  const mockNote = (a: ChatAttachment): ChatAttachmentNote => {
+    if (a.kind === "image" && "sha" in a) return { kind: "image", label: a.name || "image", ...mockImages.get(a.sha)?.ref };
+    return {
+      kind: a.kind,
+      label: a.kind === "file" ? `${a.repo}/${a.path}` : a.kind === "snippet" ? a.label || "snippet" : a.kind === "colony" ? a.id : a.kind === "image" ? a.name || a.media_type : a.kind === "map" ? `${a.repo} map` : a.kind === "map_component" ? `${a.repo} · ${a.component}` : a.kind === "merged_prs" ? "merged PRs" : "today's colonies",
+    };
+  };
 
   async function mockReply(c: { meta: ChatMeta; messages: ChatMessage[] }, model: string, parent: string | undefined, lane: number | undefined, onEvent: (e: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void> {
     const started = Date.now();
@@ -2923,6 +2931,30 @@ export function createMockApi(): Api {
         return c.meta;
       }),
     chatExportUrl: (id) => `data:text/markdown,${encodeURIComponent(`# ${mockChats.get(id)?.meta.title ?? "Conversation"}\n`)}`,
+    uploadChatImage: async (file, onProgress) => {
+      for (const f of [0.25, 0.6, 1]) {
+        await sleep(120);
+        onProgress?.(f);
+      }
+      const sha = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const ref: ChatImageRef = { sha, mime: file.type || "image/png", width: 0, height: 0, bytes: file.size };
+      mockImages.set(sha, { url: URL.createObjectURL(file), ref });
+      return ref;
+    },
+    chatImageUrl: (sha) => mockImages.get(sha)?.url ?? "",
+    chatPrefs: () => later(() => structuredClone(mockPrefs)),
+    saveChatPersona: (id, system) =>
+      later(() => {
+        if (system === null) delete mockPrefs.personas[id];
+        else mockPrefs.personas[id] = system;
+        return structuredClone(mockPrefs);
+      }),
+    saveChatFeedback: (messageId, note) =>
+      later(() => {
+        if (note === null) delete mockPrefs.feedback[messageId];
+        else mockPrefs.feedback[messageId] = note;
+        return structuredClone(mockPrefs);
+      }),
     chatIssue: async (_id, body) => ({ url: `https://github.com/${body.repo}/issues/999` }),
     orgPublished: (org) =>
       later(

@@ -136,7 +136,7 @@ export function ChatComposer({
                 key={p.key}
                 note={{ kind: p.attachment.kind === "colonies_today" ? "colonies" : p.attachment.kind === "merged_prs" ? "merged" : p.attachment.kind === "map_component" ? "map" : p.attachment.kind, label: p.label }}
                 preview={p.preview}
-                detail={p.chars ? `~${formatTokens(Math.ceil(p.chars / 4))}` : undefined}
+                detail={p.progress !== undefined ? `uploading ${Math.round(p.progress * 100)}%` : p.chars ? `~${formatTokens(Math.ceil(p.chars / 4))}` : undefined}
                 onRemove={() => onRemoveAttachment(p.key)}
               />
             ))}
