@@ -20,7 +20,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { analyze, loadColonies, totalCost } from './colony-report.mjs';
+import { analyze, loadColonies, TOKEN_CATEGORIES, totalCost } from './colony-report.mjs';
 import { auditSession } from './trajectory-monitor.mjs';
 import { DEFAULT_MAX_GAP, addCompanion, companionsFor, familyGaps, familyOf, formatGaps, gapVerdict, loadSet, lockSet, newSet, outsideRepo, recordDecisions, saveSet } from './bench/heldout.mjs';
 
@@ -296,6 +296,7 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
     watchdog_nudges: colony?.watchdog_nudges ?? null,
     plain_text_reprompts: colony?.plain_text_reprompts ?? null,
     subagents: colony?.subagents ?? null,
+    token_categories: colony?.tokenCategories ?? null,
     visible: branchScore && expect.check ? branchScore.check : null,
     heldout: heldout?.heldout ?? null,
     scoring: scoring ?? { visible_ms: null, heldout_ms: null },
@@ -314,12 +315,15 @@ export function summarizeRun(results) {
   const sum = (key) => results.reduce((a, r) => a + (Number(r[key]) || 0), 0);
   const clean = results.filter((r) => r.passed && r.clean === true).length;
   const audited = results.some((r) => typeof r.clean === 'boolean');
+  const token_categories = Object.fromEntries(TOKEN_CATEGORIES.map((c) => [c, 0]));
+  for (const r of results) for (const c of TOKEN_CATEGORIES) token_categories[c] += r.token_categories?.[c] ?? 0;
   return {
     tasks: results.length,
     passed: results.filter((r) => r.passed).length,
     cost_usd: sum('cost_usd'),
     routed_cost_usd: sum('routed_cost_usd'),
     total_cost_usd: results.reduce((a, r) => a + (spent(r) ?? 0), 0),
+    token_categories,
     working_ms: sum('working_ms'),
     // Scoring makes no model calls, so its only cost is the time it took.
     scoring_ms: results.reduce((a, r) => a + (r.scoring?.visible_ms ?? 0) + (r.scoring?.heldout_ms ?? 0), 0),
@@ -374,11 +378,20 @@ export function formatComparison(before, after) {
     heldoutLine = `Held-out: ${say(bh)} → ${say(ah)}.`;
     if (bh && ah && bh.version !== ah.version) heldoutLine += ' The set versions differ, so the held-out numbers are not comparable across the rotation.';
   }
+  // Only the categories either run actually spent, so the line stays readable; a run saved before
+  // the categories were recorded reads as –, not as a zero it never measured.
+  const hasCategories = (run) => run.results.some((r) => r.token_categories);
+  const bCats = hasCategories(before);
+  const aCats = hasCategories(after);
+  const spentCategories = TOKEN_CATEGORIES.filter((c) => (bCats ? bs.token_categories[c] : 0) + (aCats ? as.token_categories[c] : 0) > 0);
+  const catCell = (s, has, c) => (has ? s.token_categories[c] : '–');
+  const tokenLine = spentCategories.length ? `Tokens: ${spentCategories.map((c) => `${c} ${catCell(bs, bCats, c)} → ${catCell(as, aCats, c)}`).join(', ')}.` : null;
   return [
     `# ${before.label} → ${after.label}`,
     '',
     `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.${cleanLine}`,
     ...(heldoutLine ? ['', heldoutLine] : []),
+    ...(tokenLine ? ['', tokenLine] : []),
     '',
     line(head),
     line(head.map(() => '---')),

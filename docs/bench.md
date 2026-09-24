@@ -7,6 +7,23 @@ of tasks that change has to survive, scored the same way every time.
 It pairs with `scripts/colony-report.mjs`, which says what happened *inside* the colonies (cost, tools,
 questions, silences). The bench says whether the work was actually right.
 
+The colony report also says where a colony's tokens went. Each turn bills its whole spend to one of six
+categories — `read`, `search`, `command_output`, `edit`, `reasoning`, `replay` — by the tools it called:
+Read/NotebookRead are `read`; Grep, Glob, LS and WebSearch are `search`; Bash, BashOutput and KillShell are
+`command_output`; Edit, Write, MultiEdit and NotebookEdit are `edit`; everything else (Task, Skill,
+WebFetch, any `mcp__*` tool, unknown names) and a turn with no tool call at all is `reasoning`. The turn is
+billed whole, to the most consequential thing it did, by precedence `edit` > `command_output` > `search` >
+`read` > `reasoning` — a turn that read files and then edited them is all `edit`, and `tool_call`s a
+subagent made count toward the same turn, since `turn_end` is the colony's own and its `model_usage`
+covers the subagents' work too. Cache tokens (`cache_read` + `cache_write`) are always `replay`. The
+split takes each `turn_end`'s cumulative `model_usage`, diffs it against the previous snapshot, and
+floors the delta at zero, the same way the spend journal's `turn_deltas` does in
+`crates/colonizer/src/spend.rs` — so a colony's six categories add up exactly to its recorded usage. A
+`turn_end` without `model_usage` (it is optional) attributes nothing and leaves the baseline for the next
+measured turn, rather than re-counting what came before it. They surface in the report's "Token
+categories" table, in `--json` as `tokenCategories`/`tokenCategoriesByModel`, and per bench task as
+`token_categories`.
+
 ## The tasks
 
 `scripts/bench/tasks.json`. Each one is an issue on a scratch repository, and says what a good outcome is:

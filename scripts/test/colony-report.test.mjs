@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { analyze, formatReport, formatTranscript, loadColonies, reasons, redact, summarize, totalCost } from '../colony-report.mjs';
+import { analyze, formatReport, formatTranscript, loadColonies, reasons, redact, summarize, TOKEN_CATEGORIES, totalCost } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -312,6 +312,105 @@ test('routed provider cost is carried beside Claude’s, and the total adds both
 test('the top-quarter cost reason counts routed spend', () => {
   const cheapClaude = { ...analyze({ session: { id: 'r', cost_usd: 0.05, routed_cost_usd: 2 }, events: [] }) };
   assert.deepEqual(reasons(cheapClaude, 1), ['cost $2.05 (top quarter)']);
+});
+
+// Seven turns, one per category: read; search; command_output; edit; no tool call; read+edit (edit
+// wins); an unmapped tool. model_usage is cumulative, over two models on some turns.
+const counts = (input, output, cache_read = 0, cache_write = 0) => ({ input_tokens: input, output_tokens: output, cache_read_tokens: cache_read, cache_write_tokens: cache_write });
+const call = (id, name) => ({ type: 'tool_call', tool_call_id: id, name, input: {}, ts: at(0) });
+const end = (model_usage, extra = {}) => ({ type: 'turn_end', is_error: false, duration_ms: 1000, model_usage, ts: at(0), ...extra });
+const categorized = {
+  mothership: 'test',
+  session: { id: 'tokens01', repo: 'acme/webshop', status: 'pr_opened' },
+  events: [
+    { type: 'status', state: 'working', ts: at(0) },
+    call('r1', 'Read'),
+    end({ 'claude-opus-5': counts(100, 50, 1000, 200) }, { ts: at(1) }),
+    call('g1', 'Grep'),
+    call('g2', 'Glob'),
+    end({ 'claude-opus-5': counts(300, 90, 3000, 200) }, { ts: at(2) }),
+    call('b1', 'Bash'),
+    end({ 'claude-opus-5': counts(500, 140, 3000, 600), 'zai/glm-5.3-flash': counts(70, 30) }, { ts: at(3) }),
+    call('e1', 'Edit'),
+    call('e2', 'Write'),
+    end({ 'claude-opus-5': counts(700, 190, 5000, 600), 'zai/glm-5.3-flash': counts(170, 30) }, { ts: at(4) }),
+    end({ 'claude-opus-5': counts(800, 200, 5000, 600), 'zai/glm-5.3-flash': counts(170, 30) }, { ts: at(5) }),
+    call('m1', 'Read'),
+    call('m2', 'Edit'),
+    end({ 'claude-opus-5': counts(1000, 250, 5000, 600), 'zai/glm-5.3-flash': counts(170, 30) }, { ts: at(6) }),
+    call('t1', 'Task'),
+    end({ 'claude-opus-5': counts(1050, 260, 5000, 600), 'zai/glm-5.3-flash': counts(170, 30) }, { ts: at(7) }),
+  ],
+};
+
+test('each turn bills its whole spend to one category, by the tools it called', () => {
+  const r = analyze(categorized);
+  assert.equal(r.tokenCategories.read, 150);
+  assert.equal(r.tokenCategories.search, 240);
+  assert.equal(r.tokenCategories.command_output, 350, 'every model of the turn, the routed one included');
+  assert.equal(r.tokenCategories.edit, 600, 'a turn that read and then edited bills edit, whole');
+  assert.equal(r.tokenCategories.reasoning, 170, 'no tool call at all, or an unmapped one, is reasoning');
+  assert.equal(r.tokenCategories.replay, 5600, 'cache reads and writes are replay, whatever else the turn did');
+  assert.deepEqual(r.tokenCategoriesByModel.command_output, { 'claude-opus-5': 250, 'zai/glm-5.3-flash': 100 });
+  assert.deepEqual(r.tokenCategoriesByModel.replay, { 'claude-opus-5': 5600 });
+});
+
+test('the categories add up exactly to the recorded usage', () => {
+  const r = analyze(categorized);
+  const filed = TOKEN_CATEGORIES.reduce((a, c) => a + r.tokenCategories[c], 0);
+  const recorded = Object.values(r.model_usage).reduce((a, m) => a + m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_write_tokens, 0);
+  assert.equal(filed, recorded, 'every token delta is assigned to exactly one bucket');
+});
+
+test('a subagent’s tool calls bill to the colony’s turn, which they are part of', () => {
+  const r = analyze({
+    mothership: 'test',
+    session: { id: 'tokens02' },
+    events: [
+      { type: 'status', state: 'working', ts: at(0) },
+      call('r1', 'Read'),
+      { ...call('g1', 'Grep'), agent: { id: 'task1', name: 'Explore' } },
+      { ...call('e1', 'Edit'), agent: { id: 'task1', name: 'Explore' } },
+      end({ 'claude-opus-5': counts(300, 90) }, { ts: at(1) }),
+    ],
+  });
+  assert.equal(r.tokenCategories.edit, 390, 'the subagent’s Edit outranks the reads, over the union of the turn’s tools');
+  assert.equal(r.tokenCategories.reasoning, 0, 'delegation is not reasoning');
+  const filed = TOKEN_CATEGORIES.reduce((a, c) => a + r.tokenCategories[c], 0);
+  const recorded = Object.values(r.model_usage).reduce((a, m) => a + m.input_tokens + m.output_tokens, 0);
+  assert.equal(filed, recorded);
+});
+
+test('a turn_end without model_usage keeps the baseline the next measured turn diffs against', () => {
+  const r = analyze({
+    mothership: 'test',
+    session: { id: 'tokens03' },
+    events: [
+      { type: 'status', state: 'working', ts: at(0) },
+      call('r1', 'Read'),
+      end({ 'claude-opus-5': counts(100, 50, 1000) }, { ts: at(1) }),
+      call('b1', 'Bash'),
+      { type: 'turn_end', is_error: false, duration_ms: 1000, ts: at(2) },
+      call('e1', 'Edit'),
+      end({ 'claude-opus-5': counts(200, 90, 1000) }, { ts: at(3) }),
+    ],
+  });
+  assert.equal(r.tokenCategories.read, 150);
+  assert.equal(r.tokenCategories.edit, 140, 'the delta over the surviving baseline, not over an emptied one');
+  assert.equal(r.tokenCategories.command_output, 0, 'the unmeasured turn attributes nothing itself');
+  const filed = TOKEN_CATEGORIES.reduce((a, c) => a + r.tokenCategories[c], 0);
+  const recorded = Object.values(r.model_usage).reduce((a, m) => a + m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_write_tokens, 0);
+  assert.equal(filed, recorded, 'no double count across the gap');
+});
+
+test('the summary and the report carry the categories', () => {
+  const reports = [analyze(categorized), analyze({ session: { id: 'plain', status: 'pr_opened', pr_url: 'u' }, events: [] })];
+  const s = summarize(reports);
+  assert.equal(s.tokenCategories.read, 150);
+  assert.equal(s.tokenCategories.edit, 600);
+  const report = formatReport(s, reports);
+  assert.match(report, /## Token categories/);
+  assert.match(report, /\| replay \| 5600 \| 79%/);
 });
 
 /** A data dir whose one colony is known only from its sessions/ directory; removed after the test. */

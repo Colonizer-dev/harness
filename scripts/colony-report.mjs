@@ -68,6 +68,45 @@ export function totalCost(claude, routed) {
   return (typeof claude === 'number' ? claude : 0) + (typeof routed === 'number' ? routed : 0);
 }
 
+/** Where a colony's tokens went (issue #469). Every token delta lands in exactly one of these. */
+export const TOKEN_CATEGORIES = ['read', 'search', 'command_output', 'edit', 'reasoning', 'replay'];
+const emptyCategories = () => Object.fromEntries(TOKEN_CATEGORIES.map((c) => [c, 0]));
+const emptyCategoriesByModel = () => Object.fromEntries(TOKEN_CATEGORIES.map((c) => [c, {}]));
+
+/** Tool name → the category its turn bills to. Anything absent — Task, Skill, WebFetch, mcp__*,
+ *  unknown names — is left out, and a turn with no mapped call at all bills as reasoning. */
+const TOOL_CATEGORY = {
+  Read: 'read',
+  NotebookRead: 'read',
+  Grep: 'search',
+  Glob: 'search',
+  LS: 'search',
+  WebSearch: 'search',
+  Bash: 'command_output',
+  BashOutput: 'command_output',
+  KillShell: 'command_output',
+  Edit: 'edit',
+  Write: 'edit',
+  MultiEdit: 'edit',
+  NotebookEdit: 'edit',
+};
+// A turn bills whole to the most consequential thing it did, so a turn that read files and then
+// edited them is edit, not read.
+const CATEGORY_PRECEDENCE = ['edit', 'command_output', 'search', 'read', 'reasoning'];
+
+/** The {model: counts} of a cumulative `model_usage` doc, read the way spend.rs's `model_tokens`
+ *  does: a malformed entry or a missing or negative count is zero, never an error. */
+function modelTokens(usage) {
+  const out = [];
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return out;
+  for (const [model, counts] of Object.entries(usage)) {
+    if (!model || !counts || typeof counts !== 'object') continue;
+    const n = (k) => (Number.isInteger(counts[k]) && counts[k] > 0 ? counts[k] : 0);
+    out.push([model, { input: n('input_tokens'), output: n('output_tokens'), cache_read: n('cache_read_tokens'), cache_write: n('cache_write_tokens') }]);
+  }
+  return out;
+}
+
 /** One colony's numbers. Pure: takes what loadColonies read, so it can be tested without a mothership. */
 export function analyze({ mothership = '', session = {}, events = [], logs = [] }) {
   const tools = {};
@@ -96,6 +135,8 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
     routed_cost_usd: session.routed_cost_usd ?? null,
     total_cost_usd: null,
     model_usage: null,
+    tokenCategories: emptyCategories(),
+    tokenCategoriesByModel: emptyCategoriesByModel(),
     tool_calls: 0,
     tool_errors: 0,
     subagent_tool_calls: 0,
@@ -144,6 +185,10 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
 
   let state = 'idle';
   let lastTs = NaN;
+  // One turn's state, shared by the colony and its subagents: model_usage arrives only on the
+  // colony's own turn_end and is cumulative for everything the colony did, subagents included, so
+  // a subagent's tool calls bill to the same turn as the orchestrator's.
+  const turn = { categories: new Set(), usage: new Map() };
   for (const e of events) {
     const t = ms(e.ts);
     // Silence counts only while the agent is meant to be working: waiting for an answer is the user's time.
@@ -165,6 +210,8 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
         const name = e.name ?? 'unknown';
         (tools[name] ??= { calls: 0, errors: 0 }).calls += 1;
         calls.set(e.tool_call_id, name);
+        const category = TOOL_CATEGORY[name];
+        if (category) turn.categories.add(category);
         if (e.agent) {
           r.subagent_tool_calls += 1;
         }
@@ -211,7 +258,39 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
         r.working_ms += Number(e.duration_ms) || 0;
         // Cumulative for the colony (docs/protocol.md §2), so the last one is the total.
         if (typeof e.cost_usd === 'number') r.cost_usd = e.cost_usd;
-        if (e.model_usage) r.model_usage = e.model_usage;
+        const usage = e.model_usage && typeof e.model_usage === 'object' && !Array.isArray(e.model_usage) ? e.model_usage : null;
+        if (usage) r.model_usage = usage;
+        // model_usage is cumulative for the whole colony, subagents' work included, and optional on
+        // turn_end (docs/protocol.md §2). A turn without it has nothing to attribute, and wiping the
+        // baseline here would make the next measured turn re-count everything before the gap — so
+        // the baseline survives, the way events.rs only overwrites the record when usage is an object.
+        if (usage) {
+          // This turn's own spend is the difference against the last cumulative, floored at zero
+          // exactly like spend.rs's turn_deltas: a cheaper re-estimate must not write a negative line.
+          const counts = modelTokens(usage);
+          let workTokens = 0;
+          let replayTokens = 0;
+          const workByModel = new Map();
+          const cacheByModel = new Map();
+          for (const [model, now] of counts) {
+            const before = turn.usage.get(model);
+            const input = Math.max(0, now.input - (before?.input ?? 0));
+            const output = Math.max(0, now.output - (before?.output ?? 0));
+            const cacheRead = Math.max(0, now.cache_read - (before?.cache_read ?? 0));
+            const cacheWrite = Math.max(0, now.cache_write - (before?.cache_write ?? 0));
+            if (input + output > 0) workByModel.set(model, input + output);
+            if (cacheRead + cacheWrite > 0) cacheByModel.set(model, cacheRead + cacheWrite);
+            workTokens += input + output;
+            replayTokens += cacheRead + cacheWrite;
+          }
+          const turnCategory = CATEGORY_PRECEDENCE.find((c) => turn.categories.has(c)) ?? 'reasoning';
+          r.tokenCategories[turnCategory] += workTokens;
+          r.tokenCategories.replay += replayTokens;
+          for (const [model, n] of workByModel) r.tokenCategoriesByModel[turnCategory][model] = (r.tokenCategoriesByModel[turnCategory][model] ?? 0) + n;
+          for (const [model, n] of cacheByModel) r.tokenCategoriesByModel.replay[model] = (r.tokenCategoriesByModel.replay[model] ?? 0) + n;
+          turn.categories = new Set();
+          turn.usage = new Map(counts);
+        }
         break;
       case 'log':
         if (e.level === 'error') r.errors_logged += 1;
@@ -308,6 +387,14 @@ export function summarize(reports) {
   const sum = (key) => reports.reduce((a, r) => a + (Number(r[key]) || 0), 0);
   const stat = (key) => ({ median: quantile(reports.map((r) => r[key]), 0.5), p90: quantile(reports.map((r) => r[key]), 0.9) });
   const costThreshold = quantile(reports.map((r) => r.total_cost_usd), 0.75) ?? Infinity;
+  const tokenCategories = emptyCategories();
+  const tokenCategoriesByModel = emptyCategoriesByModel();
+  for (const r of reports) {
+    for (const c of TOKEN_CATEGORIES) {
+      tokenCategories[c] += r.tokenCategories?.[c] ?? 0;
+      for (const [model, n] of Object.entries(r.tokenCategoriesByModel?.[c] ?? {})) tokenCategoriesByModel[c][model] = (tokenCategoriesByModel[c][model] ?? 0) + n;
+    }
+  }
   return {
     colonies: reports.length,
     motherships: [...new Set(reports.map((r) => r.mothership))],
@@ -339,6 +426,8 @@ export function summarize(reports) {
     contradicted_claims: sum('contradicted_claims'),
     memory_proposals: sum('memory_proposals'),
     subagents: sum('subagents'),
+    tokenCategories,
+    tokenCategoriesByModel,
     tools: Object.entries(tools)
       .sort((a, b) => b[1].calls - a[1].calls)
       .map(([name, t]) => ({ name, ...t, error_rate: t.calls ? t.errors / t.calls : 0 })),
@@ -419,6 +508,14 @@ export function formatReport(summary, reports, worst = 10) {
   out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}${findingChain(summary)}. Memory proposals: ${summary.memory_proposals}. Verifications: ${summary.verifications}${summary.contradicted_claims ? `, ${summary.contradicted_claims} contradicted` : ''}.`);
   out.push('', '## Tools', '');
   out.push(table(['Tool', 'Calls', 'Failed', 'Failure rate'], summary.tools.slice(0, 15).map((t) => [t.name, t.calls, t.errors, pct(t.error_rate)])));
+  out.push('', '## Token categories', '');
+  const tokenTotal = TOKEN_CATEGORIES.reduce((a, c) => a + summary.tokenCategories[c], 0);
+  out.push(
+    table(
+      ['Category', 'Tokens', '% of total'],
+      TOKEN_CATEGORIES.map((c) => [c, summary.tokenCategories[c], tokenTotal ? pct(summary.tokenCategories[c] / tokenTotal) : '–']),
+    ),
+  );
   out.push('', '## Colonies', '');
   out.push(
     table(
