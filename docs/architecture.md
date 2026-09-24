@@ -62,7 +62,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
-| `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
+| `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
 | `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, or a model provider starting to fail, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
@@ -84,6 +84,32 @@ Two settings layers sit next to the modules:
   switch per org. `known-orgs.json` records the orgs seen on the signed-in GitHub account, so an org that appears for
   the first time asks instead of being adopted silently. A colony belongs to its repository
   owner's org.
+
+## Shared memory access
+
+Shared memory is read-only from inside a colony. What each part of a colony may do:
+
+| Role | Read (repo / org / global) | Propose | Write |
+| --- | --- | --- | --- |
+| Orchestrator | yes / yes / yes | yes — reviewed as any proposal is | no |
+| Subagent | yes / yes / yes | no | no |
+| Background task | yes / no / no | no | no |
+
+Writing is the operator's, through the mothership's own note editor; a colony's way in is a proposal,
+and a proposal is review, not a write. The matrix is enforced twice: the runner's `PreToolUse` hook
+denies `memory_propose` for any agent but the orchestrator (subagents and background tasks carry an
+`agent_id`, so the transcript tells the delegate to report the learning instead), and the mothership
+re-checks the proposal event's `origin` before it touches a store — so with the `mem0` provider a
+refused proposal is never sent upstream. Delegates never hold the mem0 key: mem0's own retrieval
+cannot enforce this split, so it is enforced in the harness, and each colony sees only the notes the
+mothership fetched and mounted at boot. A proposal records who made it — `source.origin`
+(`orchestrator`) beside `source.session_id`, the colony's id — shown in the review queue. No
+background task reads memory today; the background row is there for when one does.
+
+Nothing extracts memories from conversation turns automatically. Shared memory grows only from
+explicit orchestrator proposals, and a proposal is persisted the moment its event arrives, so a
+colony that ends or dies loses no proposal already made. `MEMORY.md` is written at boot from landed
+notes only.
 
 ## Session lifecycle
 
@@ -131,7 +157,20 @@ stateDiagram-v2
    before the VM is removed. A publish that fails part-way leaves the colony `failed`, and it can be
    published again from there (the kept worktree and the remote are enough, no new microVM) with the
    remaining steps picked up where the attempt stopped. A turn that ends with an error
-   (not an interrupt) holds autopilot and flags the colony (`autopilot_held`). The mesh node is deleted.
+   (not an interrupt) holds autopilot and flags the colony (`autopilot_held`).
+   Before a completion claim is published, the host verifies it independently: it snapshots
+   the colony's work (commits and uncommitted files) without touching the worktree, reads the git state
+   itself — commits ahead of base, changed files, whether the paths the PR description names are on the
+   branch — and re-runs the repository's test command in a fresh one-shot microVM over a git archive of
+   the snapshot, never on the host and never from the agent's own logs. The verdict, recorded as a
+   `verification` host event in the colony's log, is `confirmed`, `contradicted` (the contradictions
+   stated plainly) or `unverifiable`, which is never treated as confirmed. The command comes from the
+   `publish` module's `verify` setting — `auto` (the default) reads the repository's own declaration on
+   the base branch (package.json `scripts.test` → `npm ci && npm test`, or `npm install && npm
+   test` without a lockfile; else Cargo.toml → `cargo test`; else a Makefile `test:` target →
+   `make test`), `none` means unverifiable by declaration, and a colony's own `verify`
+   overrides it. Autopilot publishes on `confirmed` and `unverifiable` exactly as before; on
+   `contradicted` it holds the colony the same way an errored turn does. The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
    a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM
@@ -140,6 +179,13 @@ stateDiagram-v2
    agentd numbers its events from 1, so the previous transcript is rotated to `events-<n>.jsonl` first.
    Changing models does not need a resume: a live `set_model` switches the running colony's model for
    its next turns and keeps the session (docs/protocol.md §6.1b).
+
+Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
+written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
+whose contract — atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session —
+is what will let the per-session files under `data/sessions/<id>/` move onto other backends in follow-ups. That is
+what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
+restart changes where the bytes are, not how the colony continues.
 
 ## Per-colony limits
 
@@ -175,6 +221,103 @@ be a surprise. When the host stops a colony, the only stop it decides on its own
 microVM is torn down, the status goes to `stopped` with the reason in the colony log, and the worktree is
 kept: Resume continues once the limit is raised, queued if the parallel limit is full.
 
+## Configuration: refuse loudly, never degrade silently
+
+Every user-facing setting validates where it is set, and every refusal names the setting, the
+offending value and the way out: `unknown model tier "soon"; use low, medium or high`, not
+"invalid tier". The alternative — accepting the bytes and reading them as a default — turns a typo
+into behaviour that looks like a decision, and the operator learns of it from a colony that runs
+wrong instead of from an error pointing at the field. So a fallback to a default is allowed only
+where it is documented per setting with the reason (the list below), and "warn and continue" needs
+the same justification.
+
+Capability-gated features — cache TTL, effort, tool availability, the model-specific fields a
+provider may not take — check support at configure or launch time, and either adapt loudly or
+refuse. Adapting loudly is the cache-TTL keep/strip decided at provider save (issue #305): the
+provider carries `normalize_cache_ttl`, and the gateway's rewrite is logged with the count of blocks
+it changed, so the downgrade is in the log, never only in the behaviour.
+
+Closed vocabularies the host decides are refused by name, listing what does exist: an unknown
+skillset name, an unknown model tier, a `<provider>/` model prefix no configured provider owns
+(issue #366 — the runner would only warn and send those requests to Anthropic), an unknown tool in
+the runner's delegation gate. The one warn-and-continue is in the guest, where refusing would leave
+no colony at all: the runner's router drops a malformed `COLONIZER_MODEL_ROUTES` entry with a
+warning and keeps the rest.
+
+Shadowing is stated precedence plus a configure-time log naming the loser: an org's `stack` wins
+over the global preset (stated under Per-colony limits), and a local plugin copy wins over the
+vendored one — logged when the skillset is saved and again at each colony boot that loads it.
+
+### Where garbage is caught
+
+| Boundary | Validator | Garbage-in test |
+| --- | --- | --- |
+| Module settings save | `modules::update` → `validate_settings` | `a_save_refuses_an_unknown_setting_by_name_but_keeps_stored_ones`, `settings_validation_names_unknown_keys_enums_and_types`, `an_enum_refusal_names_the_options` |
+| Provider save | `providers::put` | `a_put_over_a_duplicated_id_is_refused_naming_it`, `prices_must_be_amounts_never_negatives_or_infinities` |
+| Org save | `orgs::put` → `orgs::validate` | `org_settings_are_validated` |
+| Notify, voice, telemetry | notify and voice are module kinds, so the module-settings save validates them; telemetry's PUT is a typed `enabled` bool | — |
+| `modules.json` load | `ModulesConfig::load`: damaged file moved aside, sticky `LoadDamage` alert (issue #408) | `a_damaged_modules_json_is_moved_aside_with_an_alert_rather_than_overwritten` |
+| `providers.json`, `orgs.json` load | `App::read_config_loud`: defaults plus alert, saves refuse to overwrite | `a_duplicated_load_keeps_the_first_entry_and_names_the_loser`, `a_put_over_a_damaged_orgs_json_is_refused_and_leaves_the_bytes_alone` |
+| `claude-accounts.json` load | `claude_accounts::load_meta`: logs and reads empty; writers refuse (409) | `a_corrupt_record_reads_as_empty_and_refuses_to_be_overwritten` |
+| `colonizer.toml` load | `FileConfig::load`: logs file, error and fix, continues with defaults | `load_reads_colonizer_toml_from_the_config_dir` |
+| `COLONIZER_GATEWAY_BIND` | `Settings::parse_gateway_bind` refuses startup (issue #406) | `gateway_bind_defaults_unset_parses_an_ip_port_and_refuses_everything_else` |
+| Colony launch | `sessions::create`: unknown tier, a model naming no configured provider, an uninstalled agent module, missing Claude credentials | none yet (follow-up) |
+| Spawn | the boot refuses an unrouted `<provider>/` model setting (`ColonyRoutes::unrouted_provider`); the runner's router warns about malformed routes | `unrouted_providers_are_reported_with_the_value_and_prefix`; `router.test.mjs` |
+
+### Documented fallbacks
+
+The deliberate degradations, each with its reason:
+
+- An unknown sandbox `preset` id contributes no defaults, so a hand-edited `modules.json` still
+  boots on its explicit fields instead of failing the launch (presets.rs,
+  `an_unknown_preset_degrades_instead_of_failing`). An image the `images.lock` pin does not know
+  boots as the bare tag rather than not at all — a colony that cannot boot is worse than one booting
+  unpinned (`an_unpinned_image_degrades_to_the_bare_reference`).
+- The token savers — `rtk`, Headroom, caveman — warn and continue when the install lacks the piece
+  they need: saving tokens is never the reason a colony doesn't start (sessions.rs).
+- A module-settings save lets a stored key the schema no longer declares pass through. The Settings
+  UI saves back everything `modules.json` holds, and a provider switch keeps the previous provider's
+  keys, so refusing them would lock the user out of saving until the file was hand-edited
+  (`modules.rs`, `validate_settings`).
+- A `colonizer.toml` that will not parse logs its name, the error and the fix, and continues with
+  defaults: it is read per commit and per finding at runtime (`findings.rs`, `github.rs`), paths
+  that cannot refuse, and there is no startup caller that could.
+- A `claude-accounts.json` that will not parse reads as empty on the launch path, which cannot fail;
+  the writers refuse to save over it (409), so the defaults never replace the operator's bytes.
+- Duplicate provider ids in a hand-edited `providers.json`: the first entry wins, the loser is named
+  in a storage alert and a log — the alert slot is shared with the strict read's file-damage alerts,
+  which take precedence, so the duplicate warning yields rather than hiding them — and a PUT that
+  would save over the shadow is refused.
+
+### The audit
+
+What the rule found, setting by setting — the table reviewers check:
+
+| Setting | Silent behaviour before | Status |
+| --- | --- | --- |
+| Unknown module-setting key on save | dropped, so the typo read as the default | fixed: refused, naming the known settings |
+| Enum refusal | "must be one of the listed options" | fixed: names them |
+| Corrupt `colonizer.toml` | a bare "using defaults" | fixed: names file, error, fix |
+| Corrupt `claude-accounts.json` | silently reset the default-account choice | fixed: logged, and saves refuse the overwrite |
+| Local plugin shadowing vendored | no configure-time log | fixed: logged naming both paths at skillset save (colony boot already logged it) |
+| Duplicate provider ids | first wins, silently | fixed: load warning and alert naming the id; PUT refuses |
+| Wrong-typed stored module settings | read as `0` / `""` (`max_parallel` of `"eight"` reads as 1) | filed |
+| Unknown provider for a non-agent module kind | empty schema, so boot fails in `msb` with an empty image | filed |
+| Bare typo'd model ids | pass org/module save and boot; `summary_model` skips even the prefix check (absent from `MODEL_VARS`) | filed |
+
+The filed refusals will read:
+
+- `modules.json: sandbox.max_parallel is "eight" but max_parallel is a number; using the default of 3
+  until it is fixed (edit modules.json or re-save the module in Settings)`
+- `modules.json: sandbox provider "nonexistent" is not installed (installed: microsandbox); colonies
+  cannot boot — set sandbox.provider to a listed provider in Settings → Modules`
+- `org model override "claude-opus-4-999" has no provider prefix and is not a known Claude alias; it
+  will be sent to Anthropic as-is. Use "provider/model" …`
+
+Two gaps are known and not yet filed: the range and type refusals in `validate_settings` say "out of
+range" / "wrong type" without the min, max or expected type, and the launch refusals for an unknown
+tier or a bad model override have no direct unit test.
+
 ## Mesh design
 
 - Headscale listens on `127.0.0.1`; VMs reach it as `http://host.microsandbox.internal:<port>`
@@ -193,6 +336,49 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
 - Headscale reads a bundled DERP relay map (`vendor/derpmap.yaml`, refreshed with
   `scripts/update-derpmap.sh`) instead of fetching one, so the mesh starts without internet access.
   Relays are only a fallback; the direct UDP path doesn't need them.
+
+## Caching
+
+The cockpit's slow read-only views — the repository list, repository meta, packages and
+supply-chain scans, lines of code, registry facts — are answered from a cache so a page load never
+waits on `gh`, a clone or a registry, and a mothership restart or a GitHub outage does not empty
+the screen.
+
+- **Answer cache** (`AnswerCache` in `main.rs`, disk layer in `cache_store.rs`). Every
+  `cached_answer`/`cached_answer_nowait` key keeps its value in memory and, as one JSON file per
+  key (`<data>/cache/answers/<sha256 of key>`: `{key, fetched_at, etag, last_modified, sha,
+  value}`), on disk. Files are written to a temporary name and renamed, read lazily the first time
+  a key is asked for, touched on read, and evicted least-recently-used past ~200 MB; a file that
+  does not parse or holds another key is deleted and reads as a miss. A kept answer is served at
+  the age it has on disk: within its freshness as is, past it at once with one refresh behind it.
+  TTLs are the same as in memory (scans an hour, registry facts 6–24 h, OSV a day). Run-only
+  markers (`code-fetch:*`, `repo-meta-pending:*`) and `storage` are never written.
+- **Keyed by commit.** Per-repository dependency scans (`deps-scan:<repo>@<sha>:v<format>`), lines
+  of code and blame are keyed by the sha they were computed at, so they are reused until the branch
+  moves; the org views recompute from those parts and only re-read repositories that changed. OSV
+  answers are cached per `(ecosystem, package, version)`, so a new lockfile entry costs one query.
+- **Conditional requests** (`github::gh_get`, `deps::get_json`, `http_cache` under
+  `<data>/cache/http`). A 200's body is kept with its `ETag`/`Last-Modified`; the next request
+  sends `If-None-Match`/`If-Modified-Since`, and a 304 reuses the body. `gh api -i` prints a 304's
+  head and exits 1, so its stdout is parsed whatever the exit status. Paginated listings (the
+  repository list, the account's orgs) ask page one conditionally and reuse the last full listing
+  while it is unchanged, for at most 15/30 minutes. Registries (npm, crates.io, PyPI, the Go proxy,
+  pub.dev, OSV records) go through the same path.
+- **Invalidation by event.** When a colony opens a pull request (after pushing its branch), a pull
+  request it opened is merged, or the Code page pushes an edit, `App::invalidate_repo` marks that
+  repository's answers, its org's aggregates and the repository list stale (answers computed
+  before the mark are refreshed on their next read) and drops its clone's fetch marker so that
+  read fetches first. No other repository is touched. `?refresh=1` on a package view does the same
+  for what the view covers.
+- **Avatars** go through `/api/img` (`img_proxy.rs`), an allowlist-only proxy for GitHub avatar
+  URLs cached a week under `<data>/cache/img`.
+- **Service worker** (`web/public/sw.js`, rules in `sw-routes.js`): cache-first for `/api/img`,
+  stale-while-revalidate for an allowlist of read-only JSON views (repository meta, lines of code,
+  packages and the package views, never with `?refresh`), network for every other `/api` call,
+  every write and the sign-in link. The cache names carry a version; activation drops old ones.
+
+The cockpit shows a cached answer with "updated 5m ago · refreshing" and a Refresh button rather
+than the "scanning" placeholder, which now appears only for a scope never scanned before.
 
 ## Trust boundaries
 

@@ -15,6 +15,10 @@ import type {
   ChatMessage,
   ChatMeta,
   ChatModels,
+  ChatCompareRequest,
+  ChatImageRef,
+  ChatPrefs,
+  ChatPatch,
   ChatSendRequest,
   ChatStreamEvent,
   MapFileDetail,
@@ -244,12 +248,13 @@ export interface Api {
   repoMap(repo: string): Promise<RepoMap>;
   /** GET /api/repos/{owner}/{repo}/meta: description, languages, weekly commits, contributors. */
   repoMeta(repo: string): Promise<RepoMeta>;
-  /** GET /api/orgs/{org}/packages/published: what the workspace's repositories define and publish. */
-  orgPublished(org: string): Promise<PackagesPublished | ScanPending>;
+  /** GET /api/orgs/{org}/packages/published: what the workspace's repositories define and publish.
+   *  These three answer from the mothership's cache; `refresh` asks it to recompute behind the answer. */
+  orgPublished(org: string, refresh?: boolean): Promise<PackagesPublished | ScanPending>;
   /** GET /api/orgs/{org}/packages/dependencies: what they depend on, from their lockfiles. */
-  orgDependencies(org: string): Promise<PackagesDependencies | ScanPending>;
+  orgDependencies(org: string, refresh?: boolean): Promise<PackagesDependencies | ScanPending>;
   /** GET /api/orgs/{org}/packages/supply-chain: risky dependencies, with reasons. */
-  orgSupplyChain(org: string): Promise<SupplyChain | ScanPending>;
+  orgSupplyChain(org: string, refresh?: boolean): Promise<SupplyChain | ScanPending>;
   // The Code page (code.rs), read from the mothership's bare clone.
   repoLoc(repo: string): Promise<RepoLoc>;
   repoCoverage(repo: string): Promise<RepoCoverage>;
@@ -271,12 +276,32 @@ export interface Api {
   /** Chat (docs/protocol.md): direct conversations with a model, stored on the mothership. */
   chats(): Promise<{ chats: ChatMeta[] }>;
   chatModels(): Promise<ChatModels>;
-  createChat(body: { title?: string; model?: string; system?: string; max_tokens?: number; workspace?: string }): Promise<ChatMeta>;
+  createChat(body: { title?: string; model?: string; system?: string; max_tokens?: number; temperature?: number; persona?: string; workspace?: string }): Promise<ChatMeta>;
   chat(id: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }>;
-  patchChat(id: string, body: Partial<Pick<ChatMeta, "title" | "model" | "system" | "max_tokens" | "workspace">>): Promise<ChatMeta>;
+  patchChat(id: string, body: ChatPatch): Promise<ChatMeta>;
   deleteChat(id: string): Promise<unknown>;
   /** Streams the reply; `onEvent` gets each line; aborting `signal` stops the reply (kept as stopped). */
   sendChat(id: string, body: ChatSendRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** One message to two models at once; every streamed line carries its `lane`. */
+  compareChat(id: string, body: ChatCompareRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** Keeps one compare reply and drops its sibling. */
+  pickChat(id: string, messageId: string): Promise<{ messages: ChatMessage[] }>;
+  /** A new conversation with the messages up to (`include`) or just before one of this one's. */
+  forkChat(id: string, messageId: string, include: boolean): Promise<ChatMeta>;
+  retitleChat(id: string): Promise<ChatMeta>;
+  /** The URL of the conversation's Markdown export (a download). */
+  /** The Markdown export; `zip` packs it with the conversation's images beside it. */
+  chatExportUrl(id: string, zip?: boolean): string;
+  /** POST /api/chat/attachments: stores one image (checked by its bytes, metadata stripped) and answers its reference. */
+  uploadChatImage(file: Blob, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<ChatImageRef>;
+  /** GET /api/chat/attachments/{sha}: where a stored image is served. */
+  chatImageUrl(sha: string): string;
+  chatPrefs(): Promise<ChatPrefs>;
+  /** Saves a persona preset's system prompt; `null` goes back to the built-in one. */
+  saveChatPersona(id: string, system: string | null): Promise<ChatPrefs>;
+  /** Keeps a note on a reply; `null` clears it. */
+  saveChatFeedback(messageId: string, note: string | null): Promise<ChatPrefs>;
+  chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string }>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
@@ -370,6 +395,69 @@ export function splitNdjson(buffer: string): { events: ChatStreamEvent[]; rest: 
   return { events, rest };
 }
 
+/** POSTs a file as the raw body, reporting upload progress (fetch cannot), and answers the JSON reply. */
+function uploadWithProgress<T>(url: string, file: Blob, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data: unknown = null;
+      try {
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        data = xhr.responseText;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data as T);
+      else
+        reject(
+          new ApiError(
+            data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : xhr.statusText || `upload failed (${xhr.status})`,
+            xhr.status,
+          ),
+        );
+    };
+    xhr.onerror = () => reject(new ApiError("the upload failed", 0));
+    xhr.onabort = () => reject(new DOMException("aborted", "AbortError"));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(file);
+  });
+}
+
+/** POSTs `body` and hands each line of the newline-delimited JSON answer to `onEvent` as it lands. */
+async function streamNdjson(url: string, body: unknown, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    let message = text || res.statusText;
+    try {
+      message = String((JSON.parse(text) as { error?: unknown }).error ?? message);
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let rest = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const split = splitNdjson(rest + decoder.decode(value, { stream: true }));
+    rest = split.rest;
+    for (const event of split.events) onEvent(event);
+  }
+  for (const event of splitNdjson(rest + "\n").events) onEvent(event);
+}
+
 function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}${path}`;
@@ -453,9 +541,9 @@ export const httpApi: Api = {
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   repoMeta: (repo) => request(`/api/repos/${repo.split("/").map(enc).join("/")}/meta`),
-  orgPublished: (org) => request(`/api/orgs/${enc(org)}/packages/published`),
-  orgDependencies: (org) => request(`/api/orgs/${enc(org)}/packages/dependencies`),
-  orgSupplyChain: (org) => request(`/api/orgs/${enc(org)}/packages/supply-chain`),
+  orgPublished: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/published${refresh ? "?refresh=1" : ""}`),
+  orgDependencies: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/dependencies${refresh ? "?refresh=1" : ""}`),
+  orgSupplyChain: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/supply-chain${refresh ? "?refresh=1" : ""}`),
   repoLoc: (repo) => request(`${repoPath(repo)}/loc`),
   repoCoverage: (repo) => request(`${repoPath(repo)}/coverage`),
   repoGitSummary: (repo) => request(`${repoPath(repo)}/git-summary`),
@@ -477,35 +565,18 @@ export const httpApi: Api = {
   chat: (id) => request(`/api/chat/${enc(id)}`),
   patchChat: (id, body) => request(`/api/chat/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteChat: (id) => del(`/api/chat/${enc(id)}`),
-  sendChat: async (id, body, onEvent, signal) => {
-    const res = await fetch(`/api/chat/${enc(id)}/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => "");
-      let message = text || res.statusText;
-      try {
-        message = String((JSON.parse(text) as { error?: unknown }).error ?? message);
-      } catch {
-        /* not JSON */
-      }
-      throw new ApiError(message, res.status);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let rest = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const split = splitNdjson(rest + decoder.decode(value, { stream: true }));
-      rest = split.rest;
-      for (const event of split.events) onEvent(event);
-    }
-    for (const event of splitNdjson(rest + "\n").events) onEvent(event);
-  },
+  sendChat: (id, body, onEvent, signal) => streamNdjson(`/api/chat/${enc(id)}/messages`, body, onEvent, signal),
+  compareChat: (id, body, onEvent, signal) => streamNdjson(`/api/chat/${enc(id)}/compare`, body, onEvent, signal),
+  pickChat: (id, messageId) => post(`/api/chat/${enc(id)}/pick`, { message_id: messageId }),
+  forkChat: (id, messageId, include) => post(`/api/chat/${enc(id)}/fork`, { message_id: messageId, include }),
+  retitleChat: (id) => post(`/api/chat/${enc(id)}/title`),
+  chatExportUrl: (id, zip) => `/api/chat/${enc(id)}/export${zip ? "?format=zip" : ""}`,
+  uploadChatImage: (file, onProgress, signal) => uploadWithProgress("/api/chat/attachments", file, onProgress, signal),
+  chatImageUrl: (sha) => `/api/chat/attachments/${enc(sha)}`,
+  chatPrefs: () => request("/api/chat/prefs"),
+  saveChatPersona: (id, system) => put(`/api/chat/prefs/personas/${enc(id)}`, { system }),
+  saveChatFeedback: (messageId, note) => put(`/api/chat/prefs/feedback/${enc(messageId)}`, { note }),
+  chatIssue: (id, body) => post(`/api/chat/${enc(id)}/issue`, body),
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),

@@ -9,11 +9,11 @@ import { Fragment, useContext, useEffect, useState, type KeyboardEvent, type Rea
 import { ApiContext } from "../context";
 import { inPackage, packageRows, OUTSIDE, UNKNOWN, type PackageRow } from "./monorepo";
 
-import { sameOrg, timeAgo } from "../components/ui";
+import { SESSION_STATUS, sameOrg, timeAgo } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, formatTokens, modelMix, orgCost } from "../spend";
-import type { RepoPackages, Session, SpendHistory } from "../types";
+import type { RepoPackages, Session, SessionStatus, SpendHistory } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { AreaChart, ChartSection, ColonyRow, DashLegend, KpiStrip, OrgTile, PillTab, Rules, Section, type KpiDef } from "./DashChart";
 import { isBumped, isFlashed, type LiveEvents } from "./liveEvents";
@@ -43,6 +43,9 @@ import {
 } from "./dash";
 import { deliveryKpis } from "./delivery";
 import { PackagesView } from "./PackagesView";
+import { COLONY_LIST_ALL, colonyListMatches } from "./ColonyFilters";
+import { FilterSelect, Pagination, SearchBox, optionsBy } from "./ListControls";
+import { PAGE_SIZE, usePagedFilter } from "./paging";
 import { overviewCounts } from "./feed";
 
 /** Kept here (rather than imported from dash) so existing importers keep working. */
@@ -314,6 +317,7 @@ export function OrgDashboard({
   const mixTotal = mix.shown.reduce((n, m) => n + m.tokens, 0);
 
   const colonies = sortSessions(scoped);
+  const colonyList = usePagedFilter(colonies, { filters: COLONY_LIST_ALL, match: colonyListMatches });
   const nowMs = Date.now();
   const labels = days.map(shortDayLabel);
   const pctOf = (v: number) => (funnel.launched > 0 ? `${Math.round((v / funnel.launched) * 100)}%` : "");
@@ -502,14 +506,40 @@ export function OrgDashboard({
         )}
       </Section>
 
-      <Section title="Colonies" meta={String(colonies.length)}>
+      <Section
+        title="Colonies"
+        meta={String(colonies.length)}
+        right={
+          colonies.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <SearchBox value={colonyList.query} onChange={colonyList.setQuery} placeholder="Search colonies…" label="search colonies" className="w-full sm:w-52" />
+              <FilterSelect
+                label="status"
+                allLabel="Any status"
+                value={colonyList.filters.status}
+                onChange={(v) => colonyList.setFilters({ status: v })}
+                options={optionsBy(colonies, (s) => s.status, (k) => SESSION_STATUS[k as SessionStatus]?.label ?? k)}
+              />
+              <FilterSelect label="repository" allLabel="All repositories" value={colonyList.filters.repo} onChange={(v) => colonyList.setFilters({ repo: v })} options={optionsBy(colonies, (s) => s.repo, shortRepo)} />
+              <FilterSelect label="agent" allLabel="All agents" value={colonyList.filters.agent} onChange={(v) => colonyList.setFilters({ agent: v })} options={optionsBy(colonies, (s) => s.agent)} />
+            </div>
+          ) : undefined
+        }
+      >
         <Rules>
           {colonies.length === 0 ? (
             <div className="py-3.5 text-[13px] text-faint">No colonies right now.</div>
+          ) : colonyList.total === 0 ? (
+            <div className="py-3.5 text-[13px] text-muted">
+              nothing matches this search and these filters ·{" "}
+              <button type="button" onClick={colonyList.reset} className="cursor-pointer border-0 bg-transparent p-0 font-medium text-text underline underline-offset-[3px]">
+                clear filters ×
+              </button>
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <div className="min-w-[640px]">
-                {colonies.map((s) => (
+                {colonyList.rows.map((s) => (
                   <ColonyRow
                     key={s.id}
                     session={s}
@@ -523,6 +553,7 @@ export function OrgDashboard({
               </div>
             </div>
           )}
+          {colonyList.total > PAGE_SIZE && <Pagination view={colonyList} onPage={colonyList.setPage} noun="colonies" className="-mt-px border-t border-border py-2.5" />}
         </Rules>
       </Section>
 

@@ -863,7 +863,9 @@ export interface SpendHistory {
 /** `key` is "" for global, the org for `org`, and `owner/repo` for `repo`. */
 export type MemoryScope = "global" | "org" | "repo";
 
-export type MemorySource = { session_id: string; repo: string } | { user: true };
+/** `origin` is where in the colony a note came from ("orchestrator", "subagent", "background", …).
+ * Older proposals omit it; treat those as "orchestrator". */
+export type MemorySource = { session_id: string; repo: string; origin?: string } | { user: true };
 
 export interface MemoryNote {
   id: string;
@@ -998,7 +1000,27 @@ export type AgentEventBody =
   /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
   | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
-  | { type: "finding"; title: string; body: string; evidence: string };
+  | { type: "finding"; title: string; body: string; evidence: string }
+  /**
+   * The mothership's independent verdict on a completion claim (§6.3, Autopilot): tests re-run in a
+   * fresh checkout and the git state read directly, never the agent's own account. Host-generated,
+   * like the finding-chain events, so the runner-event schema does not list it.
+   */
+  | {
+      type: "verification";
+      verdict: "confirmed" | "contradicted" | "unverifiable";
+      by_declaration: boolean;
+      summary: string;
+      contradictions: string[];
+      command: string | null;
+      command_source: "config" | "package.json" | "Cargo.toml" | "Makefile" | null;
+      exit_code: number | null;
+      tests_ms: number | null;
+      commits: number;
+      files_changed: string[];
+      snapshot: string | null;
+      ms: number;
+    };
 
 export type AgentEvent = Sequenced & AgentEventBody;
 
@@ -1475,6 +1497,44 @@ export interface ChatMeta {
   workspace?: string;
   created_at: string;
   updated_at: string;
+  /** Kept at the top of the list; absent from an older mothership. */
+  pinned?: boolean;
+  /** 0–1; absent leaves it to the provider. */
+  temperature?: number;
+  /** The persona preset the system prompt came from, a label only. */
+  persona?: string;
+  /** The title is still the automatic one; the first reply replaces it with a generated one. */
+  auto_title?: boolean;
+  forked_from?: { chat: string; message: string };
+}
+
+/** What an attachment left on the message it came with: never the content, only what it was. An image
+ * also carries its stored reference, so it can be shown and sent to the model again. */
+export interface ChatAttachmentNote {
+  kind: string;
+  label: string;
+  sha?: string;
+  mime?: string;
+  width?: number;
+  height?: number;
+  bytes?: number;
+}
+
+/** A stored chat image (POST /api/chat/attachments), content-addressed by its sha256. */
+export interface ChatImageRef {
+  sha: string;
+  mime: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/** Persona preset edits and notes on replies, kept on the mothership (GET /api/chat/prefs). */
+export interface ChatPrefs {
+  /** Preset id → the system prompt saved to it. */
+  personas: Record<string, string>;
+  /** Reply message id → the operator's note on it. */
+  feedback: Record<string, string>;
 }
 
 export interface ChatMessage {
@@ -1488,6 +1548,23 @@ export interface ChatMessage {
   cost_usd?: number;
   stopped: boolean;
   error?: string;
+  parent_id?: string;
+  first_token_ms?: number;
+  latency_ms?: number;
+  attachments?: ChatAttachmentNote[];
+  /** A compare reply not picked yet; the model's history leaves it out. */
+  candidate?: boolean;
+  lane?: number;
+}
+
+export interface ChatProvider {
+  id: string;
+  name: string;
+  models: string[];
+  preset?: string;
+  wire?: "anthropic" | "openai";
+  has_key?: boolean;
+  pricing?: { input_per_mtok: number; output_per_mtok: number } | null;
 }
 
 export interface ChatModels {
@@ -1495,20 +1572,48 @@ export interface ChatModels {
   default: string | null;
   /** Plain Claude models: usable only with an Anthropic API key or an Anthropic provider. */
   claude: { available: boolean; reason: string | null };
-  providers: { id: string; name: string; models: string[] }[];
+  providers: ChatProvider[];
 }
 
-/** One line of the streamed reply to POST /api/chat/{id}/messages. */
-export type ChatStreamEvent =
+/** Something attached to a message (docs/protocol.md, "Chat attachments"). */
+export type ChatAttachment =
+  | { kind: "colony"; id: string }
+  | { kind: "file"; repo: string; path: string; ref?: string }
+  | { kind: "map"; repo: string }
+  | { kind: "map_component"; repo: string; component: string }
+  | { kind: "snippet"; label?: string; text: string }
+  /** A stored image (`sha`), or older clients' inline base64 `data`, which the mothership stores first. */
+  | { kind: "image"; sha: string; name?: string }
+  | { kind: "image"; media_type: string; data: string; name?: string }
+  | { kind: "colonies_today"; org?: string }
+  | { kind: "merged_prs"; org?: string; days?: number };
+
+/** One line of the streamed reply to POST /api/chat/{id}/messages (or /compare, tagged by `lane`). */
+export type ChatStreamEvent = (
   | { type: "delta"; text: string }
-  | { type: "done"; message: ChatMessage }
-  | { type: "error"; message: string; message_record?: ChatMessage };
+  | { type: "done"; message: ChatMessage; chat?: ChatMeta }
+  | { type: "error"; message: string; message_record?: ChatMessage }
+) & { lane?: number };
 
 export interface ChatSendRequest {
   content?: string;
   regenerate?: boolean;
+  /** Answer with this model once; the conversation keeps its own. */
+  model?: string;
   context?: { colony?: string; file?: { repo: string; path: string; ref?: string } };
+  attachments?: ChatAttachment[];
 }
+
+export interface ChatCompareRequest {
+  content: string;
+  models: [string, string];
+  attachments?: ChatAttachment[];
+}
+
+export type ChatPatch = Partial<Pick<ChatMeta, "title" | "model" | "system" | "max_tokens" | "workspace" | "pinned" | "persona">> & {
+  /** A negative temperature clears it. */
+  temperature?: number;
+};
 
 // ---------------------------------------------------------------------------
 // Packages (GET /api/orgs/{org}/packages/*): published, dependencies, supply chain
@@ -1518,6 +1623,13 @@ export interface ChatSendRequest {
 export interface ScanPending {
   status: "scanning";
   message: string;
+}
+
+/** What the mothership adds to an answer served from its cache: when it was computed, and whether
+ *  a refresh is running behind it. */
+export interface CacheInfo {
+  cached_at?: string;
+  refreshing?: boolean;
 }
 
 export type Ecosystem = "npm" | "cargo" | "pypi" | "go" | "dart" | "swift";
@@ -1564,7 +1676,7 @@ export interface GithubPackage {
   repo: string | null;
 }
 
-export interface PackagesPublished {
+export interface PackagesPublished extends CacheInfo {
   org: string;
   scanned_at: string;
   repos: ScannedRepo[];
@@ -1599,7 +1711,7 @@ export interface Dependency {
   versions: DependencyVersion[];
 }
 
-export interface PackagesDependencies {
+export interface PackagesDependencies extends CacheInfo {
   org: string;
   scanned_at: string;
   repos: ScannedRepo[];
@@ -1624,7 +1736,7 @@ export interface SupplyRisk {
   users: { repo: string; path: string }[];
 }
 
-export interface SupplyChain {
+export interface SupplyChain extends CacheInfo {
   org: string;
   scanned_at: string;
   repos: ScannedRepo[];

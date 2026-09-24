@@ -1,0 +1,52 @@
+/* Token colours for chat code blocks, from the theme's tokens so light and dark both read. Loaded
+   with the highlighter chunk only. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--color-faint);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-meta .hljs-keyword {
+  color: var(--color-accent);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: var(--color-ok);
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable.constant_,
+.hljs-link {
+  color: var(--color-warn);
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-section,
+.hljs-name {
+  color: var(--color-info, var(--color-accent));
+  font-weight: 500;
+}
+.hljs-type,
+.hljs-built_in,
+.hljs-params,
+.hljs-attr,
+.hljs-property {
+  color: var(--color-muted);
+}
+.hljs-deletion {
+  color: var(--color-err);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}

@@ -12,6 +12,42 @@ function noteOrg(note: MemoryNote): string | null {
   return "repo" in note.source ? note.source.repo.split("/")[0] : null;
 }
 
+/** Colony ids are long; the first few characters are enough to tell one from another. */
+function shortId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 4)}…` : id;
+}
+
+/** Pending proposals written by the same part of one colony. */
+interface ProposalGrouping {
+  id: string;
+  /** Colony session, or null for proposals without one (the "Other" group). */
+  sessionId: string | null;
+  /** orchestrator / subagent / background / …; "orchestrator" for proposals that predate it. */
+  origin: string;
+  repo: string | null;
+  proposals: MemoryProposal[];
+}
+
+/** Group pending proposals by author so one colony's output reads as a unit, keeping first-seen order. */
+function groupProposals(proposals: MemoryProposal[]): ProposalGrouping[] {
+  const groups = new Map<string, ProposalGrouping>();
+  for (const proposal of proposals) {
+    const source = "session_id" in proposal.source ? proposal.source : null;
+    const id = source ? `${source.session_id}\u0000${source.origin ?? "orchestrator"}` : "other";
+    const group = groups.get(id);
+    if (group) group.proposals.push(proposal);
+    else
+      groups.set(id, {
+        id,
+        sessionId: source?.session_id ?? null,
+        origin: source?.origin || "orchestrator",
+        repo: source?.repo ?? null,
+        proposals: [proposal],
+      });
+  }
+  return [...groups.values()];
+}
+
 export function MemoryView({
   narrow,
   selectedOrg,
@@ -107,8 +143,8 @@ export function MemoryView({
                 Nothing to review. Colonies propose notes when they learn something worth keeping.
               </p>
             )}
-            {visible.map((proposal) => (
-              <ProposalCard key={proposal.id} proposal={proposal} onResolved={resolved} />
+            {groupProposals(visible).map((group) => (
+              <ProposalGroup key={group.id} group={group} onResolved={resolved} onReload={loadProposals} />
             ))}
             {hidden > 0 && (
               <p className="text-[12.5px] text-faint">
@@ -162,7 +198,16 @@ function Tags({ tags }: { tags: string[] }) {
   );
 }
 
-function ProposalCard({ proposal, onResolved }: { proposal: MemoryProposal; onResolved: (id: string, approved: boolean) => void }) {
+function ProposalCard({
+  proposal,
+  onResolved,
+  groupBusy,
+}: {
+  proposal: MemoryProposal;
+  onResolved: (id: string, approved: boolean) => void;
+  /** True while the group's Approve all / Reject all runs, so per-card buttons stand down. */
+  groupBusy?: boolean;
+}) {
   const api = useApi();
   const toast = useToast();
   const [editing, setEditing] = useState(false);
@@ -192,7 +237,6 @@ function ProposalCard({ proposal, onResolved }: { proposal: MemoryProposal; onRe
     <article className="rounded-xl border border-border bg-panel">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 pt-3 text-[12.5px] text-muted">
         <ScopeBadge scope={proposal.scope} keyName={proposal.key} />
-        <SourceLabel note={proposal} />
         <span className="text-faint">· {timeAgo(proposal.created_at)}</span>
       </div>
       <div className="px-4 py-3">
@@ -223,14 +267,14 @@ function ProposalCard({ proposal, onResolved }: { proposal: MemoryProposal; onRe
         )}
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-4 py-2.5">
-        <Button size="sm" variant="danger" className="mr-auto" disabled={busy !== null} onClick={() => run("reject")}>
+        <Button size="sm" variant="danger" className="mr-auto" disabled={groupBusy || busy !== null} onClick={() => run("reject")}>
           {busy === "reject" ? <Spinner /> : <IconTrash size={13} />} Reject
         </Button>
         {editing ? (
           <Button
             size="sm"
             variant="ghost"
-            disabled={busy !== null}
+            disabled={groupBusy || busy !== null}
             onClick={() => {
               setEditing(false);
               setTitle(proposal.title);
@@ -240,20 +284,89 @@ function ProposalCard({ proposal, onResolved }: { proposal: MemoryProposal; onRe
             Cancel edit
           </Button>
         ) : (
-          <Button size="sm" disabled={busy !== null} onClick={() => setEditing(true)}>
+          <Button size="sm" disabled={groupBusy || busy !== null} onClick={() => setEditing(true)}>
             <IconPencil size={13} /> Edit
           </Button>
         )}
         <Button
           size="sm"
           variant="primary"
-          disabled={busy !== null || (editing && (!title.trim() || !content.trim()))}
+          disabled={groupBusy || busy !== null || (editing && (!title.trim() || !content.trim()))}
           onClick={() => run("approve")}
         >
           {busy === "approve" ? <Spinner /> : <IconCheck size={13} />} {editing && edited ? "Approve edited" : "Approve"}
         </Button>
       </div>
     </article>
+  );
+}
+
+/** A colony's pending proposals, with bulk actions so its output can be cleared in one go. */
+function ProposalGroup({
+  group,
+  onResolved,
+  onReload,
+}: {
+  group: ProposalGrouping;
+  onResolved: (id: string, approved: boolean) => void;
+  onReload: () => void;
+}) {
+  const api = useApi();
+  const toast = useToast();
+  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  const proposals = group.proposals;
+  const count = `${proposals.length} ${proposals.length === 1 ? "proposal" : "proposals"}`;
+
+  // Approve-all takes each proposal as written; reject-all asks first, like deleting a note does.
+  // One failure (a proposal another tab already handled, say) doesn't stop the rest.
+  const runAll = async (kind: "approve" | "reject") => {
+    if (kind === "reject" && !window.confirm(`Reject all ${count} from this colony?`)) return;
+    setBusy(kind);
+    const done = kind === "approve" ? "Approved" : "Rejected";
+    let ok = 0;
+    let firstError: string | null = null;
+    for (const proposal of [...proposals]) {
+      try {
+        if (kind === "approve") await api.approveProposal(proposal.id);
+        else await api.rejectProposal(proposal.id);
+        ok++;
+        onResolved(proposal.id, kind === "approve");
+      } catch (e) {
+        firstError ??= errorMessage(e);
+      }
+    }
+    setBusy(null);
+    onReload();
+    toast(
+      ok === proposals.length ? `${done} ${count}` : `${done} ${ok} of ${proposals.length}; ${proposals.length - ok} failed: ${firstError}`,
+      ok === proposals.length ? undefined : "error",
+    );
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-muted">
+        {group.sessionId === null ? (
+          <span>Other</span>
+        ) : (
+          <span className="min-w-0 [overflow-wrap:anywhere]">
+            Colony <code className="font-mono text-[12px] text-text">{shortId(group.sessionId)}</code> on{" "}
+            <span className="font-mono text-[12px]">{group.repo}</span>
+          </span>
+        )}
+        <span>· {group.origin}</span>
+        <span className="text-faint">· {count}</span>
+        <Button size="sm" variant="ghost" className="ml-auto" disabled={busy !== null} onClick={() => runAll("reject")}>
+          {busy === "reject" ? <Spinner /> : <IconTrash size={13} />} Reject all
+        </Button>
+        <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => runAll("approve")}>
+          {busy === "approve" ? <Spinner /> : <IconCheck size={13} />} Approve all
+        </Button>
+      </div>
+      {proposals.map((proposal) => (
+        <ProposalCard key={proposal.id} proposal={proposal} onResolved={onResolved} groupBusy={busy !== null} />
+      ))}
+    </div>
   );
 }
 

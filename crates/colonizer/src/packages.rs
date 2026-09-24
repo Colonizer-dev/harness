@@ -7,7 +7,7 @@
 //! only when the tree has them. Everything after that — the parsers, glob expansion over the tree,
 //! the fallback for `apps/*` and `packages/*` — is pure and tested without `gh`.
 
-use crate::{ApiResult, Shared, client_error, util::exec};
+use crate::{ApiResult, Shared, client_error};
 use axum::{
     Json,
     extract::{Path, State},
@@ -258,28 +258,33 @@ fn valid_part(s: &str) -> bool {
 }
 
 async fn fetch(app: &Shared, repo: &str) -> anyhow::Result<Detection> {
-    let tree = exec(&mut app.gh([
-        "api",
-        &format!("repos/{repo}/git/trees/HEAD?recursive=1"),
-        "--jq",
-        ".tree[] | select(.type == \"blob\") | .path",
-    ]))
-    .await?;
-    let paths: BTreeSet<String> = tree.lines().map(str::to_string).collect();
+    // Both calls are conditional (see `github::gh_get`): an unchanged tree or manifest is a 304.
+    let tree = crate::github::gh_get_json(app, &format!("repos/{repo}/git/trees/HEAD?recursive=1")).await?;
+    let paths: BTreeSet<String> = tree_blobs(&tree);
     let mut files = std::collections::HashMap::new();
     for name in wanted_root_files(&paths) {
-        let raw = exec(&mut app.gh([
-            "api",
-            "-H",
-            "Accept: application/vnd.github.raw",
+        let raw = crate::github::gh_get(
+            app,
             &format!("repos/{repo}/contents/{name}"),
-        ]))
+            Some("application/vnd.github.raw"),
+        )
         .await;
-        if let Ok(text) = raw {
+        if let Ok((_, text)) = raw {
             files.insert(name, text);
         }
     }
     Ok(detect(&paths, |name| files.get(name).cloned()))
+}
+
+/// The blob paths of a `git/trees?recursive=1` answer.
+fn tree_blobs(tree: &Value) -> BTreeSet<String> {
+    tree["tree"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["type"].as_str() == Some("blob"))
+        .filter_map(|e| e["path"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// GET /api/repos/{owner}/{name}/packages: whether the repository is a monorepo, and its packages.

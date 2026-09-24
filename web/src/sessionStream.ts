@@ -8,6 +8,7 @@ import { isLive } from "./components/ui";
 import { settlerName, settlerRole } from "./settlers";
 import type {
   AgentEvent,
+  AgentEventBody,
   AgentRef,
   AgentState,
   Answers,
@@ -209,6 +210,15 @@ function modelsOfTurn(previous: Record<string, number> | null, current: Record<s
     .map(([model]) => model);
 }
 
+/** One verification host event as a line for the activity strip, the same words the report uses. */
+function verificationLine(ev: Extract<AgentEventBody, { type: "verification" }>): string {
+  if (ev.by_declaration) return "verification: unverifiable by declaration (verify: none)";
+  const verdict = String(ev.verdict ?? "unverifiable").toUpperCase();
+  const detail = [ev.summary, ...(ev.contradictions ?? [])].filter(Boolean).join("; ");
+  const seconds = Number.isFinite(ev.ms) ? ` (${(ev.ms / 1000).toFixed(1)}s)` : "";
+  return `verification: ${verdict}${detail ? ` — ${detail}` : ""}${seconds}`;
+}
+
 export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState {
   if (frame.type === "session") {
     // A colony that stopped being live drops commands, so a switch still pending will never be answered.
@@ -371,6 +381,13 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
       const logs = [...s.logs, entry].slice(-MAX_LOGS);
       const refused = ev.level !== "info" && s.switchingModel !== null;
       return refused ? { ...s, logs, switchingModel: null, refusedModel: s.switchingModel } : { ...s, logs };
+    }
+
+    case "verification": {
+      // The mothership's own verdict on the colony's completion claim: one harness line in the activity
+      // strip, warn-level when the claim was contradicted so it colors like other trouble.
+      const entry: LogEntry = { source: "harness", level: ev.verdict === "contradicted" ? "warn" : "info", message: verificationLine(ev), ts };
+      return { ...s, logs: [...s.logs, entry].slice(-MAX_LOGS) };
     }
 
     case "model_changed":
