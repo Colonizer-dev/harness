@@ -957,7 +957,12 @@ async fn shutdown_signal() {
 
 fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     match assets.map(|a| a.join("web")).filter(|dir| dir.join("index.html").exists()) {
-        Some(dir) => Router::new().fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
+        // Hashed build assets 404 when missing instead of falling back to the page: a tab left open
+        // across an update asks for chunks the new build no longer has, and HTML served as a
+        // module script fails with a MIME error the page cannot tell apart from a real bug.
+        Some(dir) => Router::new()
+            .nest_service("/assets", ServeDir::new(dir.join("assets")))
+            .fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
         None => Router::new().fallback(|| async { Html(UI_MISSING_HTML) }),
     }
 }
