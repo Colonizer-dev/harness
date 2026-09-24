@@ -1361,7 +1361,7 @@ export function createMockApi(): Api {
   const mem0: Mem0Status = { has_key: false, source: null, active: false };
   const voiceKeys = new Set<string>();
 
-  // Shared memory: two proposals waiting for review and a few notes per scope.
+  // Shared memory: three proposals waiting for review, two of them from one colony, and a few notes per scope.
   const proposals: MemoryProposal[] = [
     {
       id: "prop-emails",
@@ -1372,7 +1372,19 @@ export function createMockApi(): Api {
         "Order and account emails live in `emails/*.mjml` and compile to `dist/emails/*.html`.\n\n- Run `npm run build:emails` once after editing; **don't** pass `--watch` in a colony, it never exits\n- Snapshot tests: `npm test -- emails`",
       tags: ["build", "emails"],
       created_at: ago(21),
-      source: { session_id: "stall5678", repo: "acme/webshop" },
+      source: { session_id: "stall5678", repo: "acme/webshop", origin: "orchestrator" },
+      status: "pending",
+    },
+    {
+      id: "prop-dark",
+      scope: "repo",
+      key: "acme/webshop",
+      title: "Dark mode emails need explicit colors",
+      content:
+        "Email clients ignore `prefers-color-scheme`, so dark mode comes from the palette in `emails/theme.js`:\n\n- Declare `<meta name=\"color-scheme\" content=\"light dark\">` in every template\n- Inline background and text colors; the partials in `emails/partials/` already do",
+      tags: ["emails", "dark-mode"],
+      created_at: ago(5),
+      source: { session_id: "stall5678", repo: "acme/webshop", origin: "orchestrator" },
       status: "pending",
     },
     {
@@ -1383,7 +1395,7 @@ export function createMockApi(): Api {
       content: "Every acme repository has a `pnpm-lock.yaml`. Use `pnpm install` and `pnpm run <script>`; `npm install` creates a second lockfile that CI rejects.",
       tags: ["tooling"],
       created_at: ago(3),
-      source: { session_id: "demo1234", repo: "acme/webshop" },
+      source: { session_id: "demo1234", repo: "acme/webshop", origin: "orchestrator" },
       status: "pending",
     },
   ];

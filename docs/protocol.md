@@ -1272,8 +1272,16 @@ tells the runner memory is enabled. The runner exposes two tools to the agent: `
 Proposing emits a runner event; nothing is written inside the colony:
 
 ```jsonc
-{"type":"memory_proposal","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
+{"type":"memory_proposal","origin":"orchestrator","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
 ```
+
+`origin` names who asked: `orchestrator`, a `subagent:<name>` or a `background:<name>`. Only the
+orchestrator proposes — the runner's `PreToolUse` hook refuses the tool for any agent with an
+`agent_id`, and the mothership refuses any proposal whose origin is not the orchestrator's
+(`memory_read_only`, logged in the colony's transcript) before it touches a store, so with the `mem0`
+provider a refused proposal is never sent upstream. An event without `origin` — a runner from before
+the field existed — is read as the orchestrator. The matrix and where it is enforced are in
+[architecture](architecture.md#shared-memory-access).
 
 The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
