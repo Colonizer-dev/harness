@@ -333,7 +333,8 @@ export async function main(argv) {
     // The stub as the only provider, so every model call — orchestrator, subagent, background — is
     // provider-prefixed and routed through the mothership's gateway rather than to Anthropic.
     await needOk(api('PUT', '/api/providers/stub', { name: 'Stub', base_url: stub.url, auth: 'none', wire: 'anthropic', preset: 'custom' }), 'registering the stub provider');
-    await needOk(api('PUT', '/api/modules/agent', { provider: 'claude-code', enabled: true, settings: { model: MODEL, subagent_model: MODEL, background_model: MODEL } }), 'pointing the agent module at the stub');
+    // `plugins: ''` on purpose: skillsets default on (archify), and this run stages none.
+    await needOk(api('PUT', '/api/modules/agent', { provider: 'claude-code', enabled: true, settings: { model: MODEL, subagent_model: MODEL, background_model: MODEL, plugins: '' } }), 'pointing the agent module at the stub');
     // No mesh: the default headscale provider would start headscale and wait 120s for a mesh join.
     await needOk(api('PUT', '/api/modules/mesh', { provider: 'none', enabled: true, settings: {} }), 'switching the mesh off');
     log('mothership configured (stub provider, no mesh)');
