@@ -141,6 +141,13 @@ stateDiagram-v2
    Changing models does not need a resume: a live `set_model` switches the running colony's model for
    its next turns and keeps the session (docs/protocol.md §6.1b).
 
+Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
+written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
+whose contract — atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session —
+is what will let the per-session files under `data/sessions/<id>/` move onto other backends in follow-ups. That is
+what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
+restart changes where the bytes are, not how the colony continues.
+
 ## Per-colony limits
 
 Four sandbox module settings bound colonies, each with a per-org override:

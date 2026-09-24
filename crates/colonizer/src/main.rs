@@ -57,6 +57,7 @@ mod sessions;
 mod spend;
 mod stack;
 mod stale;
+mod store;
 mod stream;
 mod summaries;
 mod telemetry;
