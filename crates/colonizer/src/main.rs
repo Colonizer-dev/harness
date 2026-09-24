@@ -176,6 +176,9 @@ pub struct App {
     pub gateway: gateway::Gateway,
     /// Owners seen in the repository list, so org workspaces can be offered before any colony exists.
     pub repo_owners: RwLock<BTreeSet<String>>,
+    /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
+    /// `gh` or a disk walk: see [`cached_answer`].
+    pub answer_cache: AnswerCache,
     /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
     /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
@@ -1274,6 +1277,7 @@ async fn serve() -> Result<()> {
         memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
         gateway: gateway::Gateway::new(&cfg.data_dir)?,
         repo_owners: RwLock::new(BTreeSet::new()),
+        answer_cache: AnswerCache::default(),
         new_orgs: RwLock::new(BTreeMap::new()),
         org_descriptions: RwLock::new(BTreeMap::new()),
         orgs_refreshed: Mutex::new(None),
@@ -1583,6 +1587,7 @@ pub(crate) mod tests {
             updater: update::Updater::new(),
             gateway: gateway::Gateway::new(&root.join("data")).unwrap(),
             repo_owners: RwLock::new(BTreeSet::new()),
+            answer_cache: AnswerCache::default(),
             new_orgs: RwLock::new(BTreeMap::new()),
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_refreshed: Mutex::new(None),
@@ -2528,6 +2533,118 @@ pub(crate) mod tests {
             "the walk answered in {:?}; the wedged probes were waited out",
             started.elapsed()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Cached answers for slow read-only endpoints, by key: when each was computed, and the value.
+#[derive(Default)]
+pub struct AnswerCache {
+    entries: std::sync::Mutex<HashMap<&'static str, (Instant, serde_json::Value)>>,
+    refreshing: std::sync::Mutex<std::collections::HashSet<&'static str>>,
+}
+
+/// Stale-while-revalidate for a slow read-only answer. Within `fresh` the cached value is returned
+/// as is; past it the cached value is still returned at once and one background refresh is started
+/// (never two for the same key); with nothing cached the caller waits for the first computation. A
+/// failed computation keeps the last good value and reports the error only when there is none.
+pub async fn cached_answer<F, Fut>(
+    app: &Shared,
+    key: &'static str,
+    fresh: Duration,
+    compute: F,
+) -> anyhow::Result<serde_json::Value>
+where
+    F: Fn(Shared) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+{
+    let hit = app
+        .answer_cache
+        .entries
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(key)
+        .cloned();
+    if let Some((at, value)) = hit {
+        if at.elapsed() >= fresh {
+            let first = app
+                .answer_cache
+                .refreshing
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(key);
+            if first {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Ok(value) = compute(app.clone()).await {
+                        app.answer_cache
+                            .entries
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(key, (Instant::now(), value));
+                    }
+                    app.answer_cache
+                        .refreshing
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(key);
+                });
+            }
+        }
+        return Ok(value);
+    }
+    let value = compute(app.clone()).await?;
+    app.answer_cache
+        .entries
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, (Instant::now(), value.clone()));
+    Ok(value)
+}
+
+#[cfg(test)]
+mod answer_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn a_fresh_answer_is_served_from_the_cache_and_a_stale_one_refreshes_behind_it() {
+        let root = std::env::temp_dir().join(format!("colonizer-answer-cache-{}", util::short_id()));
+        let app = tests::test_app(&root);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let compute = {
+            let calls = calls.clone();
+            move |_app: Shared| {
+                let calls = calls.clone();
+                async move { Ok(serde_json::json!(calls.fetch_add(1, Ordering::SeqCst) + 1)) }
+            }
+        };
+        // Nothing cached: the caller waits for the first answer.
+        assert_eq!(
+            cached_answer(&app, "k", Duration::from_secs(60), compute.clone())
+                .await
+                .unwrap(),
+            1
+        );
+        // Fresh: no second computation.
+        assert_eq!(
+            cached_answer(&app, "k", Duration::from_secs(60), compute.clone())
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Stale: the old value comes back at once and one refresh runs behind it.
+        assert_eq!(cached_answer(&app, "k", Duration::ZERO, compute.clone()).await.unwrap(), 1);
+        for _ in 0..50 {
+            if calls.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(cached_answer(&app, "k", Duration::from_secs(60), compute).await.unwrap(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 }

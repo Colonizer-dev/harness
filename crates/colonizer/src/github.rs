@@ -1841,6 +1841,16 @@ pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
 }
 
 pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
+    // `gh api --paginate` takes seconds; the cockpit asks on every load, so serve the last list at
+    // once and refresh it behind the answer once it is a minute old.
+    let value = crate::cached_answer(&app, "repos", Duration::from_secs(60), |app| async move {
+        fetch_repos(&app).await.map(Value::Array)
+    })
+    .await?;
+    Ok(Json(serde_json::from_value(value)?))
+}
+
+async fn fetch_repos(app: &Shared) -> anyhow::Result<Vec<Value>> {
     let out = exec(&mut app.gh([
         "api",
         "--paginate",
@@ -1854,7 +1864,7 @@ pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
         .iter()
         .filter_map(|r| r["full_name"].as_str()?.split('/').next().map(String::from));
     app.repo_owners.write().await.extend(owners);
-    Ok(Json(repos))
+    Ok(repos)
 }
 
 /// A successful org refresh serves every workspace poll for five minutes.
