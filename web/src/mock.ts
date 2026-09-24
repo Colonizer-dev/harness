@@ -33,6 +33,8 @@ import type {
   Question,
   RedTeamRun,
   RedTeamSchedule,
+  Loop,
+  NewLoop,
   NewRedTeamSchedule,
   RedTeamCadence,
   Repo,
@@ -1942,6 +1944,28 @@ export function createMockApi(): Api {
   ];
 
   const redSchedules: RedTeamSchedule[] = [];
+  const loopList: Loop[] = [];
+  const loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
+    id,
+    name: body.name,
+    org: body.repo.split("/")[0],
+    repo: body.repo,
+    prompt: body.prompt,
+    cadence: body.cadence,
+    tz_offset_minutes: body.tz_offset_minutes ?? 0,
+    model: body.model ?? null,
+    subagent_model: body.subagent_model ?? null,
+    autopilot: body.autopilot ?? true,
+    max_runs: body.max_runs ?? null,
+    end_at: body.end_at ?? null,
+    enabled: body.enabled ?? true,
+    next_run_at: body.enabled === false ? null : new Date(Date.now() + 3600_000).toISOString(),
+    runs,
+    last_run: null,
+    last_note: null,
+    ended_reason: null,
+    created_at: created,
+  });
   /** The first time `cadence` fires after `from`, in UTC — the server's rule, month-end clamp included. */
   const nextRun = (cadence: RedTeamCadence, from: Date): string => {
     const at = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d, cadence.hour, cadence.minute));
@@ -2896,6 +2920,32 @@ export function createMockApi(): Api {
       redRuns.unshift(run);
       return clone(run);
     },
+    loops: () => later(() => loopList.map(clone)),
+    createLoop: async (body) => {
+      await sleep(200);
+      const l = loopOf(body, `loop_${Math.random().toString(16).slice(2, 8)}`, now());
+      loopList.push(l);
+      return clone(l);
+    },
+    updateLoop: async (id, body) => {
+      await sleep(150);
+      const at = loopList.findIndex((l) => l.id === id);
+      if (at < 0) throw new ApiError("no such loop", 404);
+      loopList[at] = { ...loopOf(body, id, loopList[at].created_at, loopList[at].runs), last_run: loopList[at].last_run };
+      return clone(loopList[at]);
+    },
+    deleteLoop: async (id) => {
+      await sleep(120);
+      const at = loopList.findIndex((l) => l.id === id);
+      if (at >= 0) loopList.splice(at, 1);
+    },
+    runLoopNow: async (id) => {
+      await sleep(200);
+      const l = loopList.find((x) => x.id === id);
+      if (!l) throw new ApiError("no such loop", 404);
+      throw new ApiError("the mock mothership does not launch colonies from loops", 409);
+    },
+    loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),
     createRedTeamSchedule: async (body) => {
       await sleep(250);

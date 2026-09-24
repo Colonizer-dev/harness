@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
+import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
 import { sameOrg, store, stored } from "../components/ui";
 import { isLive } from "../components/ui";
 import type { Issue, Repo, Session, VoiceStatus } from "../types";
@@ -429,6 +430,35 @@ export function Composer({
   const send = async () => {
     if (!canSend || !repo) return;
     if (voice.listening) voice.stop();
+    // `/loop 1h <task>` (or `/loop <task>`, self-paced) makes a loop instead of a one-off colony.
+    const loopCommand = parseLoopCommand(shown);
+    if (loopCommand) {
+      if (loopCommand.error) {
+        toast(loopCommand.error, "error");
+        return;
+      }
+      setSending(true);
+      try {
+        const created = await api.createLoop({
+          name: nameFromPrompt(loopCommand.prompt),
+          repo,
+          prompt: loopCommand.prompt,
+          cadence: loopCommand.cadence,
+          tz_offset_minutes: -new Date().getTimezoneOffset(),
+          autopilot: autopilotDefault,
+        });
+        store(REPO_KEY, repo);
+        toast({ title: `Loop on ${repo}`, body: `"${created.name}" runs ${describeLoopCadence(created.cadence)}. Manage it under Loops.`, kind: "success" });
+        setText("");
+        setPicked(null);
+        setOpen(false);
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
     const instructions = shown.trim() || undefined;
     setSending(true);
     try {
@@ -451,7 +481,7 @@ export function Composer({
   };
 
   const filtered = query.trim() ? choices.filter((r) => r.full_name.toLowerCase().includes(query.trim().toLowerCase())) : choices;
-  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, or pick an issue below…";
+  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, pick an issue below, or /loop 1h <task> to repeat it…";
 
   return (
     <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6">

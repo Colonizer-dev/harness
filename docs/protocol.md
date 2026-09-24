@@ -2245,3 +2245,34 @@ other the agent not making progress, and they need different fixes.
 question waiting for a person, the second autopilot declining to publish after
 the turn's own error. UHP uses `incomplete` for budgets and does not reconcile
 that with its `timeout` code, so Colonizer does not emit `timeout`.
+
+## Loops
+
+Scheduled colonies ([loops.md](loops.md)), saved in `<config_dir>/loops.json`; every write needs the
+Bearer token and `Origin` like the other writes.
+
+| Route | What it does |
+|---|---|
+| `GET /api/loops` | Every loop: `{id, name, org, repo, prompt, cadence, tz_offset_minutes, model, subagent_model, autopilot, max_runs, end_at, enabled, next_run_at, runs, last_run: {session, at}, last_note, ended_reason, created_at}`. `next_run_at` is null once the loop has ended. |
+| `POST /api/loops` | Creates one from `{name, repo, prompt, cadence, tz_offset_minutes?, model?, subagent_model?, autopilot? (true), max_runs?, end_at?, enabled? (true)}`. A `<provider>/<model>` must name a configured provider. |
+| `PUT /api/loops/{id}` | Replaces its settings; id, creation time, run count and last run are kept, and the next run is recomputed. |
+| `DELETE /api/loops/{id}` | Removes the loop; its past colonies stay. |
+| `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight. |
+| `GET /api/loops/{id}/runs` | The loop's colonies (origin `loop:<id>`), newest first. |
+
+`cadence` is tagged by `every`, all times UTC: `{"every":"interval","minutes":60}` (15–10080),
+`{"every":"daily","hour":9,"minute":0}`, `{"every":"weekly","weekday":0,"hour":9,"minute":0}` (0 =
+Monday), `{"every":"monthly","day":31,"hour":6,"minute":0}` (clamped to the month's end), or
+`{"every":"self_paced"}`.
+
+A loop's colony emits two agent events (§3), acted on only for colonies whose origin names a loop:
+
+```json
+{"type":"loop_next","delay_minutes":120,"reason":"CI reruns at 11"}
+{"type":"loop_stop","reason":"all flakes fixed"}
+```
+
+`loop_next` sets a self-paced loop's `next_run_at` to now + `delay_minutes` (clamped to 15–1440); a
+fixed loop only notes it. `loop_stop` disables the loop and records `ended_reason: "stopped by the
+colony: <reason>"`. The runner offers them as `mcp__colonizer_loop__loop_next` / `…__loop_stop`
+when the mothership sets `COLONIZER_LOOP=true` (and `COLONIZER_LOOP_SELF_PACED`); subagents are refused.

@@ -17,7 +17,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -845,82 +845,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
 // Schedules: a run every week or every month
 // ---------------------------------------------------------------------------
 
-/// When a schedule fires, in UTC: the cockpit converts the operator's local choice before saving.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "every", rename_all = "snake_case")]
-pub enum Cadence {
-    /// `weekday` 0 = Monday … 6 = Sunday.
-    Weekly { weekday: u32, hour: u32, minute: u32 },
-    /// `day` 1–31; a day past the month's end fires on its last day (31 → 30 April, 28/29 February).
-    Monthly { day: u32, hour: u32, minute: u32 },
-}
-
-impl Cadence {
-    fn check(&self) -> Result<(), String> {
-        let (hour, minute) = match self {
-            Cadence::Weekly { weekday, hour, minute } => {
-                if *weekday > 6 {
-                    return Err(format!("weekday must be 0 (Monday) to 6 (Sunday), got {weekday}"));
-                }
-                (*hour, *minute)
-            }
-            Cadence::Monthly { day, hour, minute } => {
-                if !(1..=31).contains(day) {
-                    return Err(format!("day must be 1 to 31, got {day}"));
-                }
-                (*hour, *minute)
-            }
-        };
-        if hour > 23 || minute > 59 {
-            return Err(format!("time must be 00:00 to 23:59 UTC, got {hour:02}:{minute:02}"));
-        }
-        Ok(())
-    }
-}
-
-fn last_day_of_month(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-    NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .and_then(|d| d.pred_opt())
-        .map(|d| d.day())
-        .unwrap_or(28)
-}
-
-fn at(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
-    date.and_hms_opt(hour, minute, 0).map(|t| Utc.from_utc_datetime(&t))
-}
-
-/// The first time the cadence fires strictly after `after`. Pure, so the month-end and week-wrap
-/// rules are tested with fixed dates.
-pub fn next_run_after(cadence: &Cadence, after: DateTime<Utc>) -> DateTime<Utc> {
-    let today = after.date_naive();
-    match *cadence {
-        Cadence::Weekly { weekday, hour, minute } => {
-            let ahead = (weekday + 7 - today.weekday().num_days_from_monday()) % 7;
-            for extra in [0, 7] {
-                if let Some(when) = at(today + ChronoDuration::days(i64::from(ahead + extra)), hour, minute)
-                    && when > after
-                {
-                    return when;
-                }
-            }
-            after + ChronoDuration::days(7)
-        }
-        Cadence::Monthly { day, hour, minute } => {
-            let (mut year, mut month) = (today.year(), today.month());
-            for _ in 0..3 {
-                let d = day.min(last_day_of_month(year, month));
-                if let Some(when) = NaiveDate::from_ymd_opt(year, month, d).and_then(|date| at(date, hour, minute))
-                    && when > after
-                {
-                    return when;
-                }
-                (year, month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-            }
-            after + ChronoDuration::days(28)
-        }
-    }
-}
+pub use crate::schedule::{Cadence, next_run_after};
 
 /// A recurring red-team run over some of an org's repositories.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1032,6 +957,9 @@ fn schedule_from(
         return Err(bad(&format!("swarm_size must be 1..={MAX_SWARM}, got {swarm_size}")));
     }
     req.cadence.check().map_err(|e| bad(&e))?;
+    if !matches!(req.cadence, Cadence::Weekly { .. } | Cadence::Monthly { .. }) {
+        return Err(bad("a red-team schedule runs weekly or monthly"));
+    }
     let model = crate::sessions::launch_model(app, req.model.as_deref(), "model")?;
     let subagent_model = crate::sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
     Ok(RedTeamSchedule {
@@ -1164,6 +1092,7 @@ mod tests {
     use super::*;
     use crate::sessions::tests::colony;
     use crate::tests::test_app;
+    use chrono::{Duration as ChronoDuration, TimeZone};
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("colonizer-redteam-{}", short_id()));

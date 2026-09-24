@@ -23,6 +23,7 @@ import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
+import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
@@ -37,7 +38,7 @@ const VIEW_KEY = "colonizer.cockpitView";
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host", "secrets", "code"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -391,6 +392,8 @@ export function Cockpit({
             onOpenColony={openColonyById}
           />
         );
+      case "loops":
+        return <LoopsView org={selectedOrg} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
       case "secrets":
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "host":

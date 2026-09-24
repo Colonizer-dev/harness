@@ -97,6 +97,17 @@ pub(crate) enum AgentEvent {
     /// A confirmed problem outside the task (§6.6). The harness files it on the host; validation
     /// and every outcome's log line stay in `findings.rs`, which still reads the raw event.
     Finding { title: String, body: String, evidence: String },
+    /// A self-paced loop's colony names its next run (loops.rs): minutes from now, and why.
+    LoopNext {
+        delay_minutes: u64,
+        #[serde(default)]
+        reason: String,
+    },
+    /// A loop's colony ends its loop (loops.rs).
+    LoopStop {
+        #[serde(default)]
+        reason: String,
+    },
     /// Everything the harness only forwards, and any type a newer runner adds (§2: unknown types
     /// must be ignored). A known body with broken fields lands here too: it was forwarded, it just
     /// triggers no side effects.
@@ -245,6 +256,8 @@ mod tests {
             "turn_end",
             "memory_proposal",
             "finding",
+            "loop_next",
+            "loop_stop",
         ] {
             assert!(AgentEvent::is_acted_on(tag), "{tag} is a variant of this enum");
         }

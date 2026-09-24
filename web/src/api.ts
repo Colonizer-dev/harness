@@ -10,6 +10,8 @@ import type {
   RepoGitSummary,
   RepoLoc,
   RepoTree,
+  Loop,
+  NewLoop,
   MapFileDetail,
   RepoPackages,
   BurnDownStatus,
@@ -264,6 +266,15 @@ export interface Api {
   redTeamRuns(): Promise<RedTeamRun[]>;
   startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
   stopRedTeamRun(id: string): Promise<RedTeamRun>;
+  /** GET /api/loops: the scheduled colonies. */
+  loops(): Promise<Loop[]>;
+  createLoop(body: NewLoop): Promise<Loop>;
+  updateLoop(id: string, body: NewLoop): Promise<Loop>;
+  deleteLoop(id: string): Promise<void>;
+  /** POST /api/loops/{id}/run-now: start the next run now (409 while the previous run is live). */
+  runLoopNow(id: string): Promise<Session>;
+  /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
+  loopRuns(id: string): Promise<Session[]>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
   createRedTeamSchedule(body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
   updateRedTeamSchedule(id: string, body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
@@ -422,6 +433,12 @@ export const httpApi: Api = {
   redTeamRuns: () => request("/api/redteam/runs"),
   startRedTeamRun: (body) => post("/api/redteam/runs", body),
   stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),
+  loops: () => request("/api/loops"),
+  createLoop: (body) => post("/api/loops", body),
+  updateLoop: (id, body) => put(`/api/loops/${enc(id)}`, body),
+  deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
+  runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
+  loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),
   updateRedTeamSchedule: (id, body) => put(`/api/redteam/schedules/${enc(id)}`, body),

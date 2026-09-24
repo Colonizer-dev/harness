@@ -30,6 +30,7 @@ mod hunters;
 mod jev;
 mod lifecycle;
 mod login_item;
+mod loops;
 mod maps;
 mod mem0;
 mod memory;
@@ -54,6 +55,7 @@ mod restack;
 mod routing;
 mod runtime;
 mod sandbox;
+mod schedule;
 mod secrets;
 mod sessions;
 mod spend;
@@ -151,6 +153,8 @@ pub struct App {
     pub agent_problems: Vec<String>,
     pub sessions: RwLock<Vec<Session>>,
     pub redteam: redteam::RedTeamStore,
+    /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
+    pub loops: loops::LoopStore,
     session_persist: Mutex<()>,
     /// Serialises the read-modify-write of `orgs.json` and `providers.json` (`orgs::put`,
     /// `providers::put`/`delete`), of `known-orgs.json` (`orgs::record_known_sightings`, which
@@ -1360,6 +1364,7 @@ async fn serve() -> Result<()> {
         agent_problems,
         sessions: RwLock::new(sessions),
         redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
+        loops: loops::LoopStore::new(&cfg.config_dir),
         session_persist: Mutex::new(()),
         config_write: Mutex::new(()),
         config_damage: std::sync::Mutex::new(None),
@@ -1500,6 +1505,10 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
         .route("/api/sessions/{id}/findings", get(findings::list))
         .route("/api/findings", get(findings::list_all))
+        .route("/api/loops", get(loops::list).post(loops::create))
+        .route("/api/loops/{id}", put(loops::update).delete(loops::delete))
+        .route("/api/loops/{id}/run-now", post(loops::run_now))
+        .route("/api/loops/{id}/runs", get(loops::runs))
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
         .route("/api/redteam/runs/{id}/stop", post(redteam::stop))
@@ -1577,6 +1586,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { redteam::run(redteam).await });
     let schedules = app.clone();
     tokio::spawn(async move { redteam::run_schedules(schedules).await });
+    let loop_ticks = app.clone();
+    tokio::spawn(async move { loops::run(loop_ticks).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
     tokio::spawn(reclaim::run(app.clone()));
@@ -1691,6 +1702,7 @@ pub(crate) mod tests {
             agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
             redteam: redteam::RedTeamStore::new(&root.join("data"), &root.join("config")),
+            loops: loops::LoopStore::new(&root.join("config")),
             session_persist: Mutex::new(()),
             config_write: Mutex::new(()),
             config_damage: std::sync::Mutex::new(None),
