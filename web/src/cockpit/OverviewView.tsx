@@ -59,6 +59,7 @@ import { StoragePanel } from "./StoragePanel";
 import { useOpenQuestions } from "./questions";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
 import type { LiveConnection } from "../liveStream";
+import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
 
 /** The last `range` local-calendar days, ascending — the x axis of every per-day series.
  *  Walks the calendar (not fixed 24h steps) so a DST transition cannot duplicate or skip a day. */
@@ -110,6 +111,7 @@ export function OverviewView({
   onOpenSettings,
   scopeOrg,
   onScopeOrg,
+  issues,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -141,6 +143,8 @@ export function OverviewView({
   onOpenColony: (id: string) => void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
+  /** The GitHub issues hand-off, shown as a button above the range toolbar; absent in tests. */
+  issues?: IssuesActions;
   /** The cockpit's workspace scope: set, it opens that org's dashboard in place; null is the
    *  overview. Omitted (tests), the page keeps the choice itself. */
   scopeOrg?: string | null;
@@ -294,8 +298,17 @@ export function OverviewView({
     ),
   );
   const tableShown = showAll ? tableSessions : tableSessions.slice(0, COLONY_LIMIT);
-  const toolbar = (
+  const rangePicker = (
     <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} emptyPrevious={prevEmpty} />
+  );
+  // The issues hand-off sits above the range controls, at the title row's right.
+  const toolbar = issues ? (
+    <div className="flex flex-col items-end gap-2.5">
+      <IssuesButton variant="header" {...issues} />
+      {rangePicker}
+    </div>
+  ) : (
+    rangePicker
   );
 
   // An org dashboard replaces the overview body in place; the header above stays put.

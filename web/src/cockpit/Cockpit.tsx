@@ -321,6 +321,15 @@ export function Cockpit({
       case "overview":
         return (
           <OverviewView
+            issues={{
+              repos,
+              org: selectedOrg,
+              sessions,
+              githubConnected: status?.github.connected ?? false,
+              autopilotDefault,
+              onCreated,
+              onOpenColony: openColonyById,
+            }}
             // One control: the sidebar's workspace switcher is the overview's scope, and the page's
             // own "open workspace" / "← All workspaces" move that same scope.
             scopeOrg={selectedOrg}
@@ -447,15 +456,6 @@ export function Cockpit({
           onOpenColony: openColonyById,
           onOpenInbox: () => navigate("inbox"),
           onOpenNotificationSettings: () => onOpenSettings("notifications"),
-        }}
-        issues={{
-          repos,
-          org: selectedOrg,
-          sessions,
-          githubConnected: status?.github.connected ?? false,
-          autopilotDefault,
-          onCreated,
-          onOpenColony: openColonyById,
         }}
       />
       <div className="relative z-[1] flex min-h-0 min-w-0">

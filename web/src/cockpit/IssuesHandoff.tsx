@@ -108,7 +108,7 @@ function GitHubMark({ size = 15 }: { size?: number }): ReactElement {
   );
 }
 
-export function IssuesButton(props: IssuesActions): ReactElement {
+export function IssuesButton({ variant = "compact", ...props }: IssuesActions & { variant?: "compact" | "header" }): ReactElement {
   const [open, setOpen] = useState(false);
   // The filtered count the pane last loaded for this scope, which beats GitHub's rough one.
   const [loaded, setLoaded] = useState<{ scope: string; count: number } | null>(null);
@@ -134,12 +134,15 @@ export function IssuesButton(props: IssuesActions): ReactElement {
         disabled={!props.githubConnected}
         onClick={() => setOpen((o) => !o)}
         className={cx(
-          "inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-transparent px-2.5 text-[12.5px] font-medium text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50",
+          variant === "header"
+            ? "inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-border-strong bg-panel px-3 text-[13px] font-medium text-text transition-colors hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
+            : "inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-transparent px-2.5 text-[12.5px] font-medium text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50",
           open && "border-border-strong bg-panel-2 text-text",
         )}
       >
-        <GitHubMark />
-        <span className="tabular-nums">{count > 999 ? "999+" : count}</span>
+        <GitHubMark size={variant === "header" ? 16 : 14} />
+        {variant === "header" && <span>Issues</span>}
+        <span className={cx("tabular-nums", variant === "header" && "rounded-full bg-panel-3 px-2 py-px text-[12px]")}>{count > 999 ? "999+" : count}</span>
       </button>
       {open && (
         <IssuesPane
