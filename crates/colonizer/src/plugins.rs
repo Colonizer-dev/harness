@@ -292,6 +292,15 @@ pub fn shadowed_vendored(cfg: &Settings, name: &str) -> Option<PathBuf> {
     vendored_root(cfg).map(|root| root.join(name)).filter(|dir| dir.is_dir())
 }
 
+/// The shadow line: which copy a colony gets, and which one it does not (#326).
+fn shadow_message(name: &str, local: &Path, vendored: &Path) -> String {
+    format!(
+        "plugin {name:?}: local copy at {} shadows the vendored copy at {} (local wins)",
+        local.display(),
+        vendored.display()
+    )
+}
+
 /// Refuses, at save time, any name `resolve` would refuse at boot. A name that is not there is refused
 /// listing what could be named instead; one that is there but fails [`validate`] is refused with the
 /// validation error, which names the file and the rule, since listing it as "available" would not help.
@@ -300,6 +309,11 @@ pub fn check_skillsets<'a>(cfg: &Settings, names: impl IntoIterator<Item = &'a s
         let Some(dir) = locate(cfg, name) else {
             return Err(unknown_skillset(cfg, name));
         };
+        // Saving is when a shadow is chosen: name the loser here, as each colony boot does in its
+        // own log (sessions.rs), instead of leaving it to the list API's `shadows_vendored` flag.
+        if let Some(vendored) = shadowed_vendored(cfg, name) {
+            eprintln!("{}", shadow_message(name, &dir, &vendored));
+        }
         validate(&dir).map_err(|err| format!("skillset {name:?} is invalid: {err:#}"))?;
     }
     Ok(())
@@ -596,6 +610,14 @@ mod tests {
             ["ecc", "superpowers", "google-skills"]
         );
         assert!(parse_list("").is_empty());
+    }
+
+    #[test]
+    fn the_shadow_line_names_the_winner_and_the_loser() {
+        assert_eq!(
+            shadow_message("ecc", Path::new("/data/plugins/ecc"), Path::new("/app/plugins/ecc")),
+            "plugin \"ecc\": local copy at /data/plugins/ecc shadows the vendored copy at /app/plugins/ecc (local wins)"
+        );
     }
 
     #[test]

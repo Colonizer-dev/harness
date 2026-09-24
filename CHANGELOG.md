@@ -39,6 +39,18 @@ setting) is called out under **Take care** rather than left for you to find.
   Verified, then Multilingual. Runs stay labeled uncalibrated until the remaining controls (#330's gold
   sanity gate, network and trajectory monitoring) land. ([#331])
 
+### Fixed
+
+- **Misconfiguration refuses with a name and a fix instead of degrading silently.** A settings save
+  refuses an unknown key, naming it and the settings the module does take (a key already stored still
+  passes, or a provider switch would lock you out of saving); an enum refusal lists the options; a
+  corrupt `colonizer.toml` names the file, the error and the fix instead of a bare "using defaults"; a
+  corrupt `claude-accounts.json` is logged instead of silently resetting your default account, and its
+  writers refuse to overwrite it; a local plugin copy shadowing a vendored one is logged when the
+  skillset is saved; and duplicate provider ids in a hand-edited `providers.json` are named, with the
+  save over them refused. The house rule and its audit table are in
+  [docs/architecture.md](docs/architecture.md). ([#326])
+
 ## [v0.1.9] - 2026-09-24
 
 ### Added
@@ -623,6 +635,7 @@ Macs. ([#74])
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
 [#329]: https://github.com/Colonizer-dev/harness/issues/329
 [#331]: https://github.com/Colonizer-dev/harness/issues/331
+[#326]: https://github.com/Colonizer-dev/harness/issues/326
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
