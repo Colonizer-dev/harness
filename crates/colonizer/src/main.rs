@@ -75,6 +75,7 @@ mod update;
 mod usage;
 mod util;
 mod validation;
+mod verify;
 mod version;
 mod voice;
 mod watchdog;

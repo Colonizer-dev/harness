@@ -996,7 +996,27 @@ export type AgentEventBody =
   /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
   | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
-  | { type: "finding"; title: string; body: string; evidence: string };
+  | { type: "finding"; title: string; body: string; evidence: string }
+  /**
+   * The mothership's independent verdict on a completion claim (§6.3, Autopilot): tests re-run in a
+   * fresh checkout and the git state read directly, never the agent's own account. Host-generated,
+   * like the finding-chain events, so the runner-event schema does not list it.
+   */
+  | {
+      type: "verification";
+      verdict: "confirmed" | "contradicted" | "unverifiable";
+      by_declaration: boolean;
+      summary: string;
+      contradictions: string[];
+      command: string | null;
+      command_source: "config" | "package.json" | "Cargo.toml" | "Makefile" | null;
+      exit_code: number | null;
+      tests_ms: number | null;
+      commits: number;
+      files_changed: string[];
+      snapshot: string | null;
+      ms: number;
+    };
 
 export type AgentEvent = Sequenced & AgentEventBody;
 
