@@ -2,11 +2,14 @@
 // depend on (from their lockfiles), and the supply-chain risks in those dependencies. Everything is
 // read by the mothership from its own clones and the public registries (see crates/colonizer/src/
 // deps.rs); the first scan of a workspace runs in the background, so a view that answers
-// "scanning" asks again every few seconds until it lands.
+// "scanning" asks again every few seconds until it lands. After that the mothership answers from
+// its cache (kept on disk across restarts), so the view shows the last answer with "updated 5m ago
+// · refreshing" while a refresh runs behind it, and a Refresh button asks for one.
 import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, timeAgo } from "../components/ui";
 import type {
+  CacheInfo,
   Dependency,
   Ecosystem,
   PackagesDependencies,
@@ -61,43 +64,50 @@ function isPending(v: unknown): v is ScanPending {
   return typeof v === "object" && v !== null && (v as ScanPending).status === "scanning";
 }
 
-/** Fetch, and while the mothership answers "scanning", ask again every five seconds. */
-function useScan<T>(fetcher: () => Promise<T | ScanPending>, key: string): { data: T | null; pending: string | null; error: string | null } {
+type ScanState<T> = { data: T | null; pending: string | null; error: string | null; refresh: () => void };
+
+/** Fetch, and while the mothership answers "scanning" or is refreshing the answer it gave, ask
+ *  again every five seconds. `refresh()` asks the mothership to recompute (the last answer stays
+ *  on screen meanwhile). */
+function useScan<T extends CacheInfo>(fetcher: (refresh: boolean) => Promise<T | ScanPending>, key: string): ScanState<T> {
   const [state, setState] = useState<{ key: string; data: T | null; pending: string | null; error: string | null }>({ key, data: null, pending: null, error: null });
+  const [asked, setAsked] = useState(0);
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = () => {
-      fetcher().then(
+    const load = (refresh: boolean) => {
+      fetcher(refresh).then(
         (v) => {
           if (!alive) return;
           if (isPending(v)) {
-            setState({ key, data: null, pending: v.message, error: null });
-            timer = setTimeout(load, 5000);
+            setState((s) => ({ key, data: s.key === key ? s.data : null, pending: v.message, error: null }));
+            timer = setTimeout(() => load(false), 5000);
           } else {
             setState({ key, data: v, pending: null, error: null });
+            if (v.refreshing || refresh) timer = setTimeout(() => load(false), 5000);
           }
         },
-        (e) => alive && setState({ key, data: null, pending: null, error: errorMessage(e) }),
+        (e) => alive && setState((s) => ({ key, data: s.key === key ? s.data : null, pending: null, error: s.key === key && s.data ? null : errorMessage(e) })),
       );
     };
-    load();
+    load(asked > 0);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
     };
     // The fetcher changes identity every render; the key names what it fetches.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-  return state.key === key ? state : { data: null, pending: null, error: null };
+  }, [key, asked]);
+  const refresh = () => setAsked((n) => n + 1);
+  return state.key === key ? { ...state, refresh } : { data: null, pending: null, error: null, refresh };
 }
 
 export function PackagesView({ org, onOpenColony }: { org: string; onOpenColony?: (id: string) => void }): ReactElement {
   const api = useApi();
   const [tab, setTab] = useState<Tab>("published");
-  const published = useScan<PackagesPublished>(() => api.orgPublished(org), `published:${org}`);
-  const deps = useScan<PackagesDependencies>(() => api.orgDependencies(org), `deps:${org}`);
-  const supply = useScan<SupplyChain>(() => api.orgSupplyChain(org), `supply:${org}`);
+  const published = useScan<PackagesPublished>((refresh) => api.orgPublished(org, refresh), `published:${org}`);
+  const deps = useScan<PackagesDependencies>((refresh) => api.orgDependencies(org, refresh), `deps:${org}`);
+  const supply = useScan<SupplyChain>((refresh) => api.orgSupplyChain(org, refresh), `supply:${org}`);
   const riskCount = supply.data ? supply.data.risks.length : null;
   const counts: Record<Tab, number | null> = {
     published: published.data ? published.data.packages.length : null,
@@ -136,14 +146,45 @@ export function PackagesView({ org, onOpenColony }: { org: string; onOpenColony?
   );
 }
 
-function Loaded<T>({ state, children }: { state: { data: T | null; pending: string | null; error: string | null }; children: (d: T) => ReactNode }): ReactElement {
+function Loaded<T extends CacheInfo>({ state, children }: { state: ScanState<T>; children: (d: T) => ReactNode }): ReactElement {
   if (state.error) return <p className="py-3 text-[13px] text-err">{state.error}</p>;
-  if (state.data) return <>{children(state.data)}</>;
+  if (state.data)
+    return (
+      <>
+        <Freshness data={state.data} onRefresh={state.refresh} />
+        {children(state.data)}
+      </>
+    );
   return (
     <p className="flex items-center gap-2 py-3 text-[13px] text-muted">
       <span aria-hidden="true" className="size-2 animate-pulse rounded-full bg-accent" />
       {state.pending ?? "Loading…"}
     </p>
+  );
+}
+
+/** "Updated 5m ago · refreshing", and the panel's Refresh button. */
+export function Freshness({ data, onRefresh }: { data: CacheInfo & { scanned_at?: string }; onRefresh: () => void }): ReactElement {
+  const at = data.cached_at ?? data.scanned_at;
+  return (
+    <div className="mb-2 flex items-center gap-2 text-[12px] text-faint">
+      {at && <span>updated {timeAgo(at)}</span>}
+      {data.refreshing && (
+        <span className="flex items-center gap-1.5 text-muted">
+          {at && <span aria-hidden="true">·</span>}
+          <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-accent" />
+          refreshing
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={data.refreshing}
+        className="ml-auto cursor-pointer rounded-md border border-border bg-transparent px-2 py-0.5 text-[12px] text-muted hover:text-text disabled:cursor-default disabled:opacity-50"
+      >
+        Refresh
+      </button>
+    </div>
   );
 }
 

@@ -1576,6 +1576,13 @@ export interface ScanPending {
   message: string;
 }
 
+/** What the mothership adds to an answer served from its cache: when it was computed, and whether
+ *  a refresh is running behind it. */
+export interface CacheInfo {
+  cached_at?: string;
+  refreshing?: boolean;
+}
+
 export type Ecosystem = "npm" | "cargo" | "pypi" | "go" | "dart" | "swift";
 
 export interface ScannedRepo {
@@ -1620,7 +1627,7 @@ export interface GithubPackage {
   repo: string | null;
 }
 
-export interface PackagesPublished {
+export interface PackagesPublished extends CacheInfo {
   org: string;
   scanned_at: string;
   repos: ScannedRepo[];
@@ -1655,7 +1662,7 @@ export interface Dependency {
   versions: DependencyVersion[];
 }
 
-export interface PackagesDependencies {
+export interface PackagesDependencies extends CacheInfo {
   org: string;
   scanned_at: string;
   repos: ScannedRepo[];
@@ -1680,7 +1687,7 @@ export interface SupplyRisk {
   users: { repo: string; path: string }[];
 }
 
-export interface SupplyChain {
+export interface SupplyChain extends CacheInfo {
   org: string;
   scanned_at: string;
   repos: ScannedRepo[];

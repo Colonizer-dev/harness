@@ -194,6 +194,49 @@ kept: Resume continues once the limit is raised, queued if the parallel limit is
   `scripts/update-derpmap.sh`) instead of fetching one, so the mesh starts without internet access.
   Relays are only a fallback; the direct UDP path doesn't need them.
 
+## Caching
+
+The cockpit's slow read-only views — the repository list, repository meta, packages and
+supply-chain scans, lines of code, registry facts — are answered from a cache so a page load never
+waits on `gh`, a clone or a registry, and a mothership restart or a GitHub outage does not empty
+the screen.
+
+- **Answer cache** (`AnswerCache` in `main.rs`, disk layer in `cache_store.rs`). Every
+  `cached_answer`/`cached_answer_nowait` key keeps its value in memory and, as one JSON file per
+  key (`<data>/cache/answers/<sha256 of key>`: `{key, fetched_at, etag, last_modified, sha,
+  value}`), on disk. Files are written to a temporary name and renamed, read lazily the first time
+  a key is asked for, touched on read, and evicted least-recently-used past ~200 MB; a file that
+  does not parse or holds another key is deleted and reads as a miss. A kept answer is served at
+  the age it has on disk: within its freshness as is, past it at once with one refresh behind it.
+  TTLs are the same as in memory (scans an hour, registry facts 6–24 h, OSV a day). Run-only
+  markers (`code-fetch:*`, `repo-meta-pending:*`) and `storage` are never written.
+- **Keyed by commit.** Per-repository dependency scans (`deps-scan:<repo>@<sha>:v<format>`), lines
+  of code and blame are keyed by the sha they were computed at, so they are reused until the branch
+  moves; the org views recompute from those parts and only re-read repositories that changed. OSV
+  answers are cached per `(ecosystem, package, version)`, so a new lockfile entry costs one query.
+- **Conditional requests** (`github::gh_get`, `deps::get_json`, `http_cache` under
+  `<data>/cache/http`). A 200's body is kept with its `ETag`/`Last-Modified`; the next request
+  sends `If-None-Match`/`If-Modified-Since`, and a 304 reuses the body. `gh api -i` prints a 304's
+  head and exits 1, so its stdout is parsed whatever the exit status. Paginated listings (the
+  repository list, the account's orgs) ask page one conditionally and reuse the last full listing
+  while it is unchanged, for at most 15/30 minutes. Registries (npm, crates.io, PyPI, the Go proxy,
+  pub.dev, OSV records) go through the same path.
+- **Invalidation by event.** When a colony opens a pull request (after pushing its branch), a pull
+  request it opened is merged, or the Code page pushes an edit, `App::invalidate_repo` marks that
+  repository's answers, its org's aggregates and the repository list stale (answers computed
+  before the mark are refreshed on their next read) and drops its clone's fetch marker so that
+  read fetches first. No other repository is touched. `?refresh=1` on a package view does the same
+  for what the view covers.
+- **Avatars** go through `/api/img` (`img_proxy.rs`), an allowlist-only proxy for GitHub avatar
+  URLs cached a week under `<data>/cache/img`.
+- **Service worker** (`web/public/sw.js`, rules in `sw-routes.js`): cache-first for `/api/img`,
+  stale-while-revalidate for an allowlist of read-only JSON views (repository meta, lines of code,
+  packages and the package views, never with `?refresh`), network for every other `/api` call,
+  every write and the sign-in link. The cache names carry a version; activation drops old ones.
+
+The cockpit shows a cached answer with "updated 5m ago · refreshing" and a Refresh button rather
+than the "scanning" placeholder, which now appears only for a scope never scanned before.
+
 ## Trust boundaries
 
 - GitHub token: host only. Claude credential: host only, injected by microsandbox's TLS proxy for

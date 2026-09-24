@@ -150,7 +150,7 @@ function RepoCodeCard({ repo, facts, live, onOpen }: { repo: string; facts: Repo
       <footer className="flex items-center gap-2 text-[11.5px] text-faint">
         <span className="flex -space-x-1.5">
           {(facts?.meta?.contributors ?? []).slice(0, 5).map((c) => (
-            <img key={c.login} src={c.avatar_url} alt="" title={`${c.login} · ${c.contributions} commits`} className="size-5 rounded-full border border-panel" />
+            <Avatar key={c.login} name={c.login} src={c.avatar_url || undefined} size={20} rounded="full" title={`${c.login} · ${c.contributions} commits`} className="border border-panel" />
           ))}
         </span>
         {facts?.meta?.pushed_at && <span>pushed {timeAgo(facts.meta.pushed_at)}</span>}

@@ -246,12 +246,13 @@ export interface Api {
   repoMap(repo: string): Promise<RepoMap>;
   /** GET /api/repos/{owner}/{repo}/meta: description, languages, weekly commits, contributors. */
   repoMeta(repo: string): Promise<RepoMeta>;
-  /** GET /api/orgs/{org}/packages/published: what the workspace's repositories define and publish. */
-  orgPublished(org: string): Promise<PackagesPublished | ScanPending>;
+  /** GET /api/orgs/{org}/packages/published: what the workspace's repositories define and publish.
+   *  These three answer from the mothership's cache; `refresh` asks it to recompute behind the answer. */
+  orgPublished(org: string, refresh?: boolean): Promise<PackagesPublished | ScanPending>;
   /** GET /api/orgs/{org}/packages/dependencies: what they depend on, from their lockfiles. */
-  orgDependencies(org: string): Promise<PackagesDependencies | ScanPending>;
+  orgDependencies(org: string, refresh?: boolean): Promise<PackagesDependencies | ScanPending>;
   /** GET /api/orgs/{org}/packages/supply-chain: risky dependencies, with reasons. */
-  orgSupplyChain(org: string): Promise<SupplyChain | ScanPending>;
+  orgSupplyChain(org: string, refresh?: boolean): Promise<SupplyChain | ScanPending>;
   // The Code page (code.rs), read from the mothership's bare clone.
   repoLoc(repo: string): Promise<RepoLoc>;
   repoCoverage(repo: string): Promise<RepoCoverage>;
@@ -496,9 +497,9 @@ export const httpApi: Api = {
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   repoMeta: (repo) => request(`/api/repos/${repo.split("/").map(enc).join("/")}/meta`),
-  orgPublished: (org) => request(`/api/orgs/${enc(org)}/packages/published`),
-  orgDependencies: (org) => request(`/api/orgs/${enc(org)}/packages/dependencies`),
-  orgSupplyChain: (org) => request(`/api/orgs/${enc(org)}/packages/supply-chain`),
+  orgPublished: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/published${refresh ? "?refresh=1" : ""}`),
+  orgDependencies: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/dependencies${refresh ? "?refresh=1" : ""}`),
+  orgSupplyChain: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/supply-chain${refresh ? "?refresh=1" : ""}`),
   repoLoc: (repo) => request(`${repoPath(repo)}/loc`),
   repoCoverage: (repo) => request(`${repoPath(repo)}/coverage`),
   repoGitSummary: (repo) => request(`${repoPath(repo)}/git-summary`),

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { EcoIcon, PackagesView, filterDependencies, filterRisks, fixInstructions } from "./PackagesView";
+import { EcoIcon, Freshness, PackagesView, filterDependencies, filterRisks, fixInstructions } from "./PackagesView";
 import type { Dependency, SupplyRisk } from "../types";
 import { ApiContext, ToastProvider } from "../context";
 import { createMockApi } from "../mock";
@@ -34,6 +34,17 @@ const risk = (over: Partial<SupplyRisk> = {}): SupplyRisk => ({
 });
 
 describe("Packages tab", () => {
+  it("shows a cached answer's age and a running refresh instead of the scanning state", () => {
+    const at = new Date(Date.now() - 5 * 60_000).toISOString();
+    const refreshing = renderToStaticMarkup(<Freshness data={{ cached_at: at, refreshing: true }} onRefresh={() => {}} />);
+    expect(refreshing).toContain("updated 5m ago");
+    expect(refreshing).toContain("refreshing");
+    expect(refreshing).toMatch(/<button[^>]* disabled=""[^>]*>Refresh<\/button>/);
+    const settled = renderToStaticMarkup(<Freshness data={{ cached_at: at, refreshing: false }} onRefresh={() => {}} />);
+    expect(settled).not.toContain("refreshing");
+    expect(settled).not.toMatch(/ disabled=""/);
+  });
+
   it("filters dependencies by ecosystem, directness, freshness, advisories and name", () => {
     const list = [
       dep("react", { outdated: true }),

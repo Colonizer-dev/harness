@@ -16,6 +16,12 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **Cached views survive a restart and a GitHub outage.** The Packages tab, repository meta,
+  lines of code and registry facts are kept on disk (`<data>/cache`, capped, least-recently-used
+  first out) and served at once after a restart with "updated 5m ago · refreshing" and a Refresh
+  button, instead of "scanning" for minutes. Scans are reused per commit, GitHub and registry
+  requests are conditional (a 304 costs nothing), a colony's push or merge refreshes only that
+  repository, and GitHub avatars load through the mothership's week-long cache (`/api/img`). ([#519])
 - **Loops: colonies on a schedule, like `/loop`.** A saved prompt on a repository launches a colony every N minutes (15 minutes to 7 days), daily, weekly, monthly, or self-paced, where each run names the next with a `loop_next` tool (15 minutes–24 hours). Any run can end its loop with `loop_stop`, and a loop also ends after its max runs or end date. One run at a time: a tick that finds the previous run still live skips and says so. Loops has its own page (templates, history with status, PR and cost, run now), loop colonies carry a ↻ badge, and `/loop 1h <task>` in the composer makes one. Red-team schedules now share the cadence code. See [docs/loops.md](docs/loops.md).
 - **Chat.** Talk to a model directly from the cockpit, no colony: conversations stored on the Mothership, replies streamed, stop and regenerate, a colony's summary and recent activity as optional context, and "Turn into a colony" on any reply. Any configured `<provider>/<model>`, or a Claude model with an Anthropic API key or an Anthropic provider — never the Claude subscription login. The composer's Ask mode sends a question there. The dashboard's issues button is now the orange **Send colonies** action.
 - **Chat, redesigned.** A searchable conversation list (workspace filter, pinned and Today / Yesterday / Previous 7 days / Older groups, inline rename, delete with undo, ⌘\\ to collapse); an empty-state hero with suggestions from the workspace (explain a repo's architecture from its map, what the colonies did today, why a colony failed, release notes from merged PRs, review a file, plan an issue); a centred composer with a model picker (provider marks, key status, prices, fast/cheap/strong tags), a "+" menu to attach a repository file, colony, map or map component, GitHub issue, snippet or image, slash commands (`/colony`, `/file`, `/loop`, `/model`, `/system`, `/clear`) and a token and cost estimate for what is attached. Replies show model, tokens, cost and latency, with syntax-highlighted code (loaded on demand) and file paths that open in the Code page. Edit and resend in a branch, regenerate with another model, branch from any message, compare two models side by side and keep one, persona presets, temperature and max tokens, Markdown export, search within a conversation, and hand-offs to a colony, a loop or a GitHub issue. The first reply names the conversation with the cheap summary model. See `/api/chat` in [docs/protocol.md](docs/protocol.md).
@@ -621,6 +627,7 @@ Macs. ([#74])
 [#488]: https://github.com/Colonizer-dev/harness/pull/488
 [#489]: https://github.com/Colonizer-dev/harness/pull/489
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
+[#519]: https://github.com/Colonizer-dev/harness/pull/519
 [#329]: https://github.com/Colonizer-dev/harness/issues/329
 [#331]: https://github.com/Colonizer-dev/harness/issues/331
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
