@@ -4,6 +4,8 @@ import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import type {
   ArchMap,
+  ChatMessage,
+  ChatMeta,
   RepoMap,
   AgentEvent,
   AgentEventBody,
@@ -1209,6 +1211,7 @@ export function createMockApi(): Api {
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
   const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
   const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
+  const mockChats = new Map<string, { meta: ChatMeta; messages: ChatMessage[] }>();
   const repoMap = (repo: string): RepoMap => {
     const map = maps.get(repo);
     return {
@@ -2775,6 +2778,48 @@ export function createMockApi(): Api {
     deleteDrafts: async () => ({ removed: 0 }),
     editorSettings: async () => ({ autosave: true }),
     saveEditorSettings: async (body) => body,
+    chats: () => later(() => ({ chats: [...mockChats.values()].map((c) => c.meta).sort((a, b) => b.updated_at.localeCompare(a.updated_at)) })),
+    chatModels: () => later(() => ({ default: "zai/glm-5.3-flash", claude: { available: false, reason: "a Claude model needs an Anthropic API key (sk-ant-api…) or an Anthropic model provider; the Claude subscription login is only used by colonies" }, providers: [{ id: "zai", name: "Z.AI", models: ["glm-5.3-flash", "glm-5.3"] }] })),
+    createChat: (body) =>
+      later(() => {
+        const at = new Date().toISOString();
+        const meta = { id: Math.random().toString(16).slice(2, 10), title: body.title ?? "", model: body.model || "zai/glm-5.3-flash", system: body.system, max_tokens: body.max_tokens ?? 4096, workspace: body.workspace, created_at: at, updated_at: at };
+        mockChats.set(meta.id, { meta, messages: [] });
+        return meta;
+      }),
+    chat: (id) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        return { chat: c.meta, messages: [...c.messages] };
+      }),
+    patchChat: (id, body) =>
+      later(() => {
+        const c = mockChats.get(id);
+        if (!c) throw new Error("no such conversation");
+        c.meta = { ...c.meta, ...body, updated_at: new Date().toISOString() };
+        return c.meta;
+      }),
+    deleteChat: (id) => later(() => mockChats.delete(id)),
+    sendChat: async (id, body, onEvent, signal) => {
+      const c = mockChats.get(id);
+      if (!c) throw new Error("no such conversation");
+      if (body.regenerate) while (c.messages.at(-1)?.role === "assistant") c.messages.pop();
+      else if (body.content) c.messages.push({ id: Math.random().toString(16).slice(2, 10), role: "user", content: body.content, ts: new Date().toISOString(), input_tokens: 0, output_tokens: 0, stopped: false });
+      if (!c.meta.title && body.content) c.meta.title = body.content.slice(0, 60);
+      const answer = `*(mock reply)* You asked: **${c.messages.at(-1)?.content.slice(0, 80) ?? ""}**\n\n\`\`\`ts\nconst answer = 42;\n\`\`\``;
+      let text = "";
+      for (const word of answer.split(/(?<= )/)) {
+        if (signal?.aborted) break;
+        await sleep(30);
+        text += word;
+        onEvent({ type: "delta", text: word });
+      }
+      const message = { id: Math.random().toString(16).slice(2, 10), role: "assistant" as const, content: text, ts: new Date().toISOString(), model: c.meta.model, input_tokens: 120, output_tokens: 40, cost_usd: 0.0004, stopped: Boolean(signal?.aborted) };
+      c.messages.push(message);
+      c.meta.updated_at = message.ts;
+      onEvent({ type: "done", message });
+    },
     repoMeta: (repo) =>
       later(() => ({
         full_name: repo,

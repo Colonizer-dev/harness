@@ -12,6 +12,11 @@ import type {
   RepoTree,
   Loop,
   NewLoop,
+  ChatMessage,
+  ChatMeta,
+  ChatModels,
+  ChatSendRequest,
+  ChatStreamEvent,
   MapFileDetail,
   RepoPackages,
   BurnDownStatus,
@@ -248,6 +253,15 @@ export interface Api {
   deleteDrafts(repo: string, ref: string, path?: string): Promise<{ removed: number }>;
   editorSettings(): Promise<{ autosave: boolean }>;
   saveEditorSettings(body: { autosave: boolean }): Promise<{ autosave: boolean }>;
+  /** Chat (docs/protocol.md): direct conversations with a model, stored on the mothership. */
+  chats(): Promise<{ chats: ChatMeta[] }>;
+  chatModels(): Promise<ChatModels>;
+  createChat(body: { title?: string; model?: string; system?: string; max_tokens?: number; workspace?: string }): Promise<ChatMeta>;
+  chat(id: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }>;
+  patchChat(id: string, body: Partial<Pick<ChatMeta, "title" | "model" | "system" | "max_tokens" | "workspace">>): Promise<ChatMeta>;
+  deleteChat(id: string): Promise<unknown>;
+  /** Streams the reply; `onEvent` gets each line; aborting `signal` stops the reply (kept as stopped). */
+  sendChat(id: string, body: ChatSendRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<void>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
@@ -324,6 +338,22 @@ const query = (params: Record<string, string | undefined | null>) => {
 };
 
 const enc = encodeURIComponent;
+
+/** Splits newline-delimited JSON: the complete lines parsed, and the unfinished tail to carry over. */
+export function splitNdjson(buffer: string): { events: ChatStreamEvent[]; rest: string } {
+  const lines = buffer.split("\n");
+  const rest = lines.pop() ?? "";
+  const events: ChatStreamEvent[] = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line) as ChatStreamEvent);
+    } catch {
+      /* a torn line: skipped */
+    }
+  }
+  return { events, rest };
+}
 
 function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -421,6 +451,41 @@ export const httpApi: Api = {
   deleteDrafts: (repo, ref, path) => del(`${repoPath(repo)}/drafts${query({ ref, path })}`),
   editorSettings: () => request("/api/editor/settings"),
   saveEditorSettings: (body) => put("/api/editor/settings", body),
+  chats: () => request("/api/chat"),
+  chatModels: () => request("/api/chat/models"),
+  createChat: (body) => post("/api/chat", body),
+  chat: (id) => request(`/api/chat/${enc(id)}`),
+  patchChat: (id, body) => request(`/api/chat/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteChat: (id) => del(`/api/chat/${enc(id)}`),
+  sendChat: async (id, body, onEvent, signal) => {
+    const res = await fetch(`/api/chat/${enc(id)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      let message = text || res.statusText;
+      try {
+        message = String((JSON.parse(text) as { error?: unknown }).error ?? message);
+      } catch {
+        /* not JSON */
+      }
+      throw new ApiError(message, res.status);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const split = splitNdjson(rest + decoder.decode(value, { stream: true }));
+      rest = split.rest;
+      for (const event of split.events) onEvent(event);
+    }
+    for (const event of splitNdjson(rest + "\n").events) onEvent(event);
+  },
   repoMapFiles: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/files`),
   repoMapFile: (repo, path) => request(`/api/maps/${repo.split("/").map(enc).join("/")}/file?path=${encodeURIComponent(path)}`),
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),

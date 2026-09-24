@@ -1438,3 +1438,52 @@ export interface LoginItemStatus {
   log: string;
   note: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Chat: a direct conversation with a model, no colony (GET/POST /api/chat, docs/protocol.md)
+// ---------------------------------------------------------------------------
+
+export interface ChatMeta {
+  id: string;
+  title: string;
+  model: string;
+  system?: string;
+  max_tokens: number;
+  /** The workspace its spend is filed under; absent files it under the `chat` pseudo-org. */
+  workspace?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+  model?: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd?: number;
+  stopped: boolean;
+  error?: string;
+}
+
+export interface ChatModels {
+  /** The cheap default (the summaries' model), or null when none is reachable. */
+  default: string | null;
+  /** Plain Claude models: usable only with an Anthropic API key or an Anthropic provider. */
+  claude: { available: boolean; reason: string | null };
+  providers: { id: string; name: string; models: string[] }[];
+}
+
+/** One line of the streamed reply to POST /api/chat/{id}/messages. */
+export type ChatStreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "done"; message: ChatMessage }
+  | { type: "error"; message: string; message_record?: ChatMessage };
+
+export interface ChatSendRequest {
+  content?: string;
+  regenerate?: boolean;
+  context?: { colony?: string; file?: { repo: string; path: string; ref?: string } };
+}

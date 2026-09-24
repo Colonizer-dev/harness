@@ -11,6 +11,7 @@ mod auth;
 mod authority;
 mod autonomy;
 mod burn_down;
+mod chat;
 mod claims;
 mod claude_accounts;
 mod claude_login;
@@ -1464,6 +1465,10 @@ async fn serve() -> Result<()> {
             "/api/voice/transcribe",
             post(voice::transcribe).layer(DefaultBodyLimit::max(voice::MAX_BYTES + 1)),
         )
+        .route("/api/chat", get(chat::list).post(chat::create))
+        .route("/api/chat/models", get(chat::models))
+        .route("/api/chat/{id}", get(chat::get).patch(chat::patch).delete(chat::delete))
+        .route("/api/chat/{id}/messages", post(chat::send))
         .route("/api/repos", get(github::list_repos))
         .route("/api/maps/{owner}/{name}", get(maps::get).post(maps::create))
         .route("/api/maps/{owner}/{name}/files", get(maps::files))

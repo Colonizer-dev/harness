@@ -174,6 +174,28 @@ async fn settings(app: &Shared) -> (bool, Option<Route>) {
     (true, choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key))
 }
 
+/// The cheap model the install would write summaries with, whether or not summaries are switched
+/// on: the default for anything else that wants a quick, inexpensive answer (the cockpit's chat).
+pub async fn cheap_route(app: &Shared) -> Option<Route> {
+    let modules = app.modules.read().await.clone();
+    let (summary_model, candidates) = match modules.get("agent") {
+        Some(choice) => {
+            let schema = modules::schema_for("agent", &choice.provider, &app.agents);
+            let candidates = ["subagent_model", "model_low", "background_model"].map(|k| setting_str(choice, &schema, k));
+            (setting_str(choice, &schema, "summary_model"), candidates.to_vec())
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let providers = app.providers();
+    let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+    let has_anthropic = providers.iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    let has_api_key = app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some());
+    let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key)
+}
+
 /// Asks for a summary of `input` along `route`, bounded by [`REQUEST_TIMEOUT`].
 async fn ask(app: &Shared, route: &Route, input: &str) -> Result<String, String> {
     match route {
