@@ -287,12 +287,14 @@ describe("OverviewView colonies table", () => {
     expect(filtered).toContain("showing 1 of 2");
   });
 
-  it("caps a long table at ten with a way to see the rest", () => {
+  it("pages a long table ten at a time", () => {
     const many = Array.from({ length: 11 }, (_, i) => session({ id: `s${i}`, issue: i, issue_title: `Work ${i}` }));
     const html = renderOverview(many, [ACME]);
-    expect(html).toContain("Show all 11 colonies");
+    expect(html).toContain("1–10 of 11");
+    expect(html).toContain('aria-label="next page"');
+    expect(html).toContain('aria-current="page"');
     const few = renderOverview(many.slice(0, 3), [ACME]);
-    expect(few).not.toContain("Show all");
+    expect(few).not.toContain('aria-label="pages"');
   });
 });
 
