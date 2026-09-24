@@ -56,6 +56,20 @@ pub async fn exec_within(limit: Duration, cmd: &mut Command) -> Result<String> {
         .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
 }
 
+/// Runs a command with a deadline and returns `(stdout, stderr)` whatever the exit status: `gh api
+/// -i` prints a 304's head on stdout and then exits 1.
+pub async fn exec_capture(limit: Duration, cmd: &mut Command) -> Result<(String, String)> {
+    let desc = describe(cmd);
+    let out = tokio::time::timeout(limit, cmd.stdin(Stdio::null()).kill_on_drop(true).output())
+        .await
+        .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
+        .with_context(|| format!("failed to start `{desc}`"))?;
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+}
+
 /// Runs a command for its exit status only.
 pub async fn exec_status(cmd: &mut Command) -> Result<bool> {
     let desc = describe(cmd);
@@ -193,7 +207,7 @@ const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 /// Standard base64 (alphabet `A–Z a–z 0–9 + /` with `=` padding), implemented by hand so no
 /// new crate is needed.
-fn b64_encode(bytes: &[u8]) -> String {
+pub(crate) fn b64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < bytes.len() {
@@ -220,7 +234,7 @@ fn b64_encode(bytes: &[u8]) -> String {
 
 /// Inverse of [`b64_encode`]. Outer whitespace is trimmed first; anything else outside the
 /// standard alphabet (including inner whitespace) is rejected with `None`.
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
         match c {
             b'A'..=b'Z' => Some((c - b'A') as u32),

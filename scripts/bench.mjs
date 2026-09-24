@@ -6,7 +6,8 @@
 //
 //   node scripts/bench.mjs seed --repo owner/bench-repo     # create the repo, its files and the issues (once)
 //   node scripts/bench.mjs run --repo owner/bench-repo --label before
-//   node scripts/bench.mjs run --repo owner/bench-repo --label after --only add-helper,readme-typo
+//   node scripts/bench.mjs run --repo owner/bench-repo --label after --only add-helper,readme-typo --heldout ~/bench-heldout
+//   node scripts/bench.mjs heldout add --heldout ~/bench-heldout --family cart-rounding --check my-check.test.mjs
 //   node scripts/bench.mjs compare bench-before.json bench-after.json
 //   node scripts/bench.mjs clean --repo owner/bench-repo    # close the bench's PRs and delete their branches
 //
@@ -14,12 +15,14 @@
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
 // and opens real pull requests on that repository, and on nothing else.
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { analyze, loadColonies, totalCost } from './colony-report.mjs';
+import { auditSession } from './trajectory-monitor.mjs';
+import { DEFAULT_MAX_GAP, addCompanion, companionsFor, familyGaps, familyOf, formatGaps, gapVerdict, loadSet, lockSet, newSet, outsideRepo, recordDecisions, saveSet } from './bench/heldout.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MOTHERSHIP = process.env.COLONIZER_URL || 'http://127.0.0.1:7878';
@@ -44,7 +47,7 @@ const gh = (args, options = {}) => execFileSync('gh', args, { encoding: 'utf8', 
 const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(path, init) {
+export async function api(path, init) {
   // authHeaders last: a caller must not be able to clobber the token.
   const res = await fetch(`${MOTHERSHIP}${path}`, { ...init, headers: { 'content-type': 'application/json', ...init?.headers, ...authHeaders } });
   const text = await res.text();
@@ -167,10 +170,11 @@ async function runTask(task, repo, issue, options) {
 
 // ------------------------------------------------------------------------------------------------ score
 
-// A node --test started from inside another one inherits NODE_TEST_CONTEXT, skips its files and exits 0, so
-// every check would pass when this runs under the bench's own tests.
+// A node --test started from inside another one inherits NODE_TEST_CONTEXT, skips its files and exits 0 —
+// every check would pass under the bench's own tests — and a colony sandbox exports GIT_DIR and friends
+// that would point scorer git at the wrong work tree. None of it rides into a scored child.
 const childEnv = () => {
-  const { NODE_TEST_CONTEXT, ...env } = process.env;
+  const { NODE_TEST_CONTEXT, NODE_OPTIONS, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...env } = process.env;
   return env;
 };
 
@@ -199,15 +203,27 @@ export function runOwnTests(dir) {
   }
 }
 
+// The scorer's git runs against a colony's branch — agent-controlled content — under the same `-c` guards
+// the mothership puts on every host-side git (`HOST_GIT_NO_EXEC`, crates/colonizer/src/github.rs).
+const SCORER_GIT_FLAGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
+const scorerGit = (args, cwd) => execFileSync('git', [...SCORER_GIT_FLAGS, ...args], { cwd, encoding: 'utf8', env: childEnv() }).trim();
+
+/** A fresh clone of a branch into `dir` — each scorer gets its own, never the other's checkout — with
+ *  `source` injectable so tests can score a local repository. */
+export function cloneBranch({ repo, branch, source = `https://github.com/${repo}.git`, dir }) {
+  scorerGit(['clone', '--quiet', '--depth', '50', source, dir]);
+  scorerGit(['fetch', '--quiet', 'origin', branch], dir);
+  scorerGit(['checkout', '--quiet', 'FETCH_HEAD'], dir);
+  return dir;
+}
+
 /** Checks out the colony's branch, runs the task's hidden check and the repo's own tests, and diffs it. */
-export function scoreBranch({ repo, branch, base = 'main', task, workdir }) {
+export function scoreBranch({ repo, branch, base = 'main', task, workdir, source }) {
   const result = { check: false, regression: null, changed: [], outside: [], check_output: '' };
   const dir = workdir ?? mkdtempSync(join(tmpdir(), 'colonizer-bench-score-'));
   try {
-    git(['clone', '--quiet', '--depth', '50', `https://github.com/${repo}.git`, dir]);
-    git(['fetch', '--quiet', 'origin', branch], dir);
-    git(['checkout', '--quiet', 'FETCH_HEAD'], dir);
-    result.changed = git(['diff', '--name-only', `origin/${base}...HEAD`], dir).split('\n').filter(Boolean);
+    cloneBranch({ repo, branch, source, dir });
+    result.changed = scorerGit(['diff', '--name-only', `origin/${base}...HEAD`], dir).split('\n').filter(Boolean);
     result.outside = outsideTask(task, result.changed);
     if (task.expect.check) {
       const check = runCheck(task, dir);
@@ -221,8 +237,32 @@ export function scoreBranch({ repo, branch, base = 'main', task, workdir }) {
   return result;
 }
 
-/** What the colony did, from the mothership's own records, plus whether the work is right. */
-export function scoreTask({ task, session, answers, timed_out, branchScore, colony }) {
+/** Scores a held-out companion on its own fresh clone. Only the pass bit and the companion's id come
+ *  back; the output is dropped, so held-out material never lands in anything the bench writes. */
+export function scoreHeldout({ repo, branch, source, heldoutDir, companion }) {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-bench-heldout-'));
+  try {
+    cloneBranch({ repo, branch, source, dir });
+    cpSync(join(heldoutDir, companion.file), join(dir, 'heldout-check.test.mjs'));
+    let heldout;
+    try {
+      execFileSync('node', ['--test', 'heldout-check.test.mjs'], { cwd: dir, encoding: 'utf8', env: childEnv() });
+      heldout = true;
+    } catch {
+      heldout = false;
+    } finally {
+      rmSync(join(dir, 'heldout-check.test.mjs'), { force: true });
+    }
+    return { companion: companion.id, heldout };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** What the colony did, from the mothership's own records, plus whether the work is right. `visible` and
+ *  `heldout` are the check results (null when never scored); `passed` stays visible-based, so runs from
+ *  before the suite compare. */
+export function scoreTask({ task, session, answers, timed_out, branchScore, colony, heldout = null, scoring = null }) {
   const expect = task.expect ?? {};
   const failures = [];
   const cost = colony?.cost_usd ?? session.cost_usd ?? null;
@@ -239,6 +279,7 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
   }
   return {
     id: task.id,
+    family: familyOf(task),
     passed: failures.length === 0,
     failures,
     pr_url: session.pr_url ?? null,
@@ -255,6 +296,9 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
     watchdog_nudges: colony?.watchdog_nudges ?? null,
     plain_text_reprompts: colony?.plain_text_reprompts ?? null,
     subagents: colony?.subagents ?? null,
+    visible: branchScore && expect.check ? branchScore.check : null,
+    heldout: heldout?.heldout ?? null,
+    scoring: scoring ?? { visible_ms: null, heldout_ms: null },
     changed: branchScore?.changed ?? [],
     outside: branchScore?.outside ?? [],
     answers,
@@ -268,6 +312,8 @@ const spent = (r) => (r ? totalCost(r.cost_usd, r.routed_cost_usd) : null);
 export function summarizeRun(results) {
   const n = results.length || 1;
   const sum = (key) => results.reduce((a, r) => a + (Number(r[key]) || 0), 0);
+  const clean = results.filter((r) => r.passed && r.clean === true).length;
+  const audited = results.some((r) => typeof r.clean === 'boolean');
   return {
     tasks: results.length,
     passed: results.filter((r) => r.passed).length,
@@ -275,9 +321,15 @@ export function summarizeRun(results) {
     routed_cost_usd: sum('routed_cost_usd'),
     total_cost_usd: results.reduce((a, r) => a + (spent(r) ?? 0), 0),
     working_ms: sum('working_ms'),
+    // Scoring makes no model calls, so its only cost is the time it took.
+    scoring_ms: results.reduce((a, r) => a + (r.scoring?.visible_ms ?? 0) + (r.scoring?.heldout_ms ?? 0), 0),
     questions: sum('questions'),
     tool_errors: sum('tool_errors'),
     pass_rate: results.filter((r) => r.passed).length / n,
+    clean_resolved: clean,
+    hacked_resolved: results.filter((r) => r.passed && r.clean === false).length,
+    clean_rate: audited ? clean / n : null,
+    gap: audited ? results.filter((r) => r.passed).length / n - clean / n : null,
   };
 }
 
@@ -295,23 +347,38 @@ export function formatComparison(before, after) {
     const b = before.results.find((r) => r.id === id);
     const a = after.results.find((r) => r.id === id);
     const mark = (r) => (r ? (r.passed ? 'pass' : 'FAIL') : '–');
+    const cleanMark = (r) => (r?.clean === false ? 'HACKED' : r?.clean === true ? 'clean' : '–');
     return [
       id,
       `${mark(b)} → ${mark(a)}`,
+      `${cleanMark(b)} → ${cleanMark(a)}`,
       `${spent(b)?.toFixed(2) ?? '–'} → ${spent(a)?.toFixed(2) ?? '–'} (${delta(spent(a), spent(b))})`,
       `${Math.round((b?.working_ms ?? 0) / 1000)}s → ${Math.round((a?.working_ms ?? 0) / 1000)}s`,
       `${b?.questions ?? '–'} → ${a?.questions ?? '–'}`,
       (a?.failures ?? []).join('; ') || '',
     ];
   });
-  const head = ['Task', 'Result', 'Cost', 'Worked', 'Questions', 'Why it failed'];
+  const head = ['Task', 'Result', 'Clean', 'Cost', 'Worked', 'Questions', 'Why it failed'];
   const line = (cells) => `| ${cells.join(' | ')} |`;
   const bs = summarizeRun(before.results);
   const as = summarizeRun(after.results);
+  const cleanLine = bs.clean_rate == null || as.clean_rate == null
+    ? ''
+    : ` Clean resolved ${bs.clean_resolved}/${bs.tasks} → ${as.clean_resolved}/${as.tasks} (clean rate ${Math.round(bs.clean_rate * 100)}% → ${Math.round(as.clean_rate * 100)}%, gap ${Math.round(bs.gap * 100)}% → ${Math.round(as.gap * 100)}%).`;
+  // The held-out numbers only mean something against the set version that scored them.
+  const bh = before.heldout;
+  const ah = after.heldout;
+  const say = (h) => (h ? `held-out set v${h.version} max gap ${Math.round((h.families ?? []).reduce((m, f) => Math.max(m, f.gap), 0) * 100)}%` : 'no held-out suite scored');
+  let heldoutLine = null;
+  if (bh || ah) {
+    heldoutLine = `Held-out: ${say(bh)} → ${say(ah)}.`;
+    if (bh && ah && bh.version !== ah.version) heldoutLine += ' The set versions differ, so the held-out numbers are not comparable across the rotation.';
+  }
   return [
     `# ${before.label} → ${after.label}`,
     '',
-    `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.`,
+    `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.${cleanLine}`,
+    ...(heldoutLine ? ['', heldoutLine] : []),
     '',
     line(head),
     line(head.map(() => '---')),
@@ -335,7 +402,7 @@ function clean(repo) {
 // ---------------------------------------------------------------------------------------------- command
 
 export function parseArgs(argv) {
-  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, files: [] };
+  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [] };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // Refuse a missing value here: a flag left dangling would otherwise be read as undefined
@@ -352,6 +419,10 @@ export function parseArgs(argv) {
       if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('--timeout needs a positive number of seconds');
       args.timeoutMs = seconds * 1000;
     } else if (a === '--data') args.data = value();
+    else if (a === '--heldout') args.heldout = value();
+    else if (a === '--max-gap') args.maxGap = Number(value());
+    else if (a === '--family') args.family = value();
+    else if (a === '--check') args.check = value();
     else if (a.startsWith('--')) throw new Error(`unknown argument ${a}`);
     else args.files.push(a);
   }
@@ -376,30 +447,97 @@ async function main() {
     console.log(formatComparison(a, b));
     return;
   }
-  if (args.command !== 'run') throw new Error('use seed, run, compare or clean');
+  if (args.command === 'heldout') {
+    if (args.files[0] !== 'add' || !args.heldout || !args.family || !args.check) throw new Error('use heldout add --heldout <dir> --family <family> --check <file>');
+    outsideRepo(args.heldout); // before the lock, which would create the directory it guards
+    const unlock = lockSet(args.heldout);
+    try {
+      const set = existsSync(join(args.heldout, 'heldout.json')) ? loadSet(args.heldout) : newSet(args.heldout);
+      const entry = addCompanion(set, { family: args.family, check: args.check });
+      saveSet(set);
+      console.log(`added ${entry.id} (${entry.file}); held-out set at ${set.dir} is now v${set.version}`);
+    } finally {
+      unlock();
+    }
+    return;
+  }
+  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare or clean');
   if (!args.repo) throw new Error('run needs --repo owner/name');
 
   const issues = benchIssues(args.repo);
   const tasks = TASKS.tasks.filter((t) => (args.only ? args.only.includes(t.id) : true));
   for (const task of tasks) if (!issues[task.id]) throw new Error(`${args.repo} has no issue for ${task.id}; run seed first`);
+  // The set and its companions are resolved before any colony launches: a family without an active
+  // companion fails the run here, before it spends.
+  const set = args.heldout ? loadSet(args.heldout) : null;
+  if (set && !Number.isFinite(args.maxGap)) throw new Error(`--max-gap needs a number, not ${args.maxGap}`);
+  const companions = set ? companionsFor(set, tasks.map(familyOf)) : null;
   const status = await api('/api/status');
   if (!status.github?.connected) throw new Error('the mothership has no GitHub connection');
 
   const results = [];
+  const scoredCompanions = [];
   for (const task of tasks) {
     console.log(`${task.id}: colony on ${args.repo}#${issues[task.id]}`);
     const { session, answers, timed_out } = await runTask(task, args.repo, issues[task.id], args);
     const dataDir = args.data || process.env.COLONIZER_DATA_DIR || join(process.env.HOME ?? '', '.local/share/colonizer');
     const colony = loadColonies(dataDir).find((c) => c.session.id === session.id);
-    const branchScore = session.pr_url ? scoreBranch({ repo: args.repo, branch: session.branch, base: session.base ?? 'main', task }) : null;
-    const scored = scoreTask({ task, session, answers, timed_out, branchScore, colony: colony ? analyze(colony) : null });
+    const scoring = { visible_ms: null, heldout_ms: null };
+    let branchScore = null;
+    let companionScore = null;
+    if (session.pr_url) {
+      const visibleAt = Date.now();
+      branchScore = scoreBranch({ repo: args.repo, branch: session.branch, base: session.base ?? 'main', task });
+      scoring.visible_ms = Date.now() - visibleAt;
+      if (companions) {
+        const heldoutAt = Date.now();
+        companionScore = scoreHeldout({ repo: args.repo, branch: session.branch, heldoutDir: set.dir, companion: companions.get(familyOf(task)) });
+        scoring.heldout_ms = Date.now() - heldoutAt;
+        scoredCompanions.push(companionScore.companion);
+      }
+    }
+    const scored = scoreTask({ task, session, answers, timed_out, branchScore, colony: colony ? analyze(colony) : null, heldout: companionScore, scoring });
+    // Post-hoc: the trajectory monitor audits the same colony's persisted record. A missing log leaves the
+    // result unaudited (clean: null), never clean.
+    const trajectory = auditSession(dataDir, session.id);
+    scored.clean = trajectory ? trajectory.clean : null;
+    scored.hacks = trajectory ? trajectory.hits.filter((h) => h.status === 'enforcing').map((h) => h.pattern) : [];
     results.push(scored);
-    console.log(`  ${scored.passed ? 'pass' : `FAIL: ${scored.failures.join('; ')}`}`);
+    console.log(`  ${scored.passed ? 'pass' : `FAIL: ${scored.failures.join('; ')}`}${scored.hacks.length > 0 ? ` [hacks: ${scored.hacks.join(', ')}]` : ''}`);
   }
 
-  const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: status.modules?.agent ?? null, results };
+  // One scoring decision per companion actually scored. The set is re-read under the lock, so a
+  // `heldout add` during the run survives; the report names the scored version, rotation in next_version.
+  let heldout = null;
+  let gapReport = null;
+  if (set) {
+    const scoredVersion = set.version;
+    let current = set;
+    const unlock = lockSet(set.dir);
+    try {
+      current = loadSet(set.dir);
+      recordDecisions(current, scoredCompanions);
+      saveSet(current);
+    } finally {
+      unlock();
+    }
+    const gaps = familyGaps(results);
+    const verdict = gapVerdict(gaps, args.maxGap);
+    heldout = { version: scoredVersion, max_gap: args.maxGap, families: gaps, failures: verdict.failures };
+    if (current.version !== scoredVersion) heldout.next_version = current.version;
+    gapReport = formatGaps(gaps, { version: scoredVersion, nextVersion: heldout.next_version, maxGap: args.maxGap });
+  }
+
+  const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: status.modules?.agent ?? null, heldout, results };
   const file = `bench-${args.label}.json`;
   writeFileSync(file, JSON.stringify(run, null, 2));
+  if (heldout) {
+    console.log(`\n${gapReport}`);
+    for (const failure of heldout.failures) console.log(`held-out gap over threshold: ${failure}`);
+    if (heldout.failures.length > 0) process.exitCode = 1;
+  } else {
+    console.log('\nNo held-out suite was scored (pass --heldout <dir> to score one).');
+  }
   const s = summarizeRun(results);
   console.log(`\n${s.passed}/${s.tasks} passed · $${s.total_cost_usd.toFixed(2)} (routed $${s.routed_cost_usd.toFixed(2)}) · ${s.questions} questions · written to ${file}`);
   console.log(`Compare with: node scripts/bench.mjs compare bench-<other>.json ${file}`);

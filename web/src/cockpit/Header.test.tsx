@@ -82,10 +82,15 @@ describe("Header running workspaces", () => {
     expect(runningOrgs([live("a", 0), live("b", 2)], "A").map((o) => o.org)).toEqual(["b", "a"]);
   });
 
-  it("marks the filter and names what runs and what waits", () => {
+  it("shows no workspace avatars — the sidebar's switcher owns the scope — only the user's own", () => {
     const html = header({ orgs: [live("Acme", 2), live("octo", 1)], selectedOrg: "acme", needByOrg: { acme: 1 } });
-    expect(html).toContain('aria-label="Acme · 2 running · 1 need you · filtered, click to show all" aria-pressed="true"');
-    expect(html).toContain('aria-label="octo · 1 running" aria-pressed="false"');
+    expect(html).not.toContain("running workspaces");
+    expect(html).not.toContain("Acme · 2 running");
+    const withUser = renderToStaticMarkup(
+      <Header orgs={[]} selectedOrg={null} onSelectOrg={() => {}} needByOrg={{}} statusError={false}
+        user={{ login: "octocat", name: "Mona", avatarUrl: null, onOpenSettings: () => {}, onOpenSecrets: () => {} }} />,
+    );
+    expect(withUser).toContain('aria-label="account · Mona (@octocat)"');
   });
 
   it("carries no crumb, ticker, counts or spend — only trouble speaks up", () => {

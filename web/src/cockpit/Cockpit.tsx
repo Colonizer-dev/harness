@@ -4,7 +4,7 @@
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
 import { CodeView } from "./CodeView";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
@@ -25,7 +25,6 @@ import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
-import { ChatView } from "./ChatView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
@@ -34,6 +33,9 @@ import { OverviewView } from "./OverviewView";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
+
+// The Chat view (and its highlighter, which it loads later still) stays out of the main bundle.
+const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
 
 const VIEW_KEY = "colonizer.cockpitView";
 
@@ -140,6 +142,8 @@ export function Cockpit({
   const [view, setView] = useState<CockpitView>(storedView);
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
+  // A file the Chat view asked the Code page to open.
+  const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -393,6 +397,7 @@ export function Cockpit({
             onSelectOrg={onSelectOrg}
             onCreated={onCreated}
             onOpenColony={openColonyById}
+            openRequest={codeRequest}
           />
         );
       case "loops":
@@ -401,18 +406,27 @@ export function Cockpit({
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "chat":
         return (
-          <ChatView
-            org={selectedOrg}
-            repos={repos}
-            sessions={sessions}
-            autopilotDefault={autopilotDefault}
-            initialPrompt={askPrompt}
-            onPromptTaken={() => setAskPrompt(null)}
-            onCreated={(session) => {
-              onCreated(session);
-              setView("home");
-            }}
-          />
+          <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
+            <ChatView
+              org={selectedOrg}
+              repos={repos}
+              sessions={sessions}
+              autopilotDefault={autopilotDefault}
+              initialPrompt={askPrompt}
+              onPromptTaken={() => setAskPrompt(null)}
+              onCreated={(session) => {
+                onCreated(session);
+                setView("home");
+              }}
+              workspaces={workspaces}
+              onOpenFile={(repo, path) => {
+                const owner = repo.split("/")[0];
+                if (!sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+                setCodeRequest((r) => ({ repo, path, n: (r?.n ?? 0) + 1 }));
+                setView("code");
+              }}
+            />
+          </Suspense>
         );
       case "host":
         return (
@@ -495,6 +509,13 @@ export function Cockpit({
         needByOrg={needByOrg}
         statusError={statusError}
         connection={liveConnection}
+        user={{
+          login: status?.github.connected ? (status.github.login ?? null) : null,
+          name: status?.github.name ?? null,
+          avatarUrl: status?.github.avatar_url ?? null,
+          onOpenSettings: () => onOpenSettings(),
+          onOpenSecrets: () => navigate("secrets"),
+        }}
         inbox={{
           sessions,
           onOpenColony: openColonyById,

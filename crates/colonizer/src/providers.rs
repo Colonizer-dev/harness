@@ -231,7 +231,49 @@ impl App {
     }
 
     pub fn providers(&self) -> Vec<Provider> {
-        self.read_config_loud(&self.providers_file(), "model providers")
+        let providers: Vec<Provider> = self.read_config_loud(&self.providers_file(), "model providers");
+        self.warn_duplicate_ids(&providers);
+        providers
+    }
+
+    /// A hand-edited file can list one id twice: the first entry wins and any later one is ignored,
+    /// so the loser is named rather than silently shadowed (#326). This reader runs per request, so
+    /// the warning goes through the `config_damage` record [`App::read_config_loud`] dedups on
+    /// instead of the log — which is also why the message names no file: the strict read clears
+    /// that record by file name, and a record it kept clearing would be re-raised (and re-printed)
+    /// every request. The slot is shared with the strict read's file-damage alerts, and a file that
+    /// will not read at all is the more urgent fault: a warning only ever takes an empty slot or one
+    /// already holding a warning of its own, and a read that comes back without the duplicate drops
+    /// it here.
+    fn warn_duplicate_ids(&self, providers: &[Provider]) {
+        let dups = duplicate_provider_ids(providers);
+        let mut damage = self.config_damage.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if dups.is_empty() {
+            if damage.as_ref().is_some_and(|a| a.message.starts_with(DUPLICATE_IDS_WARNING)) {
+                *damage = None;
+            }
+            return;
+        }
+        let message = format!(
+            "{} {} — the first entry wins and any later one is ignored",
+            DUPLICATE_IDS_WARNING,
+            dups.join(", ")
+        );
+        match damage.as_ref() {
+            Some(a) if a.message == message => return,
+            // Not ours: a file-damage alert holds the slot and takes precedence until its own
+            // reader clears it, so this warning stays log-less rather than hiding it.
+            Some(a) if !a.message.starts_with(DUPLICATE_IDS_WARNING) => return,
+            _ => {}
+        }
+        eprintln!("providers: {message}");
+        *damage = Some(crate::StorageAlert {
+            kind: crate::StorageAlertKind::LoadDamage,
+            message,
+            ts: chrono::Utc::now(),
+            failures: 1,
+            recovered_at: None,
+        });
     }
 
     async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
@@ -249,6 +291,27 @@ fn valid_id(id: &str) -> bool {
         && id.len() <= 32
         && id != "anthropic"
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// What a duplicate-ids warning starts with, so the load only ever clears or replaces its own
+/// damage record and never the strict read's file-damage alerts.
+const DUPLICATE_IDS_WARNING: &str = "these providers are listed more than once:";
+
+/// The ids `providers` lists more than once, in first-appearance order: the load keeps the first
+/// entry of each, the PUT refuses to save over the shadow, and both name them (#326).
+fn duplicate_provider_ids(providers: &[Provider]) -> Vec<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut dups: Vec<String> = Vec::new();
+    for provider in providers {
+        if seen.iter().any(|id| *id == provider.id) {
+            if !dups.iter().any(|id| id == &provider.id) {
+                dups.push(provider.id.clone());
+            }
+        } else {
+            seen.push(&provider.id);
+        }
+    }
+    dups
 }
 
 fn valid_model(model: &str) -> bool {
@@ -677,6 +740,14 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     let _config = app.config_write.lock().await;
     let mut providers: Vec<Provider> =
         crate::util::read_json_or_default(&app.providers_file()).map_err(|e| config_unreadable(&app.providers_file(), &e))?;
+    // A hand-edited file can list this id twice: the first-match update below would refresh the
+    // first entry and leave the stale shadow in place, so the save is refused naming the id
+    // instead (#326). Deleting the provider removes every entry with the id, which is the way out.
+    if duplicate_provider_ids(&providers).iter().any(|dup| dup == &id) {
+        return Err(bad(&format!(
+            "provider \"{id}\" is listed more than once in providers.json; delete it and add it again (or remove the duplicate by hand), then save"
+        )));
+    }
     match req.api_key.as_deref().map(str::trim) {
         Some("") => {
             delete_secret(&app.provider_key_file(&id));
@@ -1181,6 +1252,109 @@ mod tests {
         assert_eq!(err.status(), StatusCode::CONFLICT);
         assert!(err.message().contains("refusing to overwrite it"), "{}", err.message());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "nonsense");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- duplicated ids in a hand-edited providers.json (#326) --------------------------------------
+
+    /// Two entries answering to one id, as a hand edit leaves them.
+    fn duplicated_file(app: &crate::Shared) -> PathBuf {
+        let path = app.cfg.config_dir.join("providers.json");
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"[
+                {"id": "dupped", "name": "First", "base_url": "https://api.example.com", "auth": "none"},
+                {"id": "dupped", "name": "Second", "base_url": "https://api.example.com", "auth": "none"}
+            ]"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn duplicate_ids_are_found_in_first_appearance_order() {
+        let dups = duplicate_provider_ids(&[provider("a"), provider("b"), provider("a"), provider("b"), provider("a")]);
+        assert_eq!(dups, ["a", "b"]);
+        assert!(duplicate_provider_ids(&[provider("a"), provider("b")]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_duplicated_load_keeps_the_first_entry_and_names_the_loser() {
+        let (app, root) = providers_app();
+        duplicated_file(&app);
+
+        let providers = app.providers();
+        assert_eq!(providers.len(), 2, "the list is not deduped; consumers take the first match");
+        assert_eq!(providers[0].name, "First");
+        let alert = app.config_damage.lock().unwrap().clone().unwrap();
+        assert_eq!(alert.kind, crate::StorageAlertKind::LoadDamage);
+        assert!(
+            alert
+                .message
+                .starts_with("these providers are listed more than once: dupped — ")
+                && alert.message.contains("the first entry wins"),
+            "{}",
+            alert.message
+        );
+
+        // Fixing the file clears the warning instead of leaving it stuck on.
+        std::fs::write(app.cfg.config_dir.join("providers.json"), "[]").unwrap();
+        app.providers();
+        assert!(
+            app.config_damage.lock().unwrap().is_none(),
+            "the fixed file clears the damage"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_put_over_a_duplicated_id_is_refused_naming_it() {
+        let (app, root) = providers_app();
+        let path = duplicated_file(&app);
+
+        let err = put(State(app.clone()), Path("dupped".into()), Json(put_req("Second")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("\"dupped\"") && err.message().contains("more than once"),
+            "{}",
+            err.message()
+        );
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("First"),
+            "the file is not touched by the refused save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_warning_never_displaces_a_file_damage_alert() {
+        let (app, root) = providers_app();
+        // What a failed orgs.json read leaves in the slot the two readers share.
+        *app.config_damage.lock().unwrap() = Some(crate::StorageAlert {
+            kind: crate::StorageAlertKind::LoadDamage,
+            message: "/config/orgs.json could not be read (…); defaults are in effect for org settings".into(),
+            ts: chrono::Utc::now(),
+            failures: 1,
+            recovered_at: None,
+        });
+        duplicated_file(&app);
+
+        app.providers();
+        let held = app.config_damage.lock().unwrap().clone().unwrap();
+        assert!(
+            held.message.starts_with("/config/orgs.json"),
+            "the file-damage alert takes precedence: {}",
+            held.message
+        );
+
+        // …and once the file damage is gone, the warning takes the vacated slot.
+        *app.config_damage.lock().unwrap() = None;
+        app.providers();
+        let held = app.config_damage.lock().unwrap().clone().unwrap();
+        assert!(held.message.starts_with(DUPLICATE_IDS_WARNING), "{}", held.message);
         let _ = std::fs::remove_dir_all(root);
     }
 }

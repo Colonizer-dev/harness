@@ -1,6 +1,6 @@
 // The Overview colonies table's header row, where each column title is also that column's filter:
 // Colony — a search box; Org — a menu of workspaces with their logos; Status — a multi-select of the
-// overview's buckets with counts; Updated — any / 1h / 24h / 7d; Spent — any / >$1 / >$5. A column
+// overview's buckets (plus failed) with counts; Updated — any / 1h / 24h / 7d; Spent — any / >$1 / >$5. A column
 // with a filter set carries an accent dot, and "clear filters" resets them all.
 import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { orgOf, sameOrg } from "../components/ui";
@@ -13,10 +13,18 @@ import { OVERVIEW_FILTERS, matchesOverviewFilter, type OverviewFilter } from "./
 export type UpdatedWithin = "any" | "1h" | "24h" | "7d";
 export type SpentOver = "any" | "1" | "5";
 
+/** The status menu's buckets: the overview's four plus failed, which the counters leave out. */
+export type ColonyBucket = OverviewFilter | "failed";
+export const COLONY_BUCKETS: readonly ColonyBucket[] = [...OVERVIEW_FILTERS, "failed"];
+
+function inBucket(s: Session, b: ColonyBucket): boolean {
+  return b === "failed" ? s.status === "failed" : matchesOverviewFilter(s, b);
+}
+
 export interface ColonyFilters {
   query: string;
   org: string | null;
-  statuses: ReadonlySet<OverviewFilter>;
+  statuses: ReadonlySet<ColonyBucket>;
   updated: UpdatedWithin;
   spent: SpentOver;
 }
@@ -30,23 +38,45 @@ export function filtersActive(f: ColonyFilters): boolean {
   return f.query.trim() !== "" || f.org !== null || f.statuses.size > 0 || f.updated !== "any" || f.spent !== "any";
 }
 
-/** The colonies that pass every filter. A status set matches a colony in any of its buckets. Pure. */
-export function applyColonyFilters(sessions: readonly Session[], f: ColonyFilters, nowMs: number): Session[] {
+/** Whether one colony passes every filter. A status set matches a colony in any of its buckets. Pure. */
+export function colonyMatches(s: Session, f: ColonyFilters, nowMs: number): boolean {
   const q = f.query.trim().toLowerCase();
-  return sessions.filter((s) => {
-    if (f.org !== null && !sameOrg(orgOf(s), f.org)) return false;
-    if (f.statuses.size > 0 && ![...f.statuses].some((b) => matchesOverviewFilter(s, b))) return false;
-    if (f.updated !== "any") {
-      const at = Date.parse(s.last_activity_at ?? s.updated_at);
-      if (!Number.isFinite(at) || nowMs - at > WITHIN_MS[f.updated]) return false;
-    }
-    if (f.spent !== "any" && (sessionCost(s) ?? 0) <= Number(f.spent)) return false;
-    if (q) {
-      const hay = [taskLine(s, ""), s.issue_title, s.repo, s.issue != null ? `#${s.issue}` : ""].join(" ").toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
+  if (f.org !== null && !sameOrg(orgOf(s), f.org)) return false;
+  if (f.statuses.size > 0 && ![...f.statuses].some((b) => inBucket(s, b))) return false;
+  if (f.updated !== "any") {
+    const at = Date.parse(s.last_activity_at ?? s.updated_at);
+    if (!Number.isFinite(at) || nowMs - at > WITHIN_MS[f.updated]) return false;
+  }
+  if (f.spent !== "any" && (sessionCost(s) ?? 0) <= Number(f.spent)) return false;
+  if (q) {
+    const hay = [taskLine(s, ""), s.issue_title, s.repo, s.issue != null ? `#${s.issue}` : ""].join(" ").toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+/** The colonies that pass every filter. Pure. */
+export function applyColonyFilters(sessions: readonly Session[], f: ColonyFilters, nowMs: number): Session[] {
+  return sessions.filter((s) => colonyMatches(s, f, nowMs));
+}
+
+/** A workspace dashboard's colony list filters: one status, one repository, one agent ("all" for any). */
+export interface ColonyListFilters {
+  status: string;
+  repo: string;
+  agent: string;
+}
+
+export const COLONY_LIST_ALL: ColonyListFilters = { status: "all", repo: "all", agent: "all" };
+
+/** Whether a colony passes a colony list's search (`q` trimmed and lower-cased: task, issue title,
+ *  repository, #issue) and its filters. Pure. */
+export function colonyListMatches(s: Session, q: string, f: ColonyListFilters): boolean {
+  if (f.status !== "all" && s.status !== f.status) return false;
+  if (f.repo !== "all" && !sameOrg(s.repo, f.repo)) return false;
+  if (f.agent !== "all" && s.agent !== f.agent) return false;
+  if (!q) return true;
+  return [taskLine(s, ""), s.issue_title, s.repo, s.issue != null ? `#${s.issue}` : ""].join(" ").toLowerCase().includes(q);
 }
 
 /** A header cell that opens a small menu below it. */
@@ -167,7 +197,7 @@ export function ColonyFilterHeader({
       >
         {() => (
           <>
-            {OVERVIEW_FILTERS.map((b) => {
+            {COLONY_BUCKETS.map((b) => {
               const on = filters.statuses.has(b);
               return (
                 <Option
@@ -183,7 +213,7 @@ export function ColonyFilterHeader({
                   <span className={`flex-1 ${b === "need you" || (b === "queued" && stalledQueue) ? "text-warn" : ""}`}>
                     {b === "queued" && stalledQueue ? "queued · stalled" : b}
                   </span>
-                  <span className="tabular-nums text-faint">{counts[b]}</span>
+                  <span className="tabular-nums text-faint">{b === "failed" ? sessions.filter((x) => x.status === "failed").length : counts[b]}</span>
                 </Option>
               );
             })}

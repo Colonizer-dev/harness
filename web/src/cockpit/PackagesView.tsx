@@ -2,12 +2,18 @@
 // depend on (from their lockfiles), and the supply-chain risks in those dependencies. Everything is
 // read by the mothership from its own clones and the public registries (see crates/colonizer/src/
 // deps.rs); the first scan of a workspace runs in the background, so a view that answers
-// "scanning" asks again every few seconds until it lands.
+// "scanning" asks again every few seconds until it lands. After that the mothership answers from
+// its cache (kept on disk across restarts), so the view shows the last answer with "updated 5m ago
+// · refreshing" while a refresh runs behind it, and a Refresh button asks for one.
 import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { FilterSelect, Pagination, SearchBox, optionsBy } from "./ListControls";
+import { matchesQuery, usePagedFilter } from "./paging";
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, timeAgo } from "../components/ui";
 import type {
+  CacheInfo,
   Dependency,
+  PublishedPackage,
   Ecosystem,
   PackagesDependencies,
   PackagesPublished,
@@ -23,8 +29,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "dependencies", label: "Dependencies" },
   { id: "supply", label: "Supply chain" },
 ];
-/** Rows shown before "Show more". */
-const PAGE = 150;
+/** A repository's short name: the part after the owner. */
+const repoName = (repo: string): string => repo.split("/")[1] ?? repo;
 
 const ECO: Record<Ecosystem | "github", { label: string; short: string; color: string }> = {
   npm: { label: "npm", short: "npm", color: "#cb3837" },
@@ -61,43 +67,50 @@ function isPending(v: unknown): v is ScanPending {
   return typeof v === "object" && v !== null && (v as ScanPending).status === "scanning";
 }
 
-/** Fetch, and while the mothership answers "scanning", ask again every five seconds. */
-function useScan<T>(fetcher: () => Promise<T | ScanPending>, key: string): { data: T | null; pending: string | null; error: string | null } {
+type ScanState<T> = { data: T | null; pending: string | null; error: string | null; refresh: () => void };
+
+/** Fetch, and while the mothership answers "scanning" or is refreshing the answer it gave, ask
+ *  again every five seconds. `refresh()` asks the mothership to recompute (the last answer stays
+ *  on screen meanwhile). */
+function useScan<T extends CacheInfo>(fetcher: (refresh: boolean) => Promise<T | ScanPending>, key: string): ScanState<T> {
   const [state, setState] = useState<{ key: string; data: T | null; pending: string | null; error: string | null }>({ key, data: null, pending: null, error: null });
+  const [asked, setAsked] = useState(0);
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = () => {
-      fetcher().then(
+    const load = (refresh: boolean) => {
+      fetcher(refresh).then(
         (v) => {
           if (!alive) return;
           if (isPending(v)) {
-            setState({ key, data: null, pending: v.message, error: null });
-            timer = setTimeout(load, 5000);
+            setState((s) => ({ key, data: s.key === key ? s.data : null, pending: v.message, error: null }));
+            timer = setTimeout(() => load(false), 5000);
           } else {
             setState({ key, data: v, pending: null, error: null });
+            if (v.refreshing || refresh) timer = setTimeout(() => load(false), 5000);
           }
         },
-        (e) => alive && setState({ key, data: null, pending: null, error: errorMessage(e) }),
+        (e) => alive && setState((s) => ({ key, data: s.key === key ? s.data : null, pending: null, error: s.key === key && s.data ? null : errorMessage(e) })),
       );
     };
-    load();
+    load(asked > 0);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
     };
     // The fetcher changes identity every render; the key names what it fetches.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-  return state.key === key ? state : { data: null, pending: null, error: null };
+  }, [key, asked]);
+  const refresh = () => setAsked((n) => n + 1);
+  return state.key === key ? { ...state, refresh } : { data: null, pending: null, error: null, refresh };
 }
 
 export function PackagesView({ org, onOpenColony }: { org: string; onOpenColony?: (id: string) => void }): ReactElement {
   const api = useApi();
   const [tab, setTab] = useState<Tab>("published");
-  const published = useScan<PackagesPublished>(() => api.orgPublished(org), `published:${org}`);
-  const deps = useScan<PackagesDependencies>(() => api.orgDependencies(org), `deps:${org}`);
-  const supply = useScan<SupplyChain>(() => api.orgSupplyChain(org), `supply:${org}`);
+  const published = useScan<PackagesPublished>((refresh) => api.orgPublished(org, refresh), `published:${org}`);
+  const deps = useScan<PackagesDependencies>((refresh) => api.orgDependencies(org, refresh), `deps:${org}`);
+  const supply = useScan<SupplyChain>((refresh) => api.orgSupplyChain(org, refresh), `supply:${org}`);
   const riskCount = supply.data ? supply.data.risks.length : null;
   const counts: Record<Tab, number | null> = {
     published: published.data ? published.data.packages.length : null,
@@ -136,14 +149,45 @@ export function PackagesView({ org, onOpenColony }: { org: string; onOpenColony?
   );
 }
 
-function Loaded<T>({ state, children }: { state: { data: T | null; pending: string | null; error: string | null }; children: (d: T) => ReactNode }): ReactElement {
+function Loaded<T extends CacheInfo>({ state, children }: { state: ScanState<T>; children: (d: T) => ReactNode }): ReactElement {
   if (state.error) return <p className="py-3 text-[13px] text-err">{state.error}</p>;
-  if (state.data) return <>{children(state.data)}</>;
+  if (state.data)
+    return (
+      <>
+        <Freshness data={state.data} onRefresh={state.refresh} />
+        {children(state.data)}
+      </>
+    );
   return (
     <p className="flex items-center gap-2 py-3 text-[13px] text-muted">
       <span aria-hidden="true" className="size-2 animate-pulse rounded-full bg-accent" />
       {state.pending ?? "Loading…"}
     </p>
+  );
+}
+
+/** "Updated 5m ago · refreshing", and the panel's Refresh button. */
+export function Freshness({ data, onRefresh }: { data: CacheInfo & { scanned_at?: string }; onRefresh: () => void }): ReactElement {
+  const at = data.cached_at ?? data.scanned_at;
+  return (
+    <div className="mb-2 flex items-center gap-2 text-[12px] text-faint">
+      {at && <span>updated {timeAgo(at)}</span>}
+      {data.refreshing && (
+        <span className="flex items-center gap-1.5 text-muted">
+          {at && <span aria-hidden="true">·</span>}
+          <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-accent" />
+          refreshing
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={data.refreshing}
+        className="ml-auto cursor-pointer rounded-md border border-border bg-transparent px-2 py-0.5 text-[12px] text-muted hover:text-text disabled:cursor-default disabled:opacity-50"
+      >
+        Refresh
+      </button>
+    </div>
   );
 }
 
@@ -166,13 +210,46 @@ function RepoNotes({ repos }: { repos: { repo: string; error?: string; skipped?:
 
 // --- Published ----------------------------------------------------------------------------------
 
+export interface PublishedFilters {
+  status: PublishedPackage["status"] | "all";
+  eco: Ecosystem | "all";
+  repo: string;
+  unreleased: boolean;
+}
+
+const PUBLISHED_ALL: PublishedFilters = { status: "all", eco: "all", repo: "all", unreleased: false };
+
+/** Whether a published-tab row passes the search (name, repository and path) and the filters. */
+export function publishedMatches(p: PublishedPackage, q: string, f: PublishedFilters): boolean {
+  return (
+    (f.status === "all" || p.status === f.status) &&
+    (f.eco === "all" || p.ecosystem === f.eco) &&
+    (f.repo === "all" || p.repo === f.repo) &&
+    (!f.unreleased || p.unreleased_changes) &&
+    matchesQuery(q, p.name, p.repo, `${repoName(p.repo)}/${p.path}`)
+  );
+}
+
 function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
   const gh = data.github_packages.packages;
+  const list = usePagedFilter(data.packages, { filters: PUBLISHED_ALL, match: publishedMatches });
+  const f = list.filters;
   return (
     <div>
       {data.packages.length === 0 ? (
         <p className="py-3 text-[13px] text-faint">No package manifests found in this workspace's repositories.</p>
       ) : (
+        <>
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+          <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search packages or paths…" label="search published packages" />
+          <FilterSelect label="status" allLabel="Any status" value={f.status} onChange={(v) => list.setFilters({ status: v as PublishedFilters["status"] })} options={optionsBy(data.packages, (p) => p.status)} />
+          <FilterSelect label="ecosystem" allLabel="All ecosystems" value={f.eco} onChange={(v) => list.setFilters({ eco: v as PublishedFilters["eco"] })} options={optionsBy(data.packages, (p) => p.ecosystem, (e) => ECO[e as Ecosystem]?.label ?? e)} />
+          <FilterSelect label="repository" allLabel="All repositories" value={f.repo} onChange={(v) => list.setFilters({ repo: v })} options={optionsBy(data.packages, (p) => p.repo, repoName)} />
+          <Check label="Unreleased changes" checked={f.unreleased} onChange={(v) => list.setFilters({ unreleased: v })} />
+        </div>
+        {list.total === 0 ? (
+          <p className="border-y border-border py-3 text-[13px] text-faint">Nothing matches this search and these filters.</p>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[720px] border-collapse text-[13px]">
             <thead>
@@ -186,7 +263,7 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
               </tr>
             </thead>
             <tbody>
-              {data.packages.map((p) => (
+              {list.rows.map((p) => (
                 <tr key={`${p.ecosystem}:${p.name}:${p.repo}:${p.path}`} className="border-b border-border/60">
                   <td className="py-2 pr-3">
                     <span className="flex items-center gap-2">
@@ -223,6 +300,9 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
             </tbody>
           </table>
         </div>
+        )}
+        <Pagination view={list} onPage={list.setPage} noun="packages" />
+        </>
       )}
       <h3 className="mb-1.5 mt-5 flex items-center gap-2 text-[13px] font-medium text-text">
         <EcoIcon eco="github" size={16} /> GitHub Packages
@@ -262,36 +342,49 @@ function StatusBadge({ status }: { status: "published" | "unpublished" | "privat
 
 // --- Dependencies -------------------------------------------------------------------------------
 
-export function filterDependencies(
-  list: Dependency[],
-  f: { eco: Ecosystem | "all"; directOnly: boolean; outdated: boolean; vulnerable: boolean; q: string },
-): Dependency[] {
-  const q = f.q.trim().toLowerCase();
-  return list.filter(
-    (d) =>
-      (f.eco === "all" || d.ecosystem === f.eco) &&
-      (!f.directOnly || d.direct === true) &&
-      (!f.outdated || d.outdated) &&
-      (!f.vulnerable || d.vulnerable) &&
-      (!q || d.name.toLowerCase().includes(q)),
+export interface DependencyFilters {
+  eco: Ecosystem | "all";
+  directOnly: boolean;
+  outdated: boolean;
+  vulnerable: boolean;
+  /** A repository's full name, or "all". */
+  repo?: string;
+}
+
+const DEPS_ALL: DependencyFilters = { eco: "all", directOnly: false, outdated: false, vulnerable: false, repo: "all" };
+
+/** The repositories a dependency is used in. */
+const depRepos = (d: Dependency): string[] => d.versions.flatMap((v) => v.users.map((u) => u.repo));
+
+/** Whether a dependency passes the search (`q` trimmed and lower-cased: name, repository) and the filters. */
+export function dependencyMatches(d: Dependency, q: string, f: DependencyFilters): boolean {
+  return (
+    (f.eco === "all" || d.ecosystem === f.eco) &&
+    (!f.directOnly || d.direct === true) &&
+    (!f.outdated || d.outdated) &&
+    (!f.vulnerable || d.vulnerable) &&
+    (!f.repo || f.repo === "all" || depRepos(d).includes(f.repo)) &&
+    matchesQuery(q, d.name, ...d.versions.flatMap((v) => v.users.map((u) => `${repoName(u.repo)}/${u.path}`)))
   );
 }
 
+export function filterDependencies(list: Dependency[], f: DependencyFilters & { q: string }): Dependency[] {
+  const q = f.q.trim().toLowerCase();
+  return list.filter((d) => dependencyMatches(d, q, f));
+}
+
 function DependencyList({ data }: { data: PackagesDependencies }): ReactElement {
-  const [eco, setEco] = useState<Ecosystem | "all">("all");
-  const [directOnly, setDirectOnly] = useState(false);
-  const [outdated, setOutdated] = useState(false);
-  const [vulnerable, setVulnerable] = useState(false);
-  const [q, setQ] = useState("");
-  const [shown, setShown] = useState(PAGE);
   const [open, setOpen] = useState<string | null>(null);
-  const rows = useMemo(
+  const sorted = useMemo(
     () =>
-      filterDependencies(data.packages, { eco, directOnly, outdated, vulnerable, q }).sort(
+      [...data.packages].sort(
         (a, b) => Number(b.vulnerable) - Number(a.vulnerable) || Number(b.direct === true) - Number(a.direct === true) || a.name.localeCompare(b.name),
       ),
-    [data.packages, eco, directOnly, outdated, vulnerable, q],
+    [data.packages],
   );
+  const list = usePagedFilter(sorted, { filters: DEPS_ALL, match: dependencyMatches });
+  const { eco, directOnly, outdated, vulnerable } = list.filters;
+  const setEco = (v: Ecosystem | "all") => list.setFilters({ eco: v });
   return (
     <div>
       <div className="mb-3 flex flex-wrap gap-2">
@@ -317,20 +410,15 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
         </span>
       </div>
       <div className="mb-2 flex flex-wrap items-center gap-3 text-[12.5px] text-muted">
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search packages…"
-          aria-label="search dependencies"
-          className="w-56 rounded-md border border-border bg-transparent px-2 py-1 text-[12.5px] text-text outline-none placeholder:text-faint focus:border-border-strong"
-        />
-        <Check label="Direct only" checked={directOnly} onChange={setDirectOnly} />
-        <Check label="Outdated" checked={outdated} onChange={setOutdated} />
-        <Check label="Vulnerable" checked={vulnerable} onChange={setVulnerable} />
-        <span className="ml-auto tabular-nums text-faint">{rows.length} shown</span>
+        <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search packages or paths…" label="search dependencies" />
+        <FilterSelect label="repository" allLabel="All repositories" value={list.filters.repo ?? "all"} onChange={(v) => list.setFilters({ repo: v })} options={optionsBy(data.packages, depRepos, repoName)} />
+        <Check label="Direct only" checked={directOnly} onChange={(v) => list.setFilters({ directOnly: v })} />
+        <Check label="Outdated" checked={outdated} onChange={(v) => list.setFilters({ outdated: v })} />
+        <Check label="Vulnerable" checked={vulnerable} onChange={(v) => list.setFilters({ vulnerable: v })} />
       </div>
-      <ul className="m-0 list-none divide-y divide-border/60 border-y border-border p-0">
-        {rows.slice(0, shown).map((d) => {
+      {list.total === 0 && <p className="border-y border-border py-3 text-[13px] text-faint">Nothing matches this search and these filters.</p>}
+      <ul className="m-0 list-none divide-y divide-border/60 border-y border-border p-0 empty:hidden">
+        {list.rows.map((d) => {
           const key = `${d.ecosystem}:${d.name}`;
           const isOpen = open === key;
           return (
@@ -381,11 +469,7 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
           );
         })}
       </ul>
-      {rows.length > shown && (
-        <button type="button" onClick={() => setShown((n) => n + PAGE)} className="mt-2 cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-accent hover:underline">
-          Show {Math.min(PAGE, rows.length - shown)} more
-        </button>
-      )}
+      <Pagination view={list} onPage={list.setPage} noun="packages" />
       <RepoNotes repos={data.repos} />
     </div>
   );
@@ -402,8 +486,32 @@ function Check({ label, checked, onChange }: { label: string; checked: boolean; 
 
 // --- Supply chain -------------------------------------------------------------------------------
 
-export function filterRisks(list: SupplyRisk[], f: { severity: RiskSeverity | "all"; fixable: boolean; kind: string }): SupplyRisk[] {
-  return list.filter((r) => (f.severity === "all" || r.severity === f.severity) && (!f.fixable || r.fix.available) && (f.kind === "all" || r.kind === f.kind));
+export interface RiskFilters {
+  severity: RiskSeverity | "all";
+  fixable: boolean;
+  kind: string;
+  /** A repository's full name, or "all". */
+  repo?: string;
+  eco?: Ecosystem | "all";
+}
+
+const RISKS_ALL: RiskFilters = { severity: "all", fixable: false, kind: "all", repo: "all", eco: "all" };
+
+/** Whether a risk passes the search (`q` trimmed and lower-cased: name, reason, repository) and the filters. */
+export function riskMatches(r: SupplyRisk, q: string, f: RiskFilters): boolean {
+  return (
+    (f.severity === "all" || r.severity === f.severity) &&
+    (!f.fixable || r.fix.available) &&
+    (f.kind === "all" || r.kind === f.kind) &&
+    (!f.eco || f.eco === "all" || r.ecosystem === f.eco) &&
+    (!f.repo || f.repo === "all" || r.users.some((u) => u.repo === f.repo)) &&
+    matchesQuery(q, r.name, r.reason, ...r.via, ...r.users.map((u) => `${repoName(u.repo)}/${u.path}`))
+  );
+}
+
+export function filterRisks(list: SupplyRisk[], f: RiskFilters & { q?: string }): SupplyRisk[] {
+  const q = (f.q ?? "").trim().toLowerCase();
+  return list.filter((r) => riskMatches(r, q, f));
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -433,13 +541,10 @@ export function fixInstructions(r: SupplyRisk): string {
 function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: (id: string) => void }): ReactElement {
   const api = useApi();
   const toast = useToast();
-  const [severity, setSeverity] = useState<RiskSeverity | "all">("all");
-  const [fixable, setFixable] = useState(false);
-  const [kind, setKind] = useState("all");
-  const [shown, setShown] = useState(PAGE);
   const [sending, setSending] = useState<string | null>(null);
   const kinds = useMemo(() => [...new Set(data.risks.map((r) => r.kind))].sort(), [data.risks]);
-  const rows = useMemo(() => filterRisks(data.risks, { severity, fixable, kind }), [data.risks, severity, fixable, kind]);
+  const list = usePagedFilter(data.risks, { filters: RISKS_ALL, match: riskMatches });
+  const { severity, fixable, kind } = list.filters;
 
   const handOff = async (r: SupplyRisk, key: string) => {
     const repo = r.users[0]?.repo;
@@ -468,7 +573,7 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
             key={s}
             type="button"
             aria-pressed={severity === s}
-            onClick={() => setSeverity(severity === s ? "all" : s)}
+            onClick={() => list.setFilters({ severity: severity === s ? "all" : s })}
             className={cx(
               "inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12.5px]",
               severity === s ? "border-accent" : "border-border",
@@ -479,10 +584,10 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
             {SEVERITY[s].label}
           </button>
         ))}
-        <Check label={`Fix available (${data.fixable})`} checked={fixable} onChange={setFixable} />
+        <Check label={`Fix available (${data.fixable})`} checked={fixable} onChange={(v) => list.setFilters({ fixable: v })} />
         <select
           value={kind}
-          onChange={(e) => setKind(e.target.value)}
+          onChange={(e) => list.setFilters({ kind: e.target.value })}
           aria-label="risk kind"
           className="rounded-md border border-border bg-panel px-2 py-1 text-[12.5px] text-text"
         >
@@ -493,14 +598,20 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
             </option>
           ))}
         </select>
-        <span className="ml-auto text-[12px] tabular-nums text-faint">{rows.length} shown</span>
       </div>
-      {rows.length === 0 ? (
-        <p className="py-3 text-[13px] text-faint">{data.risks.length === 0 ? "No supply-chain risks found." : "Nothing matches these filters."}</p>
+      {data.risks.length > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+          <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search packages, reasons or paths…" label="search supply-chain risks" />
+          <FilterSelect label="ecosystem" allLabel="All ecosystems" value={list.filters.eco ?? "all"} onChange={(v) => list.setFilters({ eco: v as Ecosystem | "all" })} options={optionsBy(data.risks, (r) => r.ecosystem, (e) => ECO[e as Ecosystem]?.label ?? e)} />
+          <FilterSelect label="repository" allLabel="All repositories" value={list.filters.repo ?? "all"} onChange={(v) => list.setFilters({ repo: v })} options={optionsBy(data.risks, (r) => r.users.map((u) => u.repo), repoName)} />
+        </div>
+      )}
+      {list.total === 0 ? (
+        <p className="py-3 text-[13px] text-faint">{data.risks.length === 0 ? "No supply-chain risks found." : "Nothing matches this search and these filters."}</p>
       ) : (
         <ul className="m-0 list-none divide-y divide-border/60 border-y border-border p-0">
-          {rows.slice(0, shown).map((r, i) => {
-            const key = `${r.kind}:${r.ecosystem}:${r.name}:${r.version ?? ""}:${i}`;
+          {list.rows.map((r, i) => {
+            const key = `${r.kind}:${r.ecosystem}:${r.name}:${r.version ?? ""}:${list.from + i}`;
             return (
               <li key={key} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-[13px]">
                 <span className={cx("mt-0.5 shrink-0 rounded-full px-1.5 text-[11px]", SEVERITY[r.severity]?.tone ?? SEVERITY.low.tone)}>{SEVERITY[r.severity]?.label ?? r.severity}</span>
@@ -540,11 +651,7 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
           })}
         </ul>
       )}
-      {rows.length > shown && (
-        <button type="button" onClick={() => setShown((n) => n + PAGE)} className="mt-2 cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-accent hover:underline">
-          Show {Math.min(PAGE, rows.length - shown)} more
-        </button>
-      )}
+      <Pagination view={list} onPage={list.setPage} noun="risks" />
       <p className="mt-2 text-[11.5px] text-faint">{data.note}</p>
       <RepoNotes repos={data.repos} />
     </div>

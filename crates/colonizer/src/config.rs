@@ -449,16 +449,27 @@ impl Default for PublishConfig {
 
 impl FileConfig {
     /// Read where it is used rather than cached at startup, so editing the file doesn't need a restart.
+    /// The callers are runtime paths (a publish crediting a commit, a finding), not startup, so a
+    /// file that will not parse cannot refuse anything — but it is named, with the error and the
+    /// fix, rather than quietly read as defaults (#326).
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("colonizer.toml");
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
         toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("{}: {e}; using defaults", path.display());
+            eprintln!("colonizer.toml: {}", corrupt_message(&path, &e));
             Self::default()
         })
     }
+}
+
+/// What a colonizer.toml that will not parse says: the file, the error, and the way out.
+fn corrupt_message(path: &Path, error: &toml::de::Error) -> String {
+    format!(
+        "{} could not be parsed ({error}); fix the file or remove it to use the defaults",
+        path.display()
+    )
 }
 
 #[cfg(test)]
@@ -592,6 +603,15 @@ mod tests {
             Some(CoAuthor::settlers()),
             "a broken file falls back rather than failing a publish"
         );
+        // The fallback is loud: the refusal names the file, the TOML error and the fix (#326).
+        let path = dir.join("colonizer.toml");
+        let error = toml::from_str::<FileConfig>("[publish\nco_author = ").unwrap_err();
+        let message = corrupt_message(&path, &error);
+        assert!(
+            message.starts_with(&format!("{} could not be parsed (", path.display())),
+            "{message}"
+        );
+        assert!(message.contains("fix the file or remove it to use the defaults"), "{message}");
 
         std::fs::write(dir.join("colonizer.toml"), "[publish]\nco_author = { name = \"x\" }\n").unwrap();
         assert_eq!(

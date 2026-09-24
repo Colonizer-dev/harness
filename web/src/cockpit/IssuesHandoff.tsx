@@ -3,6 +3,7 @@
 // GET /api/repos/{o}/{r}/issues, which the mothership already narrows by the Source module's label
 // filter; the badge is GitHub's own count until the pane has loaded the filtered one.
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { createPortal } from "react-dom";
 
 import { ApiError, heldByFor } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
@@ -285,16 +286,18 @@ function IssuesPane({
 
   const repoChoices = repoQuery.trim() ? scope.filter((r) => r.full_name.toLowerCase().includes(repoQuery.trim().toLowerCase())) : scope;
 
-  return (
+  // Portalled to <body>: rendered in place it sat inside the page's own stacking context, below the
+  // top bar, whose avatars and bell then covered the pane's title.
+  return createPortal(
     <>
-      <div aria-hidden="true" className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
+      <div aria-hidden="true" className="fixed inset-0 z-[60] bg-black/30" onClick={onClose} />
       <div
         ref={panel}
         role="dialog"
         aria-modal="true"
         aria-label="hand off issues to colonies"
         tabIndex={-1}
-        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[480px] animate-[ck-in_160ms_ease-out_both] flex-col border-l border-border-strong bg-panel text-text shadow-[-16px_0_48px_rgb(0_0_0/0.35)] outline-none"
+        className="fixed inset-y-0 right-0 z-[61] flex w-full max-w-[480px] animate-[ck-in_160ms_ease-out_both] flex-col border-l border-border-strong bg-panel text-text shadow-[-16px_0_48px_rgb(0_0_0/0.35)] outline-none"
       >
         <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-3">
           <span className="grid size-8 place-items-center rounded-lg bg-panel-2 text-text">
@@ -484,7 +487,8 @@ function IssuesPane({
           </div>
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 

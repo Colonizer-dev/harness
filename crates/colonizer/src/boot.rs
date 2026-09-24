@@ -874,6 +874,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.update_session(id, |x| {
         x.boot_cpus = Some(spec.cpus);
         x.boot_memory = Some(spec.memory.clone());
+        x.boot_image = Some(spec.image.clone());
     })
     .await;
     mark_phase(app, id, &mut timing, "mesh-start").await;
