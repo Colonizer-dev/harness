@@ -71,6 +71,16 @@ setting) is called out under **Take care** rather than left for you to find.
   `0o555`. ([#442])
 - **Pi as a second agent module.** `modules/agents/pi` adds the Pi coding agent as an agent provider (`pi`) beside Claude Code, driven over Pi's RPC mode and speaking the same runner protocol. Pi reaches models only through the provider gateway (Settings → Providers, under each colony's spend and rate limits); it has no subagents, so the subagent and background model split does not apply. ([#403])
 
+### Take care
+
+- **A model setting that names an unconfigured provider refuses the boot.** A `<provider>/<model>`
+  value whose prefix matches no configured provider used to start fine and quietly send every request
+  to Anthropic — the runner's warning only landed in the colony's log, so a typo'd route spent the
+  subscription unnoticed. The mothership now checks after tier substitution, so only the models a
+  colony will actually run are looked at, and fails the boot with `model setting
+  'locall/deepseek-flash' names provider 'locall', which is not configured`. Fix the setting or add
+  the provider; bare names (`opus`, `claude-opus-5-5`) are unaffected. ([#366])
+
 ## [v0.1.8] - 2026-09-23
 
 ### Added
@@ -458,6 +468,7 @@ Macs. ([#74])
 [#440]: https://github.com/Colonizer-dev/harness/pull/440
 [#442]: https://github.com/Colonizer-dev/harness/issues/442
 [#367]: https://github.com/Colonizer-dev/harness/issues/367
+[#366]: https://github.com/Colonizer-dev/harness/issues/366
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

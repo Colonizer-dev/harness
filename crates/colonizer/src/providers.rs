@@ -330,6 +330,38 @@ impl ColonyRoutes {
             .cloned()
             .collect()
     }
+
+    /// The first model setting that names a provider nobody configured, as `(value, prefix)` — enough
+    /// to refuse the boot with. The same MODEL_VARS walk as [`ColonyRoutes::used`] read the other way
+    /// round: a value shaped like `<provider>/<model>` that no configured provider's `id/` matches
+    /// would have the runner quietly send those requests to Anthropic, so the boot says no instead.
+    /// Bare names and values that don't shape up as a prefix are Claude's own models and pass.
+    pub fn unrouted_provider<'a>(&self, runner_env: &'a Map<String, Value>) -> Option<(&'a str, &'a str)> {
+        MODEL_VARS
+            .iter()
+            .filter_map(|var| runner_env.get(*var)?.as_str())
+            .find_map(|m| {
+                let prefix = provider_prefix(m)?;
+                let configured = self
+                    .providers
+                    .iter()
+                    .any(|p| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/')));
+                (!configured).then_some((m, prefix))
+            })
+    }
+}
+
+/// The `<provider>` half of a `<provider>/<model>` setting, when the value shapes up as one: a leading
+/// `[A-Za-z0-9]`, then `[A-Za-z0-9._-]*`, then `/`. Mirrors the runner's PROVIDER_PREFIX
+/// (modules/agents/claude-code/router.mjs) so the two stay in step.
+fn provider_prefix(model: &str) -> Option<&str> {
+    let (prefix, _) = model.split_once('/')?;
+    let mut rest = prefix.chars();
+    match rest.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return None,
+    }
+    rest.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)).then_some(prefix)
 }
 
 pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
@@ -989,6 +1021,70 @@ mod tests {
         env.insert("COLONIZER_EFFORT".into(), json!("deepseek/not-a-model-var"));
         let used: Vec<String> = routes.used(&env).into_iter().map(|p| p.id).collect();
         assert_eq!(used, vec!["strix"]);
+    }
+
+    #[test]
+    fn unrouted_providers_are_reported_with_the_value_and_prefix() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("str")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("strix/qwen3"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strixish/qwen"));
+        // "strixish" shares "strix" as a partial id prefix but is its own provider, so it is the
+        // first setting naming a provider nobody configured.
+        assert_eq!(routes.unrouted_provider(&env), Some(("strixish/qwen", "strixish")));
+
+        // The runner warns per setting; the boot refuses on the first one it would meet.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("locall/deepseek-flash"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("deepseek/v4"));
+        assert_eq!(routes.unrouted_provider(&env), Some(("locall/deepseek-flash", "locall")));
+
+        // `anthropic` can never be a provider id (valid_id refuses it), so it is always unrouted.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("anthropic/claude-x"));
+        assert_eq!(routes.unrouted_provider(&env), Some(("anthropic/claude-x", "anthropic")));
+
+        // An empty providers list leaves every prefixed setting unrouted.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL_LOW".into(), json!("deepseek/v4"));
+        assert_eq!(
+            ColonyRoutes::default().unrouted_provider(&env),
+            Some(("deepseek/v4", "deepseek"))
+        );
+    }
+
+    #[test]
+    fn configured_prefixes_and_bare_names_pass_the_unrouted_check() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("deepseek"), provider("str")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("deepseek/deepseek-ai/DeepSeek-V4.1-Flash"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("str/llama"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("opus"));
+        assert_eq!(
+            routes.unrouted_provider(&env),
+            None,
+            "a configured id/ prefix matches at the first slash, extra slashes included"
+        );
+
+        // Bare aliases and full Claude ids never look like a provider route.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("claude-opus-5-5"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("us.anthropic.claude-opus-5-5"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("fable"));
+        assert_eq!(routes.unrouted_provider(&env), None);
+
+        // Shapes the runner's PROVIDER_PREFIX rejects are Claude's to interpret, not ours.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("/leading-slash"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("two words/x"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!(".hidden/x"));
+        assert_eq!(routes.unrouted_provider(&env), None);
     }
 
     #[test]

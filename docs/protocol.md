@@ -1074,8 +1074,9 @@ not to print, log, commit or persist them. The harness log records which names a
 ### 6.1 Model routing (runner)
 
 Model strings are `<provider>/<model-id>` for non-Anthropic providers (e.g. `deepseek/deepseek-flash`,
-`local/deepseek-flash`). Anything without a known provider prefix (`opus`, `claude-opus-5`, …) goes to
-Anthropic unchanged.
+`local/deepseek-flash`). A model the colony will run (after tier routing) whose `<provider>/` prefix
+names no configured provider refuses the boot — a typo'd route would otherwise quietly spend Anthropic —
+while anything without a provider prefix (`opus`, `claude-opus-5`, …) goes to Anthropic unchanged.
 
 Runner environment set by the mothership:
 
