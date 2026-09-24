@@ -328,8 +328,10 @@ On GitHub a launch marks its claim: the `colonizer:claimed` label plus a
 the mothership and colony. Release removes the label and posts a release note, but only while the
 issue's latest claim is this colony's (host id and colony both match); a merged pull request keeps
 the mark on purpose, as the record of who did the work. On boot a mothership reaps the marks it
-owns — open issues whose latest claim carries its host id but whose colony no longer holds in its
-session list — and never touches another host's mark. So the worst case is a mothership that
+owns — open issues whose latest claim carries its host id but whose colony is gone from its session
+list, or ended the way a release would have followed (stopped, failed or no changes without a pull
+request, or closed) — and never touches another host's mark. A release that races a successor's
+claim puts the label back once it sees the newer claim comment. So the worst case is a mothership that
 crashes leaving its marks until its next boot; one that never returns leaves them until a human
 removes the label. GitLab, Linear and Jira should follow the same claim shape when those forges
 land. Contested-claim detection after launch, and label repair, are not implemented yet.
