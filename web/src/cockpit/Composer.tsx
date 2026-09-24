@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
+import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
 import { sameOrg, store, stored } from "../components/ui";
 import { isLive } from "../components/ui";
 import type { Issue, Repo, Session, VoiceStatus } from "../types";
@@ -280,6 +281,7 @@ export function Composer({
   autopilotDefault,
   sessions = [],
   onCreated,
+  onAsk,
 }: {
   /** The workspace in scope; the repository chip only offers its repositories. */
   org: string | null;
@@ -289,10 +291,13 @@ export function Composer({
   githubConnected: boolean;
   autopilotDefault: boolean;
   onCreated: (session: Session) => void;
+  /** Sends the text to Chat instead of launching a colony; absent, the composer only launches. */
+  onAsk?: (text: string) => void;
 }): ReactElement {
   const api = useApi();
   const toast = useToast();
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"colony" | "ask">("colony");
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -424,11 +429,51 @@ export function Composer({
     else voice.start();
   };
 
-  const canSend = !sending && !voice.transcribing && githubConnected && repo !== null && (shown.trim().length > 0 || linked !== null);
+  const asking = mode === "ask" && onAsk !== undefined;
+  const canSend = asking
+    ? !voice.transcribing && shown.trim().length > 0
+    : !sending && !voice.transcribing && githubConnected && repo !== null && (shown.trim().length > 0 || linked !== null);
 
   const send = async () => {
+    if (asking) {
+      if (!canSend || !onAsk) return;
+      if (voice.listening) voice.stop();
+      onAsk(shown.trim());
+      setText("");
+      setOpen(false);
+      return;
+    }
     if (!canSend || !repo) return;
     if (voice.listening) voice.stop();
+    // `/loop 1h <task>` (or `/loop <task>`, self-paced) makes a loop instead of a one-off colony.
+    const loopCommand = parseLoopCommand(shown);
+    if (loopCommand) {
+      if (loopCommand.error) {
+        toast(loopCommand.error, "error");
+        return;
+      }
+      setSending(true);
+      try {
+        const created = await api.createLoop({
+          name: nameFromPrompt(loopCommand.prompt),
+          repo,
+          prompt: loopCommand.prompt,
+          cadence: loopCommand.cadence,
+          tz_offset_minutes: -new Date().getTimezoneOffset(),
+          autopilot: autopilotDefault,
+        });
+        store(REPO_KEY, repo);
+        toast({ title: `Loop on ${repo}`, body: `"${created.name}" runs ${describeLoopCadence(created.cadence)}. Manage it under Loops.`, kind: "success" });
+        setText("");
+        setPicked(null);
+        setOpen(false);
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
     const instructions = shown.trim() || undefined;
     setSending(true);
     try {
@@ -451,7 +496,7 @@ export function Composer({
   };
 
   const filtered = query.trim() ? choices.filter((r) => r.full_name.toLowerCase().includes(query.trim().toLowerCase())) : choices;
-  const placeholder = !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, or pick an issue below…";
+  const placeholder = asking ? "Ask a model anything — no colony, just a conversation…" : !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, pick an issue below, or /loop 1h <task> to repeat it…";
 
   return (
     <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6">
@@ -560,6 +605,23 @@ export function Composer({
             {voice.error && <div className="px-3 pt-1 text-[12.5px] text-warn">{voice.error}</div>}
 
             <div className="mt-2 flex items-center gap-2 px-1">
+              {onAsk && (
+                <div role="radiogroup" aria-label="what to do with it" className="flex shrink-0 rounded-full border border-border p-0.5 text-[12px]">
+                  {(["colony", "ask"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      role="radio"
+                      aria-checked={mode === m}
+                      onClick={() => setMode(m)}
+                      className={`cursor-pointer rounded-full border-0 px-2.5 py-0.5 transition-colors ${mode === m ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+                    >
+                      {m === "colony" ? "Launch colony" : "Ask"}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!asking && (
               <div className="relative min-w-0">
                 <button
                   type="button"
@@ -617,15 +679,16 @@ export function Composer({
                   </div>
                 )}
               </div>
+              )}
               <span className="hidden text-[12px] text-faint md:inline">
-                {autopilotDefault ? "autopilot on" : "you review the PR"} · <kbd className="font-sans">↵</kbd> launch · <kbd className="font-sans">⇧↵</kbd> new line
+                {asking ? "opens in Chat" : autopilotDefault ? "autopilot on" : "you review the PR"} · <kbd className="font-sans">↵</kbd> {asking ? "ask" : "launch"} · <kbd className="font-sans">⇧↵</kbd> new line
               </span>
               <div className="flex-1" />
               {voice.supported && <MicButton listening={voice.listening} busy={voice.transcribing} label={voice.label} onClick={toggleVoice} />}
               <button
                 type="button"
-                aria-label="launch colony"
-                title="Launch (Enter)"
+                aria-label={asking ? "ask in chat" : "launch colony"}
+                title={asking ? "Ask (Enter)" : "Launch (Enter)"}
                 disabled={!canSend}
                 onClick={() => void send()}
                 className="grid h-9 w-9 cursor-pointer place-items-center rounded-full border-0 bg-accent text-on-accent transition-[opacity,transform] duration-150 hover:brightness-110 active:scale-95 disabled:cursor-default disabled:opacity-35"

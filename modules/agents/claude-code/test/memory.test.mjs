@@ -85,7 +85,7 @@ test('memory tools: search returns text, propose emits a proposal event', async 
 
     const result = await propose.handler({ scope: 'repo', title: 'Use --locked', content: 'Run cargo with --locked.' });
     assert.deepEqual(result, { content: [{ type: 'text', text: PROPOSED_REPLY }] });
-    assert.deepEqual(events, [{ type: 'memory_proposal', scope: 'repo', title: 'Use --locked', content: 'Run cargo with --locked.', tags: [] }]);
+    assert.deepEqual(events, [{ type: 'memory_proposal', origin: 'orchestrator', scope: 'repo', title: 'Use --locked', content: 'Run cargo with --locked.', tags: [] }]);
 
     // The input schemas enforce the protocol limits.
     const proposeSchema = z.object(propose.shape);
@@ -140,7 +140,7 @@ test('buildOptions maps routing and memory settings into Claude Code options', (
 test('only the orchestrator proposes: a subagent is told to report instead', () => {
   const [search] = MEMORY_TOOLS;
   assert.equal(memoryDecision(MEMORY_PROPOSE_TOOL, {}), null, 'the orchestrator may propose');
-  assert.match(memoryDecision(MEMORY_PROPOSE_TOOL, { agent_id: 'agent_01' }), /Only the orchestrator proposes shared memory/);
+  assert.match(memoryDecision(MEMORY_PROPOSE_TOOL, { agent_id: 'agent_01' }), /^memory_read_only: only the orchestrator proposes shared memory/);
   assert.equal(memoryDecision(search, { agent_id: 'agent_01' }), null, 'a subagent still searches');
   assert.equal(memoryDecision('Bash', { agent_id: 'agent_01' }), null, 'other tools are not this gate’s business');
 });
@@ -161,5 +161,5 @@ test('the memory gate is registered only with memory, and refuses a subagent eve
   assert.equal(await decide({ tool_name: MEMORY_PROPOSE_TOOL }), null);
   assert.equal(await decide({ tool_name: MEMORY_TOOLS[0], agent_id: 'agent_01' }), null);
   const denied = await decide({ tool_name: MEMORY_PROPOSE_TOOL, agent_id: 'agent_01' });
-  assert.match(denied.permissionDecisionReason, /Only the orchestrator proposes shared memory/);
+  assert.match(denied.permissionDecisionReason, /^memory_read_only: only the orchestrator proposes shared memory/);
 });

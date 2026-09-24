@@ -695,6 +695,8 @@ mod tests {
             rebase_orphaned: false,
             queued_behind: None,
             claim_wait: false,
+            verify: None,
+            verification: None,
             app_slot: None,
             boot_attempt_started_at: None,
             mesh: None,
@@ -728,6 +730,7 @@ mod tests {
             boot_timing: None,
             boot_cpus: None,
             boot_memory: None,
+            boot_image: None,
             created_at: now,
             updated_at: now,
         }

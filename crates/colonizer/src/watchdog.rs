@@ -28,6 +28,9 @@ pub struct Activity {
     /// question resets it; enough in a row and the judge stops retrying, so the question reaches
     /// a person.
     pub judge_failures: u64,
+    /// The question id whose above-the-ceiling note is already in the log, so the judge's
+    /// once-per-question "left for you" line does not repeat every half-minute tick.
+    pub risk_announced: Option<String>,
 }
 
 impl Activity {
@@ -39,6 +42,7 @@ impl Activity {
             question_since: None,
             judged: 0,
             judge_failures: 0,
+            risk_announced: None,
         }
     }
 }
@@ -280,6 +284,7 @@ mod tests {
             question_since: None,
             judged: 0,
             judge_failures: 0,
+            risk_announced: None,
         };
         assert_eq!(
             decide(&SETTINGS, at(34), Observed::Working, &activity, None),
@@ -297,6 +302,7 @@ mod tests {
             question_since: Some(at(0)),
             judged: 0,
             judge_failures: 0,
+            risk_announced: None,
         };
         assert_eq!(
             decide(&SETTINGS, at(29), Observed::WaitingForAnswer, &activity, None),

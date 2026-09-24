@@ -96,7 +96,7 @@ fn bad(message: &str) -> crate::AppError {
 // --- the bare clone -----------------------------------------------------------------------------
 
 /// The bare clone, created on first use and fetched at most once per [`FETCH_EVERY`].
-async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::PathBuf> {
+pub(crate) async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::PathBuf> {
     let bare = app.bare_repo(repo);
     if !bare.join("HEAD").exists() {
         if let Some(parent) = bare.parent() {
@@ -115,21 +115,22 @@ async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::PathBuf> {
         )
         .await?;
     }
+    // One fetch at a time per repository; a failed one keeps the clone as it was. The first read
+    // of a run waits for it; later ones read the clone as it is and fetch behind the answer once
+    // FETCH_EVERY has passed. `App::invalidate_repo` drops the key, so the read after a colony
+    // pushes waits for the fetch that brings its commits in.
     let key = format!("code-fetch:{repo}");
-    if !app.answer_cache_has(&key) {
-        // One fetch at a time per repository; a failed one keeps the clone as it was.
-        let _ = crate::cached_answer(app, key, FETCH_EVERY, {
+    let _ = crate::cached_answer(app, key, FETCH_EVERY, {
+        let bare = bare.clone();
+        move |app| {
             let bare = bare.clone();
-            move |app| {
-                let bare = bare.clone();
-                async move {
-                    exec_within(GIT_LIMIT, app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
-                    Ok(Value::Bool(true))
-                }
+            async move {
+                exec_within(GIT_LIMIT, app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+                Ok(Value::Bool(true))
             }
-        })
-        .await;
-    }
+        }
+    })
+    .await;
     Ok(bare)
 }
 
@@ -145,7 +146,7 @@ async fn default_branch(app: &Shared, bare: &FsPath) -> Result<String> {
 
 /// A ref the bare clone resolves: a branch name maps to `refs/remotes/origin/<name>` (what the fetch
 /// keeps current), a sha stays a sha. Returns `(ref_name, commit_sha)`.
-async fn resolve(app: &Shared, bare: &FsPath, r: Option<&str>) -> Result<(String, String)> {
+pub(crate) async fn resolve(app: &Shared, bare: &FsPath, r: Option<&str>) -> Result<(String, String)> {
     let name = match r {
         Some(r) => valid_ref(r).ok_or_else(|| anyhow!("invalid ref"))?,
         None => default_branch(app, bare).await?,
@@ -219,7 +220,7 @@ pub fn parse_ls_tree_line(line: &str) -> Option<(String, String, u64, String)> {
     Some((kind, sha, size, path.to_string()))
 }
 
-async fn ls_tree(app: &Shared, bare: &FsPath, sha: &str) -> Result<Vec<(String, u64, String)>> {
+pub(crate) async fn ls_tree(app: &Shared, bare: &FsPath, sha: &str) -> Result<Vec<(String, u64, String)>> {
     let out = git_bytes(app, bare, &["ls-tree", "-r", "-l", "-z", sha]).await?;
     Ok(out
         .split(|b| *b == 0)
@@ -476,7 +477,7 @@ pub fn count_lines(text: &str) -> (u64, u64) {
 }
 
 /// Reads many blobs with one `git cat-file --batch`, calling `each` with every blob's bytes.
-async fn cat_batch(app: &Shared, bare: &FsPath, blobs: &[String], mut each: impl FnMut(usize, &[u8])) -> Result<()> {
+pub(crate) async fn cat_batch(app: &Shared, bare: &FsPath, blobs: &[String], mut each: impl FnMut(usize, &[u8])) -> Result<()> {
     let mut cmd = app.git(bare);
     cmd.args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
@@ -758,9 +759,15 @@ pub async fn branches(State(app): State<Shared>, Path((owner, name)): Path<(Stri
     // Protection and open pull requests from GitHub; either may fail and leave the fields empty.
     let protected: Vec<String> = {
         let path = format!("repos/{repo}/branches?protected=true&per_page=100");
-        exec_within(GIT_LIMIT, &mut app.gh(["api", path.as_str(), "--jq", ".[].name"]))
+        crate::github::gh_get_json(&app, &path)
             .await
-            .map(|s| s.lines().map(str::to_string).collect())
+            .map(|list| {
+                list.as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| b["name"].as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let prs: HashMap<String, Value> = exec_within(
@@ -852,13 +859,12 @@ pub async fn git_summary(State(app): State<Shared>, Path((owner, name)): Path<(S
             .await
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-            let release = exec_within(
-                GIT_LIMIT,
-                &mut app.gh(["release", "view", "-R", repo.as_str(), "--json", "tagName,name,publishedAt"]),
-            )
-            .await
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            // Conditional (see `github::gh_get`): an unchanged latest release is a 304; none is a 404.
+            let release = crate::github::gh_get_json(&app, &format!("repos/{repo}/releases/latest"))
+                .await
+                .ok()
+                .filter(|r| r["tag_name"].is_string())
+                .map(|r| json!({"tagName": r["tag_name"], "name": r["name"], "publishedAt": r["published_at"]}));
             let tag = if release.is_none() {
                 exec(app.git(&bare).args([
                     "for-each-ref",
@@ -1020,6 +1026,8 @@ async fn open_edit_pr(
     .await;
     let _ = exec(app.git(bare).args(["worktree", "remove", "--force"]).arg(&wt)).await;
     let _ = tokio::fs::remove_dir_all(&wt).await;
+    // A branch was pushed (and maybe a pull request opened): the repository's cached answers go stale.
+    app.invalidate_repo(repo);
     result
 }
 

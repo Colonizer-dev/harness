@@ -60,13 +60,27 @@ pub fn account_file(config_dir: &FsPath, id: &str) -> PathBuf {
     config_dir.join(ACCOUNTS_DIR).join(id)
 }
 
-/// Missing or unparseable file reads as empty, so a first run and a hand-edited file both start
-/// with no accounts rather than failing the launch that asked.
+/// A missing file reads as empty, so a first run starts with no accounts. A file that will not read
+/// or parse also answers as empty — this reader is on the sync launch path and cannot fail — but
+/// loudly, naming the file and the fix (#326, the #408 rule for hot infallible readers); the
+/// writers refuse to save over what this read rejected.
 pub fn load_meta(config_dir: &FsPath) -> AccountsMeta {
-    std::fs::read(meta_file(config_dir))
-        .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_default()
+    match crate::util::read_json_or_default(&meta_file(config_dir)) {
+        Ok(meta) => meta,
+        Err(e) => {
+            eprintln!(
+                "claude-accounts: {} could not be read ({e:#}); no accounts and no default choice until it is fixed or removed",
+                meta_file(config_dir).display()
+            );
+            AccountsMeta::default()
+        }
+    }
+}
+
+/// The writers' half of the rule: a record that will not read refuses the save, so the defaults
+/// `load_meta` fell back to never reach the disk (#408).
+fn read_meta_strict(config_dir: &FsPath) -> anyhow::Result<AccountsMeta> {
+    crate::util::read_json_or_default(&meta_file(config_dir))
 }
 
 /// Writes `meta` to a fresh temp beside the record and returns its path. The temp carries a
@@ -271,10 +285,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<CreateAccount>) -
         }
     };
     // The read-modify-write of claude-accounts.json is one critical section over `config_write`,
-    // like the settings saves: two accounts created at once cannot lose each other's entry.
+    // like the settings saves: two accounts created at once cannot lose each other's entry, and
+    // the read is strict, so a record that will not parse is refused before anything is written.
     let _config = app.config_write.lock().await;
     let _ = migrate_legacy(&app.cfg.config_dir);
-    let mut meta = load_meta(&app.cfg.config_dir);
+    let mut meta =
+        read_meta_strict(&app.cfg.config_dir).map_err(|e| crate::config_unreadable(&meta_file(&app.cfg.config_dir), &e))?;
     let label = req
         .label
         .as_deref()
@@ -313,7 +329,8 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // nothing that takes `config_write` itself.
     let _config = app.config_write.lock().await;
     let _ = migrate_legacy(&app.cfg.config_dir);
-    let meta = load_meta(&app.cfg.config_dir);
+    let meta =
+        read_meta_strict(&app.cfg.config_dir).map_err(|e| crate::config_unreadable(&meta_file(&app.cfg.config_dir), &e))?;
     if !meta.accounts.contains_key(&id) {
         return Err(client_error(StatusCode::NOT_FOUND, "no such Claude account"));
     }
@@ -368,6 +385,41 @@ mod tests {
 
         assert!(!migrate_legacy(&dir).unwrap(), "a second run migrates nothing");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_record_reads_as_empty_and_refuses_to_be_overwritten() {
+        let root = std::env::temp_dir().join(format!("colonizer-accounts-corrupt-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let path = meta_file(&app.cfg.config_dir);
+        std::fs::write(&path, "{not json").unwrap();
+
+        // The launch-path reader answers with the default rather than failing the launch…
+        let meta = load_meta(&app.cfg.config_dir);
+        assert!(
+            meta.accounts.is_empty() && meta.default.is_empty(),
+            "corrupt reads as no accounts"
+        );
+        // …and the writer refuses, so the defaults never replace the operator's bytes (#408).
+        let req = CreateAccount {
+            id: Some("work".into()),
+            label: None,
+            token: Some("sk-ant-api-test".into()),
+        };
+        let err = create(State(app.clone()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(
+            err.message().contains("claude-accounts.json") && err.message().contains("refusing to overwrite it"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{not json",
+            "the file is not overwritten"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

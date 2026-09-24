@@ -231,7 +231,10 @@ pub(crate) async fn validate(app: &App, s: &Session, finding: &Finding) -> Resul
 /// (docs/protocol.md §6.6): the runner never emits them, so `sessions.rs` `Runtime::load` cuts them
 /// out of the agentd reconnect cursor by their type when it restarts a mid-life colony.
 pub(crate) fn is_host_chain_type(kind: &str) -> bool {
-    matches!(kind, "validated" | "rejected" | "fix_colony" | "review" | "merged")
+    matches!(
+        kind,
+        "validated" | "rejected" | "fix_colony" | "review" | "merged" | "verification"
+    )
 }
 
 /// Appends a host-generated event to the colony's event log and broadcasts it on its websocket,
@@ -340,6 +343,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             title,
             instructions,
             autopilot: None,
+            verify: None,
             // A fix colony fixes the finding; it does not spawn fix colonies of its own. Automerge
             // however carries the hunter's decision, so a passing review can still merge.
             autofix: Some(false),

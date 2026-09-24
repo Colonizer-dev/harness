@@ -1,0 +1,117 @@
+[
+  {
+    "id": "a1b2c3d4",
+    "repo": "acme/widgets",
+    "org": "acme",
+    "issue": 325,
+    "issue_title": "Session storage backend abstraction: same semantics, swappable store",
+    "instructions": "Make the harness's session storage pluggable without changing what it promises.",
+    "status": "running",
+    "branch": "colonizer/issue-325-a1b2c3d4",
+    "base": "main",
+    "stack": false,
+    "worktree": "/home/u/.local/share/colonizer/worktrees/a1b2c3d4",
+    "git_admin_dir": null,
+    "sandbox": "microsandbox",
+    "mesh": {
+      "name": "col-a1b2c3d4",
+      "ip": "100.64.0.12"
+    },
+    "local_port": null,
+    "agent": "claude_code",
+    "autopilot": true,
+    "pr_url": null,
+    "ci_state": "pending",
+    "changed_paths": [
+      "crates/colonizer/src/store.rs"
+    ],
+    "summary": "Extract a swappable session storage interface from the harness's file writes.",
+    "publishing_holds_slot": true,
+    "needs_rebase": false,
+    "rebase_orphaned": false,
+    "error": null,
+    "cost_usd": 0.42,
+    "model_usage": {
+      "claude-sonnet-4-5": {
+        "cache_read_tokens": 1228800,
+        "cache_write_tokens": 38912,
+        "input_tokens": 184320,
+        "output_tokens": 9011
+      }
+    },
+    "allowed_providers": [
+      "anthropic"
+    ],
+    "routed_cost_usd": null,
+    "host_disk_bytes": 471859200,
+    "cleaned_up": false,
+    "keep_worktree": false,
+    "attention": null,
+    "last_activity_at": "2026-09-24T09:40:58Z",
+    "boot_timing": null,
+    "boot_cpus": 4,
+    "boot_memory": "8GiB",
+    "app_slot": null,
+    "created_at": "2026-09-24T09:30:00Z",
+    "updated_at": "2026-09-24T09:41:00Z"
+  },
+  {
+    "id": "e5f60718",
+    "repo": "acme/widgets",
+    "org": "acme",
+    "issue": 318,
+    "issue_title": "Nest map: group the repository picker by organization",
+    "instructions": "Make the harness's session storage pluggable without changing what it promises.",
+    "status": "merged",
+    "branch": "colonizer/issue-318-e5f60718",
+    "base": "main",
+    "stack": false,
+    "worktree": "/home/u/.local/share/colonizer/worktrees/e5f60718",
+    "git_admin_dir": null,
+    "sandbox": "microsandbox",
+    "mesh": {
+      "name": "col-e5f60718",
+      "ip": "100.64.0.12"
+    },
+    "local_port": null,
+    "agent": "claude_code",
+    "autopilot": true,
+    "pr_url": "https://github.com/acme/widgets/pull/491",
+    "merged_at": "2026-09-23T11:40:00Z",
+    "pr_opened_at": "2026-09-23T11:02:00Z",
+    "ci_state": "success",
+    "changed_paths": [
+      "crates/colonizer/src/store.rs"
+    ],
+    "summary": "Group the map's repository picker by organization with per-org headings.",
+    "publish_stage": "pr_opened",
+    "publishing_holds_slot": true,
+    "needs_rebase": false,
+    "rebase_orphaned": false,
+    "error": null,
+    "cost_usd": 0.42,
+    "model_usage": {
+      "claude-sonnet-4-5": {
+        "cache_read_tokens": 1228800,
+        "cache_write_tokens": 38912,
+        "input_tokens": 184320,
+        "output_tokens": 9011
+      }
+    },
+    "allowed_providers": [
+      "anthropic"
+    ],
+    "routed_cost_usd": null,
+    "host_disk_bytes": 471859200,
+    "cleaned_up": false,
+    "keep_worktree": false,
+    "attention": null,
+    "last_activity_at": "2026-09-23T11:40:12Z",
+    "boot_timing": null,
+    "boot_cpus": 4,
+    "boot_memory": "8GiB",
+    "app_slot": null,
+    "created_at": "2026-09-23T10:47:00Z",
+    "updated_at": "2026-09-23T11:40:12Z"
+  }
+]

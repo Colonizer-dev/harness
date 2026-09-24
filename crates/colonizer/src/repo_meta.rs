@@ -3,7 +3,7 @@
 //! contributors — read through the operator's `gh` login and cached, since it changes slowly and the
 //! picker asks for many repositories at once.
 
-use crate::{ApiResult, Shared, client_error, util::exec};
+use crate::{ApiResult, Shared, client_error};
 use axum::{
     Json,
     extract::{Path, State},
@@ -72,13 +72,11 @@ pub(crate) fn contributors(list: &Value, limit: usize) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// One `gh api` call parsed as JSON; an empty body (202, 204) or a failure reads as `Null`, so one
+/// One conditional `gh api` call parsed as JSON (a 304 reuses the last body, see
+/// [`crate::github::gh_get`]); an empty body (202, 204) or a failure reads as `Null`, so one
 /// missing part never costs the others.
 async fn gh_json(app: &Shared, path: &str) -> Value {
-    match exec(&mut app.gh(["api", path])).await {
-        Ok(out) if !out.trim().is_empty() => serde_json::from_str(&out).unwrap_or(Value::Null),
-        _ => Value::Null,
-    }
+    crate::github::gh_get_json(app, path).await.unwrap_or(Value::Null)
 }
 
 async fn fetch(app: &Shared, repo: &str) -> anyhow::Result<Value> {

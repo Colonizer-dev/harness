@@ -222,6 +222,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             "Commit on the host, push the branch and open a pull request",
             json!({"type": "object", "properties": {
                 "autopilot": {"type": "boolean", "title": "Open the PR automatically", "description": "Default for new colonies: when the agent finishes cleanly and has written its PR description, push its colonizer/ branch and open the pull request. Can be switched off per colony at launch.", "default": true},
+                "verify": {"type": "string", "title": "Verify completion claims", "description": "Default for new colonies: when an agent finishes cleanly and has written its PR description, the mothership verifies the claim before autopilot publishes — it checks the described files are on the branch and runs the repository's test command in a fresh sandbox. `auto` (the default) resolves the command from package.json, Cargo.toml or a Makefile on the base branch; `none` records the claim as unverifiable without checking; any other string is the test command itself. Can be overridden per colony at launch.", "default": "auto"},
                 "draft": {"type": "boolean", "title": "Open as draft", "default": false},
                 "file_findings": {"type": "boolean", "title": "File validated findings as issues", "description": "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.", "default": true},
                 "autofix": {"type": "boolean", "title": "Autofix validated findings", "description": "When a colony files a validated finding, spawn a fix colony for it: a fresh colony whose pull request is reviewed by an independent session before anything merges. Can be switched off per colony at launch.", "default": false},
@@ -272,7 +273,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "model": {"type": "string", "title": "Judge model", "description": "Any model you have added in Model providers: provider/model, or a plain id such as fable or opus once one of those providers' base URL host is api.anthropic.com. Judging spends that provider's key, never your Claude login. A frontier model judges best — it is deciding for you, on less context than you have, and the difference shows.", "default": ""},
                     "after_minutes": {"type": "integer", "title": "Answer after minutes unanswered", "description": "How long a question waits for you first. 0 answers as soon as it is asked.", "minimum": 0, "maximum": 1440, "default": 10},
                     "max_answers": {"type": "integer", "title": "Answers per colony", "description": "A colony that keeps asking is one to look at yourself, so the judge stops here and the watchdog flags it.", "minimum": 1, "maximum": 50, "default": 5},
-                    "free_text": {"type": "boolean", "title": "Answer questions that have no options", "description": "Off by default: a free-text box is where an automatic answer can do the most damage. With it off, those questions wait for you.", "default": false}
+                    "free_text": {"type": "boolean", "title": "Answer questions that have no options", "description": "Off by default: a free-text box is where an automatic answer can do the most damage. With it off, those questions wait for you.", "default": false},
+                    "risk_ceiling": {"type": "string", "title": "Answer questions up to this risk", "enum": ["read_only", "workspace_write", "publish_affecting", "credential_adjacent"], "description": "Each runner question carries a risk class. The judge answers only at or below this ceiling; a question above it waits for you however long, with a note in the colony's log saying why. Workspace write means the judge may settle anything confined to the colony's own workspace; publish-affecting touches what other people see; credential-adjacent is anything near a key or a login.", "default": "workspace_write"}
                 }}),
             ),
         ],
@@ -392,8 +394,18 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
             "this module kind is required and can't be disabled",
         ));
     }
-    let settings =
-        validate_settings(&provider.schema, &req.settings).map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    // Keys already stored pass the unknown-key check below: the UI saves back everything
+    // modules.json holds (switching providers keeps the previous provider's keys), so refusing
+    // those would brick every save after an upgrade until the file was hand-edited.
+    let stored = app
+        .modules
+        .read()
+        .await
+        .get(&kind)
+        .map(|choice| choice.settings.clone())
+        .unwrap_or_default();
+    let settings = validate_settings(&provider.id, &provider.schema, &req.settings, &stored)
+        .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
     check_plugin_dirs(&app.cfg, &provider.schema, &settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
 
@@ -429,14 +441,35 @@ fn check_plugin_dirs(cfg: &Settings, schema: &Value, settings: &Map<String, Valu
     Ok(())
 }
 
-/// Keeps only known keys and checks types, enums and ranges.
-fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+/// Keeps known keys (plus anything already stored) and checks types, enums and ranges. An unknown
+/// key is refused naming it and what the provider does take, never dropped: a setting the operator
+/// sent and lost to a typo would otherwise read as the default silently (#326).
+fn validate_settings(
+    provider: &str,
+    schema: &Value,
+    input: &Map<String, Value>,
+    stored: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
     let mut out = Map::new();
     let Some(properties) = schema["properties"].as_object() else {
         return Ok(out);
     };
     for (key, value) in input {
-        let Some(spec) = properties.get(key) else { continue };
+        let Some(spec) = properties.get(key) else {
+            if stored.contains_key(key) {
+                // A key no schema declares anymore, kept as is: see the `stored` read in `update`.
+                out.insert(key.clone(), value.clone());
+                continue;
+            }
+            let mut known: Vec<&str> = properties.keys().map(String::as_str).collect();
+            known.sort();
+            let known = if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            };
+            return Err(format!("`{key}` is not a {provider} setting; known settings: {known}"));
+        };
         let ok = match spec["type"].as_str() {
             Some("string") => value.is_string(),
             Some("integer") => value.is_i64() || value.is_u64(),
@@ -450,7 +483,12 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
         if let Some(options) = spec["enum"].as_array()
             && !options.contains(value)
         {
-            return Err(format!("setting `{key}` must be one of the listed options"));
+            let named = options
+                .iter()
+                .map(|option| option.as_str().map(str::to_string).unwrap_or_else(|| option.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("setting `{key}` must be one of {named}"));
         }
         if let Some(n) = value.as_f64()
             && (spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max))
@@ -617,6 +655,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_save_refuses_an_unknown_setting_by_name_but_keeps_stored_ones() {
+        let root = std::env::temp_dir().join(format!("colonizer-unknown-key-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let save = |settings: Map<String, Value>| {
+            let req = UpdateModule {
+                provider: "github".into(),
+                enabled: true,
+                settings,
+            };
+            update(State(app.clone()), Path("source".into()), Json(req))
+        };
+        let mut settings = Map::new();
+        settings.insert("include_lables".into(), json!("ready"));
+        let err = save(settings.clone()).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message()
+                .starts_with("`include_lables` is not a github setting; known settings: "),
+            "{}",
+            err.message()
+        );
+
+        // What a removed setting leaves behind rides along, whatever the schema now says.
+        app.modules
+            .write()
+            .await
+            .get_mut("source")
+            .unwrap()
+            .settings
+            .insert("include_lables".into(), json!("ready"));
+        let saved = save(settings).await.unwrap_or_else(|e| panic!("save refused: {:#}", e.1)).0;
+        assert_eq!(saved["settings"]["include_lables"], "ready");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn manifest_problems_found_at_boot_are_listed_on_the_agent_kind() {
         let root = std::env::temp_dir().join(format!("colonizer-manifest-errors-{}", crate::util::short_id()));
         let mut app = crate::tests::test_app(&root);
@@ -636,19 +710,45 @@ mod tests {
     }
 
     #[test]
-    fn settings_validation_filters_and_checks() {
+    fn settings_validation_names_unknown_keys_enums_and_types() {
         let schema = providers("sandbox", &[]).remove(0).schema;
         let mut input = Map::new();
         input.insert("cpus".into(), json!(8));
-        input.insert("unknown".into(), json!("x"));
-        let out = validate_settings(&schema, &input).unwrap();
-        assert_eq!(out.get("cpus"), Some(&json!(8)));
-        assert!(!out.contains_key("unknown"));
+        input.insert("unknwon".into(), json!("x"));
+        let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+        assert!(
+            err.starts_with("`unknwon` is not a sandbox setting; known settings: ")
+                && err.contains("cpus")
+                && err.contains("preset"),
+            "{err}"
+        );
+        // A key already stored passes: the UI saves back everything modules.json holds, so refusing
+        // those would brick every save after a provider switch or a removed setting.
+        let mut stored = Map::new();
+        stored.insert("unknwon".into(), json!("x"));
+        let out = validate_settings("sandbox", &schema, &input, &stored).unwrap();
+        assert_eq!(out.get("unknwon"), Some(&json!("x")), "the grandfathered key rides along");
 
+        input.remove("unknwon").unwrap();
         input.insert("cpus".into(), json!(0));
-        assert!(validate_settings(&schema, &input).is_err());
+        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
         input.insert("cpus".into(), json!("eight"));
-        assert!(validate_settings(&schema, &input).is_err());
+        // Being stored buys a key nothing once the schema declares it: `cpus` is checked like any
+        // other, and only keys no schema has pass through untouched.
+        stored.insert("cpus".into(), json!(4));
+        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+    }
+
+    #[test]
+    fn an_enum_refusal_names_the_options() {
+        let schema = providers("burn_down", &[]).remove(0).schema;
+        let mut input = Map::new();
+        input.insert("reset_weekday".into(), json!("Funday"));
+        let err = validate_settings("burn_down", &schema, &input, &Map::new()).unwrap_err();
+        assert_eq!(
+            err, "setting `reset_weekday` must be one of Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday",
+            "{err}"
+        );
     }
 
     #[test]
@@ -661,10 +761,12 @@ mod tests {
         );
         let mut input = Map::new();
         input.insert("budget_usd".into(), json!(-1));
-        assert!(validate_settings(&schema, &input).is_err());
+        assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
         input.insert("budget_usd".into(), json!(12.5));
         assert_eq!(
-            validate_settings(&schema, &input).unwrap().get("budget_usd"),
+            validate_settings("sandbox", &schema, &input, &Map::new())
+                .unwrap()
+                .get("budget_usd"),
             Some(&json!(12.5))
         );
     }
@@ -680,18 +782,20 @@ mod tests {
         let mut input = Map::new();
         input.insert("host_disk".into(), json!("16G"));
         assert_eq!(
-            validate_settings(&schema, &input).unwrap().get("host_disk"),
+            validate_settings("sandbox", &schema, &input, &Map::new())
+                .unwrap()
+                .get("host_disk"),
             Some(&json!("16G"))
         );
         input.insert("host_disk".into(), json!(""));
         assert!(
-            validate_settings(&schema, &input).is_ok(),
+            validate_settings("sandbox", &schema, &input, &Map::new()).is_ok(),
             "empty means unlimited, which is a size"
         );
         for bad in ["eight", "1.5G", "16 GB"] {
             input.insert("host_disk".into(), json!(bad));
             assert!(
-                validate_settings(&schema, &input).is_err(),
+                validate_settings("sandbox", &schema, &input, &Map::new()).is_err(),
                 "{bad:?} must be refused while the operator is looking"
             );
         }
@@ -713,19 +817,21 @@ mod tests {
         let mut input = Map::new();
         input.insert("warn_free_disk".into(), json!("8G"));
         input.insert("min_free_disk".into(), json!("5G"));
-        let out = validate_settings(&schema, &input).unwrap();
+        let out = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap();
         assert_eq!(out.get("warn_free_disk"), Some(&json!("8G")));
         assert_eq!(out.get("min_free_disk"), Some(&json!("5G")));
         input.insert("min_free_disk".into(), json!("0"));
         assert_eq!(
-            validate_settings(&schema, &input).unwrap().get("min_free_disk"),
+            validate_settings("sandbox", &schema, &input, &Map::new())
+                .unwrap()
+                .get("min_free_disk"),
             Some(&json!("0")),
             "0 turns the floor off"
         );
         for bad in ["eight", "1.5G", "16 GB"] {
             input.insert("warn_free_disk".into(), json!(bad));
             assert!(
-                validate_settings(&schema, &input).is_err(),
+                validate_settings("sandbox", &schema, &input, &Map::new()).is_err(),
                 "{bad:?} must be refused while the operator is looking"
             );
         }
@@ -743,14 +849,16 @@ mod tests {
         for bad in [json!(0), json!(1441)] {
             input.insert("hold_timeout_minutes".into(), bad);
             assert!(
-                validate_settings(&schema, &input).is_err(),
+                validate_settings("sandbox", &schema, &input, &Map::new()).is_err(),
                 "the timeout is 1 to 1440 minutes"
             );
         }
         for ok in [1, 30, 1440] {
             input.insert("hold_timeout_minutes".into(), json!(ok));
             assert_eq!(
-                validate_settings(&schema, &input).unwrap().get("hold_timeout_minutes"),
+                validate_settings("sandbox", &schema, &input, &Map::new())
+                    .unwrap()
+                    .get("hold_timeout_minutes"),
                 Some(&json!(ok))
             );
         }
@@ -808,9 +916,18 @@ mod tests {
             None,
             "the allowance is the one setting with no default: burn-down must never invent a budget"
         );
-        // An invalid weekday saved by hand is refused at save time by the enum check.
+        // An invalid weekday saved by hand is refused at save time by the enum check; see
+        // `an_enum_refusal_names_the_options` for the exact refusal.
         let mut input = Map::new();
         input.insert("reset_weekday".into(), json!("Funday"));
-        assert!(validate_settings(&providers("burn_down", &[]).remove(0).schema, &input).is_err());
+        assert!(
+            validate_settings(
+                "burn_down",
+                &providers("burn_down", &[]).remove(0).schema,
+                &input,
+                &Map::new()
+            )
+            .is_err()
+        );
     }
 }

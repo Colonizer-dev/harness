@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { buildOptions, DELEGATE_PROMPT_APPEND, delegationDecision, ENFORCE_PROMPT_APPEND } from '../runner.mjs';
+import { buildOptions, DELEGATE_PROMPT_APPEND, delegationDecision, ENFORCE_PROMPT_APPEND, ORCHESTRATOR_TOOLS } from '../runner.mjs';
+import { FINDING_TOOL } from '../findings.mjs';
+import { MEMORY_TOOLS } from '../memory.mjs';
+import { WAIT_TOOL } from '../wait.mjs';
 
 const ORCHESTRATOR = {};
 const SUBAGENT = { agent_id: 'agent_01' };
@@ -91,6 +94,58 @@ test('the enforced boundary is named in the prompt under enforce, and only there
   assert.ok(!appendOf({ COLONIZER_DELEGATE: 'off' }).includes(ENFORCE_PROMPT_APPEND), 'off has no gate either');
   for (const tool of ['SendMessage', 'Skill', 'Bash']) {
     assert.ok(ENFORCE_PROMPT_APPEND.includes(tool), `${tool} is named so the model need not rediscover it`);
+  }
+});
+
+// Issue #188 as a standing contract: the prompt text and the gate are two encodings of one boundary,
+// so they are checked against each other rather than against a reading of the sentences. The enforce
+// text's allow-list sentence must name exactly the gate's allow set, every tool name the
+// orchestrator's prompt mentions must get a definite verdict, the tools it offers must be granted
+// while the rest it names are refused, and a subagent is never refused at all.
+test('the prompt the orchestrator receives and the gate decide every named tool the same way', () => {
+  // The same append the runner builds, including the servers every colony wires up.
+  const prompt = buildOptions(
+    {
+      COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude',
+      COLONIZER_DELEGATE: 'enforce',
+      COLONIZER_MEMORY_DIR: '/colonizer/memory',
+      COLONIZER_FINDINGS: 'true',
+    },
+    { waitServer: {}, memoryServer: {}, findingsServer: {} },
+  ).options.systemPrompt.append;
+
+  // Claude Code's own tools, plus the colony's mcp tools, which its prompts name bare or prefixed.
+  const SDK_TOOLS = [
+    'Agent', 'AskUserQuestion', 'Bash', 'BashOutput', 'Edit', 'EnterPlanMode', 'ExitPlanMode', 'Glob',
+    'Grep', 'KillBash', 'KillShell', 'ListAgents', 'MultiEdit', 'NotebookEdit', 'Read', 'SendMessage',
+    'Skill', 'Task', 'TaskOutput', 'TaskStop', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write',
+  ];
+  const colonizerTools = [WAIT_TOOL, ...MEMORY_TOOLS, FINDING_TOOL];
+  const mentioned = new Set([
+    ...SDK_TOOLS.filter((name) => new RegExp(`\\b${name}\\b`).test(prompt)),
+    ...colonizerTools,
+    ...(prompt.match(/\bmcp__[a-z0-9_]+__[a-z0-9_]+/g) ?? []),
+  ]);
+
+  for (const name of mentioned) {
+    // Write is invited only for the pull request description, so ask for exactly that.
+    const input = name === 'Write' ? { file_path: '/harness/out/pr.md' } : {};
+    const reason = delegationDecision(name, input, ORCHESTRATOR);
+    if (ORCHESTRATOR_TOOLS.has(name) || name.startsWith('mcp__') || name === 'Write') {
+      assert.equal(reason, null, `${name} is invited, so the gate grants it`);
+    } else {
+      assert.match(String(reason), new RegExp(`^${name} belongs to your subagents`), `${name} is not invited, so the gate refuses it`);
+    }
+  }
+
+  // Set equality: a tool allowed but unannounced, or announced but refused, is issue #188 again.
+  const allowSentence = ENFORCE_PROMPT_APPEND.split('\n')[0];
+  const named = SDK_TOOLS.filter((name) => new RegExp(`\\b${name}\\b`).test(allowSentence));
+  assert.deepEqual(new Set(named), new Set([...ORCHESTRATOR_TOOLS, 'Write']));
+
+  // Inheritance: a subagent's calls carry agent_id, and this gate never refuses one.
+  for (const name of new Set([...SDK_TOOLS, ...colonizerTools])) {
+    assert.equal(delegationDecision(name, {}, SUBAGENT), null, name);
   }
 });
 

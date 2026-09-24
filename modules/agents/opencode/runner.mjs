@@ -206,7 +206,9 @@ export async function createBridge({ emit, setStatus, isWorking, findings = fals
         if (!['repo', 'org', 'global'].includes(scope)) reply(200, { error: 'memory_propose scope must be repo, org or global' });
         else if (typeof msg.title !== 'string' || !msg.title.trim() || typeof msg.content !== 'string' || !msg.content.trim()) reply(200, { error: 'memory_propose needs a title and content' });
         else {
-          emit({ type: 'memory_proposal', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          // Single agent, no subagents: the proposal is the orchestrator's, and the mothership
+          // re-checks the origin before it touches a store.
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
           reply(200, { ok: true });
         }
       } else reply(404, {});

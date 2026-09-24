@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
+import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
 import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
@@ -200,7 +201,7 @@ const ASK_TOOL = 'AskUserQuestion';
  * Tools the orchestrator keeps when delegation is enforced, grouped by why each is not subagent work.
  * Everything else is refused by delegationDecision, including tools the harness's own text invites.
  */
-const ORCHESTRATOR_TOOLS = new Set([
+export const ORCHESTRATOR_TOOLS = new Set([
   // Delegating: `Task` is Claude Code's legacy alias for `Agent`, and sessions use both spellings.
   'Task',
   'Agent',
@@ -304,6 +305,33 @@ export function normalizeQuestions(input) {
   }));
 }
 
+/**
+ * The risk class a question is published with, so the mothership can route it: an answering judge is
+ * configured with a ceiling and only sees questions at or below it, so misclassifying upward at worst
+ * costs the latency of a human, while misclassifying down would hand a credential- or publish-shaped
+ * question to a judge that must never see it. The heuristic therefore only rounds up, matches on word
+ * boundaries (a tokenizer is not a token), and `read_only` stays in the vocabulary for emitters that
+ * know more than this scan does — it is never a heuristic verdict.
+ */
+const CREDENTIALISH =
+  /\b(credentials?|secrets?|passwords?|passphrases?|(?:api|private|ssh)[\s_-]?keys?|tokens?|oauth)\b|\.env\b/i;
+const PUBLISHISH =
+  /\b(publish(?:es|ed|ing)?|releas(?:e|es|ed|ing)|deploy(?:s|ed|ing|ment)?|push(?:es|ed|ing)?|merg(?:e|es|ed|ing)|pull[\s_-]?requests?)\b/i;
+
+/** Round-up risk class of a normalized `questions` array; highest class across all its text wins. */
+export function riskClass(questions) {
+  const text = (Array.isArray(questions) ? questions : [])
+    .flatMap((q) => [
+      q?.question,
+      q?.header,
+      ...(Array.isArray(q?.options) ? q.options : []).map((o) => `${o?.label}\n${o?.description}`),
+    ])
+    .join('\n');
+  if (CREDENTIALISH.test(text)) return 'credential_adjacent';
+  if (PUBLISHISH.test(text)) return 'publish_affecting';
+  return 'workspace_write';
+}
+
 /** tool_result content → display text, capped at MAX_TOOL_OUTPUT characters. */
 export function toolResultText(content) {
   let text;
@@ -337,7 +365,7 @@ export function childEnv(env) {
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, waitServer, hiddenEnv = [], routes = [] } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [] } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -352,6 +380,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
+  const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
   // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
   // Enforced unless someone chose otherwise: an unset or unrecognised value delegates, and only an
@@ -370,6 +399,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
+  if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
@@ -418,6 +448,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
+  if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
   const preToolUse = [];
   if (delegate === 'enforce') {
@@ -428,6 +459,21 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
       hooks: [
         async (input) => {
           const reason = delegationDecision(input.tool_name, input.tool_input, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (loop) {
+    // Pacing and stopping the loop stay with the orchestrator, as filing findings does.
+    preToolUse.push({
+      hooks: [
+        async (input) => {
+          const reason = loopDecision(input.tool_name, input);
           if (!reason) return { continue: true };
           return {
             continue: true,
@@ -588,11 +634,13 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
       if (signal?.aborted) resolve(null);
       signal?.addEventListener('abort', () => resolve(null), { once: true });
     });
+    const questions = normalizeQuestions(toolInput);
     emit({
       type: 'question',
       question_id: questionId,
       message_id: toolMessage.get(questionId) ?? null,
-      questions: normalizeQuestions(toolInput),
+      risk: riskClass(questions),
+      questions,
     });
     settleStatus();
 
@@ -952,6 +1000,11 @@ async function main() {
     findingsServer = createFindingsServer({ emit, createSdkMcpServer, tool, z });
   }
 
+  let loopServer;
+  if (process.env.COLONIZER_LOOP === 'true') {
+    loopServer = createLoopServer({ emit, createSdkMcpServer, tool, z, selfPaced: process.env.COLONIZER_LOOP_SELF_PACED === 'true' });
+  }
+
   // Every colony can wait: a blocking wait costs no model turn, and the tool has no dependency or
   // setting to gate it on.
   const waitServer = createWaitServer({ createSdkMcpServer, tool, z });
@@ -961,6 +1014,7 @@ async function main() {
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     findingsServer,
+    loopServer,
     waitServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,

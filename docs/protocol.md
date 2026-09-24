@@ -127,7 +127,7 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
 {"type":"thinking","message_id":"msg_…","block_index":1,"text":"summary"}            // optional
 {"type":"tool_call","message_id":"msg_…","tool_call_id":"toolu_…","name":"Bash","input":{"command":"ls"}}
 {"type":"tool_result","tool_call_id":"toolu_…","output":"…","is_error":false}        // output ≤ 20 000 chars
-{"type":"question","question_id":"toolu_…","message_id":"msg_…","questions":[
+{"type":"question","question_id":"toolu_…","message_id":"msg_…","risk":"workspace_write","questions":[
   {"question":"Which database?","header":"Database","multi_select":false,
    "options":[{"label":"Postgres","description":"…","preview":null},{"label":"SQLite","description":"…"}]}
 ]}
@@ -159,6 +159,11 @@ Rules:
 - Agents must ask the user only through `question` events (the Claude Code runner appends a system
   prompt instruction and routes `AskUserQuestion` through `canUseTool`). Every question has 2–4
   options; UIs always add "Other".
+- Every question carries a **risk class** in `risk` (optional), a closed vocabulary ordered lowest
+  to highest: `read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`. The
+  runner assigns the class; the Mothership's autonomy judge enforces it against its ceiling
+  (§6.2b). A question with no `risk` — an older runner's — counts as `workspace_write`; a value
+  outside the vocabulary counts as above every ceiling and is never answered automatically.
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
 - `model_changed` names the orchestrator model. The runner emits it when Claude Code's init first
   names the model (`previous: null`), so a client always knows it, and after each `set_model` the
@@ -217,7 +222,13 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
 | `GET /api/repos/{owner}/{repo}/packages` | Monorepo detection: `{monorepo, tool, packages: [{name, path}]}`. `tool` is `npm-workspaces`, `pnpm`, `yarn`, `bun`, `turbo`, `nx`, `cargo`, `go-work`, `lerna` or `dirs` (no manifest declares them, but two or more `apps/*` / `packages/*` directories hold a manifest), `null` with an empty list when the repository is a single package. Read from the default branch's tree plus the root workspace manifests; served from a 10-minute stale-while-revalidate cache |
-| `GET /api/repos/{owner}/{repo}/meta` | What the repository picker shows: `{full_name, description, homepage, stars, primary_language, languages: [{name, bytes, percent}], commits_weekly: [52 counts, oldest first], stats_pending, contributors: [{login, avatar_url, contributions}] (top 8), pushed_at, html_url}`. Read through `gh api` (repository, `/languages`, `/stats/participation` `all`, `/contributors`); GitHub answers 202 while it computes statistics, which reads as an empty `commits_weekly` with `stats_pending: true` and is retried after a minute instead of an hour. Served from a stale-while-revalidate cache |
+| `GET /api/orgs/{org}/packages/published` | What the workspace's repositories (up to 25, most recently pushed, not archived) define and publish, from each manifest at the default branch in the mothership's bare clone (package.json, Cargo.toml, pyproject.toml, go.mod, pubspec.yaml; vendored, build and fixture directories skipped): `{org, scanned_at, repos: [{repo, sha, defined} or {repo, error}], packages: [{ecosystem, name, version, repo, path, private, registry, status: published\|unpublished\|private, unreleased_changes, published: {latest, published_at, downloads, downloads_period, url} \| null}], github_packages: {packages: [{name, type, visibility, versions, updated_at, url, repo}], note}}`. Registries asked: npm (+ weekly downloads), crates.io, PyPI, the Go module proxy, pub.dev; a 404 reads as `unpublished`. GitHub Packages need `read:packages` on the host's `gh` token, else `note` says so. The first scan runs in the background and the endpoint answers `{status: "scanning", message}` until it lands; a scan is then served for an hour and refreshed behind the answer |
+| `GET /api/orgs/{org}/packages/dependencies` | What those repositories depend on, from their lockfiles (package-lock.json / npm-shrinkwrap.json, bun.lock, pnpm-lock.yaml, yarn.lock classic and berry, Cargo.lock, poetry.lock, uv.lock, requirements.txt, go.mod, Package.resolved, pubspec.lock), leaving out the workspace's own packages and local/path sources: `{org, scanned_at, repos: [{repo, sha, lockfiles, skipped}], ecosystems: [{ecosystem, direct, transitive}], totals: {direct, transitive, outdated, vulnerable}, packages: [{ecosystem, name, direct: bool\|null, dev, latest, outdated, vulnerable, drift, versions: [{version, behind, users: [{repo, path}], vulns: [{id, summary, severity, fixed, url}]}]}]}`. `direct` comes from the manifests (or the lockfile when it says: go.mod `// indirect`, pubspec.lock); `latest` is asked for direct dependencies only (up to 250); advisories come from OSV.dev's batch API (details for up to 80). Same background-scan and caching rules as `published` |
+| `GET /api/orgs/{org}/packages/supply-chain` | Risky dependencies, worst first: `{org, scanned_at, repos, counts: {critical, high, moderate, low}, fixable, risks: [{severity, kind, ecosystem, name, version, reason, fix: {available, version}, url, direct, via, users: [{repo, path}]}], note}`. `kind` is `vulnerability` (OSV, with the first fixed version), `yanked` (crates.io, PyPI), `deprecated` and `install-script` (npm `preinstall`/`install`/`postinstall` of the locked version), `fresh-release` (published under 7 days ago), `young-package` (created under 30 days ago), `low-downloads` (direct, under 100), `typosquat` (one or two edits from a popular name in the same ecosystem), `license` (AGPL/SSPL high, GPL moderate, none or UNLICENSED low; skipped when the workspace's own packages are GPL-family), `unpinned-source` (git/URL/tarball sources, Cargo git deps without `rev`/`tag`, npm lock entries resolved outside a registry), `wildcard-range` (`*`/`latest`), `unpinned-version` (requirements without `==`) or `missing-integrity` (package-lock.json entries without an integrity hash). Registry facts are asked for direct or vulnerable versions only (up to 300); `via` names the package that pulls a nested npm install in. Same background-scan and caching rules |
+| `GET /api/repos/{owner}/{repo}/published`, `…/dependencies`, `…/supply-chain` | The same three views for one repository |
+| Cache fields on the six package views | Every answer after the first carries `cached_at` (RFC 3339, when it was computed) and `refreshing` (a refresh is running behind it). Answers are kept on disk under `<data>/cache/answers`, so after a restart the last answer is served at once — with `refreshing: true` once it is past its hour — rather than `scanning`. `?refresh=1` asks for a recompute (and a fresh `git fetch` of the scope's clones) while still answering with the cached value. Per-repository scans are cached by commit sha, so an org view recomputes only the repositories whose default branch moved |
+| `GET /api/img?u=<url>` | A GitHub avatar through the mothership (the cockpit's `Avatar` loads it first and falls back to the direct URL): only `https://avatars.githubusercontent.com/…` and `https://github.com/<login>.png`, anything else is `400`. Redirects are followed only to allowed URLs (at most three); the answer must be `image/png`, `jpeg`, `gif`, `webp` or `avif` (never SVG) and at most 5 MB, else `502`. Kept in `<data>/cache/img` for 7 days, then revalidated with `If-None-Match`; when GitHub cannot be reached the kept copy is served. Answered with `ETag` (a matching `If-None-Match` is a `304`), `Cache-Control: private, max-age=604800`, `nosniff` and a `default-src 'none'; sandbox` CSP |
+| `GET /api/repos/{owner}/{repo}/meta` | What the repository picker shows: `{full_name, description, homepage, stars, primary_language, languages: [{name, bytes, percent}], commits_weekly: [52 counts, oldest first], stats_pending, contributors: [{login, avatar_url, contributions}] (top 8), pushed_at, html_url}`. Read through `gh api` (repository, `/languages`, `/stats/participation` `all`, `/contributors`); GitHub answers 202 while it computes statistics, which reads as an empty `commits_weekly` with `stats_pending: true` and is retried after a minute instead of an hour. Each `gh api` call is conditional (`If-None-Match`; a 304 reuses the kept body). Served from a stale-while-revalidate cache that survives a restart; a colony pushing to or merging into the repository marks it stale |
 | `GET /api/repos/{owner}/{repo}/loc` | The Code page's lines of code at the default branch: `{ref, sha, total, by_language: [{name, files, code, blank}]}`, biggest first. Counted on the host from the mothership's bare clone (`<data>/repos/<owner>/<name>.git`, cloned on first use and fetched at most once a minute) with `git ls-tree` and one `git cat-file --batch`; languages use GitHub linguist names; vendored and generated paths (`node_modules/`, `vendor/`, `dist/`, `build/`, `target/`, lock files, minified files) and files over 1 MB are left out. Cached per commit |
 | `GET /api/repos/{owner}/{repo}/coverage` | Line coverage from the newest unexpired CI artifact whose name contains `cov`: `{measured: true, percent, format, file, artifact, run, at}` for an lcov, istanbul (`coverage-summary.json`), cobertura XML or llvm-cov/tarpaulin JSON report, else `{measured: false, reason}`. Never estimated. Cached an hour |
 | `GET /api/repos/{owner}/{repo}/git-summary` | `{repo, branches, open_prs, release: {tagName, name, publishedAt} \| null, latest_tag}`: branch count from the bare clone, open pull requests and the latest release through `gh`, the newest tag when there is no release. Cached ten minutes |
@@ -230,6 +241,20 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/repos/{owner}/{repo}/ask` | A quick answer about a file: body `{path, question, content, selection?: [first, last]}`; the file is sent cut to 60 KB. Answered by the summaries' model route (`summary_model`, else a routed `<provider>/<model>`, else a real Anthropic API key; never the Claude subscription token). Returns `{answer, model}` (Markdown) |
 | `GET\|PUT\|DELETE /api/repos/{owner}/{repo}/drafts` | Edits the Code editor autosaves on the mothership, never on GitHub. `GET ?ref=` → `{repo, autosave, drafts: [{ref, path, content, base_sha, saved_at}]}`; `PUT {ref, path, content, base_sha}` saves one (409 while autosave is off; at most 1 MB each and 20 MB per repository); `DELETE ?ref=&path=` removes one, or every draft on the ref without `path`. Stored in `<data>/drafts/<owner>/<repo>.json` (0600, directory 0700) |
 | `GET\|PUT /api/editor/settings` | `{autosave}`: whether the Code editor autosaves drafts on this mothership (default on). Persisted per install in `<data>/drafts/settings.json` |
+| `GET /api/chat` | Chat conversations (a direct conversation with a model, no colony), most recently updated first: `{chats: [{id, title, model, system?, max_tokens, workspace?, pinned, temperature?, persona?, auto_title, forked_from?: {chat, message}, created_at, updated_at}]}`. Stored on the Mothership as `<data>/chats/<id>.json` + `<id>.jsonl` and sent nowhere but the chosen model |
+| `GET /api/chat/models` | `{default, claude: {available, reason}, providers: [{id, name, models, preset, wire, has_key, pricing?: {input_per_mtok, output_per_mtok}}]}`. `default` is the summaries' cheap model. A plain Claude model is available only with an Anthropic API key (`sk-ant-api…`) or an Anthropic model provider — never the Claude subscription login, which is for colonies. `has_key` says whether a key is stored, never the key |
+| `POST /api/chat` | Creates a conversation: `{title?, model?, system?, max_tokens? (default 4096, ≤ 32000), temperature? (clamped to 0–1), persona?, workspace?}`; an empty model takes `default`. Without a title the first message names it, and the first good reply replaces that with a title from the summaries' cheap model |
+| `GET`, `PATCH`, `DELETE /api/chat/{id}` | One conversation and its messages `{chat, messages: [{id, role, content, ts, model?, input_tokens, output_tokens, cost_usd?, stopped, error?, parent_id?, first_token_ms?, latency_ms?, attachments?: [{kind, label, sha?, mime?, width?, height?, bytes?}], candidate, lane?}]}`; `PATCH` renames, pins, or changes model, system, persona, max_tokens, temperature (a negative one clears it) or workspace; `DELETE` removes both files, the stored images no remaining message refers to (plus uploads nothing took up for a day), and the notes on its replies, answering `{deleted, images_removed}`. The cockpit holds a deletion back for its 6-second undo window, so an undone one never reaches the Mothership |
+| `POST /api/chat/{id}/messages` | `{content}` (≤ 100 KB) or `{regenerate: true}`, optional `model` (answer with another model this once; the conversation's model is unchanged) and `attachments` (below; the older `context: {colony?, file?: {repo, path, ref?}}` still works). Answers `application/x-ndjson`, streamed: `{"type":"delta","text"}` lines, then `{"type":"done","message","chat"?}` or `{"type":"error","message","message_record"}` (`chat` is the renamed conversation when this reply generated its title). Anthropic-wire providers stream; `openai`-wire providers answer in one delta. Closing the request stops the reply; what was written is stored with `stopped: true`. Replies record `parent_id`, `first_token_ms` and `latency_ms`. Tokens and (priced providers') cost go to the spend journal as a `usage` row under the conversation's workspace, or the `chat` pseudo-org. Body ≤ 12 MB |
+| Chat attachments | Up to 8 per message, `{kind, …}`: `colony {id}` (summary, status, error and recent activity), `file {repo, path, ref?}` (read from the Mothership's clone like `…/blob`; repository-relative, no `..`; ≤ 60 KB used), `map {repo}` (every component of the stored architecture map), `map_component {repo, component}` (one component, its files and connections), `snippet {label?, text}` (≤ 60 KB), `image {sha, name?}` (a stored image, below; older clients may send `{media_type, data: base64, name?}` instead, which is stored first — mind the 12 MB body), `colonies_today {org?}` (colonies that moved in the last 24 h), `merged_prs {org?, days? 1–31, default 7}`. At most 8 images on a message. Their text joins the system prompt (≤ 240 KB together). The message stores `{kind, label}` per attachment, and for an image its reference `{kind: "image", label, sha, mime, width, height, bytes}` |
+| Chat images | `POST /api/chat/attachments` stores one image: the body is the image itself (any `Content-Type` but JSON; ≤ 10 MB) or JSON `{data: "<base64 or data: URL>"}`. Only PNG, JPEG, GIF and WebP are accepted, recognised by their leading bytes whatever the name or declared type says (415 otherwise). Metadata that can carry a location is removed before storing: JPEG EXIF (its orientation kept), XMP/IPTC and other APP segments except JFIF, ICC and Adobe, comments and anything after the image; PNG `tEXt`/`zTXt`/`iTXt`/`eXIf`/`tIME`; WebP `EXIF`/`XMP `. Answers `{sha, mime, width, height, bytes}` of the cleaned image, stored once, content-addressed, as `<data>/chats/attachments/<sha256>.<ext>` (0600) — the same picture in two conversations is one file. `GET /api/chat/attachments/{sha}` serves it with its real `Content-Type`, `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff` and a sandboxing CSP. Both need the API token or the cockpit cookie, and the upload a same-origin `Origin` with the cookie, like every write. Every later request — a regenerate, an edited resend, a branch, a compare — sends a conversation's stored images again, on the user turn they came with, newest first up to 20 images / 20 MB (images over the Anthropic API's 5 MB limit are left out). A model that cannot read images (an `openai`-wire provider) gets `[image omitted: model can't read images — <name>]` on that turn instead; so does any image left out, with its reason |
+| `GET /api/chat/prefs` | `{personas: {<preset id>: system}, feedback: {<message id>: note}}`: persona preset edits and the operator's notes on unhelpful replies, kept in `<data>/chats/_prefs.json`. `PUT /api/chat/prefs/personas/{id}` `{system}` (≤ 20 KB; `null` goes back to the built-in prompt) and `PUT /api/chat/prefs/feedback/{message}` `{note}` (≤ 2 KB; `null` clears it) answer the whole object |
+| `POST /api/chat/{id}/compare` | `{content, models: [a, b], attachments?}`: one message to two different models at once. Both replies stream on this response, every line tagged `lane: 0 \| 1`, and are stored with `candidate: true`, left out of the model's history until one is picked |
+| `POST /api/chat/{id}/pick` | `{message_id}`: keeps that compare reply as an ordinary one and removes its sibling; answers `{messages}` |
+| `POST /api/chat/{id}/fork` | `{message_id, include? = true}`: a new conversation (same model and settings, `forked_from` set) with the messages up to and including that one — or up to just before it with `include: false`, which is how the cockpit edits and resends a message. Compare candidates are left out |
+| `POST /api/chat/{id}/title` | Asks the summaries' cheap model (never the subscription login) for a title from the first exchange and stores it |
+| `GET /api/chat/{id}/export` | The conversation as `text/markdown`, a download; its images are linked as `/api/chat/attachments/{sha}`. `?format=zip` answers `application/zip` instead: `chat-<id>.md` with the images beside it under `images/<sha>.<ext>`, linked relatively |
+| `POST /api/chat/{id}/issue` | `{repo, title (one line, ≤ 256), body (≤ 60 KB)}`: files a GitHub issue with the Mothership's `gh`; answers `{url}`. The cockpit confirms with the operator first |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set; a remote conflict (below) is a **409** either way |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
@@ -1276,8 +1301,16 @@ tells the runner memory is enabled. The runner exposes two tools to the agent: `
 Proposing emits a runner event; nothing is written inside the colony:
 
 ```jsonc
-{"type":"memory_proposal","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
+{"type":"memory_proposal","origin":"orchestrator","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
 ```
+
+`origin` names who asked: `orchestrator`, a `subagent:<name>` or a `background:<name>`. Only the
+orchestrator proposes — the runner's `PreToolUse` hook refuses the tool for any agent with an
+`agent_id`, and the mothership refuses any proposal whose origin is not the orchestrator's
+(`memory_read_only`, logged in the colony's transcript) before it touches a store, so with the `mem0`
+provider a refused proposal is never sent upstream. An event without `origin` — a runner from before
+the field existed — is read as the orchestrator. The matrix and where it is enforced are in
+[architecture](architecture.md#shared-memory-access).
 
 The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
@@ -1314,6 +1347,7 @@ for a person. `judge` means a model answers one the person has not.
 | `after_minutes` | 10 | How long a question waits for a person first; `0` answers as soon as it is seen |
 | `max_answers` | 5 | Judged answers per colony, after which it is left for the person |
 | `free_text` | false | Whether a question with no options may be answered |
+| `risk_ceiling` | `workspace_write` | The highest risk class (§2) the judge may answer. A question above the ceiling is never answered: the judge logs once per question that it has left the question for the person, and waits however long — without spending the colony's judged answers, so a later question within the ceiling is still judged |
 
 Every thirty seconds the Mothership looks for colonies in `waiting_for_answer` whose question has
 waited long enough. It sends the model the task, the question with its options, and the last few
@@ -1326,6 +1360,13 @@ JSON, or free text while `free_text` is off: each leaves the question for the pe
 guessing, and stops this colony being judged again. This is the boundary that keeps a colony's own
 output (which can carry repository content, which can carry instructions) from becoming an
 instruction to the Mothership.
+
+Risk bounds it further. Every question carries a risk class (§2) and `risk_ceiling` is the highest
+class the judge may answer, `workspace_write` by default. A question above the ceiling —
+publish-affecting or credential-adjacent, unless the ceiling is raised — degrades to notify-only:
+the judge never answers it, logs once per question that it has left the question for the person,
+and waits however long it takes — without spending the colony's answer budget, so a later
+question within the ceiling is judged as usual.
 
 Not reaching an answer is different from refusing one. Any failure short of a refusal — a provider
 that cannot be reached, an HTTP error status (a 401 from a stale key as much as a 5xx), a reply
@@ -1389,6 +1430,8 @@ pull requests small; they will adopt the red-team runs of
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/plugins` | `{local_root, plugins: [{name, description, version, source: "vendored"\|"local", shadows_vendored, skills, agents, commands}]}`, one entry per name resolved the way a colony's boot resolves it. `local_root` is where an operator adds their own; the counts are what Claude Code discovers: `skills/<name>/SKILL.md`, `agents/*.md`, `commands/*.md` |
+| `GET /api/plugins/graft` | The downloadable graft skillset (docs/skill-packs.md, "Downloadable skillsets"): `{name, release, installed_release, state: "idle"\|"downloading"\|"unpacking"\|"installed"\|"failed"\|"unavailable"\|"local", bytes, total, started_at, finished_at, error}`. `GET /api/plugins` carries the same objects under `downloadable` |
+| `POST /api/plugins/graft/download` | Start downloading the bundle `graft.lock` pins for this architecture into `<data>/plugins/graft`, or join the running download; returns at once. `409` when nothing is pinned, or when `plugins/graft` is the operator's own directory |
 
 **Model providers** (credentials stay on the mothership, keys stored 0600):
 
@@ -1531,7 +1574,8 @@ Every minute the mothership checks live colonies. A colony that is `running` wit
 `stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
 `nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
-autopilot colony whose turn ends with an error (not an interrupt) is not published and gets
+autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
+mothership contradicted (Autopilot, below) — is not published and gets
 `autopilot_held`. Any new agent event clears `attention`; a disabled watchdog clears only the reasons
 it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
@@ -1610,6 +1654,44 @@ log gets a `warn` line (`autopilot: not publishing, external writes are blocked
 (COLONIZER_NO_EXTERNAL_EFFECTS); press Create PR when writes are enabled`) and the colony's
 `attention` is left as it was. Opening pull requests as drafts (`publish.settings.draft`) does not
 change this: a draft PR is still an external write, refused the same way as a ready one.
+
+**Done-verification (issue #328).** Before a completion claim is published, the mothership verifies it
+on its own. It snapshots the colony's work — commits and uncommitted files — without touching the
+worktree, reads the git state directly (commits ahead of base, changed files, whether the paths the PR
+description names are on the branch), and re-runs the repository's test command in a fresh one-shot
+microVM over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
+codes. The verdict is `confirmed` (the fresh run is green and the git state matches the description),
+`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — no test
+command known, the runner unavailable — which is never treated as confirmed. The fresh run's exit
+number is the one the guest itself writes to a report file mounted for exactly that
+(`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it, so a runner that never
+reported has not verified anything. Autopilot publishes on
+`confirmed` and on `unverifiable` exactly as before; on `contradicted` the colony is held with
+`attention.reason` `autopilot_held` and the contradictions in the event below.
+
+The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
+colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
+a command), then — for `auto` — the repository's own declaration read from the **base** branch:
+package.json `scripts.test` (else `npm ci && npm test`, or `npm install && npm test` without a
+lockfile), Cargo.toml → `cargo test`, a Makefile `test:` target → `make test`. A branch that rewrote
+the entry its resolved command comes from (`scripts.test`, the Makefile) would be grading its own
+homework: the claim comes back `unverifiable` with that said plainly, and nothing runs. `verify:
+none` means
+unverifiable by declaration. The verdict is appended to the colony's `events.jsonl` as a host event
+with the usual `seq`/`ts` — host-generated the same way as the finding chain's events (§6.6), so the
+runner-event schema is unchanged — and the `Session` carries the latest one as `verification` (the
+same object minus `type`/`seq`/`ts`):
+
+```jsonc
+{"type":"verification","verdict":"confirmed","by_declaration":false,"summary":"one plain line",
+ "contradictions":[],"command":"npm test","command_source":"package.json","exit_code":0,
+ "tests_ms":8100,"commits":2,"files_changed":["src/scan.rs"],"snapshot":"<sha>|null","ms":12345}
+```
+
+`command_source` names where the command came from (`config` for an explicit command — the colony's
+`verify` or the `publish` module's setting — or the base branch file that declared it:
+`package.json`, `Cargo.toml`, `Makefile`; null when no command ran), `exit_code`/`tests_ms` are the
+fresh run's, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
 
 **No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
 in the mothership's environment to any non-empty value other than `0`, `false`, `off` or `no`
@@ -1937,7 +2019,9 @@ transcript show the whole chain:
 
 These five are host-generated: the mothership appends them to the hunter colony's events.jsonl, the
 runner never emits them, and the runner-event schema in `docs/agent-events.schema.json` is unchanged —
-the runner events stay the §2 set plus `finding`. Every transition is also one line of the ledger,
+the runner events stay the §2 set plus `finding`. The publish gate's `verification` event (§6.3,
+Autopilot) is host-generated the same way, on the writing colony's own event log. Every transition is
+also one line of the ledger,
 `sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records
 `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?,
 verdict?, pr?}`, `state` one of `validated|rejected|filed|duplicate|fix_colony|review|merged|blocked|error`. A
@@ -2274,3 +2358,34 @@ other the agent not making progress, and they need different fixes.
 question waiting for a person, the second autopilot declining to publish after
 the turn's own error. UHP uses `incomplete` for budgets and does not reconcile
 that with its `timeout` code, so Colonizer does not emit `timeout`.
+
+## Loops
+
+Scheduled colonies ([loops.md](loops.md)), saved in `<config_dir>/loops.json`; every write needs the
+Bearer token and `Origin` like the other writes.
+
+| Route | What it does |
+|---|---|
+| `GET /api/loops` | Every loop: `{id, name, org, repo, prompt, cadence, tz_offset_minutes, model, subagent_model, autopilot, max_runs, end_at, enabled, next_run_at, runs, last_run: {session, at}, last_note, ended_reason, created_at}`. `next_run_at` is null once the loop has ended. |
+| `POST /api/loops` | Creates one from `{name, repo, prompt, cadence, tz_offset_minutes?, model?, subagent_model?, autopilot? (true), max_runs?, end_at?, enabled? (true)}`. A `<provider>/<model>` must name a configured provider. |
+| `PUT /api/loops/{id}` | Replaces its settings; id, creation time, run count and last run are kept, and the next run is recomputed. |
+| `DELETE /api/loops/{id}` | Removes the loop; its past colonies stay. |
+| `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight. |
+| `GET /api/loops/{id}/runs` | The loop's colonies (origin `loop:<id>`), newest first. |
+
+`cadence` is tagged by `every`, all times UTC: `{"every":"interval","minutes":60}` (15–10080),
+`{"every":"daily","hour":9,"minute":0}`, `{"every":"weekly","weekday":0,"hour":9,"minute":0}` (0 =
+Monday), `{"every":"monthly","day":31,"hour":6,"minute":0}` (clamped to the month's end), or
+`{"every":"self_paced"}`.
+
+A loop's colony emits two agent events (§3), acted on only for colonies whose origin names a loop:
+
+```json
+{"type":"loop_next","delay_minutes":120,"reason":"CI reruns at 11"}
+{"type":"loop_stop","reason":"all flakes fixed"}
+```
+
+`loop_next` sets a self-paced loop's `next_run_at` to now + `delay_minutes` (clamped to 15–1440); a
+fixed loop only notes it. `loop_stop` disables the loop and records `ended_reason: "stopped by the
+colony: <reason>"`. The runner offers them as `mcp__colonizer_loop__loop_next` / `…__loop_stop`
+when the mothership sets `COLONIZER_LOOP=true` (and `COLONIZER_LOOP_SELF_PACED`); subagents are refused.

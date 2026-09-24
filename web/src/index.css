@@ -1730,3 +1730,52 @@ body {
   font-family: var(--font-mono, ui-monospace, monospace);
   white-space: pre;
 }
+
+/* Chat: the "thinking" dots before a reply's first token, and popovers easing in. */
+.chat-dots i {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-faint);
+  animation: chat-dot 1.2s ease-in-out infinite;
+}
+.chat-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.chat-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes chat-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+.chat-pop {
+  animation: chat-pop 0.12s ease-out;
+}
+@keyframes chat-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-dots i,
+  .chat-pop {
+    animation: none;
+  }
+}
+.chat-md > :first-child {
+  margin-top: 0;
+}
+.chat-md > :last-child {
+  margin-bottom: 0;
+}

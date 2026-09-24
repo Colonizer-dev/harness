@@ -12,6 +12,7 @@ import type { Session } from "../types";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { feedEntries, type FeedKind } from "./feed";
 import { taskLine, taskTooltip } from "../summary";
+import { LoopBadge } from "./LoopsView";
 
 /** The local "read up to" mark, shared by the inbox and the header's notifications panel. */
 export const READ_AT = "colonizer.inboxReadAt";
@@ -101,7 +102,7 @@ export function InboxView({
               <div className="mt-2 text-[15px] font-semibold [text-wrap:pretty]">
                 {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
               </div>
-              <div className="mt-1 text-[13px] text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}</div>
+              <div className="mt-1 text-[13px] text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}<LoopBadge session={session} /></div>
             </div>
           ))
         )}

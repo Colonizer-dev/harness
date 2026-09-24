@@ -255,7 +255,7 @@ pub fn map_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf> {
     Some(data_dir.join("maps").join(owner).join(format!("{name}.json")))
 }
 
-fn read_stored(app: &App, repo: &str) -> Option<Value> {
+pub(crate) fn read_stored(app: &App, repo: &str) -> Option<Value> {
     let path = map_path(&app.cfg.data_dir, repo)?;
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }

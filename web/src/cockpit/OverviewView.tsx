@@ -61,6 +61,8 @@ import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, 
 import type { LiveConnection } from "../liveStream";
 import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
 import { taskLine, taskTooltip } from "../summary";
+import { Pagination } from "./ListControls";
+import { PAGE_SIZE, pageOf } from "./paging";
 import { ColonyFilterHeader, NO_FILTERS, applyColonyFilters, filtersActive, type ColonyFilters } from "./ColonyFilters";
 
 /** The last `range` local-calendar days, ascending — the x axis of every per-day series.
@@ -92,8 +94,6 @@ function sortColonies(list: Session[]): Session[] {
   });
 }
 
-
-const COLONY_LIMIT = 10;
 
 export function OverviewView({
   sessions,
@@ -167,7 +167,8 @@ export function OverviewView({
   const filtered = filtersActive(filters);
   // The red-team wizard or history open for one workspace row; null is neither.
   const [redTeam, setRedTeam] = useState<{ org: string; view: "wizard" | "history" } | null>(null);
-  const [showAll, setShowAll] = useState(false);
+  // The colonies table's page (zero-based); a filter change goes back to the first.
+  const [page, setPage] = useState(0);
   // What moved since the last push: flashes the row whose status changed, lights a risen cost.
   const events = useLiveEvents(sessions);
   const questions = useOpenQuestions(sessions);
@@ -294,9 +295,9 @@ export function OverviewView({
   });
   const mergedAll = compared.reduce((t, c) => t + c.merged, 0);
 
-  // The colonies table: its header filters, needs-you longest-wait first, capped at ten.
+  // The colonies table: its header filters, needs-you longest-wait first, ten to a page.
   const tableSessions = sortColonies(applyColonyFilters(visibleSessions, filters, nowMs));
-  const tableShown = showAll ? tableSessions : tableSessions.slice(0, COLONY_LIMIT);
+  const tablePage = pageOf(tableSessions, page, PAGE_SIZE);
   const rangePicker = (
     <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} emptyPrevious={prevEmpty} />
   );
@@ -337,7 +338,7 @@ export function OverviewView({
   const fleetOnline = fleetHosts.filter((h) => h.health === "online").length;
   const clearFilters = () => {
     setFilters(NO_FILTERS);
-    setShowAll(false);
+    setPage(0);
   };
 
   return (
@@ -561,7 +562,7 @@ export function OverviewView({
                     filters={filters}
                     onChange={(next) => {
                       setFilters(next);
-                      setShowAll(false);
+                      setPage(0);
                     }}
                     sessions={visibleSessions}
                     workspaces={workspaces.map((w) => ({ org: w.org, avatar: w.avatar ?? null }))}
@@ -589,7 +590,7 @@ export function OverviewView({
             ) : (
               <div className="overflow-x-auto">
                 <div className="min-w-[680px]">
-                  {tableShown.map((session) => (
+                  {tablePage.rows.map((session) => (
                     <ColonyRow
                       key={session.id}
                       session={session}
@@ -603,15 +604,7 @@ export function OverviewView({
                 </div>
               </div>
             )}
-            {tableSessions.length > COLONY_LIMIT && (
-              <button
-                type="button"
-                onClick={() => setShowAll((v) => !v)}
-                className="w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-text"
-              >
-                {showAll ? "Show fewer" : `Show all ${tableSessions.length} colonies`}
-              </button>
-            )}
+            {tableSessions.length > PAGE_SIZE && <Pagination view={tablePage} onPage={setPage} noun="colonies" className="-mt-px border-t border-border py-2.5" />}
           </Rules>
         </Section>
 
