@@ -27,22 +27,48 @@ export function mapRepos(sessions: readonly Session[]): string[] {
   return [...score.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([repo]) => repo);
 }
 
-/** Which colonies are in which chamber, from their touched files: at most three chambers a colony. */
+/** How a colony is in a chamber: changing files there, or only reading them so far. */
+export type PlaceMode = "changing" | "reading";
+export interface Place {
+  session: Session;
+  files: string[];
+  mode: PlaceMode;
+  /** Waiting on a person (a question) or idle: its ant stands still. */
+  blocked: boolean;
+}
+
+/** A colony that is live but not working right now: its ants stand still in the chamber. */
+export function isBlocked(s: Session): boolean {
+  return s.status === "waiting_for_answer" || s.status === "idle";
+}
+
+/**
+ * Which colonies are in which chamber: from the files each has changed, else — for a colony still
+ * exploring — from the files its recent tool calls read. At most three chambers a colony; a colony
+ * with neither waits at the surface.
+ */
 export function colonyPlaces(
   sessions: readonly Session[],
   touched: Readonly<Record<string, string[]>>,
   map: NonNullable<RepoMap["map"]>["map"],
-): { byChamber: Map<string, { session: Session; files: string[] }[]>; waiting: Session[] } {
-  const byChamber = new Map<string, { session: Session; files: string[] }[]>();
+  reading: Readonly<Record<string, string[]>> = {},
+): { byChamber: Map<string, Place[]>; waiting: Session[] } {
+  const byChamber = new Map<string, Place[]>();
   const waiting: Session[] = [];
   for (const s of sessions) {
     if (!isLive(s.status)) continue;
-    const hits = componentsForFiles(touched[s.id] ?? [], map.components).slice(0, 3);
+    let mode: PlaceMode = "changing";
+    let hits = componentsForFiles(touched[s.id] ?? [], map.components).slice(0, 3);
+    if (!hits.length) {
+      mode = "reading";
+      hits = componentsForFiles(reading[s.id] ?? [], map.components).slice(0, 3);
+    }
     if (!hits.length) {
       waiting.push(s);
       continue;
     }
-    for (const hit of hits) byChamber.set(hit.id, [...(byChamber.get(hit.id) ?? []), { session: s, files: hit.files }]);
+    for (const hit of hits)
+      byChamber.set(hit.id, [...(byChamber.get(hit.id) ?? []), { session: s, files: hit.files, mode, blocked: isBlocked(s) }]);
   }
   return { byChamber, waiting };
 }
@@ -54,6 +80,7 @@ export function NestMapView({
   onOpen,
   initialMap,
   initialTouched,
+  initialReading,
 }: {
   /** The nest's colonies (already scoped to the workspace). */
   sessions: Session[];
@@ -63,6 +90,7 @@ export function NestMapView({
   /** Static markup never runs effects: the tests hand the map and the touched files in directly. */
   initialMap?: RepoMap | null;
   initialTouched?: Record<string, string[]>;
+  initialReading?: Record<string, string[]>;
 }): ReactElement {
   const api = useApi();
   const toast = useToast();
@@ -71,6 +99,7 @@ export function NestMapView({
   const repo = chosen && repos.includes(chosen) ? chosen : (initialMap?.repo ?? repos[0] ?? null);
   const [data, setData] = useState<RepoMap | null>(initialMap ?? null);
   const [touched, setTouched] = useState<Record<string, string[]>>(initialTouched ?? {});
+  const [reading, setReading] = useState<Record<string, string[]>>(initialReading ?? {});
   const [open, setOpen] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
@@ -120,7 +149,11 @@ export function NestMapView({
     const load = () =>
       api
         .touched()
-        .then((t) => !cancelled && setTouched(t.sessions))
+        .then((t) => {
+          if (cancelled) return;
+          setTouched(t.sessions);
+          setReading(t.reading ?? {});
+        })
         .catch(() => {
           /* ants stay where they were */
         });
@@ -183,7 +216,7 @@ export function NestMapView({
   const openComponent = open && map ? map.components.find((c) => c.id === open) : undefined;
   const markedPaths = useMemo(() => new Set((openComponent?.sources ?? []).map((s) => s.path.replace(/\/+$/, ""))), [openComponent]);
   const changingPaths = useMemo(() => new Set(inRepo.flatMap((s) => touched[s.id] ?? [])), [inRepo, touched]);
-  const places: ReturnType<typeof colonyPlaces> = map ? colonyPlaces(inRepo, touched, map) : { byChamber: new Map(), waiting: [] };
+  const places: ReturnType<typeof colonyPlaces> = map ? colonyPlaces(inRepo, touched, map, reading) : { byChamber: new Map(), waiting: [] };
   const openChamber = open && layout ? layout.byId.get(open) : null;
 
   return (
@@ -342,7 +375,13 @@ export function NestMapView({
                       {/* One ant idles in the chamber for the colonies working there. */}
                       {inside.length > 0 && (
                         <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                          <AntAvatar state="working" size={Math.min(26, c.r)} framed={false} ground={false} phase={c.x % 5} />
+                          <AntAvatar
+                            state={inside.every((p) => p.blocked) ? "thinking" : "working"}
+                            size={Math.min(26, c.r)}
+                            framed={false}
+                            ground={false}
+                            phase={c.x % 5}
+                          />
                         </span>
                       )}
                     </button>
@@ -356,28 +395,40 @@ export function NestMapView({
 
               {/* The ants: each colony walks from the mouth, along the tunnels, to the chambers its files are in. */}
               {[...places.byChamber.entries()].flatMap(([id, list]) =>
-                list.map(({ session }, k) => {
+                list.map(({ session, mode, blocked }, k) => {
                   const route = antRoute(map, layout, id);
-                  const seconds = 16 + ((k * 5 + id.length * 3) % 9);
+                  // Readers scout faster and further apart than the ants carrying changes.
+                  const seconds = (mode === "reading" ? 11 : 16) + ((k * 5 + id.length * 3) % 9);
+                  const doing = blocked ? (session.status === "waiting_for_answer" ? "waiting for you" : "idle") : mode === "reading" ? "reading here" : "changing files here";
                   return (
                     <div
                       key={`${session.id}-${id}`}
-                      className="absolute left-0 top-0 z-[3]"
+                      className="map-ant absolute left-0 top-0 z-[3]"
+                      data-mode={mode}
+                      data-blocked={blocked}
                       style={{
                         offsetPath: `path("${route}")`,
                         offsetRotate: "0deg",
-                        offsetDistance: "0%",
-                        animation: `ck-carry ${seconds}s ease-in-out ${-((k * 4.3 + id.length) % seconds)}s infinite`,
+                        offsetDistance: "100%",
+                        animation: blocked ? undefined : `ck-carry ${seconds}s ease-in-out ${-((k * 4.3 + id.length) % seconds)}s infinite`,
                       } as CSSProperties}
                     >
                       <button
                         type="button"
                         onClick={() => onSelect(session.id)}
-                        title={`${session.repo}${session.issue != null ? ` #${session.issue}` : ""} · ${session.issue_title || "open session"}`}
-                        aria-label={`colony ${session.issue_title || session.id} in ${id}`}
-                        className="block -translate-x-1/2 -translate-y-1/2 cursor-pointer"
+                        title={`${session.repo}${session.issue != null ? ` #${session.issue}` : ""} · ${session.issue_title || "open session"} · ${doing}`}
+                        aria-label={`colony ${session.issue_title || session.id} ${doing} in ${id}`}
+                        className={`relative block -translate-x-1/2 -translate-y-1/2 cursor-pointer ${mode === "reading" ? "opacity-70" : ""}`}
                       >
-                        <AntAvatar state="working" size={22} phase={k} ground={false} framed={false} />
+                        <AntAvatar state={blocked ? "thinking" : "working"} size={22} phase={k} ground={false} framed={false} />
+                        {mode === "reading" && !blocked && (
+                          <span aria-hidden="true" className="absolute -inset-1 rounded-full border border-dashed border-accent/60" />
+                        )}
+                        {blocked && (
+                          <span aria-hidden="true" className="absolute -right-2 -top-2 grid size-4 place-items-center rounded-full bg-warn text-[10px] font-bold text-bg">
+                            {session.status === "waiting_for_answer" ? "?" : "‖"}
+                          </span>
+                        )}
                       </button>
                     </div>
                   );
@@ -390,8 +441,8 @@ export function NestMapView({
                   key={`wait-${s.id}`}
                   type="button"
                   onClick={() => onSelect(s.id)}
-                  title={`${s.issue_title || s.id} · no changes yet`}
-                  aria-label={`colony ${s.issue_title || s.id}, no changes yet`}
+                  title={`${s.issue_title || s.id} · ${isBlocked(s) ? (s.status === "waiting_for_answer" ? "waiting for you" : "idle") : "starting — nothing read or changed yet"}`}
+                  aria-label={`colony ${s.issue_title || s.id}, nothing read or changed yet`}
                   className="absolute z-[3] -translate-x-1/2 -translate-y-full cursor-pointer"
                   style={{ left: box.width / 2 + 34 + i * 22, top: SURFACE_Y }}
                 >
@@ -471,7 +522,7 @@ function ChamberPanel({
 }: {
   chamber: { x: number; y: number; r: number; component: RepoMapComponent };
   box: NestBox;
-  inside: { session: Session; files: string[] }[];
+  inside: Place[];
   onClose: () => void;
   onSelect: (id: string) => void;
   onOpen: (id: string) => void;
@@ -482,7 +533,8 @@ function ChamberPanel({
   const left = right + width + 12 <= box.width ? right : Math.max(12, chamber.x - chamber.r - 14 - width);
   const top = Math.max(SURFACE_Y + 8, Math.min(box.height - 280, chamber.y - 40));
   const maxHeight = Math.max(160, box.height - top - 12);
-  const hitFiles = new Set(inside.flatMap((p) => p.files));
+  const hitFiles = new Set(inside.filter((p) => p.mode === "changing").flatMap((p) => p.files));
+  const readFiles = new Set(inside.filter((p) => p.mode === "reading").flatMap((p) => p.files));
   const c = chamber.component;
   return (
     <div
@@ -522,6 +574,18 @@ function ChamberPanel({
           <ul className="m-0 list-none space-y-0.5 p-0">
             {[...hitFiles].slice(0, 6).map((f) => (
               <li key={f} className="truncate font-mono text-[11.5px] text-accent" title={f}>
+                {f}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {readFiles.size > 0 && (
+        <div className="mt-3">
+          <div className="mb-1 text-[11.5px] text-faint">Reading</div>
+          <ul className="m-0 list-none space-y-0.5 p-0">
+            {[...readFiles].slice(0, 6).map((f) => (
+              <li key={f} className="truncate font-mono text-[11.5px] text-muted" title={f}>
                 {f}
               </li>
             ))}

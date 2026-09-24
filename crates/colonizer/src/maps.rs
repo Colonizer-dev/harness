@@ -499,6 +499,86 @@ async fn touched_for(app: &App, s: &Session) -> Option<Vec<String>> {
 
 static TOUCHED_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
 
+/// How much of a colony's `events.jsonl` the reading probe looks at: the tail only.
+const READ_TAIL_BYTES: u64 = 256 * 1024;
+/// How many of a colony's most recent tool calls count as "reading now".
+const READ_RECENT_CALLS: usize = 40;
+/// Most paths reported per colony.
+const READ_LIMIT: usize = 20;
+
+/// The repository-relative paths a colony's most recent tool calls looked at, newest first and
+/// deduplicated: `file_path`/`notebook_path`/`path` inputs (Read, Edit, Write, Glob, Grep, …) and
+/// `/workspace/…` tokens in Bash commands. Paths outside the worktree are dropped. Pure over the
+/// parsed event lines, so it is tested without a colony.
+pub(crate) fn recent_reads(events: &[Value]) -> Vec<String> {
+    let calls = events
+        .iter()
+        .rev()
+        .filter(|e| e["type"] == "tool_call")
+        .take(READ_RECENT_CALLS);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let Some(rel) = workspace_relative(raw) else { return };
+        if !out.iter().any(|p| p == &rel) {
+            out.push(rel);
+        }
+    };
+    for call in calls {
+        let input = &call["input"];
+        for key in ["file_path", "notebook_path", "path"] {
+            if let Some(p) = input[key].as_str() {
+                push(p);
+            }
+        }
+        if let Some(cmd) = input["command"].as_str() {
+            let in_worktree = cmd.contains("/workspace");
+            for token in
+                cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '"' | '\'' | '(' | ')' | '>' | '<' | '='))
+            {
+                let token = token.trim_end_matches([':', ',']);
+                if token.starts_with("/workspace/") {
+                    push(token);
+                } else if in_worktree && looks_like_repo_path(token) {
+                    // `cd /workspace && grep -n x crates/colonizer/src/…`: relative paths count too.
+                    push(token);
+                }
+            }
+        }
+    }
+    out.truncate(READ_LIMIT);
+    out
+}
+
+/// A relative token shaped like a repository path: at least one `/`, path characters only, not a
+/// flag, a URL or a glob.
+fn looks_like_repo_path(token: &str) -> bool {
+    token.contains('/')
+        && !token.starts_with('-')
+        && !token.starts_with('/')
+        && !token.contains("://")
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '+'))
+}
+
+/// `/workspace/crates/x.rs` → `crates/x.rs`; relative paths pass through; anything outside the
+/// worktree (or the worktree root itself) is `None`.
+fn workspace_relative(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let rel = if let Some(rest) = raw.strip_prefix("/workspace/") {
+        rest
+    } else if raw.starts_with('/') || raw.starts_with('~') {
+        return None;
+    } else {
+        raw.strip_prefix("./").unwrap_or(raw)
+    };
+    let rel = rel.trim_end_matches('/');
+    if rel.is_empty() || rel == "." || rel.contains("..") || rel.contains('*') {
+        return None;
+    }
+    Some(rel.to_string())
+}
+
 /// `GET /api/touched`: `{sessions: {id: [path…]}}` for every live colony, cached for a few seconds
 /// so a map open in several tabs does not multiply the git probes.
 pub async fn touched(State(app): State<Shared>) -> Json<Value> {
@@ -526,7 +606,22 @@ pub async fn touched(State(app): State<Shared>) -> Json<Value> {
             by_id.insert(id, files);
         }
     }
-    let value = json!({"sessions": by_id});
+    // What each live colony has been looking at lately, so a colony that is still exploring (or
+    // blocked) walks the chambers it reads instead of waiting at the surface.
+    let reads = live.iter().map(|s| {
+        let path = app.session_dir(&s.id).join("events.jsonl");
+        async move {
+            let events = crate::diagnosis::tail_events_within(&path, READ_TAIL_BYTES).await;
+            (s.id.clone(), recent_reads(&events))
+        }
+    });
+    let mut reading = BTreeMap::new();
+    for (id, paths) in futures_util::future::join_all(reads).await {
+        if !paths.is_empty() {
+            reading.insert(id, paths);
+        }
+    }
+    let value = json!({"sessions": by_id, "reading": reading});
     if let Ok(mut cache) = TOUCHED_CACHE.lock() {
         *cache = Some((Instant::now(), value.clone()));
     }
@@ -617,6 +712,31 @@ mod tests {
         );
         let many: Vec<String> = (0..500).map(|i| format!("f{i}.rs")).collect();
         assert_eq!(merge_touched(many, vec![]).len(), MAX_TOUCHED);
+    }
+
+    #[test]
+    fn recent_reads_are_workspace_paths_newest_first_without_duplicates() {
+        let events: Vec<Value> = [
+            json!({"type": "tool_call", "name": "Read", "input": {"file_path": "/workspace/crates/colonizer/src/mesh.rs"}}),
+            json!({"type": "tool_result", "content": "ignored"}),
+            json!({"type": "tool_call", "name": "Bash", "input": {"command": "sed -n 1,40p /workspace/web/src/App.tsx; cat /opt/colonizer/x.md"}}),
+            json!({"type": "tool_call", "name": "Grep", "input": {"pattern": "fn", "path": "/workspace/crates/colonizer/src"}}),
+            json!({"type": "tool_call", "name": "Read", "input": {"file_path": "/workspace/crates/colonizer/src/mesh.rs"}}),
+            json!({"type": "tool_call", "name": "Glob", "input": {"pattern": "**/*.rs", "path": "/workspace"}}),
+            json!({"type": "tool_call", "name": "Bash", "input": {"command": "cd /workspace && grep -n route crates/colonizer/src/main.rs -A3"}}),
+        ]
+        .into();
+        assert_eq!(
+            recent_reads(&events),
+            vec![
+                "crates/colonizer/src/main.rs",
+                "crates/colonizer/src/mesh.rs",
+                "crates/colonizer/src",
+                "web/src/App.tsx"
+            ],
+            "newest first, deduplicated, the worktree root and paths outside it dropped"
+        );
+        assert!(recent_reads(&[]).is_empty());
     }
 
     #[test]

@@ -1230,4 +1230,6 @@ export interface RepoMap {
 /** GET /api/touched: the files each live colony's worktree has changed, keyed by session id. */
 export interface TouchedFiles {
   sessions: Record<string, string[]>;
+  /** The files each live colony's recent tool calls looked at, newest first; absent from an older mothership. */
+  reading?: Record<string, string[]>;
 }

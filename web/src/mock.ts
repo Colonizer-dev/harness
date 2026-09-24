@@ -2731,6 +2731,10 @@ export function createMockApi(): Api {
           stall5678: ["services/email/templates/order-dark.mjml"],
           burn_a1b2c3: ["services/webhooks/src/retry.ts", "services/checkout/src/retry.ts"],
         },
+        reading: {
+          demo1234: ["services/checkout/src/guest.ts"],
+          stall5678: ["services/email/templates/order-dark.mjml"],
+        },
       })),
     voice: () => later(voiceStatus),
     saveVoiceKey: async (provider, apiKey) => {

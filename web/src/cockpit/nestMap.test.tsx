@@ -89,6 +89,22 @@ describe("colony placement", () => {
     expect(places.waiting.map((s) => s.id)).toEqual(["b"]);
   });
 
+  it("places a colony that has only read files in the chambers it reads, as a reader", () => {
+    const places = colonyPlaces([live, idle], { a: ["services/checkout/src/x.ts"] }, DEMO_MAP, {
+      a: ["services/email/templates/y.mjml"],
+      b: ["services/email/templates/y.mjml"],
+    });
+    expect(places.byChamber.get("checkout")?.map((p) => [p.session.id, p.mode])).toEqual([["a", "changing"]]);
+    expect(places.byChamber.get("email")?.map((p) => [p.session.id, p.mode])).toEqual([["b", "reading"]]);
+    expect(places.waiting).toEqual([]);
+  });
+
+  it("marks a colony waiting on a question or idle as blocked", () => {
+    const asking = session({ id: "q", repo: "acme/webshop", status: "waiting_for_answer" });
+    const places = colonyPlaces([asking], {}, DEMO_MAP, { q: ["services/checkout/src/x.ts"] });
+    expect(places.byChamber.get("checkout")?.[0]).toMatchObject({ mode: "reading", blocked: true });
+  });
+
   it("offers the repositories the nest's colonies work in, busiest first", () => {
     expect(mapRepos([done, session({ id: "d", repo: "acme/api", status: "running" }), live])).toEqual(["acme/webshop", "acme/api"]);
     expect(mapRepos([done, session({ id: "d", repo: "acme/api", status: "running" })])).toEqual(["acme/api", "acme/webshop"]);
@@ -133,7 +149,7 @@ describe("NestMapView", () => {
     expect(html).toContain("map-mound");
     expect(html).toContain('aria-label="Checkout · 1 colony inside"');
     expect(html).toContain('data-active="true"');
-    expect(html).toContain("colony Guest checkout in checkout");
+    expect(html).toContain("colony Guest checkout changing files here in checkout");
     expect(html).toContain("at 4f2c9e1");
   });
 });

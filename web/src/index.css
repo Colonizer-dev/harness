@@ -1714,3 +1714,11 @@ body {
     scale: 1;
   }
 }
+
+/* Nest map ants: under reduced motion they stand in their chamber instead of patrolling. */
+@media (prefers-reduced-motion: reduce) {
+  .map-ant {
+    animation: none !important;
+    offset-distance: 100% !important;
+  }
+}
