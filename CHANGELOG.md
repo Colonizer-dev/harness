@@ -68,6 +68,7 @@ setting) is called out under **Take care** rather than left for you to find.
   serialised per hunter, verified by checksum over the downloaded bytes before anything is
   unpacked, capped at 256 MiB, follow https redirects only, and land atomically with mode
   `0o555`. ([#442])
+- **Pi as a second agent module.** `modules/agents/pi` adds the Pi coding agent as an agent provider (`pi`) beside Claude Code, driven over Pi's RPC mode and speaking the same runner protocol. Pi reaches models only through the provider gateway (Settings → Providers, under each colony's spend and rate limits); it has no subagents, so the subagent and background model split does not apply. ([#403])
 
 ## [v0.1.8] - 2026-09-23
 
@@ -442,6 +443,7 @@ Macs. ([#74])
 [#365]: https://github.com/Colonizer-dev/harness/issues/365
 [#375]: https://github.com/Colonizer-dev/harness/issues/375
 [#398]: https://github.com/Colonizer-dev/harness/issues/398
+[#403]: https://github.com/Colonizer-dev/harness/issues/403
 [#404]: https://github.com/Colonizer-dev/harness/issues/404
 [#405]: https://github.com/Colonizer-dev/harness/issues/405
 [#406]: https://github.com/Colonizer-dev/harness/issues/406

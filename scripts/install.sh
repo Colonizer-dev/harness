@@ -188,8 +188,12 @@ for module in "$root"/modules/agents/*/; do
     # platform packages are Claude Code itself. Colonies run the Claude Code binary the install provides
     # (pathToClaudeCodeExecutable in the runner), so the platform packages are left out, and the SDK is
     # recorded in fetch-at-install for scripts/install-release.sh to fetch from the npm registry.
+    # Not every module runs on the Agent SDK (pi does not), and recording one that is not there
+    # fails the build, so only a module that installed it records it.
     (cd "$target" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
-    (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
+    if [ -d "$target/node_modules/@anthropic-ai/claude-agent-sdk" ]; then
+      (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
+    fi
   elif [ -f "$target/package.json" ]; then
     (cd "$target" && npm ci --omit=dev --no-audit --no-fund --silent)
   fi

@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/LANGUAGE-RUST-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Language: Rust">
   <img src="https://img.shields.io/badge/SANDBOX-KVM%20MICROVMS-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Sandbox: KVM microVMs">
   <img src="https://img.shields.io/badge/MESH-HEADSCALE%20%C2%B7%20WIREGUARD-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Mesh: Headscale and WireGuard">
-  <img src="https://img.shields.io/badge/AGENT-CLAUDE%20CODE%20NOW%20%C2%B7%20MORE%20LATER-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Agent: Claude Code now, more later">
+  <img src="https://img.shields.io/badge/AGENT-CLAUDE%20CODE%20%C2%B7%20PI-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Agent: Claude Code and Pi">
   <img src="https://img.shields.io/badge/LICENSE-MIT-FF6B35?style=flat-square&labelColor=0A0A0B" alt="License: MIT">
 </p>
 
@@ -80,7 +80,7 @@ for the [usage data](docs/usage-data.md) switch, and `--version`.
 
 | | What it is | Status |
 | :--- | :--- | :--- |
-| **Harness** | This repository: the mothership, the in-VM daemon, the agent module, the web UI, the bundled mesh. Runnable today on your own machine. | `SHIPPING` |
+| **Harness** | This repository: the mothership, the in-VM daemon, the agent modules, the web UI, the bundled mesh. Runnable today on your own machine. | `SHIPPING` |
 | **Colonizer** | Anything beyond one machine: remote outposts, a fleet view, a hosted offering. | `PLANNED` |
 
 Two labels are used everywhere below, and they set the tense of the sentence around them:
@@ -201,6 +201,7 @@ mothership also tells you when a newer release is out, and can install it.
 | [`crates/colonizer-agentd`](crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
 | [`modules/agents/claude-code`](modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/opencode`](modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
+| [`modules/agents/pi`](modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) with a snapshot of its built-in subagents (`claude-code-builtins.json`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
@@ -212,7 +213,7 @@ mothership also tells you when a newer release is out, and can install it.
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model) | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Pi, reaching models only through the provider gateway | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
@@ -234,7 +235,8 @@ One thing worth knowing before you point a provider at a model setting: the orch
 nearly all of the work. The subagent setting only carries traffic when a colony delegates to a
 subagent, and colonies rarely do — four recent colonies of 413 to 2 095 events spawned 0, 0, 0 and 1
 between them — and the background setting carries only small auxiliary calls. A provider wired to just
-those two is configured correctly and will still look idle. To put real traffic on your own hardware,
+those two is configured correctly and will still look idle. Pi has no subagents, so its single model
+setting carries all of its traffic. To put real traffic on your own hardware,
 point the orchestrator model at it. The full breakdown is in the
 [Claude Code module](modules/agents/claude-code/README.md).
 
@@ -247,7 +249,7 @@ Stated here rather than buried.
 - **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
   Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
   publishes no macOS build of it.
-- **One agent, one forge.** Claude Code is the only agent module and GitHub the only source and publisher.
+- **Two agents, one forge.** Claude Code and Pi are the agent modules; GitHub the only source and publisher.
 - **The cockpit needs its per-install token.** Startup prints a sign-in link and opens it
   (`colonizer open` reprints it later; `COLONIZER_NO_BROWSER=1` skips the auto-open). The token is
   kept in `~/.config/colonizer/api-token`. The server binds to `127.0.0.1`, checks `Host` and
@@ -274,7 +276,7 @@ Stated here rather than buried.
   security advisories and not fixed yet ([docs/audit.md](docs/audit.md)).
 - **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
   crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
-  microsandbox, the in-VM daemon, the agent module and the web UI beside it — use the installer.
+  microsandbox, the in-VM daemon, the agent modules and the web UI beside it — use the installer.
   Nothing is published to npm.
 - **CI runs every suite, including one that boots a real colony.** The Rust tests and clippy, the
   runner's, the live map receiver's and the web UI's all run on every pull request; releases are
@@ -419,6 +421,7 @@ co_author = true
 cargo test --workspace                          # mothership and agentd, including agentd's no-KVM smoke test
 cargo clippy --workspace --all-targets -- -D warnings
 (cd modules/agents/claude-code && npm test)
+(cd modules/agents/pi && npm test)
 (cd services/telemetry && npm test)             # the live map's receiver
 (cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
 node --test scripts/test/colony-report.test.mjs

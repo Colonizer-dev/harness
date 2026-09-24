@@ -1,0 +1,43 @@
+{
+  "kind": "agent",
+  "id": "pi",
+  "name": "Pi",
+  "description": "The Pi coding agent driven over its RPC mode. Pi reaches models only through the provider gateway, so it needs a provider configured under Settings → Providers and no Claude login.",
+  "protocol": "colonizer-runner/1",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "image": "glibc + node >= 22.19"
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Model",
+        "description": "The model Pi runs on, as <provider>/<model> for a provider configured under Settings → Providers. Pi reaches models only through the provider gateway, so there is no working default; an empty value stops the colony with instructions.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "effort": {
+        "type": "string",
+        "title": "Thinking level",
+        "description": "Reasoning effort passed to Pi as --thinking: minimal to max. Empty runs the model without thinking; off is the same, stated explicitly.",
+        "enum": [
+          "",
+          "off",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default": "",
+        "env": "COLONIZER_EFFORT"
+      }
+    }
+  }
+}
