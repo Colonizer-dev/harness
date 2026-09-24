@@ -74,6 +74,10 @@ setting) is called out under **Take care** rather than left for you to find.
   save over them refused. The house rule and its audit table are in
   [docs/architecture.md](docs/architecture.md). ([#326])
 
+### Changed
+
+- **Long cockpit lists page ten at a time.** The workspace dashboard's Packages tables (Published, Dependencies, Supply chain) and the colony lists on the overview and the workspace dashboard now show ten rows per page with a pager ("11–20 of 54"), a search box and filters that fit the data: status, ecosystem, repository and unreleased changes on Published; repository on Dependencies; search, ecosystem and repository on Supply chain; a failed bucket in the overview's status menu; and status, repository and agent on a workspace's colonies. Changing the search or a filter goes back to page one, and the tab counts still show totals. The Code page gets a Grid | List toggle, where List is one compact row per repository, and the browser remembers the choice.
+
 ## [v0.1.9] - 2026-09-24
 
 ### Added
