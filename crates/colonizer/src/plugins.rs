@@ -321,7 +321,7 @@ mod tests {
             assets,
             msb: "msb".into(),
             claude_bin: None,
-            gateway_bind: "127.0.0.1:0".into(),
+            gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: vec![],
             fleet_peers: vec![],
         }

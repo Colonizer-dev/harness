@@ -73,10 +73,12 @@ Explicit rules are matched before the profile rules, and the profile rules allow
 Host group, so the default deny closes every other host-loopback port (cockpit API, headscale
 metrics/gRPC, and any other service on loopback). The two ports that are opened:
 
-- **Provider gateway.** It binds `127.0.0.1:41750` by default (`crates/colonizer/src/config.rs:62`).
-  The guest gets `http://host.microsandbox.internal:<gateway port>/providers/<id>`
+- **Provider gateway.** It binds `127.0.0.1:41750` by default (`COLONIZER_GATEWAY_BIND`,
+  parsed once as an IP:port socket address; a malformed value — a hostname included — refuses
+  startup rather than falling back, `crates/colonizer/src/config.rs:65`). The guest gets
+  `http://host.microsandbox.internal:<gateway port>/providers/<id>`
   (`crates/colonizer/src/providers.rs:343-357`) in `COLONIZER_MODEL_ROUTES`
-  (`crates/colonizer/src/sessions.rs:1580-1584`).
+  (`crates/colonizer/src/sessions.rs:1805-1810`).
 - **Headscale control.** It listens on `127.0.0.1:<control>` (`crates/colonizer/src/mesh.rs:246`),
   default 41740 (`crates/colonizer/src/modules.rs:176`). The guest logs in to
   `http://host.microsandbox.internal:<control>` (`crates/colonizer/src/mesh.rs:115-116`).
@@ -235,7 +237,7 @@ under `crates/colonizer/src/` unless given in full.
 | Port | Default bind | Serves | Auth | Reachable from a colony |
 | :--- | :--- | :--- | :--- | :--- |
 | 7878 | `127.0.0.1`, `COLONIZER_BIND` (`config.rs:44`) | Cockpit: every `/api/*` route, including the session terminal WebSocket, and the web UI (`main.rs:1179-1246`) | Per-install API token in `Authorization: Bearer` or the `colonizer_token` cookie (`auth.rs`). `host_guard` checks `Host`, and since #375 rejects a cookie-authenticated write or upgrade whose `Origin` is missing or does not match (`main.rs:778`) | Default deny since #375 |
-| 41750 | `127.0.0.1`, `COLONIZER_GATEWAY_BIND` (`config.rs:62`) | Provider gateway, `/providers/{id}/{*path}` (`gateway.rs:545-550`) | Per-colony token in `x-colonizer-colony`, matched against live colonies (`gateway.rs:34`, `gateway.rs:526-538`, `gateway.rs:948-956`) | Allowed when providers are configured |
+| 41750 | `127.0.0.1`, `COLONIZER_GATEWAY_BIND` (`config.rs:65`) | Provider gateway, `/providers/{id}/{*path}` (`gateway.rs:545-550`) | Per-colony token in `x-colonizer-colony`, matched against live colonies (`gateway.rs:34`, `gateway.rs:526-538`, `gateway.rs:948-956`) | Allowed when providers are configured |
 | 41740 | `127.0.0.1`, mesh `control_port` (`mesh.rs:246`, `modules.rs:176`) | Headscale control server | Joining needs the pre-auth key minted per VM (`mesh.rs:352-362`); other routes not verified | Allowed when the mesh is on |
 | 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:247`, `mesh.rs:291`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |
 | 41742 | `127.0.0.1`, control port + 2 (`mesh.rs:248-249`, `mesh.rs:292`) | Headscale gRPC | `grpc_allow_insecure: false` and no TLS configured; not verified | Default deny since #375 |
@@ -245,10 +247,10 @@ under `crates/colonizer/src/` unless given in full.
 
 Still open, all **(inferred)** and untested:
 
-- **Gateway bind.** The gateway allow is built from the configured bind string
-  (`crates/colonizer/src/sessions.rs:1907-1916`), not from the listener that bound; a bind failure
-  is only logged (`crates/colonizer/src/main.rs:1129-1143`). If the gateway fails to bind, whatever
-  else holds that port is reachable.
+- **Gateway bind.** The gateway allow is built from the configured socket address
+  (`colony_network` in `crates/colonizer/src/sessions.rs`), not from the listener that bound; a
+  bind failure is only logged (`crates/colonizer/src/main.rs:1304-1318`). If the gateway fails to
+  bind, whatever else holds that port is reachable.
 - **IPv6 loopback.** TCP to the gateway's IPv6 address is dialled to host `::1` first (see
   [`host`](#host)), so an unrelated service on `[::1]:<allowed port>` would be reached.
 - **Headscale.** The control-port allow exposes Headscale's whole HTTP surface on that port, not

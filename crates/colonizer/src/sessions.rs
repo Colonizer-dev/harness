@@ -1522,6 +1522,32 @@ async fn default_base(app: &Shared, repo: &str, log: &SessionLogger, started_at:
     }
 }
 
+/// The network fence a colony boots with: the `public` profile alone — never the broad `host`
+/// profile, which allows every host-loopback port and would let the untrusted colony agent drive
+/// the cockpit API (127.0.0.1:7878) or any other loopback service (#375) — plus exactly the host
+/// ports the colony needs: when the mesh is on, the WireGuard direct-path rules (passed in
+/// already-awaited because `direct_path_rules` is async and shells out) and the headscale control
+/// port; when any model route exists, the provider gateway port. Explicit `--net-rule` entries
+/// are matched before the profile rules, so these allows stand and the default deny closes the
+/// rest.
+pub(crate) fn colony_network(
+    mesh: Option<(Vec<String>, u16)>,
+    routes: &providers::ColonyRoutes,
+    gateway: std::net::SocketAddr,
+) -> (Vec<String>, Vec<String>) {
+    let mut rules = mesh
+        .map(|(direct_path, control)| {
+            let mut rules = direct_path;
+            rules.push(format!("allow@host:tcp:{control}"));
+            rules
+        })
+        .unwrap_or_default();
+    if !routes.routes.is_empty() {
+        rules.push(format!("allow@host:tcp:{}", gateway.port()));
+    }
+    (vec!["public".to_string()], rules)
+}
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -2091,9 +2117,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             hosts: vec!["api.typesafe.ai".into()],
         });
     }
-    let net_profiles = vec!["public".to_string()];
-    let mut net_rules = Vec::new();
     let mut publish = None;
+    // The mesh half of the network fence is captured here — `direct_path_rules` is async (it
+    // shells out to `ip`/`ifconfig`) — and the fence itself is decided, purely, in
+    // `colony_network` once routing is known.
+    let mut mesh_net = None;
     if mesh_on {
         let mesh = app.mesh().await?;
         log.info("starting the private mesh").await;
@@ -2112,14 +2140,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         });
         env.push(("COLONIZER_MESH_LOGIN_SERVER".into(), mesh.vm_login_server()));
         env.push(("COLONIZER_MESH_HOSTNAME".into(), s.sandbox.clone()));
-        // Reach the host only where the colony must — the headscale control port — not every
-        // loopback service. The untrusted colony agent must not be able to drive the cockpit API
-        // (127.0.0.1:7878) or other host-loopback services, so we no longer hand it the broad
-        // `host` profile (which allows every host-loopback port). See #375. The WireGuard rules
-        // keep the direct UDP path to the harness node; explicit `--net-rule` entries are matched
-        // before the profile rules, so this allow stands and the default deny closes the rest.
-        net_rules = mesh.direct_path_rules().await;
-        net_rules.push(format!("allow@host:tcp:{}", mesh.ports().control));
+        // Reach the host only where the colony must — the headscale control port and the WireGuard
+        // direct path — not every loopback service; see `colony_network` for the fence (#375).
+        mesh_net = Some((mesh.direct_path_rules().await, mesh.ports().control));
         app.update_session(id, |x| {
             x.mesh = Some(MeshInfo {
                 name: s.sandbox.clone(),
@@ -2132,20 +2155,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
-
-    // Model providers are reached through the gateway on the mothership. Allow only the gateway
-    // port on the host, never the broad `host` profile: general host-loopback reach would expose
-    // the cockpit API and every other loopback service to the untrusted colony agent (#375).
-    if !routing.routes.is_empty() {
-        let gateway_port = app
-            .cfg
-            .gateway_bind
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(41750);
-        net_rules.push(format!("allow@host:tcp:{gateway_port}"));
-    }
+    let (net_profiles, net_rules) = colony_network(mesh_net, &routing, app.cfg.gateway_bind);
 
     // The chosen stack fills in image and machine size — detected from the
     // repository when the configured preset was `auto`, otherwise the one the
@@ -2754,6 +2764,62 @@ pub(crate) mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_colony_is_fenced_to_public_with_only_the_host_ports_it_needs() {
+        // A non-default gateway port, so a regression to the 41750 fallback shows up as a mismatch.
+        let gateway: std::net::SocketAddr = "127.0.0.1:52000".parse().unwrap();
+        let control = 41740;
+        let wireguard = vec![
+            "allow@192.168.1.4:udp:41743".to_string(),
+            "allow@10.1.2.3:udp:41743".to_string(),
+        ];
+        let routed = providers::ColonyRoutes {
+            routes: vec![Value::Bool(true)],
+            providers: Vec::new(),
+        };
+        for (mesh_on, has_routes) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mesh = mesh_on.then(|| (wireguard.clone(), control));
+            let routes = if has_routes {
+                &routed
+            } else {
+                &providers::ColonyRoutes::default()
+            };
+            let (profiles, rules) = colony_network(mesh.clone(), routes, gateway);
+            // `public` alone, never the broad `host` profile (#375) — in every combination, so a
+            // future change cannot quietly hand the colony every host-loopback port again.
+            assert_eq!(
+                profiles,
+                vec!["public".to_string()],
+                "mesh_on={mesh_on} has_routes={has_routes}"
+            );
+            assert!(
+                !profiles.iter().any(|p| p == "host"),
+                "mesh_on={mesh_on} has_routes={has_routes}"
+            );
+            let mut expected = mesh
+                .clone()
+                .map(|(mut direct_path, control)| {
+                    direct_path.push(format!("allow@host:tcp:{control}"));
+                    direct_path
+                })
+                .unwrap_or_default();
+            if has_routes {
+                expected.push(format!("allow@host:tcp:{}", gateway.port()));
+            }
+            assert_eq!(rules, expected, "mesh_on={mesh_on} has_routes={has_routes}");
+            // And of the host rules, nothing but the control and gateway ports, TCP only.
+            let host_allows = [
+                format!("allow@host:tcp:{control}"),
+                format!("allow@host:tcp:{}", gateway.port()),
+            ];
+            for rule in &rules {
+                if rule.contains("@host:") {
+                    assert!(host_allows.contains(rule), "unexpected host allow {rule:?} in {rules:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn set_model_forwards_only_what_a_model_setting_could_hold() {

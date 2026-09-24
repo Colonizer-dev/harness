@@ -340,13 +340,7 @@ impl ColonyRoutes {
 }
 
 pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
-    let port = app
-        .cfg
-        .gateway_bind
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(41750);
+    let port = app.cfg.gateway_bind.port();
     let providers = app.providers();
     let routes = providers
         .iter()

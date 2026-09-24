@@ -1301,7 +1301,7 @@ async fn serve() -> Result<()> {
     auth::open_browser(&login_url);
     // The first-run notice: once, while nobody has answered yet, show the exact usage batch on stderr.
     usage::first_run_notice(&app).await;
-    match tokio::net::TcpListener::bind(&app.cfg.gateway_bind).await {
+    match tokio::net::TcpListener::bind(app.cfg.gateway_bind).await {
         Ok(listener) => {
             println!("provider gateway on http://{}", app.cfg.gateway_bind);
             let gateway = gateway::router(app.clone());
@@ -1433,7 +1433,7 @@ pub(crate) mod tests {
             assets: None,
             msb: "msb".into(),
             claude_bin: None,
-            gateway_bind: "127.0.0.1:0".into(),
+            gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: Vec::new(),
             fleet_peers: Vec::new(),
         };
