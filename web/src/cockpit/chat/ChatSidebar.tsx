@@ -8,7 +8,7 @@ import { IconPencil, IconPin, IconPlus, IconSearch, IconSidebar, IconTrash, Icon
 import { cx, timeAgo } from "../../components/ui";
 import type { ChatMeta, ChatModels } from "../../types";
 import { Select, type ListItem } from "./Popover";
-import { chatMatches, groupChats } from "./logic";
+import { chatMatches, groupChats, personaLabel } from "./logic";
 import { markFor } from "./ModelChip";
 
 function Row({
@@ -75,7 +75,7 @@ function Row({
             <span className="truncate">{title}</span>
           </span>
           <span className="block truncate text-[11px] text-faint">
-            {c.persona && c.persona !== "Plain" ? `${c.persona} · ` : ""}
+            {c.persona && c.persona !== "Plain" ? `${personaLabel(c.persona)} · ` : ""}
             {timeAgo(c.updated_at)}
           </span>
         </span>

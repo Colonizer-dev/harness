@@ -19,6 +19,8 @@ import {
   modelTags,
   parseSlash,
   personaEdit,
+  personaFor,
+  personaLabel,
   pricingOf,
   searchMessages,
   slashMatches,
@@ -169,6 +171,31 @@ describe("personas", () => {
     const original = loadPersonas({}).find((p) => p.id === "reviewer")!.system;
     expect(personaEdit("reviewer", original)).toBeNull();
     expect(personaEdit("reviewer", "Be terse.")).toBe("Be terse.");
+  });
+
+  it("gives every preset its own named ant, with the ids and roles older conversations stored", () => {
+    const ps = loadPersonas({});
+    expect(ps.map((p) => [p.id, p.name, p.ant, p.kind])).toEqual([
+      ["plain", "Plain", "Pip", "forager"],
+      ["reviewer", "Code reviewer", "Sarge", "soldier"],
+      ["architect", "Architect", "Silka", "weaver"],
+      ["release", "Release writer", "Mellie", "honeypot"],
+    ]);
+    expect(new Set(ps.map((p) => p.kind)).size).toBe(ps.length);
+    for (const p of ps) expect(p.blurb.length).toBeGreaterThan(10);
+  });
+
+  it("finds a conversation's ant from its stored label, id or the ant's name", () => {
+    const ps = loadPersonas({});
+    expect(personaFor("Code reviewer", ps)?.ant).toBe("Sarge");
+    expect(personaFor("release writer", ps)?.id).toBe("release");
+    expect(personaFor("architect", ps)?.ant).toBe("Silka");
+    expect(personaFor("Mellie", ps)?.name).toBe("Release writer");
+    expect(personaFor("Someone else", ps)).toBeNull();
+    expect(personaFor(undefined, ps)).toBeNull();
+    expect(personaLabel("Code reviewer")).toBe("Sarge · Code reviewer");
+    expect(personaLabel("Custom")).toBe("Custom");
+    expect(chatMatches(meta("x", "2026-09-24T00:00:00Z", { persona: "Code reviewer" }), "sarge", null)).toBe(true);
   });
 
   it("moves browser-kept edits up once, never over the mothership's", () => {

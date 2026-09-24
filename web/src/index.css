@@ -1773,6 +1773,305 @@ body {
     animation: none;
   }
 }
+/* Chat persona picker: the popover also eases out when it closes. */
+.chat-pop.is-closing {
+  animation: chat-pop-out 0.12s ease-in forwards;
+}
+@keyframes chat-pop-out {
+  to {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+}
+.persona-row {
+  animation: persona-row-in 0.22s ease-out both;
+}
+@keyframes persona-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+.persona-prompt {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.18s ease-out;
+}
+.persona-prompt[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+.persona-prompt > div {
+  overflow: hidden;
+}
+
+/* Chat persona ants (cockpit/chat/PersonaAnt.tsx). data-motion="none|idle|active"; a
+   `.persona-ant-host` parent wakes its ant up to walking on hover. Colours come from --pa-*. */
+.persona-ant {
+  overflow: visible;
+  flex-shrink: 0;
+}
+.persona-ant * {
+  transform-box: view-box;
+}
+.persona-ant .pa-fill {
+  fill: var(--pa-body);
+}
+.persona-ant .pa-line,
+.persona-ant .pa-leg {
+  fill: none;
+  stroke: var(--pa-dark);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.persona-ant .pa-tip {
+  fill: var(--pa-dark);
+}
+.persona-ant .pa-band {
+  fill: none;
+  stroke: var(--pa-dark);
+  stroke-width: 0.9;
+  stroke-linecap: round;
+  opacity: 0.55;
+}
+.persona-ant .pa-eye {
+  fill: #fff8f0;
+}
+.persona-ant .pa-pupil {
+  fill: #1a1210;
+}
+.persona-ant .pa-brow,
+.persona-ant .pa-chevron {
+  fill: none;
+  stroke: var(--pa-dark);
+  stroke-width: 1.1;
+  stroke-linecap: round;
+}
+.persona-ant .pa-chevron {
+  stroke: var(--pa-accent);
+}
+.persona-ant .pa-mandible {
+  fill: none;
+  stroke: var(--pa-dark);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.persona-ant .pa-leaf-fill {
+  fill: var(--pa-accent);
+}
+.persona-ant .pa-leaf-rib {
+  stroke: #2f6b21;
+  stroke-width: 0.6;
+  stroke-linecap: round;
+}
+.persona-ant .pa-honey {
+  fill: var(--pa-accent);
+  fill-opacity: 0.92;
+  stroke: var(--pa-dark);
+  stroke-width: 0.6;
+}
+.persona-ant .pa-shine {
+  fill: #fff6d6;
+  opacity: 0.7;
+}
+.persona-ant .pa-drop {
+  fill: var(--pa-accent);
+  opacity: 0;
+}
+.persona-ant .pa-quill-shaft {
+  stroke: var(--pa-dark);
+  stroke-width: 0.8;
+  stroke-linecap: round;
+}
+.persona-ant .pa-quill-vane {
+  fill: #f4efe6;
+}
+.persona-ant .pa-silk {
+  fill: none;
+  stroke: var(--pa-accent);
+  stroke-width: 0.9;
+  stroke-linecap: round;
+  stroke-dasharray: 2.4 2;
+  opacity: 0.9;
+}
+
+/* Idle: breathing — a bob, the antennae feeling about, and each ant's prop. */
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-bob,
+.persona-ant-host:hover .persona-ant .pa-bob {
+  animation: pa-bob 2.6s ease-in-out infinite;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-antenna,
+.persona-ant-host:hover .persona-ant .pa-antenna {
+  animation: pa-twitch 3.1s ease-in-out infinite;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-antenna + .pa-antenna,
+.persona-ant-host:hover .persona-ant .pa-antenna + .pa-antenna {
+  animation-delay: -1.3s;
+  animation-duration: 2.7s;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-leaf,
+.persona-ant-host:hover .persona-ant .pa-leaf {
+  animation: pa-sway 1.9s ease-in-out infinite;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-mandible,
+.persona-ant-host:hover .persona-ant .pa-mandible {
+  animation: pa-snap 2.4s ease-in-out infinite;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-silk,
+.persona-ant-host:hover .persona-ant .pa-silk {
+  animation: pa-silk 1.4s linear infinite;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-gaster,
+.persona-ant-host:hover .persona-ant[data-kind="honeypot"] .pa-gaster {
+  animation: pa-swell 2.8s ease-in-out infinite;
+}
+.persona-ant:not([data-kind="honeypot"]) .pa-gaster {
+  animation: none !important;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-drop,
+.persona-ant-host:hover .persona-ant .pa-drop {
+  animation: pa-drip 2.8s ease-in infinite;
+}
+.persona-ant:is([data-motion="idle"], [data-motion="active"]) .pa-quill,
+.persona-ant-host:hover .persona-ant .pa-quill {
+  animation: pa-write 0.9s ease-in-out infinite;
+}
+
+/* Active: walking — a tripod gait, a quicker bob; Sarge also scans left and right. */
+.persona-ant[data-motion="active"] .pa-leg,
+.persona-ant-host:hover .persona-ant .pa-leg {
+  animation: pa-step 0.42s ease-in-out infinite alternate;
+}
+.persona-ant[data-motion="active"] .pa-leg-b,
+.persona-ant-host:hover .persona-ant .pa-leg-b {
+  animation-delay: -0.42s;
+}
+.persona-ant[data-motion="active"] .pa-bob,
+.persona-ant-host:hover .persona-ant .pa-bob {
+  animation-duration: 0.84s;
+}
+.persona-ant[data-motion="active"][data-kind="soldier"] .pa-head,
+.persona-ant-host:hover .persona-ant[data-kind="soldier"] .pa-head {
+  animation: pa-scan 1.8s ease-in-out infinite;
+}
+.persona-ant[data-motion="active"] .pa-silk,
+.persona-ant-host:hover .persona-ant .pa-silk {
+  animation-duration: 0.6s;
+}
+@keyframes pa-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.9px);
+  }
+}
+@keyframes pa-twitch {
+  0%,
+  55%,
+  100% {
+    transform: rotate(0deg);
+  }
+  62% {
+    transform: rotate(calc(var(--pa-dir, 1) * 14deg));
+  }
+  70% {
+    transform: rotate(calc(var(--pa-dir, 1) * -6deg));
+  }
+  80% {
+    transform: rotate(calc(var(--pa-dir, 1) * 8deg));
+  }
+}
+@keyframes pa-step {
+  from {
+    transform: rotate(calc(var(--pa-dir, 1) * -11deg));
+  }
+  to {
+    transform: rotate(calc(var(--pa-dir, 1) * 11deg));
+  }
+}
+@keyframes pa-sway {
+  0%,
+  100% {
+    transform: rotate(-9deg);
+  }
+  50% {
+    transform: rotate(9deg);
+  }
+}
+@keyframes pa-snap {
+  0%,
+  70%,
+  100% {
+    transform: rotate(0deg);
+  }
+  78% {
+    transform: rotate(calc(var(--pa-dir, 1) * 22deg));
+  }
+  86% {
+    transform: rotate(calc(var(--pa-dir, 1) * -8deg));
+  }
+}
+@keyframes pa-scan {
+  0%,
+  100% {
+    transform: rotate(-7deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+@keyframes pa-silk {
+  to {
+    stroke-dashoffset: -8.8;
+  }
+}
+@keyframes pa-swell {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+@keyframes pa-drip {
+  0%,
+  45% {
+    opacity: 0;
+    transform: translateY(-1.5px);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes pa-write {
+  0%,
+  100% {
+    transform: rotate(-6deg);
+  }
+  50% {
+    transform: rotate(8deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .persona-ant,
+  .persona-ant *,
+  .persona-row,
+  .chat-pop.is-closing {
+    animation: none !important;
+    transition: none !important;
+  }
+  .persona-prompt {
+    transition: none;
+  }
+}
 .chat-md > :first-child {
   margin-top: 0;
 }

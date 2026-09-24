@@ -24,7 +24,8 @@ import type { ChatAttachmentNote, ChatMessage, ChatModels } from "../../types";
 import { ChatMarkdown, CopyButton } from "./ChatMarkdown";
 import { ModelPopoverList, markFor, shortModel } from "./ModelChip";
 import { Popover } from "./Popover";
-import { formatMs } from "./logic";
+import { formatMs, type Persona } from "./logic";
+import { ANT_COLORS, PersonaAnt } from "./PersonaAnt";
 
 export type MessageAction =
   | { kind: "edit"; content: string }
@@ -133,6 +134,7 @@ export const MessageRow = memo(function MessageRow({
   note = null,
   imageUrl,
   onOpenImage,
+  ant = null,
 }: {
   m: ChatMessage;
   models: ChatModels | null;
@@ -148,6 +150,8 @@ export const MessageRow = memo(function MessageRow({
   /** Where a stored image is served; without it, images show as pills. */
   imageUrl?: (sha: string) => string;
   onOpenImage?: (image: OpenImage) => void;
+  /** The conversation's persona ant, drawn as the reply's speaker; `null` shows the provider's mark. */
+  ant?: Persona | null;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [regenOpen, setRegenOpen] = useState(false);
@@ -164,7 +168,7 @@ export const MessageRow = memo(function MessageRow({
     <div
       id={`msg-${m.id}`}
       className={cx(
-        "group/msg flex scroll-mt-24 gap-3 rounded-xl px-2 py-2 transition-colors",
+        "group/msg persona-ant-host flex scroll-mt-24 gap-3 rounded-xl px-2 py-2 transition-colors",
         hit === "current" && "bg-warn/10 ring-1 ring-warn/50",
         hit === "match" && "bg-warn/5",
       )}
@@ -174,6 +178,8 @@ export const MessageRow = memo(function MessageRow({
           <span aria-hidden="true" className="grid size-7 place-items-center rounded-full bg-accent-soft text-[11px] font-semibold text-accent">
             You
           </span>
+        ) : ant ? (
+          <AntMark ant={ant} motion={isLastReply ? "idle" : "none"} mark={mark} model={m.model} />
         ) : (
           <span className="grid size-7 place-items-center" title={m.model}>
             <ProviderMark preset={mark.preset} name={mark.name} size="row" />
@@ -182,7 +188,12 @@ export const MessageRow = memo(function MessageRow({
       </div>
       <div className="min-w-0 flex-1">
         <div className="mb-0.5 flex items-center gap-2 text-[12px]">
-          <span className="font-semibold text-text">{user ? "You" : m.model ? shortModel(m.model) : "Assistant"}</span>
+          {!user && ant && (
+            <span className="font-semibold" style={{ color: ANT_COLORS[ant.kind].body }}>
+              {ant.ant}
+            </span>
+          )}
+          <span className={ant && !user ? "text-muted" : "font-semibold text-text"}>{user ? "You" : m.model ? shortModel(m.model) : "Assistant"}</span>
           {!user && <span className="text-faint">{mark.name}</span>}
         </div>
 
@@ -357,16 +368,35 @@ export const MessageRow = memo(function MessageRow({
   );
 });
 
-/** A reply still streaming in: the model's mark, the text so far, a caret. */
-export function StreamingRow({ model, text, models }: { model: string; text: string; models: ChatModels | null }): ReactElement {
+/** The persona's ant as a reply's speaker, with the provider's mark as a small badge. */
+function AntMark({ ant, motion, mark, model }: { ant: Persona; motion: "none" | "idle" | "active"; mark: ReturnType<typeof markFor>; model?: string }): ReactElement {
+  return (
+    <span
+      className="relative grid size-7 place-items-center rounded-full"
+      style={{ background: `color-mix(in srgb, ${ANT_COLORS[ant.kind].body} 18%, transparent)` }}
+      title={`${ant.ant} the ${ant.species.toLowerCase()} (${ant.name})${model ? ` · ${model}` : ""}`}
+    >
+      <PersonaAnt persona={ant} size={24} motion={motion} />
+      <span className="absolute -bottom-1 -right-1 grid scale-[0.7] place-items-center rounded-full bg-bg">
+        <ProviderMark preset={mark.preset} name={mark.name} size="button" />
+      </span>
+    </span>
+  );
+}
+
+/** A reply still streaming in: the model's mark (or the persona's ant, walking), the text so far, a caret. */
+export function StreamingRow({ model, text, models, ant = null }: { model: string; text: string; models: ChatModels | null; ant?: Persona | null }): ReactElement {
   const mark = markFor(model, models);
   return (
     <div className="flex gap-3 px-2 py-2" aria-live="polite" aria-busy="true">
       <span className="grid size-7 place-items-center pt-0.5">
-        <ProviderMark preset={mark.preset} name={mark.name} size="row" />
+        {ant ? <AntMark ant={ant} motion="active" mark={mark} model={model} /> : <ProviderMark preset={mark.preset} name={mark.name} size="row" />}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="mb-0.5 text-[12px] font-semibold text-text">{shortModel(model)}</div>
+        <div className="mb-0.5 text-[12px] font-semibold text-text">
+          {ant && <span style={{ color: ANT_COLORS[ant.kind].body }}>{ant.ant} </span>}
+          <span className={ant ? "font-normal text-muted" : undefined}>{shortModel(model)}</span>
+        </div>
         {text ? (
           <ChatMarkdown text={text} live />
         ) : (

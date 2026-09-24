@@ -36,7 +36,7 @@ export function chatMatches(c: ChatMeta, query: string, workspace: string | null
   if (workspace && (c.workspace ?? "").toLowerCase() !== workspace.toLowerCase()) return false;
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return [c.title, c.model, c.persona ?? ""].some((s) => s.toLowerCase().includes(q));
+  return [c.title, c.model, personaLabel(c.persona)].some((s) => s.toLowerCase().includes(q));
 }
 
 // ---------------------------------------------------------------------------
@@ -208,33 +208,80 @@ export function formatMs(ms: number | null | undefined): string {
 // Personas
 // ---------------------------------------------------------------------------
 
+/** Which ant a persona is drawn as (web/src/cockpit/chat/ants.tsx). */
+export type AntKind = "forager" | "soldier" | "weaver" | "honeypot";
+
 export interface Persona {
+  /** Stable: preset edits on the mothership are keyed by it. */
   id: string;
+  /** The role, which is what a conversation stores as its `persona` label. Kept stable so older
+   *  conversations still find their ant. */
   name: string;
   system: string;
+  /** The ant's own name, shown first. */
+  ant: string;
+  /** Caste or species, e.g. "Soldier ant". */
+  species: string;
+  kind: AntKind;
+  /** One line on what it does, shown in the picker instead of the raw prompt. */
+  blurb: string;
 }
 
 export const DEFAULT_PERSONAS: readonly Persona[] = [
-  { id: "plain", name: "Plain", system: "" },
+  {
+    id: "plain",
+    name: "Plain",
+    system: "",
+    ant: "Pip",
+    species: "Forager",
+    kind: "forager",
+    blurb: "Just the model, no system prompt. Fetches whatever you ask for.",
+  },
   {
     id: "reviewer",
     name: "Code reviewer",
     system:
       "You are a careful senior code reviewer. Look for bugs, security problems, missing tests and unclear names, in that order. Quote the lines you mean, say why each matters and propose the fix. Skip style nits a formatter would catch.",
+    ant: "Sarge",
+    species: "Soldier ant",
+    kind: "soldier",
+    blurb: "Guards the nest: bugs, security holes and missing tests, with the fix for each.",
   },
   {
     id: "architect",
     name: "Architect",
     system:
       "You are a pragmatic software architect. Explain how the parts fit, name the trade-offs, and recommend the simplest design that works. Prefer diagrams in text and short numbered plans.",
+    ant: "Silka",
+    species: "Weaver ant",
+    kind: "weaver",
+    blurb: "Weaves the parts together, names the trade-offs and picks the simplest design.",
   },
   {
     id: "release",
     name: "Release writer",
     system:
       "You write release notes for engineers and users. Group changes under Added, Changed, Fixed and Security, one line each, linking pull requests. Lead with what users notice; leave out internal refactors.",
+    ant: "Mellie",
+    species: "Honeypot ant",
+    kind: "honeypot",
+    blurb: "Stores up every change and serves it as release notes users actually read.",
   },
 ];
+
+/** The preset a conversation's stored `persona` label points at: its role (what is stored), its id
+ *  or its ant's name, any case. `null` for a label no preset has (or none). */
+export function personaFor<P extends Persona>(label: string | null | undefined, personas: readonly P[]): P | null {
+  const l = (label ?? "").trim().toLowerCase();
+  if (!l) return null;
+  return personas.find((p) => p.name.toLowerCase() === l || p.id === l || p.ant.toLowerCase() === l) ?? null;
+}
+
+/** How a conversation's persona reads in the list: "Sarge · Code reviewer", or the stored label as is. */
+export function personaLabel(label: string | null | undefined): string {
+  const p = personaFor(label, DEFAULT_PERSONAS);
+  return p ? `${p.ant} · ${p.name}` : label ?? "";
+}
 
 /** The presets with the operator's edits (kept on the mothership), defaults for anything unedited. */
 export function loadPersonas(edits: Readonly<Record<string, string>>): Persona[] {
