@@ -357,18 +357,20 @@ where
 /// subprocesses are independent, so they race; each field degrades on its own. A measurement that
 /// fails is `None` — and so omitted from the JSON — never a fabricated zero.
 pub async fn probe_host(app: &App) -> Host {
-    let (hostname, disk) = tokio::join!(probe_hostname(), probe_df(&app.cfg.data_dir),);
+    let (hostname, disk, darwin) = tokio::join!(probe_hostname(), probe_df(&app.cfg.data_dir), probe_darwin());
     let (memory_total, memory_used) = read_proc("/proc/meminfo")
         .map(|text| meminfo_total_used(&text))
-        .unwrap_or((None, None));
+        .unwrap_or((darwin.memory_total, darwin.memory_used));
     Host {
         id: host_id(app),
         hostname,
         cpu_cores: std::thread::available_parallelism().ok().map(|n| n.get()),
         memory_total_bytes: memory_total,
         memory_used_bytes: memory_used,
-        load: read_proc("/proc/loadavg").and_then(|text| loadavg(&text)),
-        uptime_secs: read_proc("/proc/uptime").and_then(|text| uptime_secs(&text)),
+        load: read_proc("/proc/loadavg").and_then(|text| loadavg(&text)).or(darwin.load),
+        uptime_secs: read_proc("/proc/uptime")
+            .and_then(|text| uptime_secs(&text))
+            .or(darwin.uptime_secs),
         disk_total_bytes: disk.0,
         disk_used_bytes: disk.1,
         disk_free_bytes: disk.2,
@@ -390,6 +392,84 @@ pub(crate) async fn probe_hostname() -> Option<String> {
             if name.is_empty() { None } else { Some(name) }
         }
         _ => None,
+    }
+}
+
+/// macOS's answers to what `/proc` gives Linux: load, memory and uptime. Every field is `None`
+/// on other systems, or wherever the bounded `sysctl` / `vm_stat` exec fails or does not parse.
+#[derive(Debug, Default, PartialEq)]
+struct DarwinHost {
+    memory_total: Option<u64>,
+    memory_used: Option<u64>,
+    load: Option<[f64; 3]>,
+    uptime_secs: Option<u64>,
+}
+
+async fn probe_darwin() -> DarwinHost {
+    if std::env::consts::OS != "macos" {
+        return DarwinHost::default();
+    }
+    let run = |program: &'static str, args: &'static [&'static str]| async move {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        match tokio::time::timeout(HOST_PROBE_TIMEOUT, util::exec(&mut cmd)).await {
+            Ok(Ok(out)) => Some(out),
+            _ => None,
+        }
+    };
+    let (sysctl, vm) = tokio::join!(
+        run("sysctl", &["-n", "vm.loadavg", "hw.memsize", "kern.boottime"]),
+        run("vm_stat", &[])
+    );
+    let now = chrono::Utc::now().timestamp();
+    darwin_host(sysctl.as_deref().unwrap_or(""), vm.as_deref().unwrap_or(""), now)
+}
+
+/// The parse half of [`probe_darwin`]. `sysctl -n vm.loadavg hw.memsize kern.boottime` prints one
+/// line each: `{ 1.2 1.4 1.6 }`, a byte count, and `{ sec = 1790220675, usec = … } <date>`.
+/// Memory in use is what Activity Monitor counts as used: active + wired + compressor pages.
+fn darwin_host(sysctl: &str, vm_stat: &str, now: i64) -> DarwinHost {
+    let mut lines = sysctl.lines();
+    let load = lines
+        .next()
+        .and_then(|l| loadavg(l.trim().trim_start_matches('{').trim_end_matches('}')));
+    let memory_total = lines.next().and_then(|l| l.trim().parse::<u64>().ok());
+    let uptime_secs = lines
+        .next()
+        .and_then(|l| l.split("sec = ").nth(1))
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|sec| sec.parse::<i64>().ok())
+        .and_then(|boot| u64::try_from(now - boot).ok());
+    let page = vm_stat
+        .lines()
+        .next()
+        .and_then(|l| l.split("page size of ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok());
+    let pages = |name: &str| {
+        vm_stat
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|rest| rest.trim().trim_end_matches('.').parse::<u64>().ok())
+    };
+    let memory_used = match (
+        page,
+        pages("Pages active:"),
+        pages("Pages wired down:"),
+        pages("Pages occupied by compressor:"),
+    ) {
+        (Some(page), Some(active), Some(wired), Some(compressed)) => {
+            let used = (active + wired + compressed) * page;
+            // Accounting that does not add up is not shipped as a number.
+            memory_total.filter(|total| used <= *total).map(|_| used)
+        }
+        _ => None,
+    };
+    DarwinHost {
+        memory_total,
+        memory_used,
+        load,
+        uptime_secs,
     }
 }
 
@@ -1022,6 +1102,22 @@ mod tests {
             meminfo_total_used(text),
             (None, None),
             "fabricated figures are worse than none"
+        );
+    }
+
+    #[test]
+    fn darwin_host_reads_sysctl_and_vm_stat() {
+        let sysctl = "{ 18.37 11.52 8.77 }\n38654705664\n{ sec = 1790220675, usec = 616546 } Thu Sep 24 11:31:15 2026\n";
+        let vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:      15774.\nPages active:     630993.\nPages wired down:     316167.\nPages occupied by compressor:     704694.\n";
+        let host = darwin_host(sysctl, vm, 1_790_220_775);
+        assert_eq!(host.load, Some([18.37, 11.52, 8.77]));
+        assert_eq!(host.memory_total, Some(38_654_705_664));
+        assert_eq!(host.memory_used, Some((630_993 + 316_167 + 704_694) * 16_384));
+        assert_eq!(host.uptime_secs, Some(100));
+        assert_eq!(
+            darwin_host("", "", 0),
+            DarwinHost::default(),
+            "no output is no figures, never zeros"
         );
     }
 
