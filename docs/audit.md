@@ -57,7 +57,7 @@ The public ones, each with its issue:
 | **F07.** The parallel limit isn't atomic, and costs aren't a budget | [#86](https://github.com/Colonizer-dev/harness/issues/86) |
 | **F08.** Failed writes of state and events are ignored | [#87](https://github.com/Colonizer-dev/harness/issues/87) |
 | **F09.** Telemetry retention isn't guaranteed | [#88](https://github.com/Colonizer-dev/harness/issues/88) |
-| **F10.** Release provenance and pinned inputs | [#89](https://github.com/Colonizer-dev/harness/issues/89), with CI and real-colony tests in [#73](https://github.com/Colonizer-dev/harness/issues/73) |
+| **F10.** Release provenance and pinned inputs | [#89](https://github.com/Colonizer-dev/harness/issues/89), with CI and real-colony tests in [#73](https://github.com/Colonizer-dev/harness/issues/73) and [#368](https://github.com/Colonizer-dev/harness/issues/368) |
 | The installer's app swap isn't atomic | [#90](https://github.com/Colonizer-dev/harness/issues/90) |
 
 ## Checkpoints
@@ -90,8 +90,10 @@ tests; and the tests of the telemetry receiver and the scripts. `supply-chain.ym
 and SBOMs. Two limits keep this short of what G4 asks for: CI is not yet a required check on `main` — a
 red run does not block a merge until a maintainer applies the ruleset with
 `scripts/require-ci-checks.mjs` ([#367](https://github.com/Colonizer-dev/harness/issues/367), below) —
-and nothing in CI boots a real colony: the `colony-smoke` job needs a
-self-hosted KVM runner and has never run.
+and a real colony is booted in CI since #368, but without a real model or a real GitHub write: the
+`colony-e2e` job runs a whole colony — mothership, microVM, agentd and the Claude Code runner against a
+scratch repository and a stub model server — on every pull request, so the negative tests on real
+colonies that G1 asks for are not what it runs.
 
 ## Authority controls, issue #98 (partial G2)
 

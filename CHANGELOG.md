@@ -25,6 +25,8 @@ setting) is called out under **Take care** rather than left for you to find.
   leaves the repository untouched and ends in `no_changes`; `GET /api/touched`
   reports every live colony's changed files. Run `scripts/fetch-vendor.sh` (or
   install a release) to stage the `archify` skillset.
+- **A real colony runs in CI.** The `colony-e2e` job replaces the never-run `colony-smoke` (it needed a self-hosted KVM runner): on every pull request, `scripts/colony-e2e.mjs` launches a real mothership, boots a real microVM with the vendored msb, and runs the real agentd and claude-code runner against a scratch git repository and a stub Anthropic-wire model server — no secrets, no paid model, no GitHub writes — asserting the colony comes back `no_changes` and uploading its logs on failure. ([#368])
+
 - **Configurable free-disk thresholds.** The sandbox module's `warn_free_disk`
   (default 10G) warns in the cockpit when the data dir's volume runs low, and
   `min_free_disk` (default 5G) pauses queue admission until space returns —
@@ -446,6 +448,7 @@ Macs. ([#74])
 [#417]: https://github.com/Colonizer-dev/harness/pull/417
 [#446]: https://github.com/Colonizer-dev/harness/issues/446
 [#453]: https://github.com/Colonizer-dev/harness/issues/453
+[#368]: https://github.com/Colonizer-dev/harness/issues/368
 [#407]: https://github.com/Colonizer-dev/harness/issues/407
 [#408]: https://github.com/Colonizer-dev/harness/issues/408
 [#370]: https://github.com/Colonizer-dev/harness/issues/370

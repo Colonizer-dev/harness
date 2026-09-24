@@ -276,14 +276,15 @@ Stated here rather than buried.
   crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
   microsandbox, the in-VM daemon, the agent module and the web UI beside it — use the installer.
   Nothing is published to npm.
-- **CI runs every suite except the one that needs KVM.** The Rust tests and clippy, the runner's, the
-  live map receiver's and the web UI's all run on every pull request; releases are built, smoke-tested
-  and attested with build provenance; dependency audits and SBOMs run with every change and on a weekly
-  schedule; runtime pins move only by reviewed pull request. What CI cannot do is boot a colony:
-  GitHub-hosted runners have no `/dev/kvm`, so that path is covered by unit tests, agentd's no-KVM
-  smoke test, and `scripts/build-agentd.sh --smoke` on a machine that has KVM
-  ([roadmap](#roadmap-in-public)). The crates are published to crates.io through Trusted Publishing;
-  nothing is published to npm.
+- **CI runs every suite, including one that boots a real colony.** The Rust tests and clippy, the
+  runner's, the live map receiver's and the web UI's all run on every pull request; releases are
+  built, smoke-tested and attested with build provenance; dependency audits and SBOMs run with every
+  change and on a weekly schedule; runtime pins move only by reviewed pull request. GitHub-hosted
+  runners do have `/dev/kvm` (the job makes it usable), so the `colony-e2e` job also boots a whole
+  colony end to end — mothership, microVM, agentd and the Claude Code runner against a scratch
+  repository and a stub model server, asserting it reaches `no_changes`. What that still does not
+  cover is a real model or a real GitHub write ([roadmap](#roadmap-in-public)). The crates are
+  published to crates.io through Trusted Publishing; nothing is published to npm.
 
 ---
 
@@ -422,6 +423,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 (cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
 node --test scripts/test/colony-report.test.mjs
 node scripts/colony-report.mjs                  # how colonies went, from what they already log
+node scripts/colony-e2e.mjs                     # boots a real colony against a stub model (CI's colony-e2e job)
 node scripts/colony-report.mjs --transcript <id> # one colony, step by step
 node --test scripts/test/bench.test.mjs
 node scripts/bench.mjs run --repo owner/bench --label before   # the fixed tasks, scored (docs/bench.md)
