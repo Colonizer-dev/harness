@@ -1796,6 +1796,8 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn an_org_description_is_read_trimmed_and_only_when_there_is_one() {
         assert_eq!(

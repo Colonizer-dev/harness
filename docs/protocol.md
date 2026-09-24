@@ -293,6 +293,7 @@ missing values mean the `default`.
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
+  "merged_at": null, "pr_opened_at": null, "ci_state": "success|failure|pending|no_checks",
   "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_cpus": 4, "boot_memory": "8g",
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
@@ -307,6 +308,14 @@ figures are omitted rather than faked. `null` on colonies booted before these fi
 `origin` names who launched the colony when the operator did not: `"burn_down"` marks a colony the
 burn-down scheduler auto-launched (§6.2c), so the global stop can find it and the UI can label it.
 `null` (or absent) means a person started it.
+
+`merged_at`, `pr_opened_at` and `ci_state` come from the PR watcher's `gh pr view` (`mergedAt`,
+`createdAt`, `statusCheckRollup`), and for colonies merged before they existed from a best-effort
+startup backfill; each is left out until known. `ci_state` sums the head commit's checks: any failed,
+cancelled, timed-out or action-required check is `failure`, any unfinished one `pending`, all
+passing, neutral or skipped `success`, and a pull request with no checks `no_checks`. A merged
+pull request keeps its last settled verdict. The cockpit derives lead time (`merged_at` −
+`created_at`), PR cycle time (`merged_at` − `pr_opened_at`) and CI pass rate from them.
 
 `publish_stage` records how far the last publish got (committed, pushed or pr_opened) so a retry
 finishes from where it stopped and browsers can show the progress. It is left out until a publish

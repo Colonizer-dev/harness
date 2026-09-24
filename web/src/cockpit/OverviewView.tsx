@@ -5,8 +5,6 @@
 // strip — flat sections between hairlines, no cards.
 //
 // Design elements with NO data source behind them (reported, never faked):
-// - Lead time, PR cycle time, CI pass rate KPIs: no PR-opened timestamps, no CI data. The strip
-//   names them once in its footnote rather than drawing empty tiles.
 // - Change failure rate: no failure history — derived from current session statuses as
 //   failed ÷ (merged + failed) in the window (merged by merge date, failed by created
 //   date), with the basis in the sub-line.
@@ -26,6 +24,7 @@ import { formatCost, formatTokens, orgCost, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { AreaChart, ChartSection, COLONY_GRID, ColonyRow, KpiStrip, OrgTile, RangePicker, Rules, Section, SegTabs, TrendLine, type KpiDef } from "./DashChart";
+import { deliveryKpis } from "./delivery";
 import { FleetPanel } from "./FleetPanel";
 import { isBumped, isFlashed, useLiveEvents } from "./liveEvents";
 import { OrgDashboard } from "./OrgDashboard";
@@ -213,7 +212,7 @@ export function OverviewView({
   const needList = visibleSessions.filter(needsYou).sort((a, b) => waitingMs(b) - waitingMs(a) || a.id.localeCompare(b.id));
 
   // The KPI strip: merged, change failure and spend are measured; live colonies is the moment's
-  // count; lead time, PR cycle time and CI pass rate have no data source and are named once.
+  // count; lead time, PR cycle time and CI pass rate come from the PR watcher's timestamps and checks.
   const mergedCur = mergedInWindow(visibleSessions, fromMs, nowMs);
   const mergedPrev = mergedInWindow(visibleSessions, prevFromMs, fromMs);
   const mergedDelta = compare ? relDelta(mergedCur.length, mergedPrev.length) : null;
@@ -262,9 +261,7 @@ export function OverviewView({
       sub: `${counts.queued} queued${held.count > 0 ? ` · ${held.count} held` : ""}`,
       hint: "starting, working, idle or waiting on you, right now",
     },
-    { label: "Lead time", value: "—", unmeasured: true, hint: "issue picked up → PR opened: the API serves neither timestamp" },
-    { label: "PR cycle time", value: "—", unmeasured: true, hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
-    { label: "CI pass rate", value: "—", unmeasured: true, hint: "checks on colony PRs: no CI data is served" },
+    ...deliveryKpis(visibleSessions, { from: fromMs, to: nowMs }, { from: prevFromMs, to: fromMs }, days, compare),
   ];
 
   // Merged per day, stacked by workspace in ramp order (org identity rides on the avatars, never

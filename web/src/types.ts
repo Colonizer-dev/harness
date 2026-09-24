@@ -48,6 +48,8 @@ export interface StallInfo {
   queued: number;
 }
 
+export type CiState = "success" | "failure" | "pending" | "no_checks";
+
 export interface Session {
   id: string;
   repo: string;
@@ -110,6 +112,10 @@ export interface Session {
   created_at: string;
   /** When the PR merged (GitHub mergedAt, or when the mothership saw the flip); omitted when absent. */
   merged_at?: string | null;
+  /** When the pull request was opened (GitHub's createdAt); absent until the PR watcher reads it. */
+  pr_opened_at?: string | null;
+  /** The pull request's checks in one word, as last read by the PR watcher. */
+  ci_state?: CiState | null;
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;

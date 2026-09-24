@@ -480,6 +480,7 @@ fn validate_settings(schema: &Value, input: &Map<String, Value>) -> Result<Map<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModulesConfig;
     use std::sync::Arc;
 
     #[test]

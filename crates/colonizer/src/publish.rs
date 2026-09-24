@@ -135,9 +135,31 @@ pub(crate) fn resolve_merged_at(
 }
 
 /// Whether the startup backfill still wants this colony: merged, with a pull request to ask about,
-/// and no merge time yet.
+/// and no merge time or no PR-opened time yet (the checks verdict is read in the same call).
 fn wants_merged_at(s: &Session) -> bool {
-    s.status == SessionStatus::Merged && s.merged_at.is_none() && s.pr_url.is_some()
+    s.status == SessionStatus::Merged && (s.merged_at.is_none() || s.pr_opened_at.is_none()) && s.pr_url.is_some()
+}
+
+/// The checks verdict to keep after a new reading: a settled one always replaces, a `pending` one
+/// only while the pull request is open (a merged PR keeps its last settled verdict), and
+/// `no_checks` never overwrites a verdict already held.
+pub(crate) fn next_ci_state(previous: Option<github::CiState>, seen: github::CiState, open: bool) -> Option<github::CiState> {
+    match seen {
+        github::CiState::Success | github::CiState::Failure => Some(seen),
+        github::CiState::Pending if open || !previous.is_some_and(github::CiState::settled) => Some(seen),
+        github::CiState::Pending => previous,
+        github::CiState::NoChecks => previous.or(Some(seen)),
+    }
+}
+
+/// Records what a `gh pr view` said about the PR's timing and checks; true when anything changed.
+pub(crate) fn apply_pr_facts(s: &mut Session, info: &github::PrInfo) -> bool {
+    let opened = s.pr_opened_at.or(info.created_at);
+    let ci = next_ci_state(s.ci_state, info.ci, info.state == github::PrState::Open);
+    let changed = opened != s.pr_opened_at || ci != s.ci_state;
+    s.pr_opened_at = opened;
+    s.ci_state = ci;
+    changed
 }
 
 /// The colonies the startup backfill asks GitHub about, as `(id, pr_url)`.
@@ -152,7 +174,7 @@ pub(crate) fn merged_at_backfill_targets(sessions: &[Session]) -> Vec<(String, S
 /// Stamps a backfilled merge time; true when it did. Never touches `updated_at` — the backfill
 /// persists through `record_measurement`, so old colonies keep their place in every list.
 pub(crate) fn apply_merged_at(s: &mut Session, merged_at: DateTime<Utc>) -> bool {
-    if !wants_merged_at(s) {
+    if !wants_merged_at(s) || s.merged_at.is_some() {
         return false;
     }
     s.merged_at = Some(merged_at);
@@ -166,12 +188,8 @@ pub async fn backfill_merged_at(app: Shared) {
     let targets = merged_at_backfill_targets(&app.sessions.read().await);
     let mut filled = 0usize;
     for (id, pr_url) in targets {
-        let merged_at = match github::pr_info(&app, &pr_url).await {
-            Ok(info) => match info.merged_at {
-                Some(at) => at,
-                None => continue,
-            },
-            Err(_) => continue,
+        let Ok(info) = github::pr_info(&app, &pr_url).await else {
+            continue;
         };
         // Re-checked at apply time: the colony may have changed while `gh` was running.
         if !app.session(&id).await.is_some_and(|s| wants_merged_at(&s)) {
@@ -179,13 +197,16 @@ pub async fn backfill_merged_at(app: Shared) {
         }
         // A measurement, not activity: `record_measurement` leaves `updated_at` alone.
         app.record_measurement(&id, |s| {
-            apply_merged_at(s, merged_at);
+            if let Some(at) = info.merged_at {
+                apply_merged_at(s, at);
+            }
+            apply_pr_facts(s, &info);
         })
         .await;
         filled += 1;
     }
     if filled > 0 {
-        println!("sessions: backfilled merged_at for {filled} merged colonies");
+        println!("sessions: backfilled merge and pull-request times for {filled} merged colonies");
     }
 }
 
@@ -546,6 +567,16 @@ pub async fn watch_pull_requests(app: Shared) {
             poll.last_checked = now;
             match github::pr_info(&app, &url).await {
                 Ok(info) => {
+                    // Timing and checks are measurements: recorded without touching `updated_at`,
+                    // and only written when they moved.
+                    if s.pr_opened_at.or(info.created_at) != s.pr_opened_at
+                        || next_ci_state(s.ci_state, info.ci, info.state == github::PrState::Open) != s.ci_state
+                    {
+                        app.record_measurement(&s.id, |x| {
+                            apply_pr_facts(x, &info);
+                        })
+                        .await;
+                    }
                     let (state, mergeability, pr_merged_at, base_ref_oid) =
                         (info.state, info.mergeability, info.merged_at, info.base_ref_oid);
                     poll.failing = false;
@@ -1247,11 +1278,12 @@ mod tests {
     }
 
     #[test]
-    fn only_merged_colonies_missing_a_merge_time_are_backfill_candidates() {
+    fn only_merged_colonies_missing_a_merge_or_pr_time_are_backfill_candidates() {
         let mut merged = colony("acme", SessionStatus::Merged);
         merged.pr_url = Some("https://github.com/acme/repo/pull/7".into());
         let mut stamped = merged.clone();
         stamped.merged_at = Some(Utc::now());
+        stamped.pr_opened_at = Some(Utc::now());
         let mut no_pr = colony("acme", SessionStatus::Merged);
         no_pr.merged_at = None;
         let mut open = colony("acme", SessionStatus::PrOpened);
@@ -1262,6 +1294,62 @@ mod tests {
             vec![(merged.id.clone(), merged.pr_url.clone().unwrap())],
             "only the merged colony with a PR and no merge time is asked about"
         );
+        let mut no_pr_time = merged.clone();
+        no_pr_time.merged_at = Some(Utc::now());
+        assert_eq!(
+            merged_at_backfill_targets(&[no_pr_time]).len(),
+            1,
+            "a missing PR-opened time is asked about too"
+        );
+    }
+
+    #[test]
+    fn ci_state_keeps_a_settled_verdict_once_merged() {
+        use github::CiState::*;
+        assert_eq!(next_ci_state(None, Pending, true), Some(Pending));
+        assert_eq!(next_ci_state(Some(Pending), Success, true), Some(Success));
+        assert_eq!(
+            next_ci_state(Some(Success), Failure, true),
+            Some(Failure),
+            "a new push can fail"
+        );
+        assert_eq!(
+            next_ci_state(Some(Failure), Pending, true),
+            Some(Pending),
+            "an open PR re-running is pending again"
+        );
+        assert_eq!(
+            next_ci_state(Some(Success), Pending, false),
+            Some(Success),
+            "a merged PR keeps its last verdict"
+        );
+        assert_eq!(next_ci_state(None, Pending, false), Some(Pending));
+        assert_eq!(next_ci_state(Some(Success), NoChecks, true), Some(Success));
+        assert_eq!(next_ci_state(None, NoChecks, true), Some(NoChecks));
+    }
+
+    #[test]
+    fn pr_facts_stamp_the_opened_time_once() {
+        let mut s = colony("acme", SessionStatus::PrOpened);
+        let opened = Utc::now();
+        let info = github::PrInfo {
+            state: github::PrState::Open,
+            mergeability: github::Mergeability::Clean,
+            merge_state_status: "CLEAN".into(),
+            merged_at: None,
+            base_ref_oid: None,
+            created_at: Some(opened),
+            ci: github::CiState::Success,
+        };
+        assert!(apply_pr_facts(&mut s, &info));
+        assert_eq!((s.pr_opened_at, s.ci_state), (Some(opened), Some(github::CiState::Success)));
+        assert!(!apply_pr_facts(&mut s, &info), "the same reading changes nothing");
+        let later = github::PrInfo {
+            created_at: Some(opened + chrono::Duration::hours(1)),
+            ..info
+        };
+        apply_pr_facts(&mut s, &later);
+        assert_eq!(s.pr_opened_at, Some(opened), "the first opened time is kept");
     }
 
     #[test]

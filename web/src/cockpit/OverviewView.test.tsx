@@ -160,9 +160,9 @@ describe("OverviewView KPIs", () => {
     for (const label of ["Merged PRs", "Change failure rate", "Spend", "Live colonies"]) {
       expect(html).toContain(label);
     }
-    // Lead time, PR cycle time and CI pass rate have no source: one footnote, no empty tiles.
-    expect(html).toContain("Lead time, PR cycle time and CI pass rate are not measured yet");
-    expect(html.match(/no data source/g)?.length).toBe(1);
+    // Lead time, PR cycle time and CI pass rate are measured tiles now, not a footnote.
+    for (const label of ["Lead time", "PR cycle time", "CI pass rate"]) expect(html).toContain(label);
+    expect(html).not.toContain("not measured yet");
   });
 
   it("counts merged PRs from sessions and says the bucket out loud", () => {

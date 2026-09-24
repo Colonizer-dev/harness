@@ -292,6 +292,15 @@ pub struct Session {
     /// existed gain it from the startup backfill, best effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<DateTime<Utc>>,
+    /// When the pull request was opened, as GitHub reports it (`createdAt`); set by the PR watcher
+    /// and, for colonies merged before it existed, by the startup backfill. With `merged_at` it
+    /// gives the PR cycle time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_opened_at: Option<DateTime<Utc>>,
+    /// The pull request's checks in one word (`success`, `failure`, `pending`, `no_checks`), as last
+    /// read by the PR watcher; a settled verdict survives a later `pending` reading once merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_state: Option<crate::github::CiState>,
     /// How far the last publish got; left in place when a publish failed, so a retry knows where to look.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_stage: Option<PublishStage>,
@@ -420,6 +429,8 @@ impl Default for Session {
             fix_for: None,
             pr_url: None,
             merged_at: None,
+            pr_opened_at: None,
+            ci_state: None,
             publish_stage: None,
             publishing_holds_slot: false,
             needs_rebase: false,
@@ -1319,6 +1330,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         fix_for: None,
         pr_url: None,
         merged_at: None,
+        pr_opened_at: None,
+        ci_state: None,
         publish_stage: None,
         // A fresh colony is starting or queued, never publishing: the flag is inert.
         publishing_holds_slot: false,
@@ -3122,6 +3135,8 @@ pub(crate) mod tests {
             fix_for: None,
             pr_url: None,
             merged_at: None,
+            pr_opened_at: None,
+            ci_state: None,
             publish_stage: None,
             // A bare `publishing` fixture is a live-origin claim, so it holds its slot; tests for
             // a stopped-origin publish flip this off.

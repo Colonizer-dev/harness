@@ -315,7 +315,7 @@ export function deltaTone(delta: number | null, goodWhen: "up" | "down" = "up"):
 // Overview derivations (issue #398): everything the OVERVIEW screen reads off the
 // session list. Merged PRs bucket by merged_at (falling back to created_at when the
 // mothership omits it); failed sessions bucket by created_at. Lead time / PR cycle
-// time / CI pass rate have no helper here at all, and the change-failure rate is a
+// time / CI pass rate live in delivery.ts, and the change-failure rate is a
 // snapshot reading (failed ÷ decided in the window, merged read by merge time and
 // failed by created_at), never a history.
 // ---------------------------------------------------------------------------

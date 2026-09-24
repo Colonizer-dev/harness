@@ -3,8 +3,8 @@
 // beside the token mix, the repositories table and the org's colonies. Backed only by real data —
 // Session (statuses, created_at, cost, repo), /api/spend/history (per-org per-day
 // launched/returned/cost/models) and optional cumulative provider tallies. Anything without a
-// source (lead time, PR cycle time, CI pass/CI-green, coverage, time to recover, per-day latency,
-// lead-time histogram) is named as unmeasured once, never guessed.
+// source (coverage, time to recover, per-day latency, lead-time histogram) is named as unmeasured
+// once, never guessed. Lead time, PR cycle time and CI pass rate come from delivery.ts.
 import { useState, type ReactElement, type ReactNode } from "react";
 
 import { sameOrg, timeAgo } from "../components/ui";
@@ -39,6 +39,7 @@ import {
   type ProviderErrorSnapshot,
   type RangeDays,
 } from "./dash";
+import { deliveryKpis } from "./delivery";
 import { overviewCounts } from "./feed";
 
 /** Kept here (rather than imported from dash) so existing importers keep working. */
@@ -167,6 +168,7 @@ export function OrgDashboard({
     errRate != null
       ? `API error rate ${(errRate * 100).toFixed(2)}% of ${formatTokens(totalReq)} calls${since ? ` since ${since}` : ""} (cumulative)`
       : "API error rate: no data source yet";
+  const delivery = deliveryKpis(scoped, curWin, prevWin, days, compare && previous.length > 0);
   const kpis: KpiDef[] = [
     {
       label: "Merged PRs",
@@ -177,8 +179,8 @@ export function OrgDashboard({
       sub: scoped.length > 0 ? `${Math.round((merged / scoped.length) * 100)}% of ${scoped.length} ${scoped.length === 1 ? "colony" : "colonies"}` : "no colonies in scope",
       hint: "sessions with status merged, GET /api/sessions — the delta reads merged in range vs the previous period (bucketed by merge date, falling back to created_at)",
     },
-    { label: "Lead time", value: "—", unmeasured: true, hint: "needs issue-picked-up → PR-opened timestamps; the API serves none" },
-    { label: "PR cycle time", value: "—", unmeasured: true, hint: "needs PR-opened timestamps; the API serves merged_at but no PR-opened time" },
+    delivery[0],
+    delivery[1],
     {
       label: "Change failure rate",
       ...(scoped.length > 0
@@ -193,7 +195,7 @@ export function OrgDashboard({
       hint: "failed sessions ÷ colonies in scope, GET /api/sessions — the spark and delta read the in-range window (merged by merge day, failed by created day)",
     },
     { label: "Time to recover", value: "—", unmeasured: true, hint: "needs failure → recovery timestamps; the API serves none" },
-    { label: "CI pass rate", value: "—", unmeasured: true, hint: "the API serves no CI results" },
+    delivery[2],
     {
       label: "Cost per merged PR",
       ...(merged > 0
@@ -442,7 +444,7 @@ export function OrgDashboard({
       </Section>
 
       <div className="-mt-6 text-[12.5px] text-faint">
-        {formatTokens(sumTokens(current, org.org))} tokens in range · per-day latency, the lead-time distribution, CI pass rate and coverage have no API to read from (the API serves no CI results; the API serves no coverage).
+        {formatTokens(sumTokens(current, org.org))} tokens in range · per-day latency and coverage have no API to read from (the API serves no coverage).
       </div>
     </div>
   );

@@ -54,7 +54,10 @@ describe("OrgDashboard", () => {
     for (const kpi of ["Merged PRs", "Change failure rate", "Cost per merged PR", "Spend"]) {
       expect(html).toContain(kpi);
     }
-    expect(html).toContain("Lead time, PR cycle time, Time to recover, CI pass rate and Coverage are not measured yet");
+    expect(html).toContain("Time to recover and Coverage are not measured yet");
+    // Delivery tiles are measured now; with no PR times or checks recorded they say so plainly.
+    expect(html).toContain("no merged colonies with PR times yet");
+    expect(html).toContain("no settled checks in range yet");
     expect(html).toContain("API error rate: no data source yet");
     // Real figures: 1 merged of 4 colonies, 1 failed of 4, $6 rollup ÷ 1 merged.
     expect(html).toContain("25% of 4 colonies");
