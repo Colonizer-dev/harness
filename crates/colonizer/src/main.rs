@@ -14,6 +14,7 @@ mod burn_down;
 mod claims;
 mod claude_accounts;
 mod claude_login;
+mod colony_secrets;
 mod config;
 mod diagnosis;
 mod events;
@@ -1323,6 +1324,7 @@ async fn serve() -> Result<()> {
         .route("/api/modules/{kind}", put(modules::update))
         .route("/api/secrets", get(secrets::list))
         .route("/api/secrets/health", get(secrets::health))
+        .route("/api/secrets/colony", post(colony_secrets::upsert))
         .route("/api/secrets/{id}", put(secrets::put).delete(secrets::delete))
         .route("/api/secrets/{id}/move", post(secrets::move_secret))
         .route(

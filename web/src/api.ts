@@ -3,6 +3,7 @@ import type {
   RepoPackages,
   BurnDownStatus,
   SecretRow,
+  ColonySecretRequest,
   SecretsListing,
   FleetHost,
   FindingRecord,
@@ -187,7 +188,10 @@ export interface Api {
   secrets(): Promise<SecretsListing>;
   /** PUT /api/secrets/{id}: sets or replaces a secret; `location` also moves it there. */
   saveSecret(id: string, value: string, location?: "keychain" | "file"): Promise<SecretRow>;
-  deleteSecret(id: string): Promise<SecretRow>;
+  /** DELETE /api/secrets/{id}; a colony secret answers `{id, removed}` since its row is gone. */
+  deleteSecret(id: string): Promise<SecretRow | { id: string; removed: true }>;
+  /** POST /api/secrets/colony: adds a colony secret or changes its hosts, scope or value. */
+  saveColonySecret(body: ColonySecretRequest): Promise<{ id: string }>;
   /** POST /api/secrets/{id}/move: between the system keychain and the 0600 file. */
   moveSecret(id: string, to: "keychain" | "file"): Promise<SecretRow>;
   memory(scope: MemoryScope, key: string): Promise<MemoryListing>;
@@ -319,6 +323,7 @@ export const httpApi: Api = {
   secrets: () => request("/api/secrets"),
   saveSecret: (id, value, location) => put(`/api/secrets/${enc(id)}`, location ? { value, location } : { value }),
   deleteSecret: (id) => del(`/api/secrets/${enc(id)}`),
+  saveColonySecret: (body) => post("/api/secrets/colony", body),
   moveSecret: (id, to) => post(`/api/secrets/${enc(id)}/move`, { to }),
   memory: (scope, key) => request(`/api/memory?scope=${enc(scope)}&key=${enc(key)}`),
   memoryProposals: () => request("/api/memory/proposals"),

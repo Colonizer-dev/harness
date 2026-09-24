@@ -407,6 +407,28 @@ struct Item {
     env: Option<&'static str>,
     /// Whether the page may set, replace, remove and move it.
     editable: bool,
+    /// What a colony gets of it.
+    colonies: Access,
+}
+
+/// How a secret reaches colonies, if at all.
+enum Access {
+    /// The mothership's gateway adds it to model requests; it never enters a microVM.
+    Gateway,
+    /// Handed to the colony as a placeholder that msb swaps for the value on TLS to these hosts.
+    Injected(Vec<String>),
+    /// Used by the mothership alone.
+    None,
+}
+
+impl Access {
+    fn json(&self) -> Value {
+        match self {
+            Access::Gateway => json!({"kind": "gateway", "hosts": []}),
+            Access::Injected(hosts) => json!({"kind": "injected", "hosts": hosts}),
+            Access::None => json!({"kind": "none", "hosts": []}),
+        }
+    }
 }
 
 /// Every secret this mothership knows about, whether or not it is set.
@@ -422,6 +444,7 @@ fn catalog(app: &App) -> Vec<Item> {
             path: Some(app.github_token_file()),
             env: None,
             editable: true,
+            colonies: Access::None,
         },
         Item {
             id: "claude-token".into(),
@@ -432,6 +455,7 @@ fn catalog(app: &App) -> Vec<Item> {
             path: Some(app.claude_token_file()),
             env: None,
             editable: true,
+            colonies: Access::Injected(vec![crate::CLAUDE_API_HOST.into()]),
         },
     ];
     for (id, meta) in crate::claude_accounts::load_meta(dir).accounts {
@@ -448,6 +472,7 @@ fn catalog(app: &App) -> Vec<Item> {
             path: Some(crate::claude_accounts::account_file(dir, &id)),
             env: None,
             editable: true,
+            colonies: Access::Injected(vec![crate::CLAUDE_API_HOST.into()]),
         });
     }
     items.push(Item {
@@ -460,6 +485,7 @@ fn catalog(app: &App) -> Vec<Item> {
         env: None,
         // The CLI reads it straight off disk, so it stays a file and is not edited here.
         editable: false,
+        colonies: Access::None,
     });
     for provider in app.providers() {
         items.push(Item {
@@ -471,6 +497,7 @@ fn catalog(app: &App) -> Vec<Item> {
             path: Some(app.provider_key_file(&provider.id)),
             env: None,
             editable: true,
+            colonies: Access::Gateway,
         });
     }
     for svc in crate::voice::SERVICES.iter() {
@@ -483,6 +510,7 @@ fn catalog(app: &App) -> Vec<Item> {
             path: Some(dir.join("voice-keys").join(svc.id)),
             env: Some(svc.env),
             editable: true,
+            colonies: Access::None,
         });
     }
     items.push(Item {
@@ -494,6 +522,7 @@ fn catalog(app: &App) -> Vec<Item> {
         path: Some(dir.join("memory-keys").join("mem0")),
         env: Some("MEM0_API_KEY"),
         editable: true,
+        colonies: Access::None,
     });
     items.push(Item {
         id: "notify-secret".into(),
@@ -504,6 +533,7 @@ fn catalog(app: &App) -> Vec<Item> {
         path: Some(dir.join("notify-secret")),
         env: None,
         editable: true,
+        colonies: Access::None,
     });
     items.push(Item {
         id: "jev".into(),
@@ -514,7 +544,25 @@ fn catalog(app: &App) -> Vec<Item> {
         path: None,
         env: Some("JEV_API_KEY"),
         editable: false,
+        colonies: Access::Injected(vec!["api.typesafe.ai".into()]),
     });
+    for secret in crate::colony_secrets::load(dir).unwrap_or_default() {
+        items.push(Item {
+            id: secret.id(),
+            label: secret.env.clone(),
+            group: "colonies",
+            used_by: match &secret.scope {
+                crate::colony_secrets::Scope::All => "Every colony".into(),
+                crate::colony_secrets::Scope::Org { org } => format!("Colonies on {org} repositories"),
+                crate::colony_secrets::Scope::Repo { repo } => format!("Colonies on {repo}"),
+            },
+            icon: "key",
+            path: Some(crate::colony_secrets::value_path(dir, &secret.env)),
+            env: None,
+            editable: true,
+            colonies: Access::Injected(secret.hosts.clone()),
+        });
+    }
     items
 }
 
@@ -547,6 +595,7 @@ fn row(store: &Store, item: &Item) -> Value {
         "env_set": env_set,
         "updated_at": item.path.as_deref().and_then(|p| store.updated_at(p)),
         "editable": item.editable && item.path.is_some(),
+        "colonies": item.colonies.json(),
     })
 }
 
@@ -604,6 +653,12 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     tokio::task::spawn_blocking(move || util::delete_secret(&path))
         .await
         .map_err(|e| anyhow!(e))?;
+    // A colony secret is its registry entry as much as its value: removing it stops offering it.
+    if let Some(env) = id.strip_prefix("colony:") {
+        crate::colony_secrets::remove(&app.cfg.config_dir, env)
+            .map_err(|e| client_error(StatusCode::CONFLICT, &format!("{e:#}")))?;
+        return Ok(Json(json!({ "id": id, "removed": true })));
+    }
     Ok(Json(row(store, &item)))
 }
 

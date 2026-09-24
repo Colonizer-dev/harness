@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
 import { providerSecretId } from "../secretsNav";
-import { SecretsView } from "./SecretsView";
+import { SecretsView, colonyAccessText } from "./SecretsView";
 
 describe("SecretsView", () => {
   it("renders its frame before the list arrives, with no values anywhere", () => {
@@ -38,7 +38,29 @@ describe("mock secrets", () => {
     expect((await api.saveSecret("github-token", "ghp_x")).location).toBe("file");
     expect((await api.moveSecret("github-token", "keychain")).location).toBe("keychain");
     expect((await api.moveSecret("github-token", "file")).location).toBe("file");
-    expect((await api.deleteSecret("voice-keys:openai")).location).toBe("env");
+    const removed = await api.deleteSecret("voice-keys:openai");
+    expect("location" in removed && removed.location).toBe("env");
     vi.useRealTimers();
+  });
+
+  it("adds a colony secret as an injected row, and removing it drops the row", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = createMockApi();
+    await api.saveColonySecret({ env: "SENTRY_DSN", hosts: ["sentry.io"], scope: { kind: "org", org: "acme" }, value: "x" });
+    const row = (await api.secrets()).secrets.find((r) => r.id === "colony:SENTRY_DSN");
+    expect(row?.group).toBe("colonies");
+    expect(row?.colonies).toEqual({ kind: "injected", hosts: ["sentry.io"] });
+    expect(JSON.stringify(row)).not.toContain('"x"');
+    expect(await api.deleteSecret("colony:SENTRY_DSN")).toEqual({ id: "colony:SENTRY_DSN", removed: true });
+    expect((await api.secrets()).secrets.some((r) => r.id === "colony:SENTRY_DSN")).toBe(false);
+    vi.useRealTimers();
+  });
+});
+
+describe("colonyAccessText", () => {
+  it("says plainly what a colony gets of each kind of secret", () => {
+    expect(colonyAccessText({ kind: "gateway", hosts: [] }).text).toBe("Via gateway · never in the VM");
+    expect(colonyAccessText({ kind: "injected", hosts: ["api.anthropic.com"] }).text).toBe("Injected for api.anthropic.com only");
+    expect(colonyAccessText({ kind: "none", hosts: [] }).text).toBe("Not given to colonies");
   });
 });

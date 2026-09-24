@@ -1149,7 +1149,25 @@ export interface RepoPackages {
 // ---------------------------------------------------------------------------
 
 export type SecretLocation = "keychain" | "file" | "env" | "unset";
-export type SecretGroup = "providers" | "connections" | "integrations";
+export type SecretGroup = "providers" | "connections" | "integrations" | "colonies";
+
+/** What a colony gets of a secret: nothing, the gateway's use of it, or a per-host substitution. */
+export interface SecretColonyAccess {
+  kind: "gateway" | "injected" | "none";
+  /** For `injected`: the hosts msb swaps the placeholder for the value on (TLS only). */
+  hosts: string[];
+}
+
+/** Which colonies a colony secret is given to. */
+export type ColonySecretScope = { kind: "all" } | { kind: "org"; org: string } | { kind: "repo"; repo: string };
+
+/** POST /api/secrets/colony. `value` is required for a new secret. */
+export interface ColonySecretRequest {
+  env: string;
+  hosts: string[];
+  scope: ColonySecretScope;
+  value?: string;
+}
 
 export interface SecretRow {
   /** Stable id, e.g. `provider-keys:zai`; the path segment for PUT/DELETE/move. */
@@ -1165,6 +1183,8 @@ export interface SecretRow {
   updated_at: string | null;
   /** False for secrets managed elsewhere (environment-only, or read by the CLI off disk). */
   editable: boolean;
+  /** How it reaches colonies; absent from an older mothership. */
+  colonies?: SecretColonyAccess;
 }
 
 export interface KeychainHealth {

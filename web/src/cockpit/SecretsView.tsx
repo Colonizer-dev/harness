@@ -19,6 +19,8 @@ import {
 } from "../components/settingsGuide";
 import { Button, Spinner, cx, inputClass, timeAgo } from "../components/ui";
 import type {
+  ColonySecretScope,
+  SecretColonyAccess,
   SecretGroup,
   SecretLocation,
   SecretRow,
@@ -41,7 +43,55 @@ const GROUPS: { id: SecretGroup; title: string; hint: string }[] = [
     title: "Integrations",
     hint: "Voice, memory, notifications and add-ons",
   },
+  {
+    id: "colonies",
+    title: "Colony secrets",
+    hint: "Keys you let colonies use, swapped in only for the hosts you name",
+  },
 ];
+
+/** What each row's "Colonies" pill says: whether and how a colony gets the secret. */
+export function colonyAccessText(access: SecretColonyAccess | undefined): {
+  icon: string;
+  text: string;
+  tone: string;
+} {
+  switch (access?.kind) {
+    case "gateway":
+      return {
+        icon: "mothership",
+        text: "Via gateway · never in the VM",
+        tone: "border-border text-muted",
+      };
+    case "injected":
+      return {
+        icon: "ant",
+        text: `Injected for ${access.hosts.join(", ")} only`,
+        tone: "border-accent/40 bg-accent-soft text-accent",
+      };
+    case "none":
+      return {
+        icon: "lock",
+        text: "Not given to colonies",
+        tone: "border-border text-faint",
+      };
+    default:
+      return { icon: "lock", text: "—", tone: "border-border text-faint" };
+  }
+}
+
+/** The explainer card: how a key reaches a colony, and why the colony never holds it. */
+const COLONY_GUIDE: Guide = {
+  icon: "ant",
+  blurb:
+    "How colonies use secrets: a colony never holds a key. Model keys stay in the mothership's gateway; a colony secret reaches the microVM as a placeholder, which is swapped for the real value only on TLS to the hosts you allow.",
+  flow: [
+    { icon: "lock", label: "Keychain" },
+    { icon: "mothership", label: "Mothership", metric: "adds model keys" },
+    { icon: "ant", label: "Colony", metric: "sees a placeholder" },
+    { icon: "globe", label: "Allowed host", metric: "gets the value" },
+  ],
+};
 
 const ICON: Record<string, string> = {
   github: "github",
@@ -66,7 +116,7 @@ function guide(backend: string): Guide {
   return {
     icon: "lock",
     blurb:
-      "Keys your colonies use, kept in the system keychain. Colonies never see them: the mothership adds them on the way out.",
+      "Every key this mothership holds, kept in the system keychain when it can. Values are write-only here and never shown again.",
     flow: [
       { icon: "lock", label: backend === "none" ? "Keychain" : backend },
       { icon: "mothership", label: "Mothership" },
@@ -196,6 +246,8 @@ export function SecretsView({
           }
         />
 
+        <SectionHero guide={COLONY_GUIDE} />
+
         {keychain && !keychain.available && (
           <div
             role="status"
@@ -242,7 +294,8 @@ export function SecretsView({
         {listing &&
           GROUPS.map((group) => {
             const rows = listing.secrets.filter((r) => r.group === group.id);
-            if (rows.length === 0) return null;
+            // Colony secrets always show, so there is somewhere to add the first one.
+            if (rows.length === 0 && group.id !== "colonies") return null;
             return (
               <section key={group.id} aria-labelledby={`secrets-${group.id}`}>
                 <div className="mb-2 flex items-baseline gap-2">
@@ -254,6 +307,15 @@ export function SecretsView({
                   </h2>
                   <span className="text-[12.5px] text-faint">{group.hint}</span>
                 </div>
+                {group.id === "colonies" && (
+                  <ColonySecretForm
+                    onSaved={async (id) => {
+                      await load();
+                      toast(`${id.slice("colony:".length)} saved for colonies`);
+                    }}
+                  />
+                )}
+                {rows.length > 0 && (
                 <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-panel">
                   {rows.map((row) => (
                     <SecretItem
@@ -269,11 +331,19 @@ export function SecretsView({
                         );
                         if (ok) setOpen(null);
                       }}
-                      onRemove={() =>
-                        act(row.id, `${row.label} removed`, () =>
-                          api.deleteSecret(row.id),
-                        )
-                      }
+                      onRemove={async () => {
+                        setBusy(row.id);
+                        try {
+                          const result = await api.deleteSecret(row.id);
+                          if ("removed" in result) await load();
+                          else replace(result);
+                          toast(`${row.label} removed`);
+                        } catch (e) {
+                          toast(errorMessage(e), "error");
+                        } finally {
+                          setBusy(null);
+                        }
+                      }}
                       onMove={(to) =>
                         act(
                           row.id,
@@ -284,6 +354,7 @@ export function SecretsView({
                     />
                   ))}
                 </ul>
+                )}
               </section>
             );
           })}
@@ -319,6 +390,7 @@ function SecretItem({
   const input = useRef<HTMLInputElement>(null);
   const saved = row.location === "keychain" || row.location === "file";
   const loc = LOCATION[row.location];
+  const access = colonyAccessText(row.colonies);
 
   useEffect(() => {
     if (open) input.current?.focus();
@@ -346,6 +418,16 @@ function SecretItem({
             )}
           </div>
         </div>
+        <span
+          className={cx(
+            "inline-flex max-w-[260px] shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11.5px]",
+            access.tone,
+          )}
+          title="What colonies get of this secret"
+        >
+          <GuideIcon name={access.icon} size={12} />
+          <span className="truncate">{access.text}</span>
+        </span>
         <span
           className={cx(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11.5px]",
@@ -439,5 +521,145 @@ function SecretItem({
         </form>
       )}
     </li>
+  );
+}
+
+/** Adds a colony secret: a name, the hosts it is for, which colonies get it, and the value. */
+function ColonySecretForm({
+  onSaved,
+}: {
+  onSaved: (id: string) => Promise<void> | void;
+}): ReactElement {
+  const api = useApi();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [env, setEnv] = useState("");
+  const [hosts, setHosts] = useState("");
+  const [scopeKind, setScopeKind] = useState<ColonySecretScope["kind"]>("all");
+  const [scopeName, setScopeName] = useState("");
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const envOk = /^[A-Z_][A-Z0-9_]*$/.test(env);
+  const hostList = hosts
+    .split(/[\s,]+/)
+    .map((h) => h.trim())
+    .filter(Boolean);
+  const scopeOk = scopeKind === "all" || scopeName.trim() !== "";
+  const ready = envOk && hostList.length > 0 && scopeOk && value.trim() !== "";
+
+  const scope = (): ColonySecretScope =>
+    scopeKind === "org"
+      ? { kind: "org", org: scopeName.trim() }
+      : scopeKind === "repo"
+        ? { kind: "repo", repo: scopeName.trim() }
+        : { kind: "all" };
+
+  if (!open) {
+    return (
+      <div className="mb-2">
+        <Button size="sm" onClick={() => setOpen(true)}>
+          Add colony secret
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      aria-label="add a colony secret"
+      className="mb-3 grid gap-3 rounded-xl border border-border bg-panel-2 p-4 sm:grid-cols-2"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (!ready) return;
+        setSaving(true);
+        try {
+          const saved = await api.saveColonySecret({
+            env,
+            hosts: hostList,
+            scope: scope(),
+            value: value.trim(),
+          });
+          setEnv("");
+          setHosts("");
+          setValue("");
+          setOpen(false);
+          await onSaved(saved.id);
+        } catch (err) {
+          toast(errorMessage(err), "error");
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+        Variable name
+        <input
+          value={env}
+          onChange={(e) => setEnv(e.target.value.toUpperCase())}
+          placeholder="STRIPE_TEST_KEY"
+          spellCheck={false}
+          className={cx(inputClass, "font-mono")}
+          aria-invalid={env !== "" && !envOk}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+        Allowed hosts
+        <input
+          value={hosts}
+          onChange={(e) => setHosts(e.target.value)}
+          placeholder="api.stripe.com, files.stripe.com"
+          spellCheck={false}
+          className={cx(inputClass, "font-mono")}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+        Given to
+        <span className="flex gap-2">
+          <select
+            value={scopeKind}
+            onChange={(e) => setScopeKind(e.target.value as ColonySecretScope["kind"])}
+            className={cx(inputClass, "w-auto")}
+          >
+            <option value="all">All colonies</option>
+            <option value="org">One workspace</option>
+            <option value="repo">One repository</option>
+          </select>
+          {scopeKind !== "all" && (
+            <input
+              value={scopeName}
+              onChange={(e) => setScopeName(e.target.value)}
+              placeholder={scopeKind === "org" ? "acme" : "acme/web"}
+              spellCheck={false}
+              aria-label={scopeKind === "org" ? "workspace" : "repository"}
+              className={cx(inputClass, "min-w-0 flex-1 font-mono")}
+            />
+          )}
+        </span>
+      </label>
+      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+        Value
+        <input
+          type="password"
+          autoComplete="off"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="Paste the key"
+          className={cx(inputClass, "font-mono")}
+        />
+      </label>
+      <p className="m-0 text-[12px] text-muted sm:col-span-2">
+        The colony sees the variable name and a placeholder. The real value is sent only on TLS
+        requests to the hosts above, and the colony is told not to print or store it.
+      </p>
+      <div className="flex gap-2 sm:col-span-2">
+        <Button type="submit" variant="primary" disabled={!ready || saving}>
+          {saving && <Spinner />} Save colony secret
+        </Button>
+        <Button variant="ghost" onClick={() => setOpen(false)}>
+          Cancel
+        </Button>
+      </div>
+    </form>
   );
 }

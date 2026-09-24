@@ -222,6 +222,15 @@ Rules cannot change while a colony runs.
 Composable profiles arrived in v0.6.7 ([`2026-07-24.mdx:9-18`][changelog]). The upstream changelog
 has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`][changelog-last]).
 
+## Colony secrets and the fence
+
+A colony secret (`POST /api/secrets/colony`, see `protocol.md`) names the hosts its value is for,
+and boots as msb `--secret ENV@hosts`: msb swaps the placeholder for the value only on TLS to those
+hosts. The hosts must be public DNS names, and the `public` profile already reaches the Public
+group, so no extra `--net-rule` is added for them. Private, loopback and link-local destinations
+stay behind the default deny, which is why the API refuses `localhost`, IP literals and internal
+names such as `*.internal` or `*.local` rather than accepting a host the colony could never reach.
+
 ## Host-loopback listeners
 
 A colony's profile is `public` alone (`crates/colonizer/src/sessions.rs:1862`). Besides the
