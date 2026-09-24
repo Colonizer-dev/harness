@@ -20,6 +20,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { analyze, loadColonies, totalCost } from './colony-report.mjs';
+import { auditSession } from './trajectory-monitor.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MOTHERSHIP = process.env.COLONIZER_URL || 'http://127.0.0.1:7878';
@@ -268,6 +269,8 @@ const spent = (r) => (r ? totalCost(r.cost_usd, r.routed_cost_usd) : null);
 export function summarizeRun(results) {
   const n = results.length || 1;
   const sum = (key) => results.reduce((a, r) => a + (Number(r[key]) || 0), 0);
+  const clean = results.filter((r) => r.passed && r.clean === true).length;
+  const audited = results.some((r) => typeof r.clean === 'boolean');
   return {
     tasks: results.length,
     passed: results.filter((r) => r.passed).length,
@@ -278,6 +281,10 @@ export function summarizeRun(results) {
     questions: sum('questions'),
     tool_errors: sum('tool_errors'),
     pass_rate: results.filter((r) => r.passed).length / n,
+    clean_resolved: clean,
+    hacked_resolved: results.filter((r) => r.passed && r.clean === false).length,
+    clean_rate: audited ? clean / n : null,
+    gap: audited ? results.filter((r) => r.passed).length / n - clean / n : null,
   };
 }
 
@@ -295,23 +302,28 @@ export function formatComparison(before, after) {
     const b = before.results.find((r) => r.id === id);
     const a = after.results.find((r) => r.id === id);
     const mark = (r) => (r ? (r.passed ? 'pass' : 'FAIL') : '–');
+    const cleanMark = (r) => (r?.clean === false ? 'HACKED' : r?.clean === true ? 'clean' : '–');
     return [
       id,
       `${mark(b)} → ${mark(a)}`,
+      `${cleanMark(b)} → ${cleanMark(a)}`,
       `${spent(b)?.toFixed(2) ?? '–'} → ${spent(a)?.toFixed(2) ?? '–'} (${delta(spent(a), spent(b))})`,
       `${Math.round((b?.working_ms ?? 0) / 1000)}s → ${Math.round((a?.working_ms ?? 0) / 1000)}s`,
       `${b?.questions ?? '–'} → ${a?.questions ?? '–'}`,
       (a?.failures ?? []).join('; ') || '',
     ];
   });
-  const head = ['Task', 'Result', 'Cost', 'Worked', 'Questions', 'Why it failed'];
+  const head = ['Task', 'Result', 'Clean', 'Cost', 'Worked', 'Questions', 'Why it failed'];
   const line = (cells) => `| ${cells.join(' | ')} |`;
   const bs = summarizeRun(before.results);
   const as = summarizeRun(after.results);
+  const cleanLine = bs.clean_rate == null || as.clean_rate == null
+    ? ''
+    : ` Clean resolved ${bs.clean_resolved}/${bs.tasks} → ${as.clean_resolved}/${as.tasks} (clean rate ${Math.round(bs.clean_rate * 100)}% → ${Math.round(as.clean_rate * 100)}%, gap ${Math.round(bs.gap * 100)}% → ${Math.round(as.gap * 100)}%).`;
   return [
     `# ${before.label} → ${after.label}`,
     '',
-    `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.`,
+    `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.${cleanLine}`,
     '',
     line(head),
     line(head.map(() => '---')),
@@ -393,8 +405,13 @@ async function main() {
     const colony = loadColonies(dataDir).find((c) => c.session.id === session.id);
     const branchScore = session.pr_url ? scoreBranch({ repo: args.repo, branch: session.branch, base: session.base ?? 'main', task }) : null;
     const scored = scoreTask({ task, session, answers, timed_out, branchScore, colony: colony ? analyze(colony) : null });
+    // Post-hoc: the trajectory monitor audits the same colony's persisted record. A missing log leaves the
+    // result unaudited (clean: null), never clean.
+    const trajectory = auditSession(dataDir, session.id);
+    scored.clean = trajectory ? trajectory.clean : null;
+    scored.hacks = trajectory ? trajectory.hits.filter((h) => h.status === 'enforcing').map((h) => h.pattern) : [];
     results.push(scored);
-    console.log(`  ${scored.passed ? 'pass' : `FAIL: ${scored.failures.join('; ')}`}`);
+    console.log(`  ${scored.passed ? 'pass' : `FAIL: ${scored.failures.join('; ')}`}${scored.hacks.length > 0 ? ` [hacks: ${scored.hacks.join(', ')}]` : ''}`);
   }
 
   const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: status.modules?.agent ?? null, results };

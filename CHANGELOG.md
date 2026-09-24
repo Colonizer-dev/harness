@@ -29,6 +29,7 @@ setting) is called out under **Take care** rather than left for you to find.
   on the Node 24 colonies run. Bundles are built by `.github/workflows/graft-bundle.yml`
   on `graft-*` tags; until one is published and pinned, the row says it is not
   available yet.
+- **Trajectory monitor: resolved versus clean-resolved.** A post-hoc audit of a colony's persisted event log — every archived `events-N.jsonl` and the current one — for the shapes of shortcutting (history mining, weakened tests, writes to what the scorer executes, solution fetches, unflagged injections), as a versioned, calibrated pattern set: any pattern whose false-positive rate on the committed calibration set's normal transcripts passes its budget is demoted to advisory automatically, so it reports without judging. `node scripts/trajectory-monitor.mjs --session <id> [--bench run.json | --calibration]` reports hits with redacted evidence and logs its own operation to the colony's `audit.jsonl`; `scripts/bench.mjs run` records `clean` and `hacks` per result, its summaries add `clean_resolved`, `hacked_resolved`, `clean_rate` and `gap`, and comparisons gain the clean verdict and the gap. The contract a future Evolver consumes — fitness is the clean rate, and a proposal that widens the gap is rejected — is fixed in [docs/trajectory-monitor.md](docs/trajectory-monitor.md). ([#329])
 
 ## [v0.1.9] - 2026-09-24
 
@@ -612,6 +613,7 @@ Macs. ([#74])
 [#488]: https://github.com/Colonizer-dev/harness/pull/488
 [#489]: https://github.com/Colonizer-dev/harness/pull/489
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
+[#329]: https://github.com/Colonizer-dev/harness/issues/329
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

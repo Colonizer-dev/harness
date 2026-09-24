@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------------------------- reading
 
-function readJsonLines(path) {
+export function readJsonLines(path) {
   if (!existsSync(path)) return [];
   const out = [];
   for (const line of readFileSync(path, 'utf8').split('\n')) {

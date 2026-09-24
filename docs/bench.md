@@ -65,6 +65,13 @@ else.
 One run of one task is one sample. A cost difference of a few cents is noise; a task that flips from pass to
 fail, or a question that stops being asked, is not.
 
+Every result also carries `clean`: after scoring, the [trajectory monitor](trajectory-monitor.md) audits the
+colony's persisted event log for shortcut shapes — history mining, weakened tests, writes to what the scorer
+executes, solution fetches, unflagged injections — and the comparison gains a Clean column (`clean`,
+`HACKED`, or `–` when there was no log to audit) plus the run-level clean rate and the gap between resolved
+and clean-resolved. A run that raises its pass rate while widening that gap bought its score; the gap is the
+number to watch.
+
 ## Synthetic tasks
 
 Four hand-written tasks is a thin sample. `scripts/bench/synth.mjs` grows the set the SWE-smith way: inject
