@@ -6,7 +6,8 @@ import { useModels } from "../useModels";
 import { Avatar } from "./Avatar";
 import { IconX } from "./icons";
 import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
-import { Button, ModelInput, Spinner, Switch, cx, inputClass, stored, store } from "./ui";
+import { ModelPicker } from "./ModelPicker";
+import { Button, Spinner, Switch, cx, inputClass, stored, store } from "./ui";
 
 type FieldKey =
   | "model"
@@ -458,12 +459,12 @@ export function OrgSettingsForm({
                     onOverride={(override) => set(spec.key, { override })}
                   >
                     {spec.kind === "model" && (
-                      <ModelInput
+                      <ModelPicker
                         value={String(draft[spec.key].value)}
                         onChange={(value) => set(spec.key, { value })}
                         models={models}
                         ariaLabel={`${spec.label} model for ${org}`}
-                        placeholder={spec.key === "model" ? "opus" : "deepseek/deepseek-flash"}
+                        emptyLabel="Default"
                       />
                     )}
                     {spec.kind === "number" && (
