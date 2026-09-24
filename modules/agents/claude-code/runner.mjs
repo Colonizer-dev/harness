@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
+import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
 import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
@@ -337,7 +338,7 @@ export function childEnv(env) {
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, waitServer, hiddenEnv = [], routes = [] } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [] } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -352,6 +353,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
+  const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
   // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
   // Enforced unless someone chose otherwise: an unset or unrecognised value delegates, and only an
@@ -370,6 +372,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
+  if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
@@ -418,6 +421,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
+  if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
   const preToolUse = [];
   if (delegate === 'enforce') {
@@ -428,6 +432,21 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
       hooks: [
         async (input) => {
           const reason = delegationDecision(input.tool_name, input.tool_input, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (loop) {
+    // Pacing and stopping the loop stay with the orchestrator, as filing findings does.
+    preToolUse.push({
+      hooks: [
+        async (input) => {
+          const reason = loopDecision(input.tool_name, input);
           if (!reason) return { continue: true };
           return {
             continue: true,
@@ -952,6 +971,11 @@ async function main() {
     findingsServer = createFindingsServer({ emit, createSdkMcpServer, tool, z });
   }
 
+  let loopServer;
+  if (process.env.COLONIZER_LOOP === 'true') {
+    loopServer = createLoopServer({ emit, createSdkMcpServer, tool, z, selfPaced: process.env.COLONIZER_LOOP_SELF_PACED === 'true' });
+  }
+
   // Every colony can wait: a blocking wait costs no model turn, and the tool has no dependency or
   // setting to gate it on.
   const waitServer = createWaitServer({ createSdkMcpServer, tool, z });
@@ -961,6 +985,7 @@ async function main() {
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     findingsServer,
+    loopServer,
     waitServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,

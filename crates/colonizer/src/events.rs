@@ -309,6 +309,12 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
         }
+        AgentEvent::LoopNext { delay_minutes, reason } => {
+            crate::loops::on_next(app, id, delay_minutes, &reason).await;
+        }
+        AgentEvent::LoopStop { reason } => {
+            crate::loops::on_stop(app, id, &reason).await;
+        }
         AgentEvent::TurnEnd {
             is_error,
             result,

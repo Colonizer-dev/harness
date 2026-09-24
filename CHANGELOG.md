@@ -14,6 +14,10 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+### Added
+
+- **Loops: colonies on a schedule, like `/loop`.** A saved prompt on a repository launches a colony every N minutes (15 minutes to 7 days), daily, weekly, monthly, or self-paced, where each run names the next with a `loop_next` tool (15 minutes–24 hours). Any run can end its loop with `loop_stop`, and a loop also ends after its max runs or end date. One run at a time: a tick that finds the previous run still live skips and says so. Loops has its own page (templates, history with status, PR and cost, run now), loop colonies carry a ↻ badge, and `/loop 1h <task>` in the composer makes one. Red-team schedules now share the cadence code. See [docs/loops.md](docs/loops.md).
+
 ## [v0.1.9] - 2026-09-24
 
 ### Added

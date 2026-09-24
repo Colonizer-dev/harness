@@ -1132,6 +1132,53 @@ export interface NewRedTeamSchedule {
   enabled?: boolean;
 }
 
+/** When a loop runs, in UTC (loops.rs, schedule.rs). `self_paced`: each run names the next (loop_next), else a day later. */
+export type LoopCadence =
+  | RedTeamCadence
+  | { every: "interval"; minutes: number }
+  | { every: "daily"; hour: number; minute: number }
+  | { every: "self_paced" };
+
+/** A scheduled colony (GET /api/loops). */
+export interface Loop {
+  id: string;
+  name: string;
+  org: string;
+  repo: string;
+  prompt: string;
+  cadence: LoopCadence;
+  tz_offset_minutes: number;
+  model: string | null;
+  subagent_model: string | null;
+  autopilot: boolean;
+  max_runs: number | null;
+  end_at: string | null;
+  enabled: boolean;
+  /** Null once the loop has ended. */
+  next_run_at: string | null;
+  runs: number;
+  last_run: { session: string; at: string } | null;
+  /** The last thing it did or was told: a skip, the colony's chosen next run, why it ended. */
+  last_note: string | null;
+  ended_reason: string | null;
+  created_at: string;
+}
+
+/** POST /api/loops, and PUT /api/loops/{id} (a full replace). */
+export interface NewLoop {
+  name: string;
+  repo: string;
+  prompt: string;
+  cadence: LoopCadence;
+  tz_offset_minutes?: number;
+  model?: string | null;
+  subagent_model?: string | null;
+  autopilot?: boolean;
+  max_runs?: number | null;
+  end_at?: string | null;
+  enabled?: boolean;
+}
+
 /** GET /api/hunters/{id}/probe: whether an external hunter is installed and could run here. */
 export interface HunterProbe {
   manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };

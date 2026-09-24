@@ -1961,6 +1961,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
     }
+    // A loop's colony gets loop_stop, and loop_next when the loop is self-paced (loops.rs).
+    if let Some(self_paced) = crate::loops::colony_self_paced(app, s.origin.as_deref()).await {
+        runner_env.insert("COLONIZER_LOOP".into(), Value::String("true".into()));
+        runner_env.insert("COLONIZER_LOOP_SELF_PACED".into(), Value::String(self_paced.to_string()));
+    }
     let memory_on = orgs::effective_memory_enabled(&modules, &org_settings);
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
