@@ -3305,6 +3305,8 @@ pub(crate) mod tests {
             automerge: None,
             allow_duplicate: false,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             after: None,
             stack: false,
