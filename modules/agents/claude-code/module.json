@@ -126,8 +126,8 @@
         "type": "string",
         "format": "plugin-dirs",
         "title": "Skillsets",
-        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. All off by default. Stored as a comma-separated list of names.",
-        "default": "",
+        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. archify is on by default, so any colony can draw the repository as an architecture map for the Nest; the rest are off until you switch them on. Stored as a comma-separated list of names.",
+        "default": "archify",
         "env": "COLONIZER_PLUGIN_DIRS"
       },
       "caveman": {
