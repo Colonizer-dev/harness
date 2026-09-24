@@ -401,6 +401,7 @@ pub(crate) async fn start_queued(app: &Shared) {
                 // outside `update_session` (the claim writes the record directly), so the journal
                 // hears about the return here, not there.
                 spend::record_returned(app, &retired.org).await;
+                crate::activity::record_transition(app, crate::sessions::SessionStatus::Queued, &retired).await;
                 app.persist_and_broadcast(&retired).await;
                 app.session_log(&retired.id, "warn", message).await;
                 // Retired without ever booting: it frees the issue for a retry, on GitHub as well

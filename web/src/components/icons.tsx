@@ -83,6 +83,15 @@ export const IconGitPR = make(
     <path d="m13 3.5-2.5 2.5L13 8.5" />
   </>,
 );
+export const IconMerge = make(
+  <>
+    <circle cx="6" cy="5" r="2.5" />
+    <circle cx="6" cy="19" r="2.5" />
+    <circle cx="18" cy="13" r="2.5" />
+    <path d="M6 7.5v9M6 7.5c0 3.5 3 5.5 9.5 5.5" />
+  </>,
+);
+export const IconMinus = make(<path d="M6 12h12" />);
 export const IconCheck = make(<path d="m5 12 5 5 9-10" />);
 export const IconChevron = make(<path d="m9 6 6 6-6 6" />);
 export const IconChevronDown = make(<path d="m6 9 6 6 6-6" />);

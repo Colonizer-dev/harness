@@ -1,10 +1,6 @@
-// What the inbox and the history timeline show, derived from the colony list alone.
-//
-// The prototype drew both from an event log. The mothership keeps no such log for the browser —
-// `GET /api/sessions` is the whole story — so every entry here is a reading of a colony's *current*
-// state stamped with its `updated_at`, not a record of something that happened. That is why there is
-// one entry per colony rather than one per transition: inventing a history the API cannot support
-// would put words in the mothership's mouth.
+// What the inbox shows, derived from the colony list alone: every entry is a reading of a colony's
+// *current* state stamped with its `updated_at`, one entry per colony. History does not read these:
+// `updated_at` moves on every housekeeping write, so it reads the activity log instead (history.ts).
 import { needsYou } from "../notifications";
 import { colonyLabel } from "../notifications";
 import { isLive, occupiesSlot, orgOf, sameOrg } from "../components/ui";
@@ -24,15 +20,6 @@ export interface FeedEntry {
   at: string;
   prUrl: string | null;
 }
-
-/** The timeline's filter pills. */
-export type HistoryFilter = "all" | "launches" | "questions" | "returned";
-
-const KIND_FOR_FILTER: Record<Exclude<HistoryFilter, "all">, readonly FeedKind[]> = {
-  launches: ["launched", "queued", "stopped"],
-  questions: ["question"],
-  returned: ["returned", "failed"],
-};
 
 /** Which kind of line a colony is on right now. `needsYou` wins over status: that is the one thing worth interrupting for. */
 export function feedKind(session: Session): FeedKind {
@@ -107,17 +94,13 @@ export function feedEntries(sessions: Session[]): FeedEntry[] {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
-export function matchesFilter(kind: FeedKind, filter: HistoryFilter): boolean {
-  return filter === "all" || KIND_FOR_FILTER[filter].includes(kind);
-}
-
 // ---------------------------------------------------------------------------
 // The overview's buckets. The counters at the top of OVERVIEW and the click-filters
 // read these same predicates, so the number a counter shows can never disagree with
 // the colonies the corresponding filter reveals.
 // ---------------------------------------------------------------------------
 
-/** The four buckets the overview counts and filters on. Kept apart from `HistoryFilter`: the timeline groups by kind of line, the overview by these. */
+/** The four buckets the overview counts and filters on. */
 export type OverviewFilter = "live" | "need you" | "returned" | "queued";
 
 /** The order the counters render in. */
@@ -225,25 +208,6 @@ export function dayLabel(at: string, now: Date): string {
   if (days <= 0) return "TODAY";
   if (days === 1) return "YESTERDAY";
   return `${then.getDate()} ${MONTHS[then.getMonth()]}`;
-}
-
-export interface HistoryRow {
-  /** The day heading this entry opens, or null when it sits under the one above. */
-  day: string | null;
-  entry: FeedEntry;
-}
-
-/** The timeline: filtered, newest first, each entry told whether it starts a new day. */
-export function historyRows(sessions: Session[], filter: HistoryFilter, now: Date): HistoryRow[] {
-  let last: string | null = null;
-  return feedEntries(sessions)
-    .filter((entry) => matchesFilter(entry.kind, filter))
-    .map((entry) => {
-      const label = dayLabel(entry.at, now);
-      const day = label === last ? null : label;
-      last = label;
-      return { day, entry };
-    });
 }
 
 /**

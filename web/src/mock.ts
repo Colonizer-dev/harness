@@ -3,6 +3,7 @@ import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import type {
+  ActivityEntry,
   PackagesPublished,
   PackagesDependencies,
   SupplyChain,
@@ -2123,6 +2124,85 @@ export function createMockApi(): Api {
     };
   };
 
+  // The activity log (GET /api/activity): outcomes recorded at the transition, and what "you" did.
+  // Seeded oldest first so `seq` climbs with time, and shaped like the report that prompted the
+  // History redesign: a sweep of stops on the same issue three times over, a run of colonies that
+  // found nothing to change, and outcomes whose colony's `updated_at` a later housekeeping write
+  // moved (the log keeps the real time; the page must not show them twice).
+  const activityLog: ActivityEntry[] = [];
+  let activitySeq = 0;
+  const logActivity = (entry: Omit<ActivityEntry, "seq" | "ts"> & { ts?: string }) => {
+    activityLog.push({ ...entry, seq: ++activitySeq, ts: entry.ts ?? now() });
+  };
+  {
+    type Seed = Omit<ActivityEntry, "seq">;
+    const seeds: Seed[] = [];
+    const minutesAgo = (at: string) => Math.max(0, (Date.now() - Date.parse(at)) / 60_000);
+    const OUTCOME: Partial<Record<Session["status"], string>> = {
+      pr_opened: "outcome.pr_opened",
+      merged: "outcome.merged",
+      closed: "outcome.closed",
+      no_changes: "outcome.no_changes",
+      stopped: "outcome.stopped",
+      failed: "outcome.failed",
+      waiting_for_answer: "outcome.question",
+    };
+    const colonyFields = (s: Session) => ({ org: s.org, repo: s.repo, issue: s.issue, colony: s.id, title: s.issue_title, pr_url: s.pr_url });
+    for (const { session: s } of sessions.values()) {
+      if (!s.origin) seeds.push({ ts: s.created_at, kind: "colony.launch", actor: "you", via: "cockpit", ...colonyFields(s), pr_url: null });
+      const kind = OUTCOME[s.status];
+      // Five minutes before its `updated_at`: the write after the outcome (a cleanup, a PR-watch
+      // poll) moved the colony's timestamp, not the event's.
+      if (kind) seeds.push({ ts: ago(minutesAgo(s.updated_at) + 5), kind, actor: "colony", ...colonyFields(s), detail: s.status === "failed" ? s.error : null });
+    }
+    const gone = (id: string, repo: string, issue: number | null, title: string) => ({ org: repo.split("/")[0], repo, issue, colony: id, title });
+    // 00:16-style sweep: you stopped the same two issues' colonies several times over.
+    const sweep: [string, string, number, string][] = [
+      ["ca04bc02", "acme/webshop", 44, "Wire the payment method picker into checkout"],
+      ["d4ed94b7", "acme/api", 12, "QRIS callback signature check"],
+      ["c1c9215b", "acme/webshop", 44, "Wire the payment method picker into checkout"],
+      ["bc4f8f51", "acme/api", 12, "QRIS callback signature check"],
+      ["34418674", "acme/webshop", 44, "Wire the payment method picker into checkout"],
+    ];
+    sweep.forEach(([id, repo, issue, title], i) => seeds.push({ ts: ago(16 + i * 0.1), kind: "outcome.stopped", actor: "you", via: "cockpit", ...gone(id, repo, issue, title) }));
+    const quiet: [string, number, string][] = [
+      ["acme/app", 1215, "Bump the lockfile"],
+      ["acme/app", 1211, "Remove the dead feature flag"],
+      ["acme/infra", 1878, "Rotate the staging certificate"],
+      ["acme/infra", 1881, "Pin the base image"],
+      ["acme/infra", 1877, "Tidy the backup cron"],
+      ["acme/api", 4503, "Drop the unused index"],
+      ["acme/infra", 1879, "Document the restore drill"],
+      ["acme/app", 1246, "Translate the settings screen"],
+      ["acme/webshop", 3469, "Fix the footer year"],
+      ["acme/infra", 1876, "Rename the deploy job"],
+      ["acme/app", 1250, "Update the splash asset"],
+      ["acme/api", 4499, "Tighten the rate limiter"],
+    ];
+    quiet.forEach(([repo, issue, title], i) => seeds.push({ ts: ago(17 + i * 0.08), kind: "outcome.no_changes", actor: "colony", ...gone(`nc${i.toString(16).padStart(6, "0")}`, repo, issue, title) }));
+    seeds.push(
+      { ts: ago(34), kind: "settings.save", actor: "you", via: "cockpit", target: "provider openrouter", section: "providers" },
+      { ts: ago(35), kind: "settings.save", actor: "you", via: "cockpit", target: "secret provider-keys:openrouter", section: "secrets" },
+      { ts: ago(52), kind: "workspace.disable", actor: "you", via: "cockpit", org: "globex", target: "globex", section: "org:globex" },
+      { ts: ago(71), kind: "loop.pause", actor: "you", via: "cockpit", org: "acme", repo: "acme/webshop", target: "Nightly dependency bumps", section: "loops" },
+      { ts: ago(95), kind: "redteam.start", actor: "you", via: "cockpit", org: "acme", repo: "acme/webshop", target: "red-team run", section: "redteam" },
+      { ts: ago(118), kind: "chat.colony", actor: "you", via: "cockpit", ...gone("c7a91e02", "acme/design-system", null, "Tokens for the new dark palette") },
+      { ts: ago(131), kind: "outcome.question", actor: "colony", ...gone("q51f00aa", "acme/webshop", 51, "Currency rounding for IDR") },
+      { ts: ago(126), kind: "colony.answer", actor: "you", via: "cockpit", ...gone("q51f00aa", "acme/webshop", 51, "Currency rounding for IDR") },
+      { ts: ago(60 * 26), kind: "outcome.pr_opened", actor: "colony", ...gone("p1e0a001", "acme/api", 88, "Idempotency keys on refunds"), pr_url: "https://github.com/acme/api/pull/412" },
+      { ts: ago(60 * 26 + 12), kind: "outcome.merged", actor: "colony", ...gone("p1e0a002", "acme/webshop", 39, "Guest checkout email validation"), pr_url: "https://github.com/acme/webshop/pull/58" },
+      { ts: ago(60 * 26 + 40), kind: "outcome.failed", actor: "colony", ...gone("f1e0a003", "acme/app", 1203, "Offline queue for tap-to-pay"), detail: "tests failed: 3 of 212 (queue.spec.ts); the colony stopped after its budget" },
+      { ts: ago(60 * 27), kind: "settings.save", actor: "you", via: "api", target: "module agent", section: "module:agent" },
+      { ts: ago(60 * 27 + 20), kind: "loop.run_now", actor: "you", via: "cockpit", org: "acme", repo: "acme/api", target: "Weekly flaky-test hunt", section: "loops" },
+      { ts: ago(60 * 50), kind: "settings.remove", actor: "you", via: "cockpit", target: "provider strix-old", section: "providers" },
+      { ts: ago(60 * 51), kind: "workspace.enable", actor: "you", via: "cockpit", org: "acme", target: "acme", section: "org:acme" },
+    );
+    seeds.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+    for (const seedEntry of seeds) logActivity(seedEntry);
+  }
+  const colonyActivity = (kind: string, s: Session) =>
+    logActivity({ kind, actor: "you", via: "cockpit", org: s.org, repo: s.repo, issue: s.issue, colony: s.id, title: s.issue_title, pr_url: s.pr_url });
+
   return {
     mock: true,
     status: () =>
@@ -2342,6 +2422,7 @@ export function createMockApi(): Api {
     body.instructions ?? null,
       );
       sessions.set(id, session);
+      colonyActivity(body.origin === "chat" ? "chat.colony" : "colony.launch", session.session);
       return clone(session.session);
     },
     resumeSession: async (id) => {
@@ -2351,6 +2432,7 @@ export function createMockApi(): Api {
     throw new ApiError("this colony can't be resumed", 409);
       }
       s.patch({ status: "starting", error: null });
+      colonyActivity("colony.resume", s.session);
       return clone(s.session);
     },
     publishSession: async (id) => {
@@ -2385,6 +2467,7 @@ export function createMockApi(): Api {
       if (!isLive(s.session.status)) throw new ApiError("session is not running", 409);
       s.halt();
       s.patch({ status: "stopped", mesh: null });
+      logActivity({ kind: "outcome.stopped", actor: "you", via: "cockpit", org: s.session.org, repo: s.session.repo, issue: s.session.issue, colony: s.session.id, title: s.session.issue_title });
       s.log("microVM stopped and removed; the worktree was kept");
       return { ...clone(s.session), result: "stopped" };
     },
@@ -2393,6 +2476,7 @@ export function createMockApi(): Api {
       if (isLive(s.session.status) || s.session.status === "publishing") throw new ApiError("stop the colony first", 409);
       s.halt();
       sessions.delete(id);
+      colonyActivity("colony.delete", s.session);
       return { deleted: id, leftover: null };
     },
     cleanupSession: async (id) => {
@@ -2665,6 +2749,21 @@ export function createMockApi(): Api {
         ...(mockOrgSpend[org] ? { spend: mockOrgSpend[org] } : null),
       };
     });
+      }),
+    activity: (q = {}) =>
+      later(() => {
+        const limit = q.limit ?? 100;
+        const needle = q.q?.trim().toLowerCase() ?? "";
+        const matching = [...activityLog]
+          .reverse()
+          .filter((e) => q.before == null || e.seq < q.before)
+          .filter((e) => !q.org || !e.org || e.org.toLowerCase() === q.org.toLowerCase())
+          .filter((e) => !q.repo || e.repo === q.repo)
+          .filter((e) => !q.actor || e.actor === q.actor)
+          .filter((e) => !q.kind || q.kind.split(",").some((k) => e.kind === k || e.kind.startsWith(`${k}.`)))
+          .filter((e) => !needle || [e.repo, e.title, e.target, e.detail, e.colony].some((f) => f?.toLowerCase().includes(needle)));
+        const entries = matching.slice(0, limit);
+        return { entries, next_before: matching.length > limit ? entries[entries.length - 1].seq : null, skipped: 0 };
       }),
     spendHistory: (days = 8) =>
       later((): SpendHistory => {

@@ -23,6 +23,15 @@ pub const UNAUTHORIZED_BODY: &str = "missing or invalid API token; run `colonize
 #[derive(Clone, Copy, Debug)]
 pub struct Authenticated(pub bool);
 
+/// How an authenticated request reached the API, for the activity log's `via`: the browser's
+/// cookie (the cockpit) or an `Authorization: Bearer` token (the CLI or a script). Set by
+/// `host_guard` next to [`Authenticated`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Via {
+    Cockpit,
+    Api,
+}
+
 /// The token file: `<config_dir>/api-token`, next to the other saved secrets.
 pub fn token_file(config_dir: &Path) -> PathBuf {
     config_dir.join("api-token")
