@@ -143,6 +143,16 @@ pub struct App {
     pub sessions: RwLock<Vec<Session>>,
     pub redteam: redteam::RedTeamStore,
     session_persist: Mutex<()>,
+    /// Serialises the read-modify-write of `orgs.json` and `providers.json` (`orgs::put`,
+    /// `providers::put`/`delete`): one strict read, the modify, and the save happen as one
+    /// critical section, so two settings saves at once cannot lose each other's orgs or
+    /// providers, and no save ever follows a read that failed (#408).
+    pub config_write: Mutex<()>,
+    /// The `LoadDamage` a strict read of `orgs.json` or `providers.json` raised, recorded by
+    /// [`App::read_config_loud`]. A std mutex because those readers are sync and hot (the
+    /// gateway reads `providers()` for every request), unlike the tokio `storage_alert`, which
+    /// only writers touch. Cleared when the file it names reads cleanly again.
+    pub config_damage: std::sync::Mutex<Option<StorageAlert>>,
     /// The latest write failure. Only `Write` alerts go here.
     pub storage_alert: RwLock<Option<StorageAlert>>,
     /// The last queue-tick free-space verdict, refreshed where the queue
@@ -330,13 +340,65 @@ impl App {
         }
     }
 
-    /// The alert `/api/status` shows: a write failure that has not recovered, else the startup's
-    /// load damage, else a write failure that has. So load damage hidden by a write failure comes
-    /// back, unchanged, once writes go through again.
+    /// The alert `/api/status` shows: a write failure that has not recovered, else damage to
+    /// `orgs.json`/`providers.json` a reader is still falling back over, else the startup's load
+    /// damage, else a write failure that has. The live reader damage outranks the sticky startup
+    /// damage because only it can clear, and load damage hidden by a write failure comes back,
+    /// unchanged, once writes go through again.
     async fn shown_storage_alert(&self) -> Option<StorageAlert> {
         match self.storage_alert.read().await.clone() {
             Some(write) if write.recovered_at.is_none() => Some(write),
-            write => self.load_damage.clone().or(write),
+            write => self
+                .config_damage
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .or_else(|| self.load_damage.clone())
+                .or(write),
+        }
+    }
+
+    /// The read half of the strict-config rule (#408): `orgs.json` and `providers.json` have
+    /// infallible, sync, hot readers (the gateway calls `providers()` per request), so a file that
+    /// will not read or parse becomes the default — loudly. The failure is printed and recorded as
+    /// a `LoadDamage` alert in [`App::config_damage`], deduped on its message so a request storm
+    /// neither logs nor replaces it every call, and a file that reads cleanly again clears an
+    /// alert that named it. The writers refuse to save over what this strict read rejects
+    /// ([`config_unreadable`]), so the defaults never reach the disk from here.
+    pub(crate) fn read_config_loud<T: serde::de::DeserializeOwned + Default>(&self, path: &FsPath, what: &str) -> T {
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match util::read_json_or_default(path) {
+            Ok(value) => {
+                let mut damage = self.config_damage.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if damage.as_ref().is_some_and(|a| a.message.contains(&file)) {
+                    damage.take();
+                }
+                value
+            }
+            Err(e) => {
+                let message = format!(
+                    "{} could not be read ({e:#}); defaults are in effect for {what} until it is fixed or removed, and saves that would overwrite it are refused",
+                    path.display()
+                );
+                // The lock guard is a plain mutex on a hot, infallible path, so a poison elsewhere
+                // must not turn every read into a panic; the printing stays out of the guard.
+                let mut damage = self.config_damage.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let fresh = !damage.as_ref().is_some_and(|a| a.message == message);
+                if fresh {
+                    *damage = Some(StorageAlert {
+                        kind: StorageAlertKind::LoadDamage,
+                        message: message.clone(),
+                        ts: Utc::now(),
+                        failures: 1,
+                        recovered_at: None,
+                    });
+                }
+                drop(damage);
+                if fresh {
+                    eprintln!("config: {message}");
+                }
+                T::default()
+            }
         }
     }
 
@@ -485,6 +547,19 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 
 pub fn client_error(status: StatusCode, message: &str) -> AppError {
     AppError(status, anyhow!(message.to_string()))
+}
+
+/// The error every settings writer answers with when the file it would overwrite cannot be read:
+/// refusing the save is the whole fix for a damaged `orgs.json`/`providers.json` (#408) — the old
+/// silent-default read meant the next save replaced the operator's file with those defaults.
+pub(crate) fn config_unreadable(path: &FsPath, err: &anyhow::Error) -> AppError {
+    client_error(
+        StatusCode::CONFLICT,
+        &format!(
+            "{} could not be read ({err:#}); fix or remove it — refusing to overwrite it",
+            path.display()
+        ),
+    )
 }
 
 impl AppError {
@@ -984,8 +1059,9 @@ fn corrupt_aside_name(path: &FsPath) -> PathBuf {
     path.with_file_name(format!("{name}.corrupt-{stamp}"))
 }
 
-/// Moves a `sessions.json` the harness cannot use aside, into the same directory, so its bytes survive.
-fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
+/// Moves a file the harness cannot use aside (`sessions.json`, `modules.json`), into the same
+/// directory, so its bytes survive.
+pub(crate) fn move_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
     let saved = corrupt_aside_name(path);
     let aside = || {
         format!(
@@ -1159,7 +1235,16 @@ async fn serve() -> Result<()> {
     if stale_attention > 0 {
         println!("sessions: cleared a stale attention flag from {stale_attention} finished colonies");
     }
-    let modules = ModulesConfig::load(&cfg.config_dir.join("modules.json"));
+    let (modules, modules_damage) = ModulesConfig::load(&cfg.config_dir.join("modules.json"))?;
+    // Both startup ruin reports show as one alert when both happen: the operator dismisses one
+    // banner, not two about the same bad disk.
+    let load_damage = match (corrupt, modules_damage) {
+        (Some(sessions), Some(modules)) => Some(StorageAlert {
+            message: format!("{}\n{}", sessions.message, modules.message),
+            ..sessions
+        }),
+        (sessions, modules) => sessions.or(modules),
+    };
     let (agents, agent_problems) = modules::discover_agents(cfg.assets.as_deref());
 
     // The cockpit API token, minted on first run: every request to the API proves itself with it.
@@ -1172,9 +1257,11 @@ async fn serve() -> Result<()> {
         sessions: RwLock::new(sessions),
         redteam: redteam::RedTeamStore::new(&cfg.data_dir),
         session_persist: Mutex::new(()),
+        config_write: Mutex::new(()),
+        config_damage: std::sync::Mutex::new(None),
         storage_alert: RwLock::new(None),
         disk_verdict: Mutex::new(Default::default()),
-        load_damage: corrupt,
+        load_damage,
         runtimes: Mutex::new(HashMap::new()),
         repo_locks: Mutex::new(HashMap::new()),
         session_locks: Mutex::new(HashMap::new()),
@@ -1425,6 +1512,7 @@ pub(crate) mod tests {
 
     fn test_app_full(root: &FsPath, agents: Vec<AgentModule>, settings: impl FnOnce(&mut Settings)) -> Shared {
         std::fs::create_dir_all(root.join("data")).unwrap();
+        let (modules, _) = ModulesConfig::load(&root.join("config/modules.json")).unwrap();
         let mut cfg = Settings {
             bind: "127.0.0.1:0".into(),
             data_dir: root.join("data"),
@@ -1443,12 +1531,14 @@ pub(crate) mod tests {
             // A throwaway token: these tests never bind a port, and each one reads the token it
             // needs off the App itself.
             api_token: crate::util::random_token(),
-            modules: RwLock::new(ModulesConfig::load(&root.join("config/modules.json"))),
+            modules: RwLock::new(modules),
             agents,
             agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
             redteam: redteam::RedTeamStore::new(&root.join("data")),
             session_persist: Mutex::new(()),
+            config_write: Mutex::new(()),
+            config_damage: std::sync::Mutex::new(None),
             storage_alert: RwLock::new(None),
             disk_verdict: Mutex::new(Default::default()),
             load_damage: None,
@@ -2107,6 +2197,69 @@ pub(crate) mod tests {
         app.persist_sessions().await.unwrap();
         let after = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default());
         assert_eq!(after, damaged, "the load damage is shown again, unchanged");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Damage a settings file the readers fall back over (#408): the alert shows in /api/status,
+    /// yields to a failing disk while it lasts, comes back once writes go through, and clears when
+    /// the file reads cleanly again.
+    #[tokio::test]
+    async fn config_damage_shows_until_the_file_reads_cleanly_again() {
+        let root = temp_root();
+        let mut app = test_app(&root);
+        let path = app.cfg.config_dir.join("orgs.json");
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(&path, b"broken").unwrap();
+
+        assert!(app.all_org_settings().is_empty(), "the reader still answers");
+        let shown = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default());
+        assert_eq!(shown["kind"], "load_damage");
+        assert_eq!(shown["ok"], true, "writes still go through; the kind keeps it shown");
+        assert!(
+            shown["message"].as_str().unwrap().contains("orgs.json")
+                && shown["message"].as_str().unwrap().contains("defaults are in effect"),
+            "{shown}"
+        );
+
+        // Live damage outranks the sticky startup damage: only the live one can clear.
+        Arc::get_mut(&mut app).unwrap().load_damage = Some(StorageAlert {
+            kind: StorageAlertKind::LoadDamage,
+            message: "sessions.json was moved aside at startup".into(),
+            ts: Utc::now(),
+            failures: 1,
+            recovered_at: None,
+        });
+        assert!(
+            storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default())["message"]
+                .as_str()
+                .unwrap()
+                .contains("orgs.json"),
+            "the alert that can still clear is the one shown"
+        );
+
+        // A failing disk outranks it while it lasts, then it comes back unchanged.
+        app.storage_failed("save the session list", &anyhow!("disk is full")).await;
+        let failing = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default());
+        assert_eq!(failing["kind"], "write");
+        app.storage_succeeded().await;
+        assert_eq!(
+            storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default())["kind"],
+            "load_damage"
+        );
+
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(app.all_org_settings().is_empty());
+        assert!(
+            app.config_damage.lock().unwrap().is_none(),
+            "a clean read clears the alert that named the file"
+        );
+        assert!(
+            storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default())["message"]
+                .as_str()
+                .unwrap()
+                .contains("sessions.json"),
+            "with the live alert cleared, the startup damage shows again"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

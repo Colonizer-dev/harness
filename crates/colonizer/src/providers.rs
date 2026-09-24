@@ -5,7 +5,7 @@
 //! colony.
 
 use crate::{
-    ApiResult, App, Shared, client_error,
+    ApiResult, App, Shared, client_error, config_unreadable,
     gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, forget_probe, health},
     orgs::effective_agent,
     provider_quota,
@@ -231,19 +231,12 @@ impl App {
     }
 
     pub fn providers(&self) -> Vec<Provider> {
-        std::fs::read(self.providers_file())
-            .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+        self.read_config_loud(&self.providers_file(), "model providers")
     }
 
-    fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
+    async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
-        let path = self.providers_file();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(providers)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_atomic(&self.providers_file(), &serde_json::to_vec_pretty(providers)?).await
     }
 
     pub fn provider_key(&self, id: &str) -> Option<String> {
@@ -643,6 +636,15 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if fallback_model.as_deref().is_some_and(|m| !valid_model(m) || m.contains('/')) {
         return Err(bad("fallback model must be a Claude model such as sonnet or claude-sonnet-5"));
     }
+    // The whole read-modify-write of providers.json — the api-key secret and the pricing and
+    // normalize-cache-ttl keep-lookups included — is one critical section over a strict read
+    // (#408): a file that will not parse is refused before the key is written or deleted, rather
+    // than silently replaced by defaults, the keep-lookups read the locked copy instead of racing
+    // a concurrent save, and two saves at once cannot each lose the other's provider. The guard
+    // is dropped at the save: the cache and env work below it reads other state.
+    let _config = app.config_write.lock().await;
+    let mut providers: Vec<Provider> =
+        crate::util::read_json_or_default(&app.providers_file()).map_err(|e| config_unreadable(&app.providers_file(), &e))?;
     match req.api_key.as_deref().map(str::trim) {
         Some("") => {
             delete_secret(&app.provider_key_file(&id));
@@ -658,7 +660,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     // quietly stop a budget from counting. An all-`0` object clears it in effect, so nothing is unreachable.
     let pricing = match req.pricing {
         Some(pricing) => Some(pricing),
-        None => app.providers().into_iter().find(|p| p.id == id).and_then(|p| p.pricing),
+        None => providers.iter().find(|p| p.id == id).and_then(|p| p.pricing),
     };
 
     let provider = Provider {
@@ -676,19 +678,19 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         fallback_model,
         pricing,
         normalize_cache_ttl: req.normalize_cache_ttl.unwrap_or_else(|| {
-            app.providers()
-                .into_iter()
+            providers
+                .iter()
                 .find(|p| p.id == id)
                 .map(|p| p.normalize_cache_ttl)
                 .unwrap_or(false)
         }),
     };
-    let mut providers = app.providers();
     match providers.iter_mut().find(|p| p.id == id) {
         Some(existing) => *existing = provider.clone(),
         None => providers.push(provider.clone()),
     }
-    app.save_providers(&providers)?;
+    app.save_providers(&providers).await?;
+    drop(_config);
     // The probe cache key carries no credential, so a rotated key or a changed auth mode /
     // endpoint would otherwise keep serving the old answer for up to the probe TTL.
     forget_probe(&app, &id).await;
@@ -697,13 +699,19 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
 }
 
 pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
-    let mut providers = app.providers();
+    // One critical section over a strict read (#408): a providers.json that will not parse is
+    // refused rather than silently replaced by the remainder, and a concurrent put cannot race
+    // the retain.
+    let _config = app.config_write.lock().await;
+    let mut providers: Vec<Provider> =
+        crate::util::read_json_or_default(&app.providers_file()).map_err(|e| config_unreadable(&app.providers_file(), &e))?;
     let before = providers.len();
     providers.retain(|p| p.id != id);
     if providers.len() == before {
         return Err(client_error(StatusCode::NOT_FOUND, "no such provider"));
     }
-    app.save_providers(&providers)?;
+    app.save_providers(&providers).await?;
+    drop(_config);
     if valid_id(&id) {
         delete_secret(&app.provider_key_file(&id));
     }
@@ -1004,5 +1012,79 @@ mod tests {
         aliases.insert("COLONIZER_MODEL".into(), json!("strix"));
         aliases.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strixish/qwen"));
         assert_eq!(used_by("strix", &[aliases]), Vec::<&str>::new());
+    }
+
+    // -- the strict providers.json rule (#408) -----------------------------------------------------
+
+    fn providers_app() -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-providers-{}", crate::util::short_id()));
+        (crate::tests::test_app(&root), root)
+    }
+
+    fn put_req(name: &str) -> PutProvider {
+        PutProvider {
+            name: name.into(),
+            base_url: "https://api.deepseek.com/anthropic".into(),
+            auth: "none".into(),
+            wire: Wire::Anthropic,
+            models: Vec::new(),
+            preset: None,
+            api_key: None,
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: None,
+            pricing: None,
+            normalize_cache_ttl: None,
+        }
+    }
+
+    fn damaged_providers(app: &crate::Shared, bytes: &[u8]) -> PathBuf {
+        let path = app.cfg.config_dir.join("providers.json");
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_put_over_a_damaged_providers_json_is_refused_and_leaves_the_bytes_alone() {
+        let (app, root) = providers_app();
+        let damaged = b"][ nope";
+        let path = damaged_providers(&app, damaged);
+
+        let mut req = put_req("DeepSeek");
+        req.api_key = Some("sk-live-123".into()); // a refused save must not touch the key either
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(
+            err.message().contains("providers.json") && err.message().contains("refusing to overwrite it"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "the file is not overwritten");
+        assert!(
+            !app.provider_key_file("deepseek").exists(),
+            "the key from the refused save is not persisted"
+        );
+
+        // The gateway's reader still answers — with defaults — and the damage reaches /api/status.
+        assert!(app.providers().is_empty());
+        let alert = app.config_damage.lock().unwrap().clone().unwrap();
+        assert_eq!(alert.kind, crate::StorageAlertKind::LoadDamage);
+        assert!(alert.message.contains("providers.json"), "{}", alert.message);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_delete_over_a_damaged_providers_json_is_refused_and_leaves_the_bytes_alone() {
+        let (app, root) = providers_app();
+        let path = damaged_providers(&app, b"nonsense");
+
+        let err = delete(State(app.clone()), Path("deepseek".into())).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(err.message().contains("refusing to overwrite it"), "{}", err.message());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "nonsense");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

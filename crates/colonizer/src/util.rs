@@ -301,12 +301,12 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 /// parent directory after the rename, so a power loss can revert the rename — the right trade for
 /// these files, which are rewritten on their next change.
 pub async fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    // The temp is `<whole file name>.tmp` next to the target. `with_extension` would *replace* the
-    // extension, so `foo.jsonl` and `foo.json` would share one temp path; spelled this way,
-    // `sessions.json` still writes its historical `sessions.json.tmp`.
+    // The temp is `<whole file name>.<short id>.tmp` next to the target: unique per call, so two
+    // writers never share one temp file, and the whole file name is kept — `with_extension` would
+    // *replace* the extension, making `foo.jsonl` and `foo.json` collide on one temp path.
     let tmp = path
         .file_name()
-        .map(|name| path.with_file_name(format!("{}.tmp", name.to_string_lossy())))
+        .map(|name| path.with_file_name(format!("{}.{}.tmp", name.to_string_lossy(), short_id())))
         .with_context(|| {
             format!(
                 "could not write {}: it names no file, so there is no temp path to write",
@@ -338,6 +338,20 @@ pub async fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
         return Err(e).with_context(|| format!("could not put {} in place (temp file {})", path.display(), tmp.display()));
     }
     Ok(())
+}
+
+/// Reads a JSON file strictly: a missing file is `T::default()` (a first run), while any other
+/// read error or a parse error is `Err` naming the file. The caller decides what an `Err` means —
+/// a writer refuses to save over a file it could not read, and an infallible reader falls back to
+/// the default loudly. This is the half of the fix for silent `unwrap_or_default` reads, whose
+/// other half is that no save may follow a read that failed (#408).
+pub fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+    };
+    serde_json::from_slice(&data).with_context(|| format!("{} is not JSON the harness understands", path.display()))
 }
 
 /// Appends one line (a trailing newline is added) to `path`, creating it if needed. The append is
@@ -787,6 +801,20 @@ mod tests {
         std::io::Error::from(std::io::ErrorKind::PermissionDenied)
     }
 
+    /// Every leftover temp file name in `dir` — the thing every `write_atomic` test wants to say is
+    /// empty, whichever unique name the temp carried.
+    fn temps_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.ends_with(".tmp"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[tokio::test]
     async fn write_atomic_replaces_the_target_and_leaves_no_temp_behind() {
         let dir = temp_root("atomic-ok");
@@ -795,8 +823,9 @@ mod tests {
         write_atomic(&path, b"second").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
         assert!(
-            !path.with_extension("json.tmp").exists(),
-            "sessions.json must get its old sessions.json.tmp sibling"
+            temps_in(&dir).is_empty(),
+            "a successful write renames its unique temp away: {:?}",
+            temps_in(&dir)
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -814,7 +843,11 @@ mod tests {
             "previous",
             "no silent success, no lost contents"
         );
-        assert!(!path.with_extension("json.tmp").exists(), "the leftover temp is cleaned up");
+        assert!(
+            temps_in(&dir).is_empty(),
+            "the leftover temp is cleaned up: {:?}",
+            temps_in(&dir)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -828,7 +861,7 @@ mod tests {
         let cause = err.root_cause().downcast_ref::<std::io::Error>().unwrap();
         assert_eq!(cause.raw_os_error(), Some(5), "the injected EIO is the cause: {err:#}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
-        assert!(!path.with_extension("json.tmp").exists());
+        assert!(temps_in(&dir).is_empty(), "{:?}", temps_in(&dir));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -845,26 +878,60 @@ mod tests {
             "previous",
             "the old file is still intact"
         );
-        assert!(!path.with_extension("json.tmp").exists());
+        assert!(temps_in(&dir).is_empty(), "{:?}", temps_in(&dir));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
-    async fn write_atomic_temps_are_named_for_the_whole_file_so_jsonl_and_json_do_not_collide() {
+    async fn write_atomic_temps_are_unique_and_named_for_the_whole_file() {
         let dir = temp_root("atomic-tmp-name");
         let path = dir.join("events.jsonl");
         let _guard = inject("events.jsonl", Op::Write, enospc);
         let err = write_atomic(&path, b"new").await.unwrap_err();
         assert!(
-            err.to_string().contains("events.jsonl.tmp"),
+            err.to_string().contains("events.jsonl."),
             "the temp keeps the target's full name, not a `with_extension` .json.tmp: {err:#}"
         );
         drop(_guard);
+        // Two writes in flight at once name two different temps, so one's rename cannot consume
+        // the other's file — the reason the temp carries a per-call id.
+        let first = write_atomic(&path, b"one");
+        let second = write_atomic(&path, b"two");
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert!(temps_in(&dir).is_empty(), "{:?}", temps_in(&dir));
         let err = write_atomic(Path::new("/"), b"new").await.unwrap_err();
         assert!(
             err.to_string().contains("names no file"),
             "a path with no file name errors instead of panicking: {err:#}"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_json_or_default_treats_a_missing_file_as_the_default_and_refuses_damaged_ones() {
+        #[derive(Debug, Default, PartialEq, serde::Deserialize)]
+        struct Cfg {
+            #[serde(default)]
+            on: bool,
+        }
+        let dir = temp_root("read-json");
+        let path = dir.join("cfg.json");
+        assert_eq!(
+            read_json_or_default::<Cfg>(&path).unwrap(),
+            Cfg::default(),
+            "missing is a first run"
+        );
+        std::fs::write(&path, b"{\"on\":true}").unwrap();
+        assert_eq!(read_json_or_default::<Cfg>(&path).unwrap(), Cfg { on: true });
+        std::fs::write(&path, b"not json").unwrap();
+        let err = read_json_or_default::<Cfg>(&path).unwrap_err();
+        assert!(err.to_string().contains("cfg.json"), "the error names the file: {err:#}");
+        // A directory in the file's place is a read error, not a parse guess.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(read_json_or_default::<Cfg>(&path).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
