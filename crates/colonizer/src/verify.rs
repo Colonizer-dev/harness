@@ -328,10 +328,13 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
     };
 
     // The claim versus the observation.
-    let mut contradictions = Vec::new();
+    // An empty branch is a "no change needed" answer, not a claim of work that is missing: there
+    // is nothing to check, so it is unverifiable and publishing records it as no changes.
     if changed.is_empty() {
-        contradictions.push(format!("branch has no changes against {base}"));
-    } else {
+        unverifiable!(format!("branch has no changes against {base}; nothing to verify"));
+    }
+    let mut contradictions = Vec::new();
+    {
         let claim = tokio::fs::read_to_string(cwd.join("out").join("pr.md"))
             .await
             .unwrap_or_default();
@@ -597,7 +600,7 @@ mod tests {
 
     #[test]
     fn the_verdict_never_confirms_without_a_green_run() {
-        let contradiction = vec!["branch has no changes against main".to_string()];
+        let contradiction = vec!["described `src/absent.rs` is not on the branch".to_string()];
         assert_eq!(decide(&[], Some(true)), Verdict::Confirmed);
         // A contradiction wins even over a green run: the branch disagrees with the claim.
         assert_eq!(decide(&contradiction, Some(true)), Verdict::Contradicted);
@@ -835,15 +838,15 @@ mod tests {
             vec!["described `src/absent.rs` is not on the branch".to_string()]
         );
 
-        // A branch with nothing on it against the base contradicts the claim by itself.
-        worktree_fixture(&app, Some("true"), "did all the work", false).await;
+        // A branch with nothing on it against the base is a "no change needed" answer: nothing
+        // to verify, so unverifiable — it publishes as no changes instead of holding autopilot —
+        // and no VM run is paid for.
+        worktree_fixture(&app, Some("true"), "the repository needs no change", false).await;
         let v = verify(&app, &fake_runner(0, Some(0))).await;
-        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
-        assert_eq!(
-            v.contradictions,
-            vec!["branch has no changes against main".to_string()],
-            "{v:?}"
-        );
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(v.exit_code, None, "{v:?}");
+        assert_eq!(v.summary, "branch has no changes against main; nothing to verify");
         let _ = std::fs::remove_dir_all(root);
     }
 
