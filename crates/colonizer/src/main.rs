@@ -18,6 +18,7 @@ mod claude_login;
 mod code;
 mod colony_secrets;
 mod config;
+mod deps;
 mod diagnosis;
 mod events;
 mod exec_bits;
@@ -1482,6 +1483,12 @@ async fn serve() -> Result<()> {
         .route("/api/touched", get(maps::touched))
         .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
+        .route("/api/repos/{owner}/{name}/published", get(deps::repo_published))
+        .route("/api/repos/{owner}/{name}/dependencies", get(deps::repo_dependencies))
+        .route("/api/repos/{owner}/{name}/supply-chain", get(deps::repo_supply_chain))
+        .route("/api/orgs/{org}/packages/published", get(deps::org_published))
+        .route("/api/orgs/{org}/packages/dependencies", get(deps::org_dependencies))
+        .route("/api/orgs/{org}/packages/supply-chain", get(deps::org_supply_chain))
         .route("/api/repos/{owner}/{name}/meta", get(repo_meta::meta))
         .route("/api/repos/{owner}/{name}/loc", get(code::loc))
         .route("/api/repos/{owner}/{name}/coverage", get(code::coverage))
@@ -2780,6 +2787,61 @@ impl App {
     }
 }
 
+/// [`cached_answer`] for an answer too slow to wait for on a request (it may clone repositories
+/// and call registries): a cached value is returned as `Some` (and refreshed behind the answer once
+/// stale); a miss starts the first computation in the background and returns `None` at once, so the
+/// caller can answer "scanning" and be asked again. A failed computation leaves nothing cached, so
+/// the next ask starts it again.
+pub fn cached_answer_nowait<F, Fut>(
+    app: &Shared,
+    key: impl Into<String>,
+    fresh: Duration,
+    compute: F,
+) -> Option<serde_json::Value>
+where
+    F: Fn(Shared) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+{
+    let key: String = key.into();
+    let hit = app
+        .answer_cache
+        .entries
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .cloned();
+    let stale = hit.as_ref().is_none_or(|(at, _)| at.elapsed() >= fresh);
+    if stale {
+        let first = app
+            .answer_cache
+            .refreshing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.clone());
+        if first {
+            let app = app.clone();
+            tokio::spawn(async move {
+                match compute(app.clone()).await {
+                    Ok(value) => {
+                        app.answer_cache
+                            .entries
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(key.clone(), (Instant::now(), value));
+                    }
+                    Err(e) => eprintln!("{key}: {e:#}"),
+                }
+                app.answer_cache
+                    .refreshing
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&key);
+            });
+        }
+    }
+    hit.map(|(_, v)| v)
+}
+
 pub async fn cached_answer<F, Fut>(
     app: &Shared,
     key: impl Into<String>,
@@ -2838,6 +2900,37 @@ where
 #[cfg(test)]
 mod answer_cache_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_nowait_answer_starts_in_the_background_and_is_served_once_ready() {
+        let root = std::env::temp_dir().join(format!("colonizer-nowait-{}", util::short_id()));
+        let app = tests::test_app(&root);
+        let compute = |_app: Shared| async move { Ok(serde_json::json!("scanned")) };
+        assert_eq!(
+            cached_answer_nowait(&app, "scan", Duration::from_secs(60), compute),
+            None,
+            "a miss answers at once"
+        );
+        for _ in 0..100 {
+            if cached_answer_nowait(&app, "scan", Duration::from_secs(60), compute).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            cached_answer_nowait(&app, "scan", Duration::from_secs(60), compute),
+            Some(serde_json::json!("scanned"))
+        );
+        let failing = |_app: Shared| async move { Err::<serde_json::Value, _>(anyhow::anyhow!("offline")) };
+        assert_eq!(cached_answer_nowait(&app, "broken", Duration::from_secs(60), failing), None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            cached_answer_nowait(&app, "broken", Duration::from_secs(60), failing),
+            None,
+            "a failure caches nothing"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]

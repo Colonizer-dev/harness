@@ -25,6 +25,10 @@ import type {
   SecretsListing,
   RepoMap,
   RepoMeta,
+  PackagesPublished,
+  PackagesDependencies,
+  SupplyChain,
+  ScanPending,
   TouchedFiles,
   FleetHost,
   FindingRecord,
@@ -240,6 +244,12 @@ export interface Api {
   repoMap(repo: string): Promise<RepoMap>;
   /** GET /api/repos/{owner}/{repo}/meta: description, languages, weekly commits, contributors. */
   repoMeta(repo: string): Promise<RepoMeta>;
+  /** GET /api/orgs/{org}/packages/published: what the workspace's repositories define and publish. */
+  orgPublished(org: string): Promise<PackagesPublished | ScanPending>;
+  /** GET /api/orgs/{org}/packages/dependencies: what they depend on, from their lockfiles. */
+  orgDependencies(org: string): Promise<PackagesDependencies | ScanPending>;
+  /** GET /api/orgs/{org}/packages/supply-chain: risky dependencies, with reasons. */
+  orgSupplyChain(org: string): Promise<SupplyChain | ScanPending>;
   // The Code page (code.rs), read from the mothership's bare clone.
   repoLoc(repo: string): Promise<RepoLoc>;
   repoCoverage(repo: string): Promise<RepoCoverage>;
@@ -443,6 +453,9 @@ export const httpApi: Api = {
   checkMem0: () => post("/api/memory/mem0/check"),
   repoMap: (repo) => request(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   repoMeta: (repo) => request(`/api/repos/${repo.split("/").map(enc).join("/")}/meta`),
+  orgPublished: (org) => request(`/api/orgs/${enc(org)}/packages/published`),
+  orgDependencies: (org) => request(`/api/orgs/${enc(org)}/packages/dependencies`),
+  orgSupplyChain: (org) => request(`/api/orgs/${enc(org)}/packages/supply-chain`),
   repoLoc: (repo) => request(`${repoPath(repo)}/loc`),
   repoCoverage: (repo) => request(`${repoPath(repo)}/coverage`),
   repoGitSummary: (repo) => request(`${repoPath(repo)}/git-summary`),

@@ -42,6 +42,7 @@ import {
   type RangeDays,
 } from "./dash";
 import { deliveryKpis } from "./delivery";
+import { PackagesView } from "./PackagesView";
 import { overviewCounts } from "./feed";
 
 /** Kept here (rather than imported from dash) so existing importers keep working. */
@@ -132,6 +133,7 @@ export function OrgDashboard({
   // the outside / not-read row key) within `repo`.
   const [pkg, setPkg] = useState<string | null>(initialPackage);
   const detections = useRepoPackages(sessions, initialPackages);
+  const [codeTab, setCodeTab] = useState<"repositories" | "packages">("repositories");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialRepo && initialPackage ? [initialRepo] : []));
   const repoScoped = repo ? sessions.filter((s) => sameOrg(s.repo, repo)) : sessions;
   const pkgDetection = repo ? detections[repo] : undefined;
@@ -414,7 +416,29 @@ export function OrgDashboard({
         }
       />
 
-      <Section title="Repositories" meta={`${range}d · Click a row to filter the dashboard`}>
+      <Section
+        title={codeTab === "packages" ? "Packages" : "Repositories"}
+        meta={codeTab === "packages" ? "published · dependencies · supply chain" : `${range}d · Click a row to filter the dashboard`}
+        right={
+          <div role="tablist" aria-label="repositories or packages" className="flex rounded-lg border border-border p-0.5">
+            {(["repositories", "packages"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                role="tab"
+                aria-selected={codeTab === t}
+                onClick={() => setCodeTab(t)}
+                className={`cursor-pointer rounded-md border-0 px-3 py-1 text-[12.5px] ${codeTab === t ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+              >
+                {t === "repositories" ? "Repositories" : "Packages"}
+              </button>
+            ))}
+          </div>
+        }
+      >
+        {codeTab === "packages" ? (
+          <PackagesView org={org.org} onOpenColony={onOpenColony} />
+        ) : (
         <Rules>
           {repos.length === 0 ? (
             <div className="py-3.5 text-[13px] text-faint">No colonies right now.</div>
@@ -475,6 +499,7 @@ export function OrgDashboard({
             </div>
           )}
         </Rules>
+        )}
       </Section>
 
       <Section title="Colonies" meta={String(colonies.length)}>
