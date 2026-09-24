@@ -62,7 +62,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
-| `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot |
+| `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
 | `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, or a model provider starting to fail, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
@@ -84,6 +84,32 @@ Two settings layers sit next to the modules:
   switch per org. `known-orgs.json` records the orgs seen on the signed-in GitHub account, so an org that appears for
   the first time asks instead of being adopted silently. A colony belongs to its repository
   owner's org.
+
+## Shared memory access
+
+Shared memory is read-only from inside a colony. What each part of a colony may do:
+
+| Role | Read (repo / org / global) | Propose | Write |
+| --- | --- | --- | --- |
+| Orchestrator | yes / yes / yes | yes — reviewed as any proposal is | no |
+| Subagent | yes / yes / yes | no | no |
+| Background task | yes / no / no | no | no |
+
+Writing is the operator's, through the mothership's own note editor; a colony's way in is a proposal,
+and a proposal is review, not a write. The matrix is enforced twice: the runner's `PreToolUse` hook
+denies `memory_propose` for any agent but the orchestrator (subagents and background tasks carry an
+`agent_id`, so the transcript tells the delegate to report the learning instead), and the mothership
+re-checks the proposal event's `origin` before it touches a store — so with the `mem0` provider a
+refused proposal is never sent upstream. Delegates never hold the mem0 key: mem0's own retrieval
+cannot enforce this split, so it is enforced in the harness, and each colony sees only the notes the
+mothership fetched and mounted at boot. A proposal records who made it — `source.origin`
+(`orchestrator`) beside `source.session_id`, the colony's id — shown in the review queue. No
+background task reads memory today; the background row is there for when one does.
+
+Nothing extracts memories from conversation turns automatically. Shared memory grows only from
+explicit orchestrator proposals, and a proposal is persisted the moment its event arrives, so a
+colony that ends or dies loses no proposal already made. `MEMORY.md` is written at boot from landed
+notes only.
 
 ## Session lifecycle
 

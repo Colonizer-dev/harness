@@ -199,13 +199,14 @@
     },
     "memory_proposal": {
       "type": "object",
-      "description": "A proposed shared-memory note (§6.2); nothing is written inside the colony. Absent scope means repo; absent tags mean none.",
+      "description": "A proposed shared-memory note (§6.2); nothing is written inside the colony. Absent scope means repo; absent tags mean none. The mothership refuses any proposal whose origin is not the orchestrator's, before it touches a store.",
       "properties": {
         "type": { "const": "memory_proposal" },
         "scope": { "enum": ["repo", "org", "global"], "default": "repo" },
         "title": { "type": "string" },
         "content": { "type": "string" },
-        "tags": { "type": "array", "items": { "type": "string" }, "default": [] }
+        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." }
       },
       "required": ["type", "title", "content"]
     },

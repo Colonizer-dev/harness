@@ -841,7 +841,9 @@ export interface SpendHistory {
 /** `key` is "" for global, the org for `org`, and `owner/repo` for `repo`. */
 export type MemoryScope = "global" | "org" | "repo";
 
-export type MemorySource = { session_id: string; repo: string } | { user: true };
+/** `origin` is where in the colony a note came from ("orchestrator", "subagent", "background", …).
+ * Older proposals omit it; treat those as "orchestrator". */
+export type MemorySource = { session_id: string; repo: string; origin?: string } | { user: true };
 
 export interface MemoryNote {
   id: string;
