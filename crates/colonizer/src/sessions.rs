@@ -1152,6 +1152,15 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             .and_then(|a| a.claude_account.as_deref()),
         &crate::claude_accounts::load_meta(&app.cfg.config_dir),
     );
+    // The id becomes a path under <config>/claude-accounts, so refuse anything that is not a plain
+    // account id rather than joining it. The org override and the stored default are validated where
+    // they are saved; the request's explicit field is the one id that arrived over the API.
+    if !crate::claude_accounts::valid_id(&claude_account) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "Claude account ids are lowercase letters, digits and dashes, 1-40 characters",
+        ));
+    }
     if agent.needs_claude && app.claude_cred_for(Some(&claude_account)).is_none() {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
