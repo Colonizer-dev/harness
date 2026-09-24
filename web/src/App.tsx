@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SecretsNavContext } from "./secretsNav";
 import { useApi } from "./context";
 import { IconMenu, IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
@@ -97,6 +98,7 @@ export function App() {
   const [launchRequests, setLaunchRequests] = useState(0);
   const [settingsRequests, setSettingsRequests] = useState(0);
   const [memoryRequests, setMemoryRequests] = useState(0);
+  const [secretsRequest, setSecretsRequest] = useState<{ n: number; id?: string }>({ n: 0 });
   // Whether the cockpit is showing its inspector; the fixed card column steps left of it.
   const [inspectorShown, setInspectorShown] = useState(false);
   // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
@@ -513,6 +515,13 @@ export function App() {
     else setMemoryRequests((n) => n + 1);
   }, [narrow]);
 
+  // The deep link into Secrets (secretsNav.ts): any pane can ask for a key to be set.
+  const openSecrets = useCallback((id?: string) => {
+    setSidebarOpen(false);
+    setSettingsOpen(false);
+    setSecretsRequest((r) => ({ n: r.n + 1, id }));
+  }, []);
+
   // The one newly-appeared org to ask about now, if any; several pending are asked one at a time.
   const pendingOrg = useMemo(() => pendingOrgPrompt(orgs, answeredOrgs), [orgs, answeredOrgs]);
 
@@ -658,6 +667,7 @@ export function App() {
   );
 
   return (
+    <SecretsNavContext.Provider value={openSecrets}>
     <div className="flex h-full min-h-0">
       {narrow ? (
         <>
@@ -699,6 +709,7 @@ export function App() {
               launchRequests={launchRequests}
               settingsRequests={settingsRequests}
               memoryRequests={memoryRequests}
+              secretsRequest={secretsRequest}
               pendingMemory={pendingMemory}
               settings={settingsPane}
               onSessionChanged={upsertSession}
@@ -768,6 +779,7 @@ export function App() {
         onSaved={saveOrgInfo}
       />
     </div>
+    </SecretsNavContext.Provider>
   );
 }
 

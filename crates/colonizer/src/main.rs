@@ -14,6 +14,7 @@ mod burn_down;
 mod claims;
 mod claude_accounts;
 mod claude_login;
+mod colony_secrets;
 mod config;
 mod diagnosis;
 mod events;
@@ -49,6 +50,7 @@ mod restack;
 mod routing;
 mod runtime;
 mod sandbox;
+mod secrets;
 mod sessions;
 mod spend;
 mod stack;
@@ -1263,6 +1265,15 @@ async fn serve() -> Result<()> {
     // The cockpit API token, minted on first run: every request to the API proves itself with it.
     let api_token = auth::load_or_create(&cfg.config_dir)?;
 
+    // Saved secrets: the system keychain where it answers, the 0600 files otherwise (secrets.rs).
+    // The probe can wait on a locked keyring, so it runs off the startup path.
+    secrets::install(secrets::Store::new(&cfg.config_dir, secrets::os_backend()));
+    std::thread::spawn(|| {
+        if let Some(store) = secrets::global() {
+            store.probe();
+        }
+    });
+
     let app = Arc::new(App {
         modules: RwLock::new(modules),
         agents,
@@ -1311,6 +1322,11 @@ async fn serve() -> Result<()> {
         .route("/api/hosts", get(fleet::list_hosts_handler))
         .route("/api/modules", get(modules::list))
         .route("/api/modules/{kind}", put(modules::update))
+        .route("/api/secrets", get(secrets::list))
+        .route("/api/secrets/health", get(secrets::health))
+        .route("/api/secrets/colony", post(colony_secrets::upsert))
+        .route("/api/secrets/{id}", put(secrets::put).delete(secrets::delete))
+        .route("/api/secrets/{id}/move", post(secrets::move_secret))
         .route(
             "/api/settings/github-token",
             post(github::set_token).delete(github::delete_token),

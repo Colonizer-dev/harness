@@ -22,6 +22,7 @@ import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
 import { HistoryView } from "./HistoryView";
+import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
@@ -35,7 +36,7 @@ const VIEW_KEY = "colonizer.cockpitView";
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host"];
+const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "settings", "memory", "host", "secrets"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -71,6 +72,7 @@ export function Cockpit({
   launchRequests,
   settingsRequests,
   memoryRequests = 0,
+  secretsRequest,
   pendingMemory = 0,
   settings,
   onSessionChanged,
@@ -111,6 +113,8 @@ export function Cockpit({
   settingsRequests: number;
   /** Bumped whenever something outside the cockpit asks for memory (a colony's "memory" link). */
   memoryRequests?: number;
+  /** Bumped by `openSecrets(id)`: open the Secrets view on that row. */
+  secretsRequest?: { n: number; id?: string };
   /** Memory proposals waiting for review across every org; the rail's badge narrows it to the chosen org. */
   pendingMemory?: number;
   /** The settings body, given the way back out — the cockpit owns the view, so it owns the exit. */
@@ -167,6 +171,10 @@ export function Cockpit({
   useEffect(() => {
     if (memoryRequests > 0) setView("memory");
   }, [memoryRequests]);
+
+  useEffect(() => {
+    if (secretsRequest && secretsRequest.n > 0) setView("secrets");
+  }, [secretsRequest]);
 
   const toggleTheme = useCallback(() => {
     setTheme((current) => {
@@ -370,6 +378,8 @@ export function Cockpit({
             onOpenSettings={() => onOpenSettings("setup")}
           />
         );
+      case "secrets":
+        return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "host":
         return (
           <HostView

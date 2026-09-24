@@ -34,6 +34,14 @@ toml = "1.1.6"
 tower-http = { version = "0.7.1", features = ["fs"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 
+# The system keychain for saved secrets (secrets.rs): Keychain on macOS, the Secret Service
+# (GNOME Keyring, KWallet) on Linux. libdbus is vendored so a build host needs no dbus headers.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
 # `ServiceExt::oneshot` for the auth tests, which drive a router through the real `host_guard`.

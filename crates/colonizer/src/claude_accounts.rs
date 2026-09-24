@@ -121,11 +121,14 @@ pub fn resolve_account(explicit: Option<&str>, org_override: Option<&str>, meta:
     }
 }
 
-/// The stored secret for one account: its file path and trimmed, non-empty contents. `None` when
-/// the account was never added or its secret was deleted.
+/// The stored secret for one account: its path and trimmed, non-empty contents. `None` when
+/// the account was never added or its secret was deleted. Read through the secret store, so an
+/// account moved into the keychain (its file gone) still resolves.
 pub fn cred_for(config_dir: &FsPath, account: &str) -> Option<(PathBuf, String)> {
     let path = account_file(config_dir, account);
-    let token = read_trimmed(&path)?;
+    let token = crate::util::read_secret(&path)
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())?;
     Some((path, token))
 }
 

@@ -6,6 +6,7 @@ import { createContext, useContext, useEffect, useId, useRef, useState, type Key
 import { useApi } from "../context";
 import type { ModelOption, ModelProvider } from "../types";
 import { IconCheck, IconChevronDown } from "./icons";
+import { providerSecretId, useOpenSecrets } from "../secretsNav";
 import { ProviderMark } from "./providerMark";
 import { cx, inputClass } from "./ui";
 
@@ -204,12 +205,19 @@ export function ModelPicker({
   emptyLabel?: string;
   ariaLabel?: string;
   id?: string;
-  /** Where "Set key" goes; defaults to Settings → Model providers when inside the settings screen. */
+  /** Where "Set key" goes; inside the settings screen it defaults to the key's row on the Secrets page. */
   onSetKey?: (providerId: string) => void;
 }) {
   const providers = useProviders();
   const nav = useContext(SettingsNavContext);
-  const setKey = onSetKey ?? (nav ? (providerId: string) => nav("providers", providerId) : null);
+  const openSecrets = useOpenSecrets();
+  const setKey =
+    onSetKey ??
+    (nav && openSecrets
+      ? (providerId: string) => openSecrets(providerSecretId(providerId))
+      : nav
+        ? (providerId: string) => nav("providers", providerId)
+        : null);
   const [custom, setCustom] = useState(false);
   const name = ariaLabel ?? "Model";
 

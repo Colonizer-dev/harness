@@ -1772,7 +1772,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let colonies = app.sessions.read().await.clone();
     let touched = github::touched_files(app, &colonies, &s).await;
     let siblings = github::siblings_of(&colonies, &s, &touched);
-    let prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
+    let mut prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
+    // Colony secrets in scope: named in the prompt (never their values) and handed to msb below,
+    // which substitutes each one only on TLS to its hosts.
+    let colony_secrets = crate::colony_secrets::for_colony(&app.cfg.config_dir, &s.repo);
+    prompt.push_str(&crate::colony_secrets::prompt_block(
+        &colony_secrets.iter().map(|(meta, _)| meta).collect::<Vec<_>>(),
+    ));
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     let agent_choice = orgs::effective_agent(&modules, &org_settings);
     let mut runner_env = agent_env(&agent, &agent_choice);
@@ -2202,6 +2208,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             hosts: vec!["api.typesafe.ai".into()],
         });
     }
+    if !colony_secrets.is_empty() {
+        log.info(format!(
+            "colony secrets: {}",
+            colony_secrets
+                .iter()
+                .map(|(meta, _)| meta.env.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .await;
+    }
+    secrets.extend(crate::colony_secrets::boot_secrets(&colony_secrets));
     let mut publish = None;
     // The mesh half of the network fence is captured here — `direct_path_rules` is async (it
     // shells out to `ip`/`ifconfig`) — and the fence itself is decided, purely, in

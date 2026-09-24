@@ -2546,6 +2546,50 @@ export function createMockApi(): Api {
     });
     return { days: result };
       }),
+    secrets: async () => {
+      await sleep(150);
+      return { keychain: mockKeychain, secrets: mockSecrets.map((r) => ({ ...r })) };
+    },
+    saveSecret: async (id, _value, location) => {
+      await sleep(200);
+      const row = mockSecret(id);
+      row.location = location ?? (row.location === "unset" || row.location === "env" ? "keychain" : row.location);
+      row.updated_at = new Date().toISOString();
+      return { ...row };
+    },
+    deleteSecret: async (id) => {
+      await sleep(150);
+      if (id.startsWith("colony:")) {
+        const i = mockSecrets.findIndex((r) => r.id === id);
+        if (i >= 0) mockSecrets.splice(i, 1);
+        return { id, removed: true as const };
+      }
+      const row = mockSecret(id);
+      row.location = row.env_set ? "env" : "unset";
+      row.updated_at = null;
+      return { ...row };
+    },
+    saveColonySecret: async (body) => {
+      await sleep(200);
+      const id = `colony:${body.env}`;
+      const existing = mockSecrets.find((r) => r.id === id);
+      const usedBy = body.scope.kind === "all" ? "Every colony" : body.scope.kind === "org" ? `Colonies on ${body.scope.org} repositories` : `Colonies on ${body.scope.repo}`;
+      const row = {
+        id, label: body.env, group: "colonies" as const, used_by: usedBy, icon: "key", location: "keychain" as const,
+        env: null, env_set: false, updated_at: new Date().toISOString(), editable: true,
+        colonies: { kind: "injected" as const, hosts: body.hosts },
+      };
+      if (existing) Object.assign(existing, row);
+      else mockSecrets.push(row);
+      return { id };
+    },
+    moveSecret: async (id, to) => {
+      await sleep(200);
+      const row = mockSecret(id);
+      row.location = to;
+      row.updated_at = new Date().toISOString();
+      return { ...row };
+    },
     saveOrg: async (org, settings) => {
       await sleep(250);
       // The server merges: a field the body omits keeps its saved value, one it names (null
@@ -2753,4 +2797,22 @@ export function createMockApi(): Api {
       return clone(run);
     },
   };
+}
+
+// Saved secrets for the mock: a mix of keychain, file and environment, as a real install has.
+const mockKeychain = { available: true, backend: "macOS Keychain", reason: null, checked_at: new Date().toISOString() };
+const mockSecrets: import("./types").SecretRow[] = [
+  { id: "github-token", label: "GitHub token", group: "connections", used_by: "Issues, pushes and pull requests", icon: "github", location: "file", env: null, env_set: false, updated_at: "2026-09-20T10:00:00Z", editable: true, colonies: { kind: "none", hosts: [] } },
+  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "keychain", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: true, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
+  { id: "api-token", label: "Cockpit API token", group: "connections", used_by: "The cockpit sign-in and the colonizer CLI", icon: "key", location: "file", env: null, env_set: false, updated_at: null, editable: false, colonies: { kind: "none", hosts: [] } },
+  { id: "provider-keys:zai", label: "Z.AI", group: "providers", used_by: "Models routed to zai", icon: "plug", location: "file", env: null, env_set: false, updated_at: "2026-09-17T04:00:00Z", editable: true, colonies: { kind: "gateway", hosts: [] } },
+  { id: "provider-keys:bailian", label: "Alibaba Bailian", group: "providers", used_by: "Models routed to bailian", icon: "plug", location: "unset", env: null, env_set: false, updated_at: null, editable: true, colonies: { kind: "gateway", hosts: [] } },
+  { id: "voice-keys:openai", label: "OpenAI (voice)", group: "integrations", used_by: "Speech to text in the composer", icon: "mic", location: "env", env: "OPENAI_API_KEY", env_set: true, updated_at: null, editable: true, colonies: { kind: "none", hosts: [] } },
+  { id: "colony:STRIPE_TEST_KEY", label: "STRIPE_TEST_KEY", group: "colonies", used_by: "Colonies on acme/web", icon: "key", location: "keychain", env: null, env_set: false, updated_at: "2026-09-23T09:00:00Z", editable: true, colonies: { kind: "injected", hosts: ["api.stripe.com"] } },
+  { id: "jev", label: "TypeSafe (Jev)", group: "integrations", used_by: "Jev compaction", icon: "spark", location: "unset", env: "JEV_API_KEY", env_set: false, updated_at: null, editable: false, colonies: { kind: "injected", hosts: ["api.typesafe.ai"] } },
+];
+function mockSecret(id: string): import("./types").SecretRow {
+  const row = mockSecrets.find((r) => r.id === id);
+  if (!row) throw new Error("no such secret");
+  return row;
 }
