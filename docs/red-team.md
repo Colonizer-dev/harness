@@ -74,8 +74,31 @@ same way `sessions.json` is.
 
 ## Operating it
 
-Overview → the RED TEAM card: repository, swarm size, comma-separated modules,
-autofix checkbox, then Start now or Arm. The card lists runs newest first with
-live counts, per-run hunters, and a stop button. API: `GET`/`POST`
-`/api/redteam/runs`, `GET /api/redteam/runs/{id}`, `POST
-/api/redteam/runs/{id}/stop`.
+Overview → the Workspaces table → a workspace row's **Red team** button (the hooded
+figure) opens a three-step wizard scoped to that workspace:
+
+1. **Who and where.** A short "what is a red team" note, the hunter, and the
+   workspace's repositories (one run per repository; one that already has an active
+   run is skipped). Today the **colony swarm** runs; **Strix** and **Shannon** are shown
+   with their logos as coming soon — Strix installs and probes (see
+   [security-hunters.md](security-hunters.md)) but a run does not drive its scans yet,
+   and Shannon is a manifest-only stub. The API refuses `strix` / `shannon` with a 400
+   that says so.
+2. **Models.** A provider and model for the hunters and for their subagents, and the
+   number of hunters per repository (1–8). They reach each hunter as
+   `model_override` / `subagent_model_override` on `POST /api/sessions`.
+3. **Review.** A cost warning with an estimate from past runs (or average colony
+   spend), "let hunters fix what they find" off unless ticked (a raid never merges
+   unless autofix is on), and **Once**, **Weekly** or **Monthly** in local time, saved as
+   UTC. A one-off run starts armed and launches as soon as no colony is live.
+
+Schedules persist in `<config_dir>/redteam-schedules.json`; a once-a-minute loop
+starts every due schedule through the same path as a manual start (a monthly schedule
+on the 29th–31st fires on a shorter month's last day). The row's history button opens
+the workspace's red-team history: its schedules (pause, resume, delete) and its runs,
+live first, with state, hunter, models, found / validated / filed / rejected, cost and
+a stop button.
+
+API: `GET`/`POST` `/api/redteam/runs`, `GET /api/redteam/runs/{id}`,
+`POST /api/redteam/runs/{id}/stop`, `GET`/`POST` `/api/redteam/schedules`,
+`PUT`/`DELETE` `/api/redteam/schedules/{id}`.

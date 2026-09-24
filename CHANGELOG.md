@@ -14,15 +14,64 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ## Unreleased
 
+## [v0.1.9] - 2026-09-24
+
 ### Added
 
+- **Pi as a second agent module.** `modules/agents/pi` adds the Pi coding agent as an agent provider (`pi`) beside Claude Code, driven over Pi's RPC mode and speaking the same runner protocol. Pi reaches models only through the provider gateway (Settings → Providers, under each colony's spend and rate limits); it has no subagents, so the subagent and background model split does not apply. ([#403])
+- **Cockpit v3.** The cockpit is rebuilt around a slim sidebar whose workspace switcher is the
+  cockpit's scope (two-line rows with live/queued/colony counts, an opaque menu, workspace
+  settings inside the cockpit), a composer for new colonies (⌘K, typed or spoken, `#123` issue
+  links), a live nest, a Host page (CPU, memory, disk and microVM slots — now also read on macOS
+  through `sysctl`/`vm_stat`) and settings with sections across the top, a picture per page and
+  technical fields under Advanced. The Inbox moved into a notifications bell at the top right, and
+  toasts stack there too. Model fields are a Provider and a Model menu instead of free text. The
+  Overview measures lead time, PR cycle time and CI pass rate from recorded PR facts, shows the
+  merged-PRs legend as workspace logos with a hover card each, and each workspace row has a red-team
+  button with a three-step wizard (colony swarm today; Strix and Shannon shown as coming soon),
+  weekly or monthly schedules and a history. A GitHub issues button opens a pane to hand issues off
+  to colonies, monorepos (npm/pnpm/yarn/bun workspaces, turbo, nx, Cargo, go.work) expand into
+  their packages on the workspace dashboard, and a colony's chat history now opens on its latest
+  messages instead of filling in frame by frame. The Source module takes include/exclude label
+  filters for which issues are offered. ([#457])
+- **Secrets in the system keychain, and a Secrets page.** Saved keys (provider keys, Claude
+  accounts, voice and integration keys) go to the macOS Keychain or the Linux Secret Service when
+  it answers a startup probe, else to the 0600 files as before; the Secrets page lists every key
+  write-only with where it lives, what colonies get of it (via the gateway, injected for one host,
+  or not at all), and moves file keys into the keychain on request. Colony secrets are new:
+  variables you name, with allowed hosts and a scope (all colonies, a workspace or a repository),
+  substituted by microsandbox only on TLS to those hosts, so a colony only ever sees a
+  placeholder. A subscription token's account is now identified by the organization it bills. ([#468])
+- **The map shows what colonies read, the files, and their diffs.** On top of the Map mode below:
+  ants patrol the chambers whose files their colony is reading as well as changing, with a bubble
+  saying what they do; a right-hand explorer lists the repository's files at the map's revision
+  (`GET /api/maps/{owner}/{repo}/files`, from the local clone) with the component's files marked,
+  and clicking a file shows each live colony's recent steps there and its diff
+  (`GET /api/maps/{owner}/{repo}/file`). Raw JSON, when and by which colony the map was drawn, and a
+  mapping colony that runs as one agent at medium effort on Sonnet. ([#462])
+- **A repository picker with GitHub's facts.** The map's repository menu is grouped by
+  organization and shows each repository's description, languages as GitHub colours them, a
+  commit sparkline and contributors; the chosen one gets a card with the language bar and 52 weeks
+  of commits (`GET /api/repos/{owner}/{repo}/meta`, cached). ([#488])
+- **One-line task summaries.** Each colony gets a one-sentence summary of its task, written by a
+  cheap model you already pay for (the agent module's `summary_model`, else a routed
+  `<provider>/<model>` such as `zai/glm-5.3-flash`, else an Anthropic API key — never the
+  subscription token), shown on colony cards, the inbox and the nest. The Overview colonies table
+  filters from its header row (search, org with logos, status, updated, spent). Switch off with the
+  agent module's `summaries` setting. ([#490])
+- **An OpenCode agent module.** `modules/agents/opencode` runs OpenCode on configured providers —
+  including a local DeepSeek — through the gateway, with its binaries pinned by checksum.
+  Opt-in. ([#202])
+- **Colonies are claimed on GitHub, so two motherships never take one issue.** ([#454])
+- **Boot medians per phase.** Warm-start caches boot-time provider probes and the cockpit shows
+  median boot time per phase. ([#219])
 - **Synthetic bench tasks, stage one.** `scripts/bench/synth.mjs` injects token-level bugs into Node
   source and admits, through a green-reference / parses / breaks-the-same-tests-twice gate, only mutants
   that break the repository's own tests deterministically. Each carries full provenance ($0: no model in
   the loop) into a held-out pool kept outside the repo, scored oldest-first once 20 hand-reviewed tasks
   open it and retired after three decisions; flaky mutants go to a raid set that is never scored.
   Measured so far: 57 of 110 candidates admitted (bench fixture + telemetry). See
-  [docs/bench.md](docs/bench.md).
+  [docs/bench.md](docs/bench.md). ([#332])
 
 - **A first slice of Grok Build as an agent module.** `modules/agents/grok-build` drives xAI's
   `grok` CLI headless on the runner protocol: one grok process per turn, resumed into a single
@@ -31,7 +80,7 @@ setting) is called out under **Take care** rather than left for you to find.
   (`GROK_CREDENTIAL_MISSING`, `GROK_BINARY_MISSING`, `GROK_VERSION_DRIFT`), the colony never runs
   browser OAuth, and a fresh `GROK_HOME` plus `--sandbox off`, `--always-approve` and
   `--disable-web-search` carry the nesting decisions. Experimental and PLANNED: the mothership-side
-  key push, gateway routing and question routing are follow-ups (see the module's README).
+  key push, gateway routing and question routing are follow-ups (see the module's README). ([#333])
 - **A Hermes agent module, first slice.** `modules/agents/hermes` drives Nous Research's Hermes Agent
   CLI (verified against `v2026.9.24`) headlessly on the colonizer-runner/1 protocol: one
   `hermes chat -q --format stream-json` process per turn, resumed by session id, events mapped to the
@@ -52,7 +101,7 @@ setting) is called out under **Take care** rather than left for you to find.
   whose files it is changing. "Map this repo" launches the mapping colony, which
   leaves the repository untouched and ends in `no_changes`; `GET /api/touched`
   reports every live colony's changed files. Run `scripts/fetch-vendor.sh` (or
-  install a release) to stage the `archify` skillset.
+  install a release) to stage the `archify` skillset. ([#462])
 - **A real colony runs in CI.** The `colony-e2e` job replaces the never-run `colony-smoke` (it needed a self-hosted KVM runner): on every pull request, `scripts/colony-e2e.mjs` launches a real mothership, boots a real microVM with the vendored msb, and runs the real agentd and claude-code runner against a scratch git repository and a stub Anthropic-wire model server — no secrets, no paid model, no GitHub writes — asserting the colony comes back `no_changes` and uploading its logs on failure. ([#368])
 
 - **Configurable free-disk thresholds.** The sandbox module's `warn_free_disk`
@@ -70,7 +119,7 @@ setting) is called out under **Take care** rather than left for you to find.
   transcribes it with a key it keeps (`voice-keys/`, 0600; an OpenAI or Groq model
   provider's key is reused), so the key never reaches the browser. Settings →
   Modules → Voice has the key field and a three-second microphone test. Audio goes
-  browser → mothership → service and is not stored.
+  browser → mothership → service and is not stored. ([#457])
 - **Realtime Cockpit dashboards.** The dashboards now update over a single authenticated `/api/stream` WebSocket (sessions including running cost/tokens, orgs, fleet hosts, storage), with a Live indicator, tweened counters, reduced-motion support, and a fallback to the existing poll schedule with reconnect/backoff when the stream drops. ([#446])
 - **Colony PRs rebase themselves when GitHub marks them DIRTY or BEHIND.** A live colony is asked to rebase onto fresh main and re-run its own gates itself, in its own microVM, and push; a colony that's gone has its branch rebased on the host instead (git only, no gates — GitHub's own CI covers that push), and if that host rebase conflicts, it's flagged needs-rebase and notified instead — once per main SHA, with SHA-aware backoff. A newly launched colony can opt in to queueing behind a live colony already touching the same repository (off by default; pass `serialize` to ask for it), starting from fresh main once that colony publishes, merges or finishes; the cockpit shows `queued behind <colony>` and a needs-rebase indicator. ([#453])
 - **Skill-pack validation at every gate.** The vendored-plugin updater validates a pin's new archive with the skill-pack validator and skips the pin instead of pinning a pack that breaks a rule — the errors land in the proposal when another pin is adopted, otherwise the run fails with them in its log; CI and the updater's workflow stage the pinned packs and run the validator over them; and colony boot now enforces the `mcp.json` rules too (every server needs a stdio command or a remote url, and a remote one its declared hosts), with the declared hosts readable for the future egress gate. ([#370])
@@ -82,25 +131,57 @@ setting) is called out under **Take care** rather than left for you to find.
   [docs/security-hunters.md](docs/security-hunters.md). ([#440])
 - **A script makes CI a required check on `main`.** `scripts/require-ci-checks.mjs` prints — and with `--apply`, sends through `gh api` — a repository ruleset requiring the six CI jobs that run on every pull request, each pinned to the GitHub Actions app so only a real run's report satisfies it. `colony-smoke`, the supply-chain jobs and the release jobs stay optional, and docs/audit.md says why, along with the two settings that travel with the ruleset: "Allow auto-merge" on (a colony pull request held for checks is queued with `gh pr merge --squash --auto`), and no merge queue (no workflow has a `merge_group` trigger). Applying it still takes a repository admin, which is why it is a script rather than a change this repository can commit. ([#367])
 
+### Changed
+
+- **The archify skillset is on by default** for a fresh install, so the Map works without finding
+  the switch; installs that saved a skillset list keep theirs. ([#462])
+- **Vendored google-skills** moves from `6e3838f` to `3863d56`. ([#335])
+- **A red-team run can name its models** (`model_override`, `subagent_model_override` on
+  `POST /api/sessions`), used by the wizard's model step. ([#457])
+
 ### Fixed
 
+- **A mapping colony stops itself once its map is drawn**, instead of sitting idle on a parallel
+  slot; one that goes idle without a valid map is stopped with a clear error after 15 minutes. ([#489])
+- **A recovered provider error no longer leaves a colony on "needs you".** A provider answering
+  again lifts the gateway's `model_error` flag, and a still-running colony is never listed for
+  one — this also ends the needs-you entries that flickered on and off. ([#462])
+- **Colony commits keep the executable bit**, and a child colony is restacked when its parent
+  merges first. ([#455])
+- **A tab left open across an update reloads itself** instead of failing on a module-script MIME
+  error: missing `/assets/*` answer 404, not the page. ([#457])
 - A mothership restart no longer stops every live colony when `msb ls` fails outright. After a host reboot the microsandbox daemon can come up after the harness, and recovery read that failure as "nothing is running" and removed every live colony's microVM; it now waits — retrying with backoff — until `msb ls` answers before it decides what to tear down, so colonies that kept running across the restart are reconnected once the daemon appears. ([#407])
 - **A malformed `COLONIZER_GATEWAY_BIND` refuses startup instead of silently falling back to 41750.** The bind is parsed once as an IP:port socket address and the listener, the colony model routes and the per-colony network fence all use that port, so a typo'd bind (or a hostname like `localhost:41750`, which is no longer resolved) can no longer hand colonies an allow rule for a port nothing listens on. The fence is extracted into `colony_network` and unit-tested: a colony always boots with the `public` profile alone, and its only host allows are the mesh control port and the gateway port. ([#406])
 - **A damaged `orgs.json`, `providers.json` or `modules.json` is no longer silently replaced by defaults.** A settings save over a file that will not parse is refused with an error naming it, the cockpit's storage banner says defaults are in effect until it is fixed or removed, `modules.json` is moved aside to a `.corrupt-*` file at startup like `sessions.json`, and concurrent saves are serialised so two at once cannot lose each other's org or provider. ([#408])
-- **Concurrent writes to `claude-accounts.json` and `known-orgs.json` no longer lose each other's entries.** Account creates and deletes, the org-seen record and the five-minute GitHub refresh's save all run inside the same config-write section the settings files use, with the refresh re-reading the record just before it saves so a colony started mid-refresh keeps its org marked seen, and the first-use migration publishes create-if-absent so it cannot write over an account created while it ran. Every save names its temp file per call, so two writers cannot consume each other's temp.
+- **Concurrent writes to `claude-accounts.json` and `known-orgs.json` no longer lose each other's entries.** Account creates and deletes, the org-seen record and the five-minute GitHub refresh's save all run inside the same config-write section the settings files use, with the refresh re-reading the record just before it saves so a colony started mid-refresh keeps its org marked seen, and the first-use migration publishes create-if-absent so it cannot write over an account created while it ran. Every save names its temp file per call, so two writers cannot consume each other's temp. ([#486])
 
 ### Security
 
+- **Each colony spends only on the providers its model settings route to**, and a request's
+  budget is reserved before it is sent, so parallel requests cannot overshoot a colony's budget. A
+  colony saved before this change keeps its access until its next boot. ([#409])
+- **The VM-written PR description is read through one no-follow handle**, closing a
+  check-then-read symlink race on publish. ([#410])
+- **A `claude_account` id from a request is validated before it becomes a file path.** ([#482])
 - **Hunter installs are fenced off the host Docker daemon and hardened.** The capability probe
   no longer touches the host's Docker daemon and never suggests pointing at it: Docker-dependent
   hunters stay not-ready until Docker runs inside the colony microVM. Installs are Linux-only,
   serialised per hunter, verified by checksum over the downloaded bytes before anything is
   unpacked, capped at 256 MiB, follow https redirects only, and land atomically with mode
   `0o555`. ([#442])
-- **Pi as a second agent module.** `modules/agents/pi` adds the Pi coding agent as an agent provider (`pi`) beside Claude Code, driven over Pi's RPC mode and speaking the same runner protocol. Pi reaches models only through the provider gateway (Settings → Providers, under each colony's spend and rate limits); it has no subagents, so the subagent and background model split does not apply. ([#403])
 
 ### Take care
 
+- **Saved keys may move to the system keychain.** New keys go to the macOS Keychain or Linux Secret
+  Service when it works; existing file keys stay where they are until you move them on the Secrets
+  page. On macOS each rebuilt, unsigned binary is a new app to the Keychain and asks again for every
+  key — set `COLONIZER_CODESIGN_IDENTITY` when building (`scripts/install.sh`) to sign with one
+  stable identity. ([#468])
+- **`COLONIZER_GATEWAY_BIND` must be an IP:port.** A hostname such as `localhost:41750`, or any
+  malformed value, now refuses startup instead of falling back to 41750. ([#406])
+- **Installing a security hunter needs `COLONIZER_HUNTER_INSTALL=1`** and is Linux-only. ([#442])
+- **Colonies live across the upgrade** keep their provider access until their next boot, when the
+  per-colony allowlist applies. ([#409])
 - **A model setting that names an unconfigured provider refuses the boot.** A `<provider>/<model>`
   value whose prefix matches no configured provider used to start fine and quietly send every request
   to Anthropic — the runner's warning only landed in the colony's log, so a typo'd route spent the
@@ -498,10 +579,28 @@ Macs. ([#74])
 [#367]: https://github.com/Colonizer-dev/harness/issues/367
 [#366]: https://github.com/Colonizer-dev/harness/issues/366
 [#334]: https://github.com/Colonizer-dev/harness/issues/334
+[#202]: https://github.com/Colonizer-dev/harness/issues/202
+[#219]: https://github.com/Colonizer-dev/harness/issues/219
+[#332]: https://github.com/Colonizer-dev/harness/issues/332
+[#333]: https://github.com/Colonizer-dev/harness/issues/333
+[#335]: https://github.com/Colonizer-dev/harness/issues/335
+[#409]: https://github.com/Colonizer-dev/harness/issues/409
+[#410]: https://github.com/Colonizer-dev/harness/issues/410
+[#454]: https://github.com/Colonizer-dev/harness/issues/454
+[#455]: https://github.com/Colonizer-dev/harness/issues/455
+[#457]: https://github.com/Colonizer-dev/harness/pull/457
+[#462]: https://github.com/Colonizer-dev/harness/pull/462
+[#468]: https://github.com/Colonizer-dev/harness/pull/468
+[#482]: https://github.com/Colonizer-dev/harness/pull/482
+[#486]: https://github.com/Colonizer-dev/harness/pull/486
+[#488]: https://github.com/Colonizer-dev/harness/pull/488
+[#489]: https://github.com/Colonizer-dev/harness/pull/489
+[#490]: https://github.com/Colonizer-dev/harness/pull/490
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
 [v0.1.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.8
+[v0.1.9]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.9
 [v0.1.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2
