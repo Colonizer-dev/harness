@@ -975,7 +975,9 @@ export type ServerFrame =
   | { type: "session"; session: Session }
   | { type: "harness_log"; level: LogLevel; message: string; ts: string }
   | { type: "memory_proposed"; proposal: MemoryProposal }
-  | { type: "run_epoch"; epoch: number };
+  | { type: "run_epoch"; epoch: number }
+  /** The backlog replay is complete; everything after it is live. */
+  | { type: "replay_done"; seq: number };
 
 export type ClientCommand =
   | { type: "user_message"; text: string }

@@ -921,7 +921,10 @@ Server → client:
   to, with no `seq` field (old clients ignore the unknown frame). Then
   `{"type":"session","session":Session}`, then the last ≤200 harness logs as
   `{"type":"harness_log","level":"info|warn|error","message":"…","ts":"…"}`, then agent events with
-  `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then live.
+  `seq` above the effective cursor (same objects as §3, including `seq`/`ts`), then
+  `{"type":"replay_done","seq":N}` (N = the highest replayed `seq`, or the cursor when nothing was
+  replayed; like `run_epoch` it is a control frame, not an event), then live. A client may hold its
+  render until `replay_done` so a long history appears at once, on its latest messages.
 - Each resume rotates the event log aside (`events.jsonl` → `events-N.jsonl`) and bumps the epoch,
   and the new run's `seq` numbering starts from 1 again. The effective cursor is `0` when the
   client's `epoch` names a retired run — its `since` is a rank in that run's numbering, meaningless

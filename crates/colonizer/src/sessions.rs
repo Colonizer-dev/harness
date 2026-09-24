@@ -2583,6 +2583,16 @@ async fn events_socket(app: Shared, id: String, rt: Arc<Runtime>, since: u64, cl
         )
         .await;
     }
+    // The backlog is on the wire: the browser holds its render until this frame, so a long
+    // history opens on its latest messages instead of filling in line by line. No `seq`, like
+    // `run_epoch`, and old clients ignore the unknown frame.
+    if tx
+        .send(text(json!({"type": "replay_done", "seq": replayed}).to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
 
     loop {
         tokio::select! {

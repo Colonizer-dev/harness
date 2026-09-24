@@ -392,6 +392,14 @@ export class SessionStream {
   private retries = 0;
   private stopped = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * While a connection replays its backlog, frames are reduced without telling listeners, so a long
+   * history renders once — on its latest messages — instead of frame by frame. `replay_done` ends it;
+   * a mothership that never sends one is flushed after a quiet gap, or at the latest after HOLD_MAX_MS.
+   */
+  private holding = false;
+  private holdSince = 0;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(api: Api, sessionId: string) {
     this.api = api;
@@ -415,6 +423,7 @@ export class SessionStream {
   stop(): void {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    this.release();
     const ws = this.ws;
     this.ws = null;
     ws?.close();
@@ -447,13 +456,40 @@ export class SessionStream {
     const next = fn(this.state);
     if (next === this.state) return;
     this.state = next;
+    if (!this.holding) this.notify();
+  }
+
+  private notify(): void {
     for (const listener of this.listeners) listener();
+  }
+
+  /** Ends a replay hold and renders what it gathered, once. */
+  private release(): void {
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+    if (!this.holding) return;
+    this.holding = false;
+    this.notify();
+  }
+
+  /** Re-arms the quiet-gap flush while holding; past HOLD_MAX_MS it renders at once. */
+  private extendHold(): void {
+    if (!this.holding) return;
+    if (Date.now() - this.holdSince > HOLD_MAX_MS) {
+      this.release();
+      return;
+    }
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    this.holdTimer = setTimeout(() => this.release(), HOLD_QUIET_MS);
   }
 
   private connect(): void {
     this.update((s) => ({ ...s, connection: this.retries > 0 ? "reconnecting" : "connecting" }));
     const ws = this.api.openEvents(this.sessionId, this.state.lastSeq, this.runEpoch ?? 0);
     this.ws = ws;
+    this.holding = true;
+    this.holdSince = Date.now();
+    this.extendHold();
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.retries = 0;
@@ -468,6 +504,10 @@ export class SessionStream {
         return;
       }
       if (!frame || typeof frame !== "object" || typeof frame.type !== "string") return;
+      if (frame.type === "replay_done") {
+        this.release();
+        return;
+      }
       if (frame.type === "run_epoch") {
         const e = frame.epoch;
         if (typeof e === "number") {
@@ -479,11 +519,13 @@ export class SessionStream {
         return;
       }
       this.update((s) => reduceFrame(s, frame));
+      this.extendHold();
     };
     ws.onerror = () => {};
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.release();
       if (this.stopped) return;
       // Answers and model switches in flight may not have arrived; let the user resubmit after reconnecting.
       this.update((s) => ({ ...s, connection: "reconnecting", submitting: {}, switchingModel: null }));
@@ -495,6 +537,11 @@ export class SessionStream {
     };
   }
 }
+
+/** A replay with no `replay_done` (an older mothership) renders after this long without a frame… */
+const HOLD_QUIET_MS = 400;
+/** …and a hold never outlasts this, so a slow backlog still shows before it finishes. */
+const HOLD_MAX_MS = 4000;
 
 const EMPTY_STATE = initialStreamState();
 const noopSubscribe = () => () => {};
