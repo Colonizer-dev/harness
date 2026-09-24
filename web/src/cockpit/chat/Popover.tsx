@@ -224,7 +224,7 @@ export function SearchList<T extends ListItem>({
             aria-expanded="true"
             aria-controls={`${base}-list`}
             aria-activedescendant={shown[active] ? `${base}-${active}` : undefined}
-            className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
+            className="bare-field min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
           />
         </div>
       )}

@@ -173,7 +173,7 @@ export function ChatSidebar({
             onKeyDown={(e) => e.key === "Escape" && setQuery("")}
             placeholder="Search conversations"
             aria-label="search conversations"
-            className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
+            className="bare-field min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
           />
         </label>
         {workspaces.length > 1 && (

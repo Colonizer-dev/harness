@@ -104,7 +104,7 @@ export function ChatComposer({
           files.forEach(onImage);
         }}
         className={cx(
-          "relative rounded-[22px] border bg-panel shadow-[0_2px_18px_-6px_rgba(0,0,0,0.25)] transition-colors focus-within:border-border-strong",
+          "relative rounded-[22px] border bg-panel shadow-[0_2px_18px_-6px_rgba(0,0,0,0.25)] transition-[border-color,box-shadow] focus-within:border-accent/60 focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent)_18%,transparent),0_2px_18px_-6px_rgba(0,0,0,0.25)]",
           dragging ? "border-accent bg-accent-soft/40" : "border-border",
         )}
       >
@@ -182,7 +182,7 @@ export function ChatComposer({
           placeholder={blocked ? "Pick a model you can reach first…" : hero ? "Ask about your code, colonies or plans…  (/ for commands)" : "Reply…  (/ for commands)"}
           aria-label="message"
           className={cx(
-            "scroll-thin block w-full resize-none border-0 bg-transparent px-4 text-[15px] leading-relaxed text-text outline-none placeholder:text-faint",
+            "bare-field scroll-thin block w-full resize-none border-0 bg-transparent px-4 text-[15px] leading-relaxed text-text outline-none placeholder:text-faint",
             hero ? "min-h-[64px] pt-4" : "min-h-[48px] pt-3",
           )}
         />
