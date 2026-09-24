@@ -429,7 +429,14 @@ sh scripts/test/build-scripts.test.sh           # the build scripts: here mode r
 sh scripts/test/install-release.test.sh         # the installer: an install interrupted at any point leaves a working colonizer, and the next one recovers
 (cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
+node scripts/require-ci-checks.mjs             # dry run: the ruleset that makes CI required on main
+node scripts/require-ci-checks.mjs --apply     # send it (idempotent; needs a repository-admin token)
 ```
+
+CI is meant to gate merges on `main`: the ruleset that makes the six always-running CI jobs required
+checks is printed by the dry run above, and [docs/audit.md](docs/audit.md) ("Required checks, issue
+#367") says which checks those are, which are deliberately left optional, and the two repository
+settings that travel with them.
 
 Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their owners' trademarks. See [NOTICE](NOTICE).
 

@@ -87,8 +87,10 @@ is the audit's view of it. Since the audit, `.github/workflows/ci.yml` runs on e
 push to `main`: `cargo test --workspace` (including agentd's no-KVM smoke test), `cargo clippy` with
 warnings denied and `cargo fmt --check`; the Claude Code runner's tests; the web UI's `tsc`, build and
 tests; and the tests of the telemetry receiver and the scripts. `supply-chain.yml` adds dependency audits
-and SBOMs. Two limits keep this short of what G4 asks for: CI is not a required check on `main`, so a red
-run does not block a merge, and nothing in CI boots a real colony — the `colony-smoke` job needs a
+and SBOMs. Two limits keep this short of what G4 asks for: CI is not yet a required check on `main` — a
+red run does not block a merge until a maintainer applies the ruleset with
+`scripts/require-ci-checks.mjs` ([#367](https://github.com/Colonizer-dev/harness/issues/367), below) —
+and nothing in CI boots a real colony: the `colony-smoke` job needs a
 self-hosted KVM runner and has never run.
 
 ## Authority controls, issue #98 (partial G2)
@@ -114,3 +116,22 @@ refuses to open or reuse a PR when the local branch head moved after the push st
 Not done: the PR body's SHA-256 is only logged, never checked against an approval — per-effect grants
 stay with #98. Running the repository's tests on the host before a push is still the operator's
 responsibility. As above, F05 is not checked off and G2 is not cleared.
+
+## Required checks, issue #367 (partial G4)
+
+A repository ruleset makes CI gate merges on the default branch: the six jobs that always run on a
+pull request (`rust`, `runner`, `scripts`, `telemetry`, `web`, `colony-report`) become required
+status checks, each pinned to the GitHub Actions app, so a status another app posted under the same
+name does not count. `scripts/require-ci-checks.mjs` prints the ruleset (a dry run, the default) and
+`--apply` sends it through `gh api`, idempotently; applying it needs a repository admin, which is why
+it is a script and not a pull request. The update replaces the ruleset wholesale, so a rule, ref
+condition or bypass actor added to it by hand in the UI is lost on the next run — change it in the
+script, not in the UI. Not required, on purpose: `colony-smoke`, which is skipped
+until the repository has the KVM runner it names; the supply-chain jobs, where `vulnerabilities` can
+go red on a newly published advisory with no commit at all (the weekly run is the detection path) and
+an SBOM is evidence, not a gate; and the release jobs, which paths and tags keep away from an
+ordinary pull request. Two settings travel with it and are flipped by hand in the repository's
+settings: "Allow auto-merge" on, because a colony pull request held for required checks is queued
+with `gh pr merge --squash --auto` and GitHub refuses that queue without it, and no merge queue,
+because no workflow here has a `merge_group` trigger and a queued pull request would never leave it.
+Until a maintainer runs the script, the paragraph above stands: a red run does not block a merge.
