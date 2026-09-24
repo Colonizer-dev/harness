@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "colonizer-agentd"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "axum",
  "chrono",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "colonizer-harness"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "axum",

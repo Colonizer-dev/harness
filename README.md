@@ -337,9 +337,10 @@ sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 | What | Where it lives |
 | :--- | :--- |
 | GitHub token | Mothership only. Commit, push and `gh pr create` run on the host after the colony is gone. |
-| Claude token | Mothership only (0600). The colony sees a placeholder; microsandbox's TLS proxy substitutes the real value for `api.anthropic.com` only. |
-| Model provider keys | Mothership only (0600). Colonies send provider requests to the gateway with a per-colony token; the gateway adds the key. |
+| Claude token | Mothership only (system keychain, or a 0600 file). The colony sees a placeholder; microsandbox's TLS proxy substitutes the real value for `api.anthropic.com` only. |
+| Model provider keys | Mothership only (system keychain, or a 0600 file). Colonies send provider requests to the gateway with a per-colony token; the gateway adds the key. |
 | Worktree | Mounted read-write at `/workspace`. |
+| Colony secrets you name | Mothership only; microsandbox substitutes the value on TLS to the hosts you allowed, so the colony sees a placeholder. |
 | Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |
 | Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
 | What a colony runs | Pinned, not floating: the image by OCI digest (`crates/colonizer/images.lock`), the guest Claude Code build by sha256 (`vendor/claude-code.lock`), the vendored tools by sha256 (`vendor/vendor.lock`). Pins move only through a reviewed pull request. |
@@ -389,6 +390,11 @@ backed-up config directory, not a machine where something runs as you, since tha
 too. Use a long random value (32 or more random bytes): the single SHA-256 does no key stretching. Another
 machine with a copy of the directory needs the same value. To rotate, set a new value and save each secret
 again; if the key is lost, delete the `.enc` files and enter the secrets again.
+
+When the macOS Keychain or the Linux Secret Service answers a startup probe, newly saved secrets go
+there instead of to files (existing files stay until you move them on the cockpit's Secrets page, which
+also shows where each one lives). On macOS the Keychain ties an item to the binary that wrote it, so
+build with `COLONIZER_CODESIGN_IDENTITY` set (see `scripts/install.sh`) to keep access across rebuilds.
 
 Two limits bound one colony, both sandbox module settings (Settings → Modules → sandbox) with an override
 per org. Both default to `0` — unlimited — on purpose: there is no dollar figure or byte count that suits

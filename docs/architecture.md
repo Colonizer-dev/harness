@@ -71,7 +71,7 @@ editable in Settings → Modules). A module kind has one active provider:
 
 Two settings layers sit next to the modules:
 
-- **Model providers** (`providers.json`, keys in `provider-keys/`, 0600): Anthropic-compatible endpoints,
+- **Model providers** (`providers.json`, keys in the system keychain when it works, else `provider-keys/`, 0600): Anthropic-compatible endpoints,
   or OpenAI Chat Completions endpoints the gateway translates, that the agent can route models to as
   `<provider>/<model>`. The Claude Code runner starts a router inside
   the colony that sends those requests to the mothership's provider gateway
