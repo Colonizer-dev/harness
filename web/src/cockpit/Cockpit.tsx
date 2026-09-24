@@ -495,6 +495,13 @@ export function Cockpit({
         needByOrg={needByOrg}
         statusError={statusError}
         connection={liveConnection}
+        user={{
+          login: status?.github.connected ? (status.github.login ?? null) : null,
+          name: status?.github.name ?? null,
+          avatarUrl: status?.github.avatar_url ?? null,
+          onOpenSettings: () => onOpenSettings(),
+          onOpenSecrets: () => navigate("secrets"),
+        }}
         inbox={{
           sessions,
           onOpenColony: openColonyById,
