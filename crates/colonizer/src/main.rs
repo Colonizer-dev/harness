@@ -1487,6 +1487,7 @@ async fn serve() -> Result<()> {
         .route("/api/chat/{id}/fork", post(chat::fork))
         .route("/api/chat/{id}/title", post(chat::retitle))
         .route("/api/chat/{id}/export", get(chat::export))
+        .route("/api/chat/{id}/issue", post(chat::file_issue))
         .route("/api/repos", get(github::list_repos))
         .route("/api/maps/{owner}/{name}", get(maps::get).post(maps::create))
         .route("/api/maps/{owner}/{name}/files", get(maps::files))

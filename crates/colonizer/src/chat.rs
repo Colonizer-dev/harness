@@ -1422,6 +1422,54 @@ pub async fn retitle(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     Ok(Json(meta))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct NewIssue {
+    pub repo: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// An issue title and body checked before anything reaches GitHub. Pure, for the tests.
+pub fn check_issue(req: &NewIssue) -> Result<(), String> {
+    if !crate::util::valid_repo(&req.repo) {
+        return Err(format!("invalid repository {:?}", req.repo));
+    }
+    let title = req.title.trim();
+    if title.is_empty() || title.chars().count() > 256 || title.contains('\n') {
+        return Err("a title is one line of 1–256 characters".into());
+    }
+    if req.body.len() > FILE_CONTEXT_LIMIT {
+        return Err("the issue body is over 60 KB".into());
+    }
+    Ok(())
+}
+
+/// `POST /api/chat/{id}/issue`: files `{repo, title, body}` as a GitHub issue with the
+/// Mothership's `gh`, and answers `{url}`. The cockpit asks the operator to confirm first.
+pub async fn file_issue(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<NewIssue>) -> ApiResult<Value> {
+    check_id(&id)?;
+    load_or_404(read_meta(&app, &id).await)?;
+    check_issue(&req).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    let body_path = dir(&app).join(format!("{id}.issue-{}.md", short_id()));
+    tokio::fs::write(&body_path, format!("{}\n", req.body.trim())).await?;
+    let mut cmd = app.gh([
+        "issue",
+        "create",
+        "-R",
+        req.repo.as_str(),
+        "--title",
+        req.title.trim(),
+        "--body-file",
+    ]);
+    cmd.arg(&body_path);
+    let out = crate::util::exec(&mut cmd).await;
+    let _ = tokio::fs::remove_file(&body_path).await;
+    let out = out.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("gh could not file the issue: {e:#}")))?;
+    let url = out.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(out.trim());
+    Ok(Json(json!({"url": crate::util::truncate(url, 500)})))
+}
+
 struct ReplyOpts {
     parent_id: Option<String>,
     lane: Option<u8>,
@@ -1789,6 +1837,21 @@ mod tests {
         assert_eq!(clean_title("  \n\"\"  "), None);
         let long = clean_title(&"word ".repeat(40)).unwrap();
         assert!(long.chars().count() <= 60 && long.ends_with('…'));
+    }
+
+    #[test]
+    fn issues_are_checked_before_gh_runs() {
+        let issue = |repo: &str, title: &str, body: &str| NewIssue {
+            repo: repo.into(),
+            title: title.into(),
+            body: body.into(),
+        };
+        assert!(check_issue(&issue("acme/web", "Fix the thing", "body")).is_ok());
+        assert!(check_issue(&issue("acme", "t", "")).is_err());
+        assert!(check_issue(&issue("acme/web", "  ", "")).is_err());
+        assert!(check_issue(&issue("acme/web", "two\nlines", "")).is_err());
+        assert!(check_issue(&issue("acme/web", &"t".repeat(257), "")).is_err());
+        assert!(check_issue(&issue("acme/web", "t", &"b".repeat(FILE_CONTEXT_LIMIT + 1))).is_err());
     }
 
     #[test]
