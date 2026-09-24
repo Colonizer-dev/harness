@@ -86,6 +86,17 @@ export function relDelta(cur: number | null, prev: number | null): number | null
   return Number.isFinite(d) ? d : null;
 }
 
+/**
+ * The delta chip for a compared figure: "new" when the previous period had nothing and this one has
+ * something (a percentage over zero means nothing), the usual +/-% otherwise, and undefined when
+ * neither period has anything to compare.
+ */
+export function compareDelta(cur: number | null, prev: number | null): { text: string; d: number | null } | undefined {
+  if ((prev == null || prev === 0) && cur != null && cur > 0) return { text: "new", d: 1 };
+  const d = relDelta(cur, prev);
+  return d == null ? undefined : { text: formatDelta(d), d };
+}
+
 export function formatDelta(d: number | null): string {
   if (d == null) return "—";
   const pct = Math.abs(d * 100);

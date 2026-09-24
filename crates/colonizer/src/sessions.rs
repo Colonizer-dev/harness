@@ -340,6 +340,13 @@ pub struct Session {
     /// The tier this colony was started on, when the operator named one instead of letting the rule choose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_tier: Option<String>,
+    /// The orchestrator model the operator named at launch (a Claude alias or ID, or
+    /// `<provider>/<model>`), replacing whatever routing would pick. A launch record, like `model_tier`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    /// The subagent model the operator named at launch, replacing the agent module's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_model_override: Option<String>,
     /// The Claude account this colony bills to (issue #95): the per-colony choice, else the org's
     /// override, else the install default, resolved at launch. Like `model_tier`, a launch record.
     #[serde(default)]
@@ -440,6 +447,8 @@ impl Default for Session {
             cost_usd: None,
             model_usage: None,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
@@ -882,6 +891,13 @@ pub struct NewSession {
     /// routing rule picks for the task.
     #[serde(default)]
     pub model_tier: Option<String>,
+    /// Run the orchestrator on this model (a Claude alias or ID, or `<provider>/<model>` naming a
+    /// configured provider) instead of the one routing picks. Red-team hunters use it.
+    #[serde(default)]
+    pub model_override: Option<String>,
+    /// Run the colony's subagents on this model instead of the agent module's `subagent_model`.
+    #[serde(default)]
+    pub subagent_model_override: Option<String>,
     /// Bill this colony to a named Claude account instead of the org's override or install default.
     #[serde(default)]
     pub claude_account: Option<String>,
@@ -906,6 +922,23 @@ pub struct NewSession {
     /// them up. See `overlap_queue_target`.
     #[serde(default)]
     pub serialize: Option<bool>,
+}
+
+/// A launch-time model choice, trimmed: empty is none, and a `<provider>/<model>` must name a
+/// configured provider, so a typo is refused at launch instead of failing inside the colony.
+pub(crate) fn launch_model(app: &crate::App, raw: Option<&str>, what: &str) -> Result<Option<String>, crate::AppError> {
+    let Some(model) = raw.map(str::trim).filter(|m| !m.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some((provider, name)) = model.split_once('/')
+        && (name.is_empty() || !app.providers().iter().any(|p| p.id == provider))
+    {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("the {what} {model:?} names no configured provider \"{provider}\""),
+        ));
+    }
+    Ok(Some(model.to_string()))
 }
 
 /// A colony that makes a second one on the same issue a mistake rather than a retry: one still
@@ -1195,6 +1228,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
             }
         },
     };
+    let model_override = launch_model(&app, req.model_override.as_deref(), "model")?;
+    let subagent_model_override = launch_model(&app, req.subagent_model_override.as_deref(), "subagent model")?;
     // Relating to the parent (`after`): by default the colony queues until the parent's pull request
     // merges and then starts from the fresh default branch; `stack: true` branches from the parent's
     // branch as soon as it is pushed instead. Whitespace is refused rather than read as nothing — an
@@ -1342,6 +1377,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         cost_usd: None,
         model_usage: None,
         model_tier,
+        model_override,
+        subagent_model_override,
         claude_account: Some(claude_account),
         model_routing: None,
         // Filled in at boot, once the colony's model settings resolve to actual providers.
@@ -1775,6 +1812,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .to_string();
     if !routed_model.is_empty() {
         runner_env.insert("COLONIZER_MODEL".into(), Value::String(routed_model.into()));
+    }
+    // A model the operator named at launch beats routing: it is what they asked this colony to run.
+    if let Some(model) = s.model_override.as_deref() {
+        runner_env.insert("COLONIZER_MODEL".into(), Value::String(model.into()));
+    }
+    if let Some(model) = s.subagent_model_override.as_deref() {
+        runner_env.insert("COLONIZER_SUBAGENT_MODEL".into(), Value::String(model.into()));
     }
     // The runner reads only COLONIZER_MODEL: the tier settings are for the mothership's provider
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
@@ -3148,6 +3192,8 @@ pub(crate) mod tests {
             cost_usd: None,
             model_usage: None,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
@@ -3989,6 +4035,8 @@ pub(crate) mod tests {
                 automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
+                model_override: None,
+                subagent_model_override: None,
                 claude_account: None,
                 after: None,
                 stack: false,
@@ -4069,6 +4117,8 @@ pub(crate) mod tests {
                 automerge: None,
                 allow_duplicate: false,
                 model_tier: None,
+                model_override: None,
+                subagent_model_override: None,
                 claude_account: None,
                 after: None,
                 stack: false,
@@ -4189,6 +4239,8 @@ pub(crate) mod tests {
             automerge: None,
             allow_duplicate: false,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             after,
             stack,

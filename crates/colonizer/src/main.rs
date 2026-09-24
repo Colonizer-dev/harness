@@ -1259,7 +1259,7 @@ async fn serve() -> Result<()> {
         agents,
         agent_problems,
         sessions: RwLock::new(sessions),
-        redteam: redteam::RedTeamStore::new(&cfg.data_dir),
+        redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
         session_persist: Mutex::new(()),
         config_write: Mutex::new(()),
         config_damage: std::sync::Mutex::new(None),
@@ -1372,6 +1372,14 @@ async fn serve() -> Result<()> {
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
         .route("/api/redteam/runs/{id}/stop", post(redteam::stop))
+        .route(
+            "/api/redteam/schedules",
+            get(redteam::list_schedules).post(redteam::create_schedule),
+        )
+        .route(
+            "/api/redteam/schedules/{id}",
+            put(redteam::update_schedule).delete(redteam::delete_schedule),
+        )
         .route("/api/burn-down", get(burn_down::status))
         .route("/api/burn-down/stop", post(burn_down::stop));
     let router = api
@@ -1439,6 +1447,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move { queue::run_queue(queue).await });
     let redteam = app.clone();
     tokio::spawn(async move { redteam::run(redteam).await });
+    let schedules = app.clone();
+    tokio::spawn(async move { redteam::run_schedules(schedules).await });
     let disk_watch = app.clone();
     tokio::spawn(async move { lifecycle::watch_host_disks(disk_watch).await });
     tokio::spawn(reclaim::run(app.clone()));
@@ -1547,7 +1557,7 @@ pub(crate) mod tests {
             agents,
             agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
-            redteam: redteam::RedTeamStore::new(&root.join("data")),
+            redteam: redteam::RedTeamStore::new(&root.join("data"), &root.join("config")),
             session_persist: Mutex::new(()),
             config_write: Mutex::new(()),
             config_damage: std::sync::Mutex::new(None),

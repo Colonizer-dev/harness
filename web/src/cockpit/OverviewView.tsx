@@ -36,11 +36,10 @@ import {
   dayKeyOfDate,
   chartColor,
   deltaTone,
-  formatDelta,
   formatPts,
   formatWait,
   mergedInWindow,
-  relDelta,
+  compareDelta,
   shortDayLabel,
   slicePeriods,
   sparkPoints,
@@ -53,7 +52,8 @@ import {
 } from "./dash";
 import { OVERVIEW_FILTERS, heldSlots, matchesOverviewFilter, overviewCounts, overviewVisibleSessions, queueStalled, type OverviewFilter } from "./feed";
 import { hostFacts } from "./host";
-import { RedTeamCard } from "./RedTeamCard";
+import { RedTeamWizard } from "./RedTeamWizard";
+import { RedTeamHistory } from "./RedTeamHistory";
 import { StoragePanel } from "./StoragePanel";
 import { useOpenQuestions } from "./questions";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
@@ -118,7 +118,7 @@ export function OverviewView({
   host?: HostInfo | null;
   /** Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); absent or empty renders no fleet panel. */
   fleet?: FleetHost[];
-  /** Red-team runs (issue #212): the card lists them. */
+  /** Red-team runs (issue #212): each workspace row's history lists its own. */
   runs?: RedTeamRun[];
   /** The bucket filter to start on. Null in production — the tests pin the filtered states through it because static markup cannot click. */
   initialFilter?: OverviewFilter | null;
@@ -157,6 +157,8 @@ export function OverviewView({
   // The colonies table's own filters: one status bucket plus one org. Null is unfiltered.
   const [colonyFilter, setColonyFilter] = useState<OverviewFilter | null>(initialFilter ?? null);
   const [orgFilter, setOrgFilter] = useState<string | null>(null);
+  // The red-team wizard or history open for one workspace row; null is neither.
+  const [redTeam, setRedTeam] = useState<{ org: string; view: "wizard" | "history" } | null>(null);
   const [showAll, setShowAll] = useState(false);
   // What moved since the last push: flashes the row whose status changed, lights a risen cost.
   const events = useLiveEvents(sessions);
@@ -215,18 +217,20 @@ export function OverviewView({
   // count; lead time, PR cycle time and CI pass rate come from the PR watcher's timestamps and checks.
   const mergedCur = mergedInWindow(visibleSessions, fromMs, nowMs);
   const mergedPrev = mergedInWindow(visibleSessions, prevFromMs, fromMs);
-  const mergedDelta = compare ? relDelta(mergedCur.length, mergedPrev.length) : null;
+  const mergedCmp = compare ? compareDelta(mergedCur.length, mergedPrev.length) : undefined;
+  const mergedDelta = mergedCmp?.d ?? null;
   const failCur = changeFailRate(visibleSessions, fromMs, nowMs);
   const failPrev = changeFailRate(visibleSessions, prevFromMs, fromMs);
   const failDelta = compare && failCur.rate != null && failPrev.rate != null ? failCur.rate - failPrev.rate : null;
   const periodSpend = sumHistoryCost(current);
-  const spendDelta = compare ? relDelta(periodSpend, sumHistoryCost(previous)) : null;
+  const spendCmp = compare ? compareDelta(periodSpend, sumHistoryCost(previous)) : undefined;
+  const spendDelta = spendCmp?.d ?? null;
   const kpis: KpiDef[] = [
     {
       label: "Merged PRs",
       value: String(mergedCur.length),
       valueNum: mergedCur.length,
-      delta: mergedDelta != null ? formatDelta(mergedDelta) : undefined,
+      delta: mergedCmp?.text,
       deltaTone: deltaTone(mergedDelta),
       spark: sparkPoints(dailyMerged(visibleSessions, days)),
       sub: `${(mergedCur.length / range).toFixed(1)} per day · by merge date`,
@@ -248,7 +252,7 @@ export function OverviewView({
       value: formatCost(periodSpend),
       valueNum: periodSpend ?? undefined,
       formatNum: (n) => formatCost(n),
-      delta: spendDelta != null ? formatDelta(spendDelta) : undefined,
+      delta: spendCmp?.text,
       deltaTone: deltaTone(spendDelta, "down"),
       spark: sparkPoints(dailyCosts(current)),
       sub: `${formatTokens(sumTokens(current))} tokens`,
@@ -268,7 +272,10 @@ export function OverviewView({
   // on hue alone); the ghost is the previous period's daily total when compare is on.
   const mergedSeries = workspaces.map((o, i) => ({ label: o.org, color: chartColor(i), values: dailyMerged(visibleSessions, days, o.org) }));
   const ghostTotals = prevDays.map((day) => dailyMerged(visibleSessions, [day]).reduce((t, v) => t + v, 0));
-  const ghost = compare && ghostTotals.some((v) => v > 0) ? ghostTotals : undefined;
+  // Compare on with an empty previous period still draws: a flat dashed zero line, labelled as such,
+  // so the switch visibly does something instead of silently showing nothing.
+  const prevEmpty = ghostTotals.every((v) => v === 0) && (sumHistoryCost(previous) ?? 0) === 0;
+  const ghost = compare ? ghostTotals : undefined;
 
   // Per workspace: merged share, the in-range failure reading and the measured rollup.
   const compared = workspaces.map((o, i) => {
@@ -286,7 +293,9 @@ export function OverviewView({
     ),
   );
   const tableShown = showAll ? tableSessions : tableSessions.slice(0, COLONY_LIMIT);
-  const toolbar = <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} />;
+  const toolbar = (
+    <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} emptyPrevious={prevEmpty} />
+  );
 
   // An org dashboard replaces the overview body in place; the header above stays put.
   const dashEntry = dashOrg ? workspaces.find((o) => sameOrg(o.org, dashOrg)) : undefined;
@@ -403,7 +412,7 @@ export function OverviewView({
             ghost ? (
               <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted">
                 <span aria-hidden="true" className="h-0 w-3 border-t border-dashed border-muted" />
-                prev {range}d
+                prev {range}d{prevEmpty ? " · no activity" : ""}
               </span>
             ) : undefined
           }
@@ -421,7 +430,7 @@ export function OverviewView({
               emptyNote="no merged PRs in range"
             />
           )}
-          foot={`${mergedCur.length} merged in ${range}d · by merge date${ghost ? ` · dashed: previous ${range}d` : ""}`}
+          foot={`${mergedCur.length} merged in ${range}d · by merge date${ghost ? ` · dashed: previous ${range}d${prevEmpty ? " (no activity)" : ""}` : ""}`}
           sideTitle="Share by workspace"
           sideLimit={SHARE_LIMIT}
           side={[...compared]
@@ -460,7 +469,7 @@ export function OverviewView({
         <Section title="Workspaces" meta={String(workspaces.length)}>
           <Rules>
             <div className="overflow-x-auto">
-              <div className="min-w-[640px]">
+              <div className="min-w-[760px]">
                 <div className={`${WS_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
                   <span>Name</span>
                   <span className="text-right">Colonies</span>
@@ -469,14 +478,23 @@ export function OverviewView({
                   <span className="text-right">Fail</span>
                   <span className="text-right">Spend</span>
                   <span>Trend</span>
+                  <span className="sr-only">Actions</span>
                 </div>
                 {compared.map((c) => (
-                  <button
+                  <div
                     key={c.org}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setDashOrg(c.org)}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setDashOrg(c.org);
+                      }
+                    }}
                     title={`open the ${c.org} dashboard`}
-                    className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2`}
+                    className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent`}
                   >
                     <span className="flex min-w-0 items-center gap-2.5">
                       <OrgTile org={c.org} avatar={c.avatar} size={22} />
@@ -493,7 +511,13 @@ export function OverviewView({
                     </span>
                     <span className="text-right">{formatCost(c.spend)}</span>
                     <TrendLine values={dailyCosts(current, c.org)} />
-                  </button>
+                    <RedTeamActions
+                      org={c.org}
+                      live={runs.filter((r) => sameOrg(r.org, c.org) && ["armed", "waiting", "running", "draining"].includes(r.state)).length}
+                      onStart={() => setRedTeam({ org: c.org, view: "wizard" })}
+                      onHistory={() => setRedTeam({ org: c.org, view: "history" })}
+                    />
+                  </div>
                 ))}
               </div>
             </div>
@@ -634,15 +658,73 @@ export function OverviewView({
           <BurnDownCard />
           <FleetPanel hosts={fleetHosts} />
           <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
-          <RedTeamCard runs={runs} sessions={sessions} onStart={onStart} onStop={onStop} onOpenColony={onOpenColony} />
         </div>
       </div>
+      <RedTeamWizard
+        org={redTeam?.org ?? null}
+        open={redTeam?.view === "wizard"}
+        sessions={sessions}
+        runs={runs}
+        onStart={onStart}
+        onClose={() => setRedTeam((r) => (r?.view === "wizard" ? null : r))}
+        onDone={() => {}}
+        onOpenHistory={(org) => setRedTeam({ org, view: "history" })}
+      />
+      <RedTeamHistory
+        org={redTeam?.org ?? null}
+        open={redTeam?.view === "history"}
+        sessions={sessions}
+        runs={runs}
+        onStop={onStop}
+        onOpenColony={onOpenColony}
+        onClose={() => setRedTeam((r) => (r?.view === "history" ? null : r))}
+        onNew={(org) => setRedTeam({ org, view: "wizard" })}
+      />
     </main>
   );
 }
 
+/** A workspace row's red-team buttons: start one (the wizard), or see what ran (the history). */
+function RedTeamActions({ org, live, onStart, onHistory }: { org: string; live: number; onStart: () => void; onHistory: () => void }): ReactElement {
+  const stop = (fn: () => void) => (e: React.MouseEvent | React.KeyboardEvent) => {
+    e.stopPropagation();
+    fn();
+  };
+  return (
+    <span className="flex items-center justify-end gap-1" onKeyDown={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        onClick={stop(onStart)}
+        aria-label={`start a red team on ${org}`}
+        title="Hunt for bugs with a red-team swarm"
+        className="inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-panel px-2 py-1 text-[12px] text-text hover:border-border-strong hover:bg-panel-2"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.2 7.5 9.5 4.4-1.3 7.5-4.9 7.5-9.5V6z" />
+          <path d="m9.5 12 2 2 3.5-4" />
+        </svg>
+        Red team
+        {live > 0 && <span className="rounded-full bg-accent px-1.5 text-[10.5px] tabular-nums text-on-accent">{live}</span>}
+      </button>
+      <button
+        type="button"
+        onClick={stop(onHistory)}
+        aria-label={`red-team history for ${org}`}
+        title="Red-team history and schedules"
+        className="grid size-7 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-muted hover:bg-panel-3 hover:text-text"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+          <path d="M3.5 4.5v4h4" />
+          <path d="M12 7.5V12l3 2" />
+        </svg>
+      </button>
+    </span>
+  );
+}
+
 /** The workspaces table's grid, shared by its header and rows. */
-const WS_GRID = "grid grid-cols-[minmax(0,1.6fr)_64px_84px_64px_64px_84px_minmax(48px,1fr)] items-center gap-4";
+const WS_GRID = "grid grid-cols-[minmax(0,1.6fr)_64px_84px_64px_64px_84px_minmax(48px,1fr)_auto] items-center gap-4";
 
 /** How many workspaces "Share by workspace" lists before "Show all". */
 const SHARE_LIMIT = 5;

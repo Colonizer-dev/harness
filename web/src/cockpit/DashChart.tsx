@@ -709,11 +709,14 @@ export function RangePicker({
   onRange,
   compare,
   onCompare,
+  emptyPrevious = false,
 }: {
   range: RangeDays;
   onRange: (range: RangeDays) => void;
   compare: boolean;
   onCompare: () => void;
+  /** Nothing happened in the previous period, so comparing shows flat zeros; the switch says so. */
+  emptyPrevious?: boolean;
 }): ReactElement {
   return (
     <div className="flex items-center gap-2">
@@ -734,12 +737,13 @@ export function RangePicker({
         type="button"
         role="switch"
         aria-checked={compare}
-        title={`compare to the previous ${range}d`}
+        title={emptyPrevious ? `No activity in the previous ${range}d yet` : `compare to the previous ${range}d`}
         onClick={onCompare}
-        className={`flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-transparent px-3 py-[7px] text-[13px] hover:border-border-strong ${compare ? "text-text" : "text-muted"}`}
+        className={`relative z-[1] flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-transparent px-3 py-[7px] text-[13px] hover:border-border-strong ${compare ? "text-text" : "text-muted"}`}
       >
         <Switch on={compare} />
         Compare
+        {compare && emptyPrevious && <span className="text-[11.5px] text-faint">· prev {range}d empty</span>}
       </button>
     </div>
   );

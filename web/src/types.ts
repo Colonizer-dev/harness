@@ -1071,6 +1071,13 @@ export interface RedTeamRun {
   ended_at: string | null;
   /** The server's reason for holding an armed run at the gate; null while none applies. */
   gate_reason: string | null;
+  /** Who hunts: `swarm` (colony hunters). Absent from runs made before hunters were named. */
+  hunter?: string;
+  /** The hunters' orchestrator / subagent models when named; null uses the agent defaults. */
+  model?: string | null;
+  subagent_model?: string | null;
+  /** The schedule that started this run, if one did. */
+  schedule_id?: string | null;
 }
 
 /** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */
@@ -1080,4 +1087,50 @@ export interface StartRedTeamRunRequest {
   modules?: string[];
   autofix?: boolean;
   arm?: boolean;
+  hunter?: string;
+  model?: string | null;
+  subagent_model?: string | null;
+}
+
+/** When a red-team schedule fires, in UTC. `weekday` 0 = Monday; a monthly `day` past the month's end fires on its last day. */
+export type RedTeamCadence =
+  | { every: "weekly"; weekday: number; hour: number; minute: number }
+  | { every: "monthly"; day: number; hour: number; minute: number };
+
+/** A recurring red-team run (GET /api/redteam/schedules). */
+export interface RedTeamSchedule {
+  id: string;
+  org: string;
+  repos: string[];
+  hunter: string;
+  swarm_size: number;
+  model: string | null;
+  subagent_model: string | null;
+  autofix: boolean;
+  cadence: RedTeamCadence;
+  enabled: boolean;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_result: string | null;
+  created_at: string;
+}
+
+/** POST /api/redteam/schedules, and PUT /api/redteam/schedules/{id} (a full replace). */
+export interface NewRedTeamSchedule {
+  org: string;
+  repos: string[];
+  hunter?: string;
+  swarm_size?: number;
+  model?: string | null;
+  subagent_model?: string | null;
+  autofix?: boolean;
+  cadence: RedTeamCadence;
+  enabled?: boolean;
+}
+
+/** GET /api/hunters/{id}/probe: whether an external hunter is installed and could run here. */
+export interface HunterProbe {
+  manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };
+  installed: string | null;
+  probe: { runtime_ok: boolean; docker_ok: boolean; ready: boolean; detail: string };
 }

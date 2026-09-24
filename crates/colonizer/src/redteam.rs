@@ -17,7 +17,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -35,6 +35,10 @@ const DEFAULT_MODULE: &str = "general";
 /// The modules a run may name. Only the built-in one exists until module manifests land (#216); an
 /// unknown name is refused rather than run as if it were the default.
 const KNOWN_MODULES: &[&str] = &[DEFAULT_MODULE];
+/// Who hunts: the built-in swarm of colony hunters. The external hunter modules (Strix, Shannon —
+/// hunters.rs) install and probe, but a run does not drive their scans yet, so naming one is refused
+/// with the reason rather than quietly running the swarm instead.
+const DEFAULT_HUNTER: &str = "swarm";
 
 /// The eight focus areas a run's hunters are drawn from, cycled as `i % 8`. Each brief names its own
 /// focus and lists the others, so the swarm keeps out of one another's way.
@@ -115,6 +119,14 @@ pub struct RedTeamRun {
     pub ended_at: Option<DateTime<Utc>>,
     /// Human-readable, set while `armed`/`waiting`: why the run has not launched yet.
     pub gate_reason: Option<String>,
+    /// Who hunts: `swarm` (colony hunters). Empty in files written before hunters were named.
+    pub hunter: String,
+    /// The hunters' orchestrator model, when the operator named one; `None` uses routing.
+    pub model: Option<String>,
+    /// The hunters' subagent model, when the operator named one.
+    pub subagent_model: Option<String>,
+    /// The schedule that started this run, if one did.
+    pub schedule_id: Option<String>,
 }
 
 impl Default for RedTeamRun {
@@ -133,6 +145,10 @@ impl Default for RedTeamRun {
             started_at: None,
             ended_at: None,
             gate_reason: None,
+            hunter: DEFAULT_HUNTER.to_string(),
+            model: None,
+            subagent_model: None,
+            schedule_id: None,
         }
     }
 }
@@ -145,16 +161,31 @@ pub struct RedTeamStore {
     file: PathBuf,
     /// Serialises saves so two writers cannot interleave temp files.
     persist: Mutex<()>,
+    /// Recurring runs, saved to `<config_dir>/redteam-schedules.json`: operator configuration, so it
+    /// lives with the other settings rather than with the run history.
+    schedules: RwLock<Vec<RedTeamSchedule>>,
+    schedules_file: PathBuf,
+    persist_schedules: Mutex<()>,
 }
 
 impl RedTeamStore {
-    pub fn new(data_dir: &FsPath) -> Self {
+    pub fn new(data_dir: &FsPath, config_dir: &FsPath) -> Self {
         let file = data_dir.join("redteam.json");
+        let schedules_file = config_dir.join("redteam-schedules.json");
         Self {
             runs: RwLock::new(load_runs(&file)),
             file,
             persist: Mutex::new(()),
+            schedules: RwLock::new(load_schedules(&schedules_file)),
+            schedules_file,
+            persist_schedules: Mutex::new(()),
         }
+    }
+
+    async fn save_schedules(&self) -> Result<()> {
+        let _guard = self.persist_schedules.lock().await;
+        let data = serde_json::to_vec_pretty(&*self.schedules.read().await)?;
+        write_atomic(&self.schedules_file, &data).await
     }
 
     pub(crate) async fn save(&self) -> Result<()> {
@@ -274,6 +305,8 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize) -> Value {
         "autopilot": run.autofix,
         "allow_duplicate": true,
         "model_tier": null,
+        "model_override": run.model,
+        "subagent_model_override": run.subagent_model,
         "after": null,
     })
 }
@@ -609,9 +642,18 @@ pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult
     Ok(Json(run))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NewRedTeamRun {
     repo: String,
+    /// Who hunts; unset is the swarm.
+    #[serde(default)]
+    hunter: Option<String>,
+    /// The hunters' orchestrator model: a Claude alias or ID, or `<provider>/<model>`.
+    #[serde(default)]
+    model: Option<String>,
+    /// The hunters' subagent model.
+    #[serde(default)]
+    subagent_model: Option<String>,
     #[serde(default)]
     swarm_size: Option<usize>,
     #[serde(default)]
@@ -625,6 +667,31 @@ pub struct NewRedTeamRun {
 }
 
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -> ApiResult<RedTeamRun> {
+    Ok(Json(start(&app, req, None).await?))
+}
+
+/// Which hunter a request names, checked: the swarm runs; a known external hunter is refused with
+/// why; anything else is unknown.
+fn check_hunter(raw: Option<&str>) -> Result<String, String> {
+    let hunter = raw.map(str::trim).filter(|h| !h.is_empty()).unwrap_or(DEFAULT_HUNTER);
+    if hunter == DEFAULT_HUNTER {
+        return Ok(hunter.to_string());
+    }
+    match crate::hunters::builtin().into_iter().find(|m| m.id == hunter) {
+        Some(m) => Err(format!(
+            "{} cannot run as a red-team hunter in this build yet: its scans are not driven by runs (install and probe it at /api/hunters/{}); use the swarm",
+            m.name, m.id
+        )),
+        None => Err(format!("unknown hunter {hunter:?}; use \"swarm\"")),
+    }
+}
+
+/// The one way a run starts — the handler and the scheduler both come through here, so a scheduled
+/// run gets exactly the validation and gate a manual one does.
+pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<String>) -> Result<RedTeamRun, crate::AppError> {
+    let hunter = check_hunter(req.hunter.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    let model = crate::sessions::launch_model(app, req.model.as_deref(), "model")?;
+    let subagent_model = crate::sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
@@ -654,7 +721,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -
     }
     let autofix = req.autofix.unwrap_or(false);
     let armed = req.arm.unwrap_or(false);
-    let live = live_count(&app).await;
+    let live = live_count(app).await;
     // The nest gate is checked before anything is created, so a start-now against live colonies
     // spends nothing.
     if !armed && live > 0 {
@@ -686,6 +753,10 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -
             started_at: if armed { None } else { Some(now) },
             ended_at: None,
             gate_reason: if armed && live > 0 { Some(gate_reason(live)) } else { None },
+            hunter,
+            model,
+            subagent_model,
+            schedule_id,
         };
         runs.push(run.clone());
         run
@@ -697,7 +768,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -
     } else {
         // Start-now on an empty nest: launch inside the handler; `launch_run` records the launch
         // before any hunter exists, and this last write persists the run with the hunters attached.
-        launch_run(&app, &mut run).await;
+        launch_run(app, &mut run).await;
         let _ = app
             .redteam
             .update(&id, |r| {
@@ -708,7 +779,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -
             })
             .await;
     }
-    Ok(Json(run))
+    Ok(run)
 }
 
 /// Stop the run and every hunter it started, through the real session stop path: live hunters are
@@ -761,6 +832,324 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Schedules: a run every week or every month
+// ---------------------------------------------------------------------------
+
+/// When a schedule fires, in UTC: the cockpit converts the operator's local choice before saving.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "every", rename_all = "snake_case")]
+pub enum Cadence {
+    /// `weekday` 0 = Monday … 6 = Sunday.
+    Weekly { weekday: u32, hour: u32, minute: u32 },
+    /// `day` 1–31; a day past the month's end fires on its last day (31 → 30 April, 28/29 February).
+    Monthly { day: u32, hour: u32, minute: u32 },
+}
+
+impl Cadence {
+    fn check(&self) -> Result<(), String> {
+        let (hour, minute) = match self {
+            Cadence::Weekly { weekday, hour, minute } => {
+                if *weekday > 6 {
+                    return Err(format!("weekday must be 0 (Monday) to 6 (Sunday), got {weekday}"));
+                }
+                (*hour, *minute)
+            }
+            Cadence::Monthly { day, hour, minute } => {
+                if !(1..=31).contains(day) {
+                    return Err(format!("day must be 1 to 31, got {day}"));
+                }
+                (*hour, *minute)
+            }
+        };
+        if hour > 23 || minute > 59 {
+            return Err(format!("time must be 00:00 to 23:59 UTC, got {hour:02}:{minute:02}"));
+        }
+        Ok(())
+    }
+}
+
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|d| d.pred_opt())
+        .map(|d| d.day())
+        .unwrap_or(28)
+}
+
+fn at(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
+    date.and_hms_opt(hour, minute, 0).map(|t| Utc.from_utc_datetime(&t))
+}
+
+/// The first time the cadence fires strictly after `after`. Pure, so the month-end and week-wrap
+/// rules are tested with fixed dates.
+pub fn next_run_after(cadence: &Cadence, after: DateTime<Utc>) -> DateTime<Utc> {
+    let today = after.date_naive();
+    match *cadence {
+        Cadence::Weekly { weekday, hour, minute } => {
+            let ahead = (weekday + 7 - today.weekday().num_days_from_monday()) % 7;
+            for extra in [0, 7] {
+                if let Some(when) = at(today + ChronoDuration::days(i64::from(ahead + extra)), hour, minute)
+                    && when > after
+                {
+                    return when;
+                }
+            }
+            after + ChronoDuration::days(7)
+        }
+        Cadence::Monthly { day, hour, minute } => {
+            let (mut year, mut month) = (today.year(), today.month());
+            for _ in 0..3 {
+                let d = day.min(last_day_of_month(year, month));
+                if let Some(when) = NaiveDate::from_ymd_opt(year, month, d).and_then(|date| at(date, hour, minute))
+                    && when > after
+                {
+                    return when;
+                }
+                (year, month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+            }
+            after + ChronoDuration::days(28)
+        }
+    }
+}
+
+/// A recurring red-team run over some of an org's repositories.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RedTeamSchedule {
+    pub id: String,
+    pub org: String,
+    pub repos: Vec<String>,
+    pub hunter: String,
+    pub swarm_size: usize,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub subagent_model: Option<String>,
+    #[serde(default)]
+    pub autofix: bool,
+    pub cadence: Cadence,
+    pub enabled: bool,
+    pub next_run_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Utc>>,
+    /// What the last firing did, per repository: started, or why not.
+    #[serde(default)]
+    pub last_result: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+fn load_schedules(path: &FsPath) -> Vec<RedTeamSchedule> {
+    match std::fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            eprintln!(
+                "redteam: could not read {}: {e}; no red-team schedules loaded",
+                path.display()
+            );
+            Vec::new()
+        }
+        Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
+            eprintln!(
+                "redteam: could not parse {}: {e}; no red-team schedules loaded",
+                path.display()
+            );
+            Vec::new()
+        }),
+    }
+}
+
+/// The schedules due at `now`: enabled, and their next run is not in the future.
+pub fn due(schedules: &[RedTeamSchedule], now: DateTime<Utc>) -> Vec<String> {
+    schedules
+        .iter()
+        .filter(|s| s.enabled && s.next_run_at <= now)
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+#[derive(Clone, Deserialize)]
+pub struct NewSchedule {
+    org: String,
+    repos: Vec<String>,
+    #[serde(default)]
+    hunter: Option<String>,
+    #[serde(default)]
+    swarm_size: Option<usize>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    subagent_model: Option<String>,
+    #[serde(default)]
+    autofix: Option<bool>,
+    cadence: Cadence,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// A schedule request, validated the way a run is, so a schedule cannot hold something that would
+/// only fail when it fires.
+fn schedule_from(
+    app: &App,
+    req: NewSchedule,
+    id: String,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<RedTeamSchedule, crate::AppError> {
+    let bad = |m: &str| client_error(StatusCode::BAD_REQUEST, m);
+    let org = req.org.trim().to_string();
+    if org.is_empty() {
+        return Err(bad("org is required"));
+    }
+    let repos: Vec<String> = req
+        .repos
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    if repos.is_empty() {
+        return Err(bad("pick at least one repository"));
+    }
+    for repo in &repos {
+        if !valid_repo(repo) {
+            return Err(bad(&format!("invalid repository name {repo:?}")));
+        }
+        if !repo.split('/').next().is_some_and(|owner| owner.eq_ignore_ascii_case(&org)) {
+            return Err(bad(&format!("{repo} is not in {org}")));
+        }
+    }
+    let hunter = check_hunter(req.hunter.as_deref()).map_err(|e| bad(&e))?;
+    let swarm_size = req.swarm_size.unwrap_or(DEFAULT_SWARM);
+    if !(1..=MAX_SWARM).contains(&swarm_size) {
+        return Err(bad(&format!("swarm_size must be 1..={MAX_SWARM}, got {swarm_size}")));
+    }
+    req.cadence.check().map_err(|e| bad(&e))?;
+    let model = crate::sessions::launch_model(app, req.model.as_deref(), "model")?;
+    let subagent_model = crate::sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
+    Ok(RedTeamSchedule {
+        id,
+        org,
+        repos,
+        hunter,
+        swarm_size,
+        model,
+        subagent_model,
+        autofix: req.autofix.unwrap_or(false),
+        next_run_at: next_run_after(&req.cadence, now),
+        cadence: req.cadence,
+        enabled: req.enabled.unwrap_or(true),
+        last_run_at: None,
+        last_result: None,
+        created_at,
+    })
+}
+
+pub async fn list_schedules(State(app): State<Shared>) -> Json<Vec<RedTeamSchedule>> {
+    Json(app.redteam.schedules.read().await.clone())
+}
+
+pub async fn create_schedule(State(app): State<Shared>, Json(req): Json<NewSchedule>) -> ApiResult<RedTeamSchedule> {
+    let now = Utc::now();
+    let schedule = schedule_from(&app, req, format!("rts_{}", short_id()), now, now)?;
+    app.redteam.schedules.write().await.push(schedule.clone());
+    app.redteam.save_schedules().await?;
+    Ok(Json(schedule))
+}
+
+/// Replaces a schedule's settings; its id, creation time and last firing are kept, and the next run
+/// is recomputed from the (possibly new) cadence.
+pub async fn update_schedule(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    Json(req): Json<NewSchedule>,
+) -> ApiResult<RedTeamSchedule> {
+    let now = Utc::now();
+    let existing = app
+        .redteam
+        .schedules
+        .read()
+        .await
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such red-team schedule"))?;
+    let mut schedule = schedule_from(&app, req, id.clone(), existing.created_at, now)?;
+    schedule.last_run_at = existing.last_run_at;
+    schedule.last_result = existing.last_result;
+    {
+        let mut schedules = app.redteam.schedules.write().await;
+        let Some(slot) = schedules.iter_mut().find(|s| s.id == id) else {
+            return Err(client_error(StatusCode::NOT_FOUND, "no such red-team schedule"));
+        };
+        *slot = schedule.clone();
+    }
+    app.redteam.save_schedules().await?;
+    Ok(Json(schedule))
+}
+
+pub async fn delete_schedule(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let removed = {
+        let mut schedules = app.redteam.schedules.write().await;
+        let before = schedules.len();
+        schedules.retain(|s| s.id != id);
+        before != schedules.len()
+    };
+    if !removed {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such red-team schedule"));
+    }
+    app.redteam.save_schedules().await?;
+    Ok(Json(json!({"deleted": id})))
+}
+
+/// Fires every due schedule: one armed run per repository through [`start`], exactly like a manual
+/// start with "when the nest is empty", then books the next run. A repository that already has an
+/// active run is skipped and says so in `last_result`.
+pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
+    let due_ids = due(&app.redteam.schedules.read().await, now);
+    for id in due_ids {
+        let Some(schedule) = app.redteam.schedules.read().await.iter().find(|s| s.id == id).cloned() else {
+            continue;
+        };
+        let mut notes = Vec::new();
+        for repo in &schedule.repos {
+            let req = NewRedTeamRun {
+                repo: repo.clone(),
+                hunter: Some(schedule.hunter.clone()),
+                model: schedule.model.clone(),
+                subagent_model: schedule.subagent_model.clone(),
+                swarm_size: Some(schedule.swarm_size),
+                modules: None,
+                autofix: Some(schedule.autofix),
+                arm: Some(true),
+            };
+            match start(app, req, Some(schedule.id.clone())).await {
+                Ok(run) => notes.push(format!("{repo}: started {}", run.id)),
+                Err(e) => notes.push(format!("{repo}: {}", e.message())),
+            }
+        }
+        {
+            let mut schedules = app.redteam.schedules.write().await;
+            if let Some(s) = schedules.iter_mut().find(|s| s.id == id) {
+                s.last_run_at = Some(now);
+                s.last_result = Some(notes.join("; "));
+                s.next_run_at = next_run_after(&s.cadence, now);
+            }
+        }
+        if let Err(e) = app.redteam.save_schedules().await {
+            eprintln!("redteam: could not save the red-team schedules: {e:#}");
+        }
+    }
+}
+
+/// The schedule loop, spawned next to [`run`]: once a minute, fire whatever is due.
+pub async fn run_schedules(app: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        fire_due(&app, Utc::now()).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,6 +1173,9 @@ mod tests {
     fn new_run(repo: &str, swarm_size: Option<usize>, arm: bool) -> NewRedTeamRun {
         NewRedTeamRun {
             repo: repo.into(),
+            hunter: None,
+            model: None,
+            subagent_model: None,
             swarm_size,
             modules: None,
             autofix: None,
@@ -1164,8 +1556,14 @@ mod tests {
             started_at: None,
             ended_at: None,
             gate_reason: None,
+            hunter: "swarm".into(),
+            model: None,
+            subagent_model: None,
+            schedule_id: None,
         };
         let value = serde_json::to_value(&run).unwrap();
+        assert_eq!(value["hunter"], "swarm");
+        assert!(value["model"].is_null() && value["subagent_model"].is_null() && value["schedule_id"].is_null());
         assert_eq!(value["state"], "armed");
         assert_eq!(value["hunters"][0]["module"], "general");
         assert!(value["hunters"][0]["version"].is_null(), "version stays null until #216");
@@ -1174,5 +1572,244 @@ mod tests {
         for key in ["found", "validated", "rejected", "filed"] {
             assert_eq!(value["counts"][key], 0, "count key {key}");
         }
+    }
+
+    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    #[test]
+    fn weekly_schedules_fire_on_the_next_matching_weekday_after_now() {
+        // 2026-09-24 is a Thursday (weekday 3).
+        let thu = Cadence::Weekly {
+            weekday: 3,
+            hour: 9,
+            minute: 0,
+        };
+        assert_eq!(
+            next_run_after(&thu, utc(2026, 9, 24, 8, 59)),
+            utc(2026, 9, 24, 9, 0),
+            "later today"
+        );
+        assert_eq!(
+            next_run_after(&thu, utc(2026, 9, 24, 9, 0)),
+            utc(2026, 10, 1, 9, 0),
+            "strictly after: exactly now is next week"
+        );
+        let mon = Cadence::Weekly {
+            weekday: 0,
+            hour: 2,
+            minute: 30,
+        };
+        assert_eq!(
+            next_run_after(&mon, utc(2026, 9, 24, 12, 0)),
+            utc(2026, 9, 28, 2, 30),
+            "wraps into next week"
+        );
+        let sun = Cadence::Weekly {
+            weekday: 6,
+            hour: 23,
+            minute: 59,
+        };
+        assert_eq!(
+            next_run_after(&sun, utc(2026, 12, 31, 0, 0)),
+            utc(2027, 1, 3, 23, 59),
+            "across a year end"
+        );
+    }
+
+    #[test]
+    fn monthly_schedules_clamp_to_the_months_last_day() {
+        let d31 = Cadence::Monthly {
+            day: 31,
+            hour: 6,
+            minute: 0,
+        };
+        assert_eq!(
+            next_run_after(&d31, utc(2026, 9, 24, 0, 0)),
+            utc(2026, 9, 30, 6, 0),
+            "September has 30 days"
+        );
+        assert_eq!(next_run_after(&d31, utc(2026, 9, 30, 6, 0)), utc(2026, 10, 31, 6, 0));
+        assert_eq!(
+            next_run_after(&d31, utc(2027, 2, 1, 0, 0)),
+            utc(2027, 2, 28, 6, 0),
+            "February, common year"
+        );
+        assert_eq!(
+            next_run_after(&d31, utc(2028, 2, 1, 0, 0)),
+            utc(2028, 2, 29, 6, 0),
+            "February, leap year"
+        );
+        let d1 = Cadence::Monthly {
+            day: 1,
+            hour: 0,
+            minute: 0,
+        };
+        assert_eq!(
+            next_run_after(&d1, utc(2026, 12, 15, 0, 0)),
+            utc(2027, 1, 1, 0, 0),
+            "across a year end"
+        );
+        let d15 = Cadence::Monthly {
+            day: 15,
+            hour: 12,
+            minute: 0,
+        };
+        assert_eq!(
+            next_run_after(&d15, utc(2026, 9, 15, 11, 0)),
+            utc(2026, 9, 15, 12, 0),
+            "later the same day"
+        );
+    }
+
+    #[test]
+    fn cadences_out_of_range_are_refused() {
+        assert!(
+            Cadence::Weekly {
+                weekday: 7,
+                hour: 0,
+                minute: 0
+            }
+            .check()
+            .is_err()
+        );
+        assert!(
+            Cadence::Monthly {
+                day: 0,
+                hour: 0,
+                minute: 0
+            }
+            .check()
+            .is_err()
+        );
+        assert!(
+            Cadence::Monthly {
+                day: 32,
+                hour: 0,
+                minute: 0
+            }
+            .check()
+            .is_err()
+        );
+        assert!(
+            Cadence::Weekly {
+                weekday: 1,
+                hour: 24,
+                minute: 0
+            }
+            .check()
+            .is_err()
+        );
+        assert!(
+            Cadence::Weekly {
+                weekday: 1,
+                hour: 23,
+                minute: 60
+            }
+            .check()
+            .is_err()
+        );
+        assert!(
+            Cadence::Monthly {
+                day: 31,
+                hour: 23,
+                minute: 59
+            }
+            .check()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn only_enabled_schedules_whose_time_has_come_are_due() {
+        let now = utc(2026, 9, 24, 12, 0);
+        let schedule = |id: &str, enabled: bool, next: DateTime<Utc>| RedTeamSchedule {
+            id: id.into(),
+            org: "acme".into(),
+            repos: vec!["acme/web".into()],
+            hunter: "swarm".into(),
+            swarm_size: 3,
+            model: None,
+            subagent_model: None,
+            autofix: false,
+            cadence: Cadence::Weekly {
+                weekday: 0,
+                hour: 0,
+                minute: 0,
+            },
+            enabled,
+            next_run_at: next,
+            last_run_at: None,
+            last_result: None,
+            created_at: now,
+        };
+        let list = vec![
+            schedule("past", true, utc(2026, 9, 24, 11, 59)),
+            schedule("exactly", true, now),
+            schedule("future", true, utc(2026, 9, 24, 12, 1)),
+            schedule("off", false, utc(2026, 9, 1, 0, 0)),
+        ];
+        assert_eq!(due(&list, now), vec!["past".to_string(), "exactly".to_string()]);
+    }
+
+    #[test]
+    fn external_hunters_are_refused_with_the_reason_and_the_swarm_runs() {
+        assert_eq!(check_hunter(None).unwrap(), "swarm");
+        assert_eq!(check_hunter(Some(" swarm ")).unwrap(), "swarm");
+        let strix = check_hunter(Some("strix")).unwrap_err();
+        assert!(strix.contains("Strix") && strix.contains("not driven by runs"), "{strix}");
+        assert!(check_hunter(Some("shannon")).unwrap_err().contains("Shannon"));
+        assert!(check_hunter(Some("nmap")).unwrap_err().contains("unknown hunter"));
+    }
+
+    #[tokio::test]
+    async fn a_due_schedule_arms_one_run_per_repo_and_books_the_next_run() {
+        let root = temp_root();
+        let app = test_app(&root);
+        // A live colony keeps the gate shut, so the armed runs stay armed and nothing launches.
+        push_colony(&app, "colony", SessionStatus::Running).await;
+        let now = utc(2026, 9, 24, 12, 0);
+        let req: NewSchedule = serde_json::from_value(json!({
+            "org": "acme",
+            "repos": ["acme/web", "acme/api"],
+            "cadence": {"every": "weekly", "weekday": 3, "hour": 12, "minute": 0}
+        }))
+        .unwrap();
+        let mut schedule = schedule_from(&app, req, "rts_x".into(), now, now - ChronoDuration::minutes(1)).unwrap();
+        assert_eq!(schedule.next_run_at, now);
+        schedule.enabled = true;
+        app.redteam.schedules.write().await.push(schedule);
+        fire_due(&app, now).await;
+        let runs = app.redteam.runs.read().await.clone();
+        assert_eq!(runs.len(), 2);
+        assert!(
+            runs.iter()
+                .all(|r| r.state == RedTeamState::Armed && r.schedule_id.as_deref() == Some("rts_x"))
+        );
+        let schedule = app.redteam.schedules.read().await[0].clone();
+        assert_eq!(schedule.last_run_at, Some(now));
+        assert_eq!(schedule.next_run_at, utc(2026, 10, 1, 12, 0));
+        assert!(schedule.last_result.unwrap().contains("acme/web: started"));
+        // Firing again the same minute is a no-op: nothing is due until next week.
+        fire_due(&app, now).await;
+        assert_eq!(app.redteam.runs.read().await.len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_schedule_for_another_orgs_repo_is_refused() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let now = Utc::now();
+        let req: NewSchedule = serde_json::from_value(json!({
+            "org": "acme",
+            "repos": ["other/web"],
+            "cadence": {"every": "monthly", "day": 1, "hour": 0, "minute": 0}
+        }))
+        .unwrap();
+        let err = schedule_from(&app, req, "rts_y".into(), now, now).unwrap_err();
+        assert!(err.message().contains("not in acme"), "{}", err.message());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -713,6 +713,8 @@ mod tests {
             host_disk_bytes: None,
             model_usage: None,
             model_tier: None,
+            model_override: None,
+            subagent_model_override: None,
             claude_account: None,
             model_routing: None,
             allowed_providers: None,

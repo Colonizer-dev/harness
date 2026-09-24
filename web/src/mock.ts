@@ -30,6 +30,9 @@ import type {
   PullStatus,
   Question,
   RedTeamRun,
+  RedTeamSchedule,
+  NewRedTeamSchedule,
+  RedTeamCadence,
   Repo,
   RuntimeInfo,
   Session,
@@ -1893,6 +1896,48 @@ export function createMockApi(): Api {
     { session: "demo1234", title: "Free-shipping threshold shows the cart subtotal", state: "rejected", reason: "does not reproduce on the staging sandbox", ts: ago(60 * 24 * 2) },
   ];
 
+  const redSchedules: RedTeamSchedule[] = [];
+  /** The first time `cadence` fires after `from`, in UTC — the server's rule, month-end clamp included. */
+  const nextRun = (cadence: RedTeamCadence, from: Date): string => {
+    const at = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d, cadence.hour, cadence.minute));
+    if (cadence.every === "weekly") {
+      const weekday = (from.getUTCDay() + 6) % 7;
+      const ahead = (cadence.weekday - weekday + 7) % 7;
+      for (const extra of [0, 7]) {
+        const when = at(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate() + ahead + extra);
+        if (when > from) return when.toISOString();
+      }
+    } else {
+      for (let k = 0; k < 3; k++) {
+        const y = from.getUTCFullYear();
+        const m = from.getUTCMonth() + k;
+        const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+        const when = at(y, m, Math.min(cadence.day, last));
+        if (when > from) return when.toISOString();
+      }
+    }
+    return new Date(from.getTime() + 7 * 86_400_000).toISOString();
+  };
+  const scheduleOf = (body: NewRedTeamSchedule, id: string, created: string): RedTeamSchedule => {
+    if (body.repos.length === 0) throw new ApiError("pick at least one repository", 400);
+    if (body.hunter && body.hunter !== "swarm") throw new ApiError(`${body.hunter} cannot run as a red-team hunter in this build yet`, 400);
+    return {
+      id,
+      org: body.org,
+      repos: [...body.repos],
+      hunter: "swarm",
+      swarm_size: body.swarm_size ?? 3,
+      model: body.model ?? null,
+      subagent_model: body.subagent_model ?? null,
+      autofix: body.autofix ?? false,
+      cadence: body.cadence,
+      enabled: body.enabled ?? true,
+      next_run_at: nextRun(body.cadence, new Date()),
+      last_run_at: null,
+      last_result: null,
+      created_at: created,
+    };
+  };
   const redRuns: RedTeamRun[] = [
     {
       id: "rt-demo1",
@@ -2633,9 +2678,53 @@ export function createMockApi(): Api {
     ended_at: null,
     gate_reason:
       body.arm && live > 0 ? `${live} colony${live === 1 ? "" : "ies"} live — the nest must empty first` : null,
+    hunter: body.hunter ?? "swarm",
+    model: body.model ?? null,
+    subagent_model: body.subagent_model ?? null,
+    schedule_id: null,
       };
       redRuns.unshift(run);
       return clone(run);
+    },
+    redTeamSchedules: () => later(() => redSchedules.map(clone)),
+    createRedTeamSchedule: async (body) => {
+      await sleep(250);
+      const schedule = scheduleOf(body, `rts-${Math.random().toString(16).slice(2, 8)}`, now());
+      redSchedules.push(schedule);
+      return clone(schedule);
+    },
+    updateRedTeamSchedule: async (id, body) => {
+      await sleep(200);
+      const at = redSchedules.findIndex((s) => s.id === id);
+      if (at < 0) throw new ApiError("no such red-team schedule", 404);
+      const next = { ...scheduleOf(body, id, redSchedules[at].created_at), last_run_at: redSchedules[at].last_run_at, last_result: redSchedules[at].last_result };
+      redSchedules[at] = next;
+      return clone(next);
+    },
+    deleteRedTeamSchedule: async (id) => {
+      await sleep(150);
+      const at = redSchedules.findIndex((s) => s.id === id);
+      if (at < 0) throw new ApiError("no such red-team schedule", 404);
+      redSchedules.splice(at, 1);
+    },
+    probeHunter: async (id) => {
+      await sleep(200);
+      const strix = id === "strix";
+      return {
+        manifest: {
+          id,
+          name: strix ? "Strix" : "Shannon",
+          description: strix
+            ? "Open-source AI penetration-testing agents that run code dynamically and validate findings with working PoCs."
+            : "Keygraph's AI pentester for web apps and APIs — no exploit, no report.",
+          homepage: strix ? "https://github.com/usestrix/strix" : "https://github.com/KeygraphHQ/shannon",
+          licence: strix ? "Apache-2.0" : "AGPL-3.0",
+          available: strix,
+          needs_docker: true,
+        },
+        installed: null,
+        probe: { runtime_ok: false, docker_ok: false, ready: false, detail: strix ? "binary not installed yet" : "manifest-only stub" },
+      };
     },
     stopRedTeamRun: async (id) => {
       await sleep(250);
