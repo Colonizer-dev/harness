@@ -345,6 +345,24 @@ pub(crate) async fn stop_colony(
     error: String,
     warn: String,
 ) -> bool {
+    stop_colony_with(app, s, due, Some(error), "warn", warn).await
+}
+
+/// [`stop_colony`] for a colony that is done rather than in trouble: the status goes to `stopped`
+/// with no `error`, and the harness log line is informational. A mapping colony whose map is drawn
+/// ends this way (maps.rs).
+pub(crate) async fn finish_colony(app: &Shared, s: &Session, due: impl FnOnce(&Session) -> bool, message: String) -> bool {
+    stop_colony_with(app, s, due, None, "info", message).await
+}
+
+async fn stop_colony_with(
+    app: &Shared,
+    s: &Session,
+    due: impl FnOnce(&Session) -> bool,
+    error: Option<String>,
+    level: &str,
+    warn: String,
+) -> bool {
     // The same discipline as the stop handler: the claim and the teardown under the colony's lifecycle
     // lock, so a resume that finds the `stopped` claim waits for the teardown to finish instead of
     // booting a microVM that this in-flight removal then takes with it.
@@ -356,7 +374,7 @@ pub(crate) async fn stop_colony(
             let due = x.status.is_live() && due(x);
             if due {
                 x.status = SessionStatus::Stopped;
-                x.error = Some(error);
+                x.error = error;
                 attention = x.clear_attention();
             }
             due
@@ -364,7 +382,7 @@ pub(crate) async fn stop_colony(
         .await
         .is_some_and(|(_, due)| due);
     if claimed {
-        app.session_log(&s.id, "warn", warn).await;
+        app.session_log(&s.id, level, warn).await;
         app.note_cleared_attention(&s.id, attention).await;
         teardown_vm(app, s).await;
         // A stopped colony frees the issue for a retry, on GitHub as well as locally.
