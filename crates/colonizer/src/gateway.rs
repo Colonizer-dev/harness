@@ -1102,7 +1102,11 @@ async fn proxy(
     // mothership-wide, so the token alone must not open one the colony's model settings never
     // routed to. Refused with the other local refusals — before credentials, budget, or any
     // upstream call — and like the budget 403, one Claude Code does not retry in a loop.
-    if !session.allowed_providers.contains(&id) {
+    if session
+        .allowed_providers
+        .as_ref()
+        .is_some_and(|allowed| !allowed.contains(&id))
+    {
         return api_error(
             StatusCode::FORBIDDEN,
             "permission_error",
@@ -1770,7 +1774,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         // Routed to deepseek, so the allowlist lets it by and the missing key is what refuses.
-        colony.allowed_providers = vec!["deepseek".into()];
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -1821,7 +1825,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         // Routed to kimi only: deepseek is configured on the mothership but not this colony's.
-        colony.allowed_providers = vec!["kimi".into()];
+        colony.allowed_providers = Some(vec!["kimi".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -1872,7 +1876,7 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
-        colony.allowed_providers = vec!["deepseek".into()];
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -1995,7 +1999,7 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
-        colony.allowed_providers = vec!["deepseek".into()];
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -2121,7 +2125,7 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
-        colony.allowed_providers = vec!["deepseek".into()];
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
