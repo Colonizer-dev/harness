@@ -64,3 +64,68 @@ else.
 
 One run of one task is one sample. A cost difference of a few cents is noise; a task that flips from pass to
 fail, or a question that stops being asked, is not.
+
+## Synthetic tasks
+
+Four hand-written tasks is a thin sample. `scripts/bench/synth.mjs` grows the set the SWE-smith way: inject
+a bug into real source, keep only the mutants that break the repository's own tests, and admit them through
+a gate. Stage one is procedural and Node-only — no model in the loop, so an accepted task costs $0 to make.
+
+### What the generator does
+
+A token-level scanner — deliberately not an AST — walks JavaScript source, skipping comments, strings,
+template literals (interpolations included) and regexes, including a `/` after a keyword such as `return`
+or `typeof`, where division is impossible. It yields mutation sites: operator swaps (`+`↔`-`, `*`↔`/`,
+`<`↔`<=`, `>`↔`>=`, `===`↔`!==`, `&&`↔`||`) and literal nudges (an integer n → n+1, `true`↔`false`).
+Where a construct is ambiguous — `**`, `++`, `=>`, a generator's `*`, a number that is not a plain
+integer — the site is skipped rather than risk nonsense. The issue text is templated from the failing test
+names and states the symptom only: which tests fail, and that the fix belongs in the source, not the tests.
+It never names the operator or the line.
+
+### The gate
+
+Each candidate is checked before it is trusted, with the counts landing in `runs.json` so the pass rate is
+measured, not asserted:
+
+1. the reference checkout must be green, or generation aborts;
+2. `node --check` on the mutated file — a mutant that does not parse is rejected as vacuous breakage;
+3. the bugged checkout runs its tests twice: the same tests failing both times, compared name by name,
+   admits the instance to the held-out pool; differing failures mark a real but flaky bug, which goes to
+   the raid set; nothing failing rejects it as survived.
+
+Generation also refuses a git work tree with uncommitted changes under the repo, so the commit recorded in
+each entry reproduces the mutated source exactly; outside git the commit is null. Every admitted entry
+carries its provenance — method, stack, source repo and commit, file and line, the mutation, the gate
+outcome with failing and passing test names and the margin (failing ÷ total), the date, and the cost.
+
+### The pool
+
+`--pool <dir>` is required and never defaulted into the repo: a held-out set committed next to the agents
+being scored is visible to them. It holds `heldout.json`, `raid.json` and `runs.json`, written through a
+temp file and a rename, and the mutating commands (`generate`, `review`, `record`) take an exclusive
+`pool.lock` while they work — a hard kill leaves that lock to remove by hand.
+
+### Review and rotation
+
+The first accepted tasks are reviewed by hand: `review` records `genuine` or `vacuous`, and `draw` refuses
+— "pool not open" — until 20 carry a verdict. Once open, `draw` hands out reviewed-genuine tasks
+oldest-first, `record` retires a task after three scoring decisions, and `inventory` shows counts by
+method, stack, status and age plus the gate's aggregate pass rate and cost per accepted task.
+
+### The raid set
+
+Flaky mutants are real bugs that are unfit to score, so they are kept apart: never drawn from, never
+sharing an id with the held-out pool, and carrying briefs that name the injected class of bug and where it
+lives — ready for the red-team hunters.
+
+### Measured so far
+
+One-off measurement, 2026-09-24, `node scripts/bench/synth.mjs generate --repo <dir> --pool <dir>`: the
+bench fixture admitted 3 of 3 candidates, `services/telemetry` 54 of 107 (53 survived, 0 syntax, 0 flaky) —
+57/110 (52%) overall, $0 per accepted task.
+
+### Not yet
+
+An LM-rewrite method and PR-mirroring; stacks beyond Node (Rust, Go); wiring the raid set into the
+red-team hunters' briefs (`crates/colonizer/src/redteam.rs`); and the human review of the first 20 accepted
+tasks plus the colony trial that opens the pool to scoring.
