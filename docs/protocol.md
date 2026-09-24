@@ -1489,9 +1489,10 @@ the colony. The mothership is on the operator's networks (tailnet, LAN), holds t
 sees every colony, so it can enforce per-provider concurrency, long timeouts, health, fallback and the
 per-colony spend budget.
 
-The gateway listens on `127.0.0.1:41750` (`COLONIZER_GATEWAY_BIND`). Colonies reach it as
-`http://host.microsandbox.internal:41750`; a colony with any route gets the `host` network profile.
-Provider keys never enter colonies.
+The gateway listens on `127.0.0.1:41750` by default (`COLONIZER_GATEWAY_BIND`, an IP:port socket
+address parsed once at startup; a malformed value refuses startup). Colonies reach it as
+`http://host.microsandbox.internal:41750`; a colony with any route gets the `public` profile plus
+an allow rule for the gateway port alone. Provider keys never enter colonies.
 
 **Routes.** `COLONIZER_MODEL_ROUTES` entries gain fields:
 

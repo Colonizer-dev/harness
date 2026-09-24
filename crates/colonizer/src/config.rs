@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
+    net::SocketAddr,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
@@ -20,8 +21,10 @@ pub struct Settings {
     pub assets: Option<PathBuf>,
     pub msb: String,
     pub claude_bin: Option<String>,
-    /// Provider gateway listener; colonies reach it through `host.microsandbox.internal`.
-    pub gateway_bind: String,
+    /// Provider gateway listener; colonies reach it through `host.microsandbox.internal`. An
+    /// IP:port socket address parsed once at startup ([`parse_gateway_bind`]), so the listener,
+    /// the colony model routes and the network fence all use the same port.
+    pub gateway_bind: SocketAddr,
     pub allowed_hosts: Vec<String>,
     /// Other mothership base URLs to poll for `GET /api/hosts` (issue #231's fleet view), reached
     /// over whatever private network the operator already has (their own tailnet/mesh, a VPN, a LAN).
@@ -59,7 +62,7 @@ impl Settings {
             }),
             assets,
             claude_bin: env_nonempty("COLONIZER_CLAUDE_BIN"),
-            gateway_bind: env_nonempty("COLONIZER_GATEWAY_BIND").unwrap_or_else(|| "127.0.0.1:41750".into()),
+            gateway_bind: Self::parse_gateway_bind(env_nonempty("COLONIZER_GATEWAY_BIND"))?,
             allowed_hosts: env_nonempty("COLONIZER_ALLOWED_HOSTS")
                 .unwrap_or_default()
                 .split(',')
@@ -78,6 +81,23 @@ impl Settings {
             bail!("COLONIZER_DATA_DIR must not contain ':' or ',' (it is used in microVM mount specs)");
         }
         Ok(settings)
+    }
+
+    /// `COLONIZER_GATEWAY_BIND` as a socket address, parsed once because the listener, the colony
+    /// model routes and the network fence must all agree on the port. A malformed value (including
+    /// a hostname like `localhost:41750`, which no longer resolves here) refuses startup instead of
+    /// silently falling back to 41750 — a fallback that would open whatever unrelated service
+    /// holds that port to every colony (issue #406).
+    fn parse_gateway_bind(raw: Option<String>) -> Result<SocketAddr> {
+        let Some(raw) = raw else {
+            return Ok(SocketAddr::from(([127, 0, 0, 1], 41750)));
+        };
+        match raw.parse() {
+            Ok(addr) => Ok(addr),
+            Err(_) => bail!(
+                "COLONIZER_GATEWAY_BIND must be an IP:port socket address such as 127.0.0.1:41750 (a hostname is not enough), got {raw:?}"
+            ),
+        }
     }
 
     pub fn asset(&self, relative: &str) -> Result<PathBuf> {
@@ -413,6 +433,36 @@ mod tests {
     }
 
     #[test]
+    fn gateway_bind_defaults_unset_parses_an_ip_port_and_refuses_everything_else() {
+        // Unset keeps the documented default; an explicit bind may name any IP, IPv6 included.
+        assert_eq!(
+            Settings::parse_gateway_bind(None).unwrap(),
+            "127.0.0.1:41750".parse().unwrap()
+        );
+        assert_eq!(
+            Settings::parse_gateway_bind(Some("192.168.1.9:52000".into())).unwrap(),
+            "192.168.1.9:52000".parse().unwrap()
+        );
+        assert_eq!(
+            Settings::parse_gateway_bind(Some("[::1]:41750".into())).unwrap(),
+            "[::1]:41750".parse().unwrap()
+        );
+        // Anything else must refuse startup, naming the variable and the bad value: the old
+        // fallback would have opened port 41750 to colonies whatever the operator meant (#406).
+        for raw in [
+            "41750",
+            "127.0.0.1",
+            "localhost:41750",
+            "127.0.0.1:notaport",
+            "127.0.0.1:70000",
+        ] {
+            let err = Settings::parse_gateway_bind(Some(raw.into())).unwrap_err().to_string();
+            assert!(err.contains("COLONIZER_GATEWAY_BIND"), "{raw:?}: {err}");
+            assert!(err.contains(raw), "the bad value {raw:?} should be named: {err}");
+        }
+    }
+
+    #[test]
     fn colonizer_toml_defaults_to_settlers_and_can_turn_it_off_or_name_someone_else() {
         let settlers = Some(CoAuthor::settlers());
         assert_eq!(FileConfig::default().publish.co_author, settlers);
@@ -589,7 +639,7 @@ mod tests {
             assets: Some(dir.clone()),
             msb: String::new(),
             claude_bin: None,
-            gateway_bind: String::new(),
+            gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: Vec::new(),
             fleet_peers: Vec::new(),
         };
