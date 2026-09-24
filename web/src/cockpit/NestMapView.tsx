@@ -143,8 +143,15 @@ export function NestMapView({
     if (!repo) return;
     setStarting(true);
     try {
-      setData(await api.mapRepo(repo));
-      toast(`A colony is drawing ${repo} — the map lands here when it is done`);
+      const next = await api.mapRepo(repo);
+      setData(next);
+      const colony = next.mapping?.id;
+      toast({
+        title: `Drawing ${repo}…`,
+        body: "A colony is reading the code and drawing it with archify; the map lands here when it is done.",
+        kind: "info",
+        action: colony ? { label: "Watch it work", onClick: () => onSelect(colony) } : undefined,
+      });
     } catch (error) {
       toast(errorMessage(error), "error");
     } finally {
