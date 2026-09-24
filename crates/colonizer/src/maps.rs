@@ -38,6 +38,17 @@ use std::{
 pub const MAP_ORIGIN: &str = "map";
 /// The skillset a mapping colony loads, whatever its org has switched on.
 pub const ARCHIFY_SKILLSET: &str = "archify";
+
+/// The agent settings a mapping colony runs with, over the install's own: one agent (no
+/// delegation), medium effort, on Sonnet for every tier. Mapping is read-heavy and bounded, so the
+/// orchestrator-plus-subagents shape only adds hand-off waits.
+pub const MAP_AGENT_SETTINGS: &[(&str, &str)] = &[
+    ("delegate", "off"),
+    ("effort", "medium"),
+    ("model", "claude-sonnet-5"),
+    ("model_low", ""),
+    ("model_high", ""),
+];
 /// Where the colony writes the map, as the colony sees it.
 const OUT_FILE: &str = "architecture.json";
 

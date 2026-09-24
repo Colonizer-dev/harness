@@ -1790,6 +1790,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             .unwrap_or_default();
         let with = crate::maps::with_archify(plugins);
         agent_choice.settings.insert("plugins".into(), Value::String(with));
+        // A map is one bounded job — read the repository, write one validated JSON file — so it
+        // runs as a single agent on a fast model rather than an orchestrator at full effort
+        // handing every grep to a subagent and waiting on it.
+        for (key, value) in crate::maps::MAP_AGENT_SETTINGS {
+            agent_choice.settings.insert((*key).into(), Value::String((*value).into()));
+        }
     }
     let mut runner_env = agent_env(&agent, &agent_choice);
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
