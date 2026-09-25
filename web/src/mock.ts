@@ -1636,6 +1636,8 @@ export function createMockApi(): Api {
       preset: "deepseek",
       // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
       pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
+      // A prepaid plan with a balance endpoint, so the health line shows "… left in plan" (issue #199).
+      quota: { url: "https://api.deepseek.com/plan", pointer: "/data/remaining_tokens" },
       ...DEFAULT_LIMITS,
       in_flight: 0,
       queued: 0,
@@ -2782,6 +2784,13 @@ export function createMockApi(): Api {
     fallback_model: fallback,
     // Omitted keeps the saved rates, like the key; the Mothership treats an all-0 object the same as none.
     pricing: body.pricing ?? existing?.pricing ?? null,
+    // Omitted keeps the saved probe; an empty URL clears it, like the Mothership.
+    quota:
+      body.quota === undefined
+        ? existing?.quota ?? null
+        : body.quota.url.trim()
+          ? { url: body.quota.url.trim(), pointer: body.quota.pointer.trim() }
+          : null,
     in_flight: existing?.in_flight ?? 0,
     queued: existing?.queued ?? 0,
     usage: existing?.usage ?? zeroUsage(),
@@ -2813,7 +2822,17 @@ export function createMockApi(): Api {
       ? { reachable: true, status: 404, latency_ms: 38, models: [], error: null, note: "no model list", checked_at }
       : { reachable: true, status: 404, latency_ms: 38, models: [], error: "GET /v1/models returned 404", note: null, checked_at };
       }
-      return { reachable: true, status: 200, latency_ms: 42, models: provider.models.length ? provider.models : ["ds4-flash"], error: null, note: null, checked_at };
+      return {
+        reachable: true,
+        status: 200,
+        latency_ms: 42,
+        models: provider.models.length ? provider.models : ["ds4-flash"],
+        error: null,
+        note: null,
+        // The plan balance rides along once the provider has a quota probe configured (issue #199).
+        ...(provider.quota ? { quota: { remaining: 12_345_678, error: null } } : null),
+        checked_at,
+      };
     },
     models: () =>
       later((): ModelOption[] => [

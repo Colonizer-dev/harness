@@ -403,9 +403,10 @@ there instead of to files (existing files stay until you move them on the cockpi
 also shows where each one lives). On macOS the Keychain ties an item to the binary that wrote it, so
 build with `COLONIZER_CODESIGN_IDENTITY` set (see `scripts/install.sh`) to keep access across rebuilds.
 
-Two limits bound one colony, both sandbox module settings (Settings → Modules → sandbox) with an override
-per org. Both default to `0` — unlimited — on purpose: there is no dollar figure or byte count that suits
-every deployment, and a default that silently stopped running colonies on upgrade would be a surprise.
+Three limits bound one colony, all sandbox module settings (Settings → Modules → sandbox); `budget_usd`
+and `host_disk` take an override per org, the token budget does not. All default to `0` — unlimited — on
+purpose: there is no dollar figure, token count or byte count that suits every deployment, and a default
+that silently stopped running colonies on upgrade would be a surprise.
 
 - **`budget_usd`** is the most one colony may spend on models, in dollars: Claude's own estimate plus what
   the provider gateway priced on routed providers. When the recorded spend passes it, the mothership stops
@@ -413,15 +414,21 @@ every deployment, and a default that silently stopped running colonies on upgrad
   the gateway — microsandbox swaps the credential for `api.anthropic.com` at its TLS edge — so Claude's
   spend is only seen when a turn ends, and both halves of the total are estimates. The worktree is kept:
   raise the budget and press Resume to continue.
+- **`budget_tokens`** is the most one colony may route through the provider gateway, in tokens — counted
+  for every routed request, whether or not the provider prices it. A prepaid token or coding plan prices
+  nothing, so its colonies spend $0 and `budget_usd` can never trip; this is the budget that holds them.
+  Enforcement is the dollar budget's: past it the colony is stopped, a routed request arriving past it is
+  refused with `403`, and the worktree is kept — raise the budget and press Resume to continue.
 - **`host_disk`** is the most one colony may leave on the host, a size like `16G`: its worktree plus its
   session directory and logs, measured every five minutes. It is not the microVM's root disk, which the
   `root_disk` setting bounds. Past the quota the colony is stopped with its worktree kept, because
   removing a colony's work is your call: clean up or raise the quota and press Resume to continue.
 
-An org's own value beats the sandbox default, and an org set to `0` opts out of a global limit. Routed
+An org's own budget or quota beats the sandbox default, and an org set to `0` opts out of a global limit. Routed
 providers need `pricing` — dollars per million tokens for input, output, cached read, cache write and
 thinking — to count toward the budget; an unpriced provider still counts its tokens but contributes $0,
-so a colony that spends only through one never reaches `budget_usd` and is never stopped for spend.
+so a colony that spends only through one never reaches `budget_usd` and is never stopped for spend —
+`budget_tokens` is what holds it.
 
 Every colony-scoped row of the spend journal (`<data>/spend.jsonl`) names the colony (`session`) and the
 agent module that ran it (`agent`), and splits its spend by who measured it: the agent's own turn-end

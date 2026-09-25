@@ -462,6 +462,15 @@ pub fn budget_source(org: &OrgSettings) -> &'static str {
     }
 }
 
+/// The mothership-wide per-colony token budget from the sandbox module, in tokens routed through the
+/// gateway. Global only — no per-org override, unlike the dollar budget — and the default is `0`
+/// (unlimited) for the same reason: a prepaid token plan prices nothing, so tokens are the only thing
+/// a budget can hold it to, and no figure suits every deployment.
+pub fn budget_tokens(modules: &ModulesConfig) -> u64 {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting_u64(&modules.sandbox, &schema, "budget_tokens")
+}
+
 /// The mothership-wide per-colony host-disk quota from the sandbox module, in bytes. The default is `0`:
 /// like the spend budget, how much disk a colony deserves is a decision about someone else's deployment,
 /// so colonies are unlimited until the operator names a size.
@@ -1028,6 +1037,9 @@ mod tests {
         assert_eq!(global_budget_usd(&modules), 0.0);
         assert_eq!(budget_usd(&modules, &OrgSettings::default()), 0.0);
         assert_eq!(budget_source(&OrgSettings::default()), "the default budget");
+        assert_eq!(budget_tokens(&modules), 0, "no token budget unless the operator names one");
+        modules.sandbox.settings.insert("budget_tokens".into(), json!(1_000_000));
+        assert_eq!(budget_tokens(&modules), 1_000_000);
 
         modules.sandbox.settings.insert("budget_usd".into(), json!(10.0));
         assert_eq!(budget_usd(&modules, &OrgSettings::default()), 10.0);

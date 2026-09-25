@@ -2935,6 +2935,9 @@ export function HealthStatus({ health, degraded }: { health: HealthView; degrade
     const r = health.result;
     const latency = r.latency_ms != null ? `${Math.round(r.latency_ms)} ms` : null;
     const models = r.models.length ? `${r.models.length} model${r.models.length === 1 ? "" : "s"}` : null;
+    // The plan balance rides along on the probe when the provider has a quota URL configured; its
+    // failure is its own clause and never changes the reachability verdict (issue #199).
+    const quota = r.quota ? r.quota.error ?? (r.quota.remaining != null ? `${r.quota.remaining.toLocaleString("en-US")} left in plan` : null) : null;
     // A note marks a non-2xx the Mothership judged healthy (an anthropic-wire endpoint with no
     // /v1/models), so it skips the HTTP warning.
     if (!r.reachable) {
@@ -2942,11 +2945,11 @@ export function HealthStatus({ health, degraded }: { health: HealthView; degrade
       text = `Unreachable${r.error ? `: ${r.error}` : ""}`;
     } else if (!r.note && r.status != null && (r.status < 200 || r.status > 299)) {
       tone = "warn";
-      text = [`HTTP ${r.status}`, latency, r.error].filter(Boolean).join(" · ");
+      text = [`HTTP ${r.status}`, latency, r.error, quota].filter(Boolean).join(" · ");
     } else {
       tone = "ok";
       // A passing probe is one request; say so next to a provider failing a share of its real traffic.
-      text = ["Reachable", latency, models ?? r.note, degraded ? "but failing real traffic" : null].filter(Boolean).join(" · ");
+      text = ["Reachable", latency, models ?? r.note, quota, degraded ? "but failing real traffic" : null].filter(Boolean).join(" · ");
     }
     title = [
       r.models.length ? `Models: ${r.models.join(", ")}` : r.note ? "The endpoint does not list its models; requests route normally." : null,
@@ -3293,6 +3296,10 @@ function ProviderForm({
   // The saved rates sit in the fields; `pricing` only goes on the save once they differ from them, the
   // same convention as the key: omitted keeps what is saved, so a save never silently rezeros a rate.
   const [pricingDraft, setPricingDraft] = useState<PricingDraft>(() => pricingDraftOf(start.pricing));
+  // The quota probe (issue #199) always goes on the save: an empty URL clears it, the way an empty
+  // key string removes the key, so no keep/clear dance is needed for two plain text fields.
+  const [quotaUrl, setQuotaUrl] = useState(initial?.quota?.url ?? "");
+  const [quotaPointer, setQuotaPointer] = useState(initial?.quota?.pointer ?? "");
   // A catalogue entry whose base URL has ${…} holes: ask for them, and the URL follows.
   const template = initial ? [] : (CATALOG_BY_ID.get(preset)?.variables ?? []);
   const [vars, setVars] = useState<Record<string, string>>(() =>
@@ -3309,6 +3316,8 @@ function ProviderForm({
     key: useId(),
     models: useId(),
     fallback: useId(),
+    quotaUrl: useId(),
+    quotaPointer: useId(),
   };
   const limits = {
     timeout_secs: parseLimit("timeout_secs", limitDraft.timeout_secs),
@@ -3390,6 +3399,7 @@ function ProviderForm({
               cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
             }
           : undefined,
+        quota: { url: quotaUrl.trim(), pointer: quotaPointer.trim() },
         timeout_secs: limits.timeout_secs.value,
         max_concurrent: limits.max_concurrent.value,
         queue_timeout_secs: limits.queue_timeout_secs.value,
@@ -3667,6 +3677,44 @@ function ProviderForm({
               Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
               provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
               spend — the budget then only sees Claude's cost.
+            </p>
+          </div>
+        </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Plan balance</span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-faint">
+              {quotaUrl.trim() ? `Probe ${quotaUrl.trim()}` : "Optional — read what is left in a prepaid plan"}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+            <FormField id={ids.quotaUrl} label="Quota URL" hint="Same host as the base URL">
+              <input
+                id={ids.quotaUrl}
+                value={quotaUrl}
+                onChange={(e) => setQuotaUrl(e.target.value)}
+                placeholder="https://api.example.com/plan"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-[13px]")}
+              />
+            </FormField>
+            <FormField id={ids.quotaPointer} label="Quota JSON pointer" hint="RFC 6901, like /data/remaining_tokens">
+              <input
+                id={ids.quotaPointer}
+                value={quotaPointer}
+                onChange={(e) => setQuotaPointer(e.target.value)}
+                placeholder="/data/remaining_tokens"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-[13px]")}
+              />
+            </FormField>
+            <p className="text-[12px] leading-snug text-faint sm:col-span-2">
+              The provider's own credential is sent to that URL, so it must be on the same origin as the base URL —
+              scheme, host and port; the Mothership refuses anything else. The pointer picks the remaining-token number
+              out of the answer, shown on the health line, and must start with /.
             </p>
           </div>
         </details>

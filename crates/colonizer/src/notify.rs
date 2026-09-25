@@ -834,6 +834,7 @@ mod tests {
             pricing: None,
             model_map: Default::default(),
             disabled_tools: Vec::new(),
+            quota: None,
             normalize_cache_ttl: false,
             trusted: false,
         }

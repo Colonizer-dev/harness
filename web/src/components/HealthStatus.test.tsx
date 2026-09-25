@@ -35,4 +35,15 @@ describe("HealthStatus", () => {
     expect(out).toContain("HTTP 401 · 12 ms · invalid x-api-key");
     expect(out).toContain("text-warn");
   });
+
+  // The plan balance rides along on the probe once the provider has a quota URL configured (#199);
+  // its own failure is a clause on the same line and never changes the reachability verdict.
+  it("shows a quota probe's remaining plan balance, or its error", () => {
+    const out = markup(probe({ quota: { remaining: 12_345_678, error: null } }));
+    expect(out).toContain("Reachable · 12 ms · 12,345,678 left in plan");
+    expect(out).toContain("text-ok");
+    expect(markup(probe({ quota: { remaining: null, error: "quota endpoint answered HTTP 401" } }))).toContain(
+      "quota endpoint answered HTTP 401",
+    );
+  });
 });

@@ -86,6 +86,15 @@ impl Pricing {
     }
 }
 
+/// Where to read what is left in a prepaid token plan (issue #199): a `GET` to `url` with the
+/// provider's credential, and `pointer` — an RFC 6901 JSON pointer — naming the remaining-token
+/// number in the answer. The credential rides along, so `url` is pinned to the base URL's origin.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuotaProbe {
+    pub url: String,
+    pub pointer: String,
+}
+
 /// Per-provider dialect quirks: what one endpoint rejects that the Anthropic wire otherwise allows.
 /// Data, not branches: the next dialect gap becomes a row in [`PRESET_QUIRKS`], consulted at proxy
 /// time, instead of another `if id == ...` in gateway.rs. Keyed by the provider's `preset` (the
@@ -152,6 +161,10 @@ pub struct Provider {
     /// their tokens but cost, and spend, nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<Pricing>,
+    /// Where to read what is left in a prepaid token plan (issue #199). Unset means no probe: the
+    /// first sign of an exhausted plan stays the colonies failing over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<QuotaProbe>,
     /// Strip `ttl` from `cache_control` blocks on top of whatever the preset's quirks say. The preset
     /// is a UI label, not a capability, so a hand-pointed endpoint (preset `custom`) carrying this flag
     /// normalizes exactly like its catalogue twin; without it, a `custom` preset keeps default behaviour.
@@ -528,6 +541,19 @@ pub fn split_url(url: &str) -> Option<(String, String, Option<u16>, String)> {
     Some((scheme.to_string(), host, port, path))
 }
 
+/// Whether two [`split_url`] results name one origin: same scheme, same host case-insensitively,
+/// and the same port with an absent port read as the scheme's default (80 for http, 443 for https).
+/// The bar a quota URL must clear, since the provider's credential is sent there (#199).
+fn same_origin(
+    (base_scheme, base_host, base_port, _): (String, String, Option<u16>, String),
+    (scheme, host, port, _): (String, String, Option<u16>, String),
+) -> bool {
+    let default_port = |scheme: &str| if scheme == "https" { 443 } else { 80 };
+    base_scheme == scheme
+        && host.eq_ignore_ascii_case(&base_host)
+        && port.unwrap_or_else(|| default_port(&scheme)) == base_port.unwrap_or_else(|| default_port(&base_scheme))
+}
+
 /// Everything a colony needs to route models through the gateway.
 #[derive(Default)]
 pub struct ColonyRoutes {
@@ -737,6 +763,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "pricing": provider.pricing,
         "model_map": provider.model_map,
         "disabled_tools": provider.disabled_tools,
+        "quota": provider.quota,
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
         "queued": queued,
@@ -870,6 +897,11 @@ pub struct PutProvider {
     /// which also is exactly what "no pricing" means, so nothing becomes unreachable.
     #[serde(default)]
     pricing: Option<Pricing>,
+    /// Omitted keeps the saved probe, like pricing; a probe whose URL is empty removes it, the way
+    /// an empty key string does. The credential goes to this URL, so the host is pinned at
+    /// validation (issue #199).
+    #[serde(default)]
+    quota: Option<QuotaProbe>,
     /// Omitted keeps the saved flag, like pricing: an older save must not quietly re-enable the 400s
     /// this flag suppresses.
     #[serde(default)]
@@ -965,6 +997,41 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if !pricing_ok {
         return Err(bad("pricing rates must be dollar amounts per million tokens, zero or more"));
     }
+    // The quota probe is fetched with the provider's own credential, so its origin is pinned to the
+    // base URL's — scheme, host and port, the port included: a probe anywhere else, even a plaintext
+    // twin of the vendor's host, would hand that key to whoever answers there (#199).
+    // Outer `None` keeps the saved probe, like pricing; inner `None` — an empty URL — clears it, the
+    // way an empty key string removes the key.
+    let quota: Option<Option<QuotaProbe>> = match req.quota {
+        Some(quota) if quota.url.trim().is_empty() => Some(None),
+        Some(quota) => {
+            let url = quota.url.trim().trim_end_matches('/');
+            if url.len() > 300 || split_url(url).is_none() {
+                return Err(bad(
+                    "quota URL must be an http(s) URL on the same origin as the base URL — the provider's credential is sent to it",
+                ));
+            }
+            if !split_url(&base_url)
+                .zip(split_url(url))
+                .is_some_and(|(base, probe)| same_origin(base, probe))
+            {
+                return Err(bad(
+                    "quota URL must be on the same origin as the base URL — scheme, host and port — because the \
+                     provider's credential is sent to it, and must never leave the vendor that issued it",
+                ));
+            }
+            if !quota.pointer.trim().starts_with('/') {
+                return Err(bad(
+                    "quota JSON pointer must be non-empty and start with / (RFC 6901), like /data/remaining_tokens",
+                ));
+            }
+            Some(Some(QuotaProbe {
+                url: url.into(),
+                pointer: quota.pointer.trim().into(),
+            }))
+        }
+        None => None,
+    };
     let fallback_model = req.fallback_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
     if fallback_model.as_deref().is_some_and(|m| !valid_model(m) || m.contains('/')) {
         return Err(bad("fallback model must be a Claude model such as sonnet or claude-sonnet-5"));
@@ -1045,6 +1112,9 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
                 .map(|p| p.disabled_tools.clone())
                 .unwrap_or_default()
         }),
+        // Omitted keeps the saved probe, like pricing: a Settings save from a web build that predates
+        // the field must not quietly stop the plan balance from being read.
+        quota: quota.unwrap_or_else(|| providers.iter().find(|p| p.id == id).and_then(|p| p.quota.clone())),
         normalize_cache_ttl: req.normalize_cache_ttl.unwrap_or_else(|| {
             providers
                 .iter()
@@ -1132,6 +1202,7 @@ mod tests {
             pricing: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
+            quota: None,
             normalize_cache_ttl: false,
             trusted: false,
         }
@@ -1775,6 +1846,7 @@ mod tests {
             pricing: None,
             model_map: None,
             disabled_tools: None,
+            quota: None,
             normalize_cache_ttl: None,
             trusted: None,
         }
@@ -1972,6 +2044,103 @@ mod tests {
         app.providers();
         let held = app.config_damage.lock().unwrap().clone().unwrap();
         assert!(held.message.starts_with(DUPLICATE_IDS_WARNING), "{}", held.message);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- quota probes (#199) ------------------------------------------------------------------------
+
+    /// The probe is fetched with the provider's credential, so a URL off the base URL's origin is
+    /// refused before it can be saved: the key must never leave the vendor that issued it.
+    #[tokio::test]
+    async fn a_quota_probe_on_another_host_is_refused() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.quota = Some(QuotaProbe {
+            url: "https://balances.example.com/plan".into(),
+            pointer: "/data/remaining".into(),
+        });
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("same origin") && err.message().contains("credential"),
+            "{}",
+            err.message()
+        );
+        assert!(app.providers().is_empty(), "the refused save writes nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The origin is pinned, not just the name: a plaintext twin or an odd port of the vendor's
+    /// host would carry the credential somewhere else just as surely as another name would.
+    #[tokio::test]
+    async fn a_quota_probe_on_another_scheme_or_port_is_refused() {
+        let (app, root) = providers_app();
+        for url in ["http://api.deepseek.com/plan", "https://api.deepseek.com:8443/plan"] {
+            let mut req = put_req("DeepSeek");
+            req.quota = Some(QuotaProbe {
+                url: url.into(),
+                pointer: "/data/remaining".into(),
+            });
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().contains("same origin"), "{url}: {}", err.message());
+        }
+        assert!(app.providers().is_empty(), "the refused saves write nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_quota_pointer_must_be_rfc_6901() {
+        let (app, root) = providers_app();
+        // An empty pointer would resolve to the whole body, which is never a number, so it is
+        // refused with the pointers no RFC 6901 parser would accept.
+        for pointer in ["data.remaining", ""] {
+            let mut req = put_req("DeepSeek");
+            req.quota = Some(QuotaProbe {
+                url: "https://api.deepseek.com/plan".into(),
+                pointer: pointer.into(),
+            });
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().contains("pointer"), "{pointer:?}: {}", err.message());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// On the base URL's host it saves (trimmed, trailing slash off); omitted keeps what is saved,
+    /// and an empty URL clears it — the pricing keep-rules with the key's way out.
+    #[tokio::test]
+    async fn a_quota_probe_on_the_base_host_is_saved_kept_and_cleared() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.quota = Some(QuotaProbe {
+            url: "https://api.deepseek.com/plan/".into(),
+            pointer: " /data/remaining ".into(),
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
+        let saved = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
+        assert_eq!(
+            saved.quota,
+            Some(QuotaProbe {
+                url: "https://api.deepseek.com/plan".into(),
+                pointer: "/data/remaining".into()
+            })
+        );
+
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(put_req("DeepSeek")))
+            .await
+            .unwrap();
+        let kept = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
+        assert!(kept.quota.is_some(), "omitted keeps the saved probe");
+
+        let mut req = put_req("DeepSeek");
+        req.quota = Some(QuotaProbe {
+            url: "  ".into(),
+            pointer: String::new(),
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
+        let cleared = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
+        assert!(cleared.quota.is_none(), "an empty URL removes the probe");
         let _ = std::fs::remove_dir_all(root);
     }
 }

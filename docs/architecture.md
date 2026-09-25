@@ -204,7 +204,7 @@ restart changes where the bytes are, not how the colony continues.
 
 ## Per-colony limits
 
-Four sandbox module settings bound colonies, each with a per-org override:
+Five sandbox module settings bound colonies; all but the token budget take a per-org override:
 
 - `max_parallel` caps colonies live at once, global or per org, which is the queue above. Beside it,
   `repo_max_parallel` (default 3, overridable per org) caps colonies live at once in one repository. The
@@ -213,6 +213,11 @@ Four sandbox module settings bound colonies, each with a per-org override:
   it routes, prices it with the provider's `pricing`, and adds it to the colony's `routed_cost_usd`; the
   budget answers to that plus Claude's own `cost_usd`. Past it, a routed request is refused with `403` and
   the host stops the colony.
+- `budget_tokens` caps the tokens a colony routes through the gateway. The gateway counts the tokens of
+  every response it serves, priced or not, and adds them to the colony's `routed_tokens`; a prepaid plan
+  whose `pricing` is empty costs $0, so this is the only budget that can hold one. Past it, like the
+  dollar budget: a routed request is refused with `403` and the host stops the colony. It answers to the
+  sandbox setting alone — no per-org override.
 - `host_disk` caps what a colony leaves on the host (its worktree plus its session directory), measured
   every five minutes. It does not cover the microVM's root filesystem, which `root_disk` bounds. A colony
   past the quota is stopped and its worktree kept: removing a colony's work is the operator's call.
