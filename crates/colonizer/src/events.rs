@@ -16,7 +16,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self};
 
-use crate::protocol::{AgentEvent, AgentState, QuestionRisk};
+use crate::protocol::{AgentEvent, AgentState, Origin, QuestionRisk};
 #[allow(unused_imports)]
 use crate::{lifecycle::*, publish::*, queue::*, sessions::*};
 
@@ -151,11 +151,81 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
     }
 }
 
+/// Which subsystem a runner line came from: the closed `origin` the host stamps onto it before
+/// persisting (docs/protocol.md §3). Pure, so every branch is pinned by a test; what cannot be read
+/// off the line is handed in — the session's launch tag as `launch`, and, for a `question_answered`,
+/// whether the judge is the one who answered as `judged`. Anything unrecognisable stays a runner
+/// line (`agent`): an origin is provenance, never a contract a line can fail.
+pub(crate) fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
+    // A subagent's events carry the `agent` ref (§2 rules); the ref is the tell, whatever the type.
+    if event.get("agent").is_some() {
+        return Origin::Subagent;
+    }
+    match event["type"].as_str() {
+        // The echo of an accepted message tells its senders apart by id: the watchdog's own nudges
+        // (`watchdog-`, §6.3), the brief the session launched with (`initial`), anyone else a person.
+        Some("user_message") => match event["id"].as_str() {
+            Some(echoed) if echoed.starts_with("watchdog-") => Origin::Watchdog,
+            Some("initial") => launch_origin(launch),
+            _ => Origin::User,
+        },
+        // The judge's answer and a person's arrive as the same echo, so the judge records the ids it
+        // answered (autonomy.rs) and the handler spends that record here. Spent: a replay of the
+        // same echo — or one still in flight across a mothership restart — reads as the person's.
+        Some("question_answered") if judged => Origin::Autonomy,
+        Some("question_answered") => Origin::User,
+        _ => Origin::Agent,
+    }
+}
+
+/// The subsystem a session was launched by, read off its `Session.origin` tag. The event vocabulary
+/// distinguishes only the machine launchers it has; a person's colony — and a `map` colony, whose
+/// brief the orchestrator wrote — reads as a plain user's.
+fn launch_origin(launch: Option<&str>) -> Origin {
+    match launch {
+        Some("burn_down") => Origin::BurnDown,
+        Some(crate::redteam::REDTEAM_ORIGIN) => Origin::Redteam,
+        _ => Origin::User,
+    }
+}
+
+/// Whether a runner line counts as progress for the watchdog (§6.3). Status changes never are, a
+/// `model_changed` is a switch rather than work, and lines the host's own helpers caused — a
+/// watchdog nudge, a judge answer — would let a colony stall-proof itself by talking to itself.
+/// Everything else — the agent working, its person stepping in — is.
+fn is_watchdog_progress(origin: Origin, kind: &str) -> bool {
+    !matches!(kind, "status" | "model_changed") && !matches!(origin, Origin::Watchdog | Origin::Autonomy)
+}
+
 pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
     let Ok(mut event) = serde_json::from_str::<Value>(line) else {
         return;
     };
     let Some(seq) = event["seq"].as_u64() else { return };
+    // The origin is resolved before the append, so the persisted line and the broadcast every open
+    // browser sees both carry it (docs/protocol.md §3). One event keeps its body field: a
+    // memory_proposal's `origin` names the proposer (§6.2) and predates the envelope, so its lines
+    // are never stamped — an absent body origin must stay absent (it reads as the orchestrator's),
+    // and the dispatch below reads the proposer, not a stamp.
+    let launch = app.session(id).await.and_then(|s| s.origin.clone());
+    let judged = match event["type"].as_str() {
+        Some("question_answered") => match event["question_id"].as_str() {
+            Some(question_id) => rt.judged_questions.lock().await.remove(question_id),
+            None => false,
+        },
+        _ => false,
+    };
+    let origin = resolve_origin(&event, launch.as_deref(), judged);
+    if event["type"] != "memory_proposal" {
+        // A line arriving with an `origin` of its own is speaking outside its contract: the envelope
+        // is the host's, and the resolved stamp below overwrites whatever it carried. The carried
+        // value still goes through [`Origin::parse_logged`] first, so a value outside the closed
+        // vocabulary — a writer's bug, §3 — is named out loud before it is replaced.
+        if let Some(carried) = event.get("origin").and_then(Value::as_str) {
+            Origin::parse_logged(Some(carried));
+        }
+        event["origin"] = json!(origin.as_str());
+    }
     let (persisted, file_seq, file_line) = {
         let _guard = rt.file_lock.lock().await;
         if seq <= rt.agent_seq.load(Ordering::SeqCst) {
@@ -169,7 +239,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // the reconnect cursor stays agentd's (`agent_seq`), and a host restart reads `a_seq` back
         // exactly (sessions.rs `Runtime::load`). Agentd's own seq is never consumed or advanced by a
         // host event, so the next real agentd event cannot be mistaken for a replay. A line that
-        // does not collide is appended byte-for-byte as the runner wrote it.
+        // does not collide is appended as the runner wrote it plus the host's `origin` stamp — the
+        // one re-serialisation the host makes on every line (agentd's own output is sorted-key JSON
+        // too, so nothing else moves).
         let (file_seq, file_line);
         let err = if seq <= rt.last_seq.load(Ordering::SeqCst) {
             event["seq"] = json!(rt.last_seq.load(Ordering::SeqCst) + 1);
@@ -179,8 +251,8 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             append_line(&rt.events_path, &file_line).await.err()
         } else {
             file_seq = seq;
-            file_line = line.to_string();
-            append_line(&rt.events_path, line).await.err()
+            file_line = event.to_string();
+            append_line(&rt.events_path, &file_line).await.err()
         };
         (
             match err {
@@ -229,12 +301,11 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         .await;
     }
 
-    // Progress for the watchdog: anything but status changes, the echo of its own nudges, and a
-    // `model_changed` (a user's switch, or init announcing the model, is not the agent working).
-    let watchdog_echo =
-        matches!(&deserialised, Ok(AgentEvent::UserMessage { id: echoed, .. }) if echoed.starts_with("watchdog-"));
-    let model_changed = event["type"] == "model_changed";
-    if !matches!(&deserialised, Ok(AgentEvent::Status { .. })) && !watchdog_echo && !model_changed {
+    // Progress for the watchdog, by origin (§6.3): status changes and a `model_changed` are never
+    // progress, and neither is anything the host's own helpers said — a watchdog nudge or a judge
+    // answer would otherwise stall-proof a colony that is only talking to itself. A person's
+    // message and the agent working count, as before.
+    if is_watchdog_progress(origin, event["type"].as_str().unwrap_or_default()) {
         {
             let mut activity = rt.activity.lock().await;
             activity.last = Utc::now();
@@ -1023,6 +1094,275 @@ mod tests {
         let attention = app.session("abc").await.unwrap().attention;
         assert!(attention.is_none(), "real progress still clears it");
         assert_eq!(rt.activity.lock().await.nudges, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every branch of the origin resolver, against the line and the two things that cannot be read
+    /// off it: the session's launch tag, and whether the judge sent the answer.
+    #[test]
+    fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
+        // A subagent's `agent` ref is the tell, whatever the event type.
+        assert_eq!(
+            resolve_origin(&json!({"type":"tool_call","agent":{"id":"a","name":"Explore"}}), None, false),
+            Origin::Subagent
+        );
+        // The message echo tells its senders apart by id.
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"user_message","id":"watchdog-a1","text":"Watchdog check"}),
+                None,
+                false
+            ),
+            Origin::Watchdog
+        );
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"user_message","id":"initial","text":"Fix the issue"}),
+                None,
+                false
+            ),
+            Origin::User,
+            "a person's colony reads as a person's brief"
+        );
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"user_message","id":"initial","text":"Fix the issue"}),
+                Some("burn_down"),
+                false
+            ),
+            Origin::BurnDown
+        );
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"user_message","id":"initial","text":"Hunt"}),
+                Some(crate::redteam::REDTEAM_ORIGIN),
+                false
+            ),
+            Origin::Redteam
+        );
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"user_message","id":"m1","text":"try X"}),
+                Some("burn_down"),
+                false
+            ),
+            Origin::User
+        );
+        // The judge's answer reads as autonomy only while the record spent on it says so.
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"question_answered","question_id":"q1","answers":{}}),
+                None,
+                true
+            ),
+            Origin::Autonomy
+        );
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"question_answered","question_id":"q1","answers":{}}),
+                None,
+                false
+            ),
+            Origin::User
+        );
+        // Everything else the runner said is the agent's own.
+        assert_eq!(
+            resolve_origin(&json!({"type":"question","question_id":"q1","questions":[]}), None, false),
+            Origin::Agent
+        );
+        assert_eq!(
+            resolve_origin(
+                &json!({"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}),
+                None,
+                false
+            ),
+            Origin::Agent
+        );
+    }
+
+    /// The contract fixtures, line by line, through the resolver: runner lines almost never land on
+    /// `system`, the host's own stamp — a writer reading as system by default is exactly what this
+    /// vocabulary exists to catch. Includes the v0.1.9 stored files, whose lines predate the field:
+    /// legacy lines resolve like any other runner line. (memory_proposal is the one body whose own
+    /// `origin` shares the key with the stamp, §6.2 — its lines keep the proposer's value there.)
+    #[test]
+    fn fixture_lines_resolve_to_real_origins_not_the_system_catch_all() {
+        for fixture in [
+            include_str!("../../../modules/agents/claude-code/test/fixtures/events.jsonl"),
+            include_str!("../tests/fixtures/data-v0.1.9/sessions/a1b2c3d4/events.jsonl"),
+            include_str!("../tests/fixtures/data-v0.1.9/sessions/e5f60718/events.jsonl"),
+        ] {
+            let lines: Vec<&str> = fixture.lines().filter(|l| !l.trim().is_empty()).collect();
+            let system = lines
+                .iter()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).is_ok_and(|event| resolve_origin(&event, None, false) == Origin::System)
+                })
+                .count();
+            assert!(
+                system * 20 <= lines.len(),
+                "{system} of {} lines resolve to system — new writers must opt into a real origin",
+                lines.len()
+            );
+        }
+    }
+
+    /// The handler stamps the resolved origin onto the line it persists, the broadcast an open
+    /// browser replays carries the same stamp, and the harness log speaks as `system` by default.
+    #[tokio::test]
+    async fn the_persisted_line_the_broadcast_and_the_log_carry_the_origin() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let mut live = rt.events.subscribe();
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":1,"type":"status","state":"working"}"#).await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        let event: Value = serde_json::from_str(stored.trim()).unwrap();
+        assert_eq!(event["origin"], "agent", "the host stamps its envelope field: {stored}");
+        let mut saw_origin = false;
+        for _ in 0..10 {
+            let frame = live.recv().await.unwrap().json.clone();
+            if let Ok(v) = serde_json::from_str::<Value>(&frame)
+                && v["seq"].as_u64() == Some(1)
+            {
+                assert_eq!(v["origin"], "agent", "the browser sees the stamped line: {frame}");
+                saw_origin = true;
+                break;
+            }
+        }
+        assert!(saw_origin, "the stamped line reached the broadcast");
+        app.session_log("abc", "info", "a note".into()).await;
+        let logged = rt.logs.lock().await.back().unwrap().clone();
+        assert_eq!(logged["origin"], "system", "the harness log defaults to system");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// memory_proposal's body `origin` names the proposer (§6.2) and predates the envelope field, so
+    /// its lines are never stamped — with the field added or clobbered, the proposal would read as
+    /// a non-orchestrator's and be refused.
+    #[tokio::test]
+    async fn the_origin_stamp_never_clobbers_a_body_origin() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let proposal = r#"{"seq":1,"type":"memory_proposal","scope":"repo","title":"Commit style","content":"Small.","tags":[]}"#;
+        handle_agent_event(&app, "abc", &rt, proposal).await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        let event: Value = serde_json::from_str(stored.trim()).unwrap();
+        assert!(event.get("origin").is_none(), "an unstamped line stays unstamped: {stored}");
+        assert_eq!(
+            app.memory.proposals().await.len(),
+            1,
+            "an unstamped proposal reads as the orchestrator's"
+        );
+
+        let carried = r#"{"seq":2,"type":"memory_proposal","scope":"repo","title":"Sign commits","content":"Always.","origin":"orchestrator"}"#;
+        handle_agent_event(&app, "abc", &rt, carried).await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        let event: Value = stored.lines().nth(1).and_then(|l| serde_json::from_str(l).ok()).unwrap();
+        assert_eq!(
+            event["origin"], "orchestrator",
+            "the body's own origin is left for its reader: {stored}"
+        );
+        assert_eq!(app.memory.proposals().await.len(), 2, "the proposer is still read as such");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A line arriving with an `origin` of its own does not get to name itself: the host's resolved
+    /// origin is stamped over it (the envelope is the host's, §3), after `parse_logged` has named an
+    /// unknown carried value out loud.
+    #[tokio::test]
+    async fn a_carried_origin_is_named_then_overwritten_by_the_hosts() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let carried = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0,"origin":"the_runner_itself"}"#;
+        handle_agent_event(&app, "abc", &rt, carried).await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        let event: Value = serde_json::from_str(stored.trim()).unwrap();
+        assert_eq!(event["origin"], "agent", "the host's resolved origin wins: {stored}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony whose only lines are the echoes of the watchdog's own nudges is a hint loop: nothing
+    /// resets the stall, so the next tick nudges again (§6.3).
+    #[tokio::test]
+    async fn a_hint_loop_of_watchdog_echoes_is_still_a_stall() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = stalled_since;
+            activity.nudges = 1;
+        }
+        let echo = r#"{"seq":1,"type":"user_message","id":"watchdog-a1","text":"Watchdog check"}"#;
+        handle_agent_event(&app, "abc", &rt, echo).await;
+        let activity = rt.activity.lock().await;
+        assert_eq!(
+            activity.last, stalled_since,
+            "the watchdog's own echo does not reset the stall"
+        );
+        assert_eq!(activity.nudges, 1, "so the next tick nudges again");
+        drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A judge answer is the colony talking to itself, not progress: the stall clock keeps running.
+    /// The spent record keeps a later echo of the same answer from reading as autonomy again.
+    #[tokio::test]
+    async fn a_judge_answer_is_not_watchdog_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+        rt.activity.lock().await.last = stalled_since;
+        rt.judged_questions.lock().await.insert("q1".into());
+        let answered = r#"{"seq":1,"type":"question_answered","question_id":"q1","answers":{}}"#;
+        handle_agent_event(&app, "abc", &rt, answered).await;
+        assert_eq!(
+            rt.activity.lock().await.last,
+            stalled_since,
+            "the judge answering does not reset the stall"
+        );
+        // The record is spent: the same echo arriving again is only a replay of a person's answer.
+        let again = r#"{"seq":2,"type":"question_answered","question_id":"q1","answers":{}}"#;
+        handle_agent_event(&app, "abc", &rt, again).await;
+        assert!(
+            rt.activity.lock().await.last > stalled_since,
+            "a person's answer resets the stall"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A person's message resets the stall clock and the nudge count; the agent working — a tool
+    /// call — counts as progress, clearing a held colony as before.
+    #[tokio::test]
+    async fn a_user_message_resets_the_stall_and_the_agent_working_is_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+        app.update_session("abc", |x| x.attention = Some(json!({"reason": "stalled", "nudges": 3})))
+            .await;
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = stalled_since;
+            activity.nudges = 3;
+        }
+        let message = r#"{"seq":1,"type":"user_message","id":"m1","text":"try X instead"}"#;
+        handle_agent_event(&app, "abc", &rt, message).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert!(activity.last > stalled_since, "the person's word restarts the clock");
+            assert_eq!(activity.nudges, 0, "and spends the nudges");
+        }
+        assert!(app.session("abc").await.unwrap().attention.is_none(), "the hold clears");
+
+        app.update_session("abc", |x| x.attention = Some(json!({"reason": "stalled", "nudges": 1})))
+            .await;
+        rt.activity.lock().await.last = stalled_since;
+        let tool_call = r#"{"seq":2,"type":"tool_call","message_id":"m","tool_call_id":"t","name":"Bash","input":{}}"#;
+        handle_agent_event(&app, "abc", &rt, tool_call).await;
+        let activity = rt.activity.lock().await;
+        assert!(activity.last > stalled_since, "a tool call is the agent working");
+        assert!(app.session("abc").await.unwrap().attention.is_none());
+        drop(activity);
         let _ = std::fs::remove_dir_all(root);
     }
 }

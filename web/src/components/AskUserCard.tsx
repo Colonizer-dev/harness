@@ -287,6 +287,8 @@ function Preview({ content }: { content: string }) {
 
 function AnsweredCard({ questions, result }: { questions: Question[]; result: AskUserResult }) {
   const [expanded, setExpanded] = useState(false);
+  // A judge-answered card (§6.3, issue #312) must never read as the operator's own words.
+  const judge = result.origin === "autonomy";
   const answerFor = (q: Question): string => {
     const value = result.answers?.[q.question];
     if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
@@ -300,11 +302,13 @@ function AnsweredCard({ questions, result }: { questions: Question[]; result: As
         aria-expanded={expanded}
         className="flex w-full cursor-pointer items-start gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-panel-2"
       >
-        <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-ok-soft text-ok">
+        <span className={cx("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full", judge ? "bg-info-soft text-info" : "bg-ok-soft text-ok")}>
           <IconCheck size={12} strokeWidth={3} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[12px] font-semibold text-muted">You answered</span>
+          <span className={cx("block text-[12px] font-semibold", judge ? "text-info" : "text-muted")}>
+            {judge ? "Answered by the autonomy judge" : "You answered"}
+          </span>
           {result.response ? (
             <span className="block text-[13.5px]">{result.response}</span>
           ) : (

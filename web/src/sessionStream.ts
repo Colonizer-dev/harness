@@ -16,6 +16,7 @@ import type {
   LogLevel,
   MemoryProposal,
   ModelTokens,
+  Origin,
   Question,
   ServerFrame,
   Session,
@@ -47,7 +48,8 @@ export interface QuestionBlock {
   kind: "question";
   id: string;
   questions: Question[];
-  answer: { answers: Answers; response: string | null } | null;
+  /** Set once `question_answered` lands; `origin` names who answered (§6.3: the judge or the operator). */
+  answer: AskUserResult | null;
   /** When the question event arrived (the frame's `ts`); null when the replay omitted one. */
   asked_at: string | null;
 }
@@ -59,6 +61,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   /** The subagent that spoke, when it was not the orchestrator. */
   agent?: AgentRef;
+  /** The envelope origin (issue #312); absent on lines recorded before it, and on optimistic sends. */
+  origin?: Origin;
   blocks: Block[];
   ts: string | null;
   /** Optimistic user message not yet echoed by the agent. */
@@ -256,13 +260,14 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
       const pending = s.messages.findIndex((m) => m.role === "user" && m.pending && textOf(m) === ev.text);
       if (pending >= 0) {
         const messages = s.messages.slice();
-        messages[pending] = { ...messages[pending], id: ev.id, pending: false, ts };
+        messages[pending] = { ...messages[pending], id: ev.id, pending: false, ts, origin: ev.origin };
         return { ...s, messages };
       }
       if (s.messages.some((m) => m.role === "user" && m.id === ev.id)) return s;
       const message: ChatMessage = {
         id: ev.id,
         role: "user",
+        origin: ev.origin,
         blocks: [{ kind: "text", index: 0, text: ev.text, streaming: false }],
         ts,
         pending: false,
@@ -344,7 +349,7 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
         const messages = s.messages.slice();
         const message = { ...messages[i], blocks: messages[i].blocks.slice() };
         const block = message.blocks[at] as QuestionBlock;
-        message.blocks[at] = { ...block, answer: { answers: ev.answers ?? {}, response: ev.response ?? null } };
+        message.blocks[at] = { ...block, answer: { answers: ev.answers ?? {}, response: ev.response ?? null, origin: ev.origin } };
         messages[i] = message;
         return { ...s, messages, submitting };
       }
@@ -599,6 +604,8 @@ export interface AskUserArgs {
 export interface AskUserResult {
   answers: Answers;
   response: string | null;
+  /** Who answered (issue #312): the autonomy judge's answer never renders as the operator's own. */
+  origin?: Origin;
 }
 
 export interface ToolResultPayload {
@@ -684,6 +691,8 @@ export interface ThreadView {
   messages: ThreadMessageLike[];
   /** The subagent behind a rendered message, keyed by its id; absent means the orchestrator. */
   subagents: Record<string, SubagentView>;
+  /** The envelope origin of a user message, keyed by its id; absent means the operator's own words. */
+  origins: Record<string, Origin>;
   /** Turn summaries keyed by the id of the (grouped) message they follow. */
   turns: Record<string, TurnSummary[]>;
   /** Memory proposals keyed the same way. */
@@ -743,6 +752,7 @@ export function buildThread(state: StreamState): ThreadView {
   let lastEmitted: string | null = null;
   let hasOpenQuestion = false;
   const subagents: Record<string, SubagentView> = {};
+  const origins: Record<string, Origin> = {};
   // Settler names are numbered per role in order of first appearance: the second Explore is "Scout Settler 2".
   const names = new Map<string, string>();
   const perRole = new Map<string, number>();
@@ -812,6 +822,7 @@ export function buildThread(state: StreamState): ThreadView {
         content: [{ type: "text", text: textOf(message) }],
         createdAt: message.ts ? new Date(message.ts) : undefined,
       });
+      if (message.origin) origins[message.id] = message.origin;
       emitted.add(message.id);
       lastEmitted = message.id;
       continue;
@@ -877,5 +888,5 @@ export function buildThread(state: StreamState): ThreadView {
     i = Math.max(end, i + 1);
   }
 
-  return { messages, subagents, turns, notices, hasOpenQuestion };
+  return { messages, subagents, origins, turns, notices, hasOpenQuestion };
 }

@@ -182,6 +182,30 @@ UTC), appends it to `/var/lib/colonizer/events.jsonl`, and broadcasts it. agentd
 `log` events with the same numbering. If the runner exits, agentd emits
 `{"type":"status","state":"exited","detail":"exit code N"}`.
 
+### Origins
+
+Every line the harness appends to a colony's `events.jsonl` or `harness.jsonl` — and every frame it
+fans out to the browser for one of those lines — carries an envelope field `origin` naming the
+subsystem that caused it. Like `seq`/`ts` it is stamped by the host at write time and is not part of
+the runner contract body (§2). The vocabulary is closed:
+
+- `user` — a person drove it: a message typed into the colony, or their answer to a question.
+- `agent` — the colony's orchestrator agent: most runner lines, its questions included.
+- `subagent` — a subagent inside the colony; the line also carries the `agent` ref (§2 rules).
+- `watchdog` — the watchdog nudging a stalled colony (§6.3).
+- `autonomy` — the autonomy judge answering a question in autonomous mode (§6.2b).
+- `burn_down` — the burn-down scheduler, on a colony it launched (§6.2c).
+- `redteam` — a red-team hunter colony (§6.7).
+- `notify` — the notification dispatcher, about a dispatch it made or failed.
+- `system` — the host itself: its validation chain, verification, lifecycle and bookkeeping.
+
+Unlike the event types (§1), the vocabulary is closed: a value outside it is a bug in the writer, not
+a forward-compatibility case, and reading one logs it loudly. Lines written before the field existed
+have no `origin`; readers treat absence as unknown/legacy. A subagent event keeps its `agent` ref and
+adds `origin: "subagent"`. One body field shares the key: `memory_proposal`'s `origin` names the
+proposer (§6.2) and predates the envelope, so those lines are not stamped and their `origin` stays
+the proposer's — a value outside this vocabulary, read as the proposer and never as the stamp.
+
 ### `GET /v1/health`
 
 ```json

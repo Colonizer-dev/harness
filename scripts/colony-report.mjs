@@ -8,6 +8,7 @@
 //   node scripts/colony-report.mjs --since 2026-09-01 --repo owner/name --worst 10
 //   node scripts/colony-report.mjs --json > report.json
 //   node scripts/colony-report.mjs --transcript fc742075  # one colony, step by step, secrets redacted
+//   node scripts/colony-report.mjs --transcript fc742075 --origin autonomy,watchdog  # only those origins' lines
 //
 // Only the metadata of tool calls is summarised (names, file paths, commands). Transcripts print short
 // excerpts of text and failed output, with common credential patterns redacted, but read them before sharing.
@@ -573,12 +574,38 @@ function verificationLine(e) {
   return `verification: ${verdict}${detail ? ` — ${detail}` : ''}${counts.length ? `, ${counts.join(', ')}` : ''}${took}`;
 }
 
+// The envelope `origin` (issue #312) every recorded line carries, and the tag a transcript shows it
+// as. Lines whose words already say who spoke — you:, brief:, the agent's own steps, a settler's
+// [name] — get no tag; lines from before the field existed fall back to what the reader can tell.
+export const ORIGINS = ['user', 'agent', 'subagent', 'watchdog', 'autonomy', 'burn_down', 'redteam', 'notify', 'system'];
+const ORIGIN_TAG = { autonomy: '[judge]', burn_down: '[burn-down]', redteam: '[red-team]', notify: '[notify]', system: '[system]' };
+
+/** A line's origin: the envelope's field, or the inference a reader makes without it. */
+export function originOf(e) {
+  if (ORIGINS.includes(e.origin)) return e.origin;
+  if (e.type === 'user_message') return String(e.id ?? '').startsWith('watchdog-') ? 'watchdog' : 'user';
+  if (e.type === 'question_answered') return 'user';
+  if (e.type === 'harness_log' || e.type === 'verification') return 'system';
+  return e.agent ? 'subagent' : 'agent';
+}
+
+/** `--origin`'s comma-separated list as a filter, refusing anything outside the closed set. */
+export function parseOrigins(value) {
+  const origins = new Set(String(value).split(',').map((o) => o.trim()).filter(Boolean));
+  const unknown = [...origins].filter((o) => !ORIGINS.includes(o));
+  if (unknown.length > 0) throw new Error(`unknown origin ${unknown.join(', ')} (one of ${ORIGINS.join(', ')})`);
+  if (origins.size === 0) throw new Error(`--origin needs a comma-separated list of ${ORIGINS.join(', ')}`);
+  return origins;
+}
+
 /** One colony, one line per step, with the time since it started and gaps worth noticing. */
-export function formatTranscript({ session = {}, events = [], logs = [] }) {
+export function formatTranscript({ session = {}, events = [], logs = [], origins = null }) {
   const all = [
     ...events.map((e) => ({ ...e, source: 'event' })),
     ...logs.map((l) => ({ ...l, source: 'harness' })),
-  ].sort((a, b) => (ms(a.ts) || 0) - (ms(b.ts) || 0));
+  ]
+    .filter((e) => !origins || origins.has(originOf(e)))
+    .sort((a, b) => (ms(a.ts) || 0) - (ms(b.ts) || 0));
   const start = ms(all[0]?.ts);
   const calls = new Map();
   const asked = new Map();
@@ -593,26 +620,30 @@ export function formatTranscript({ session = {}, events = [], logs = [] }) {
     if (Number.isFinite(t)) last = t;
     const at = Number.isFinite(t) && Number.isFinite(start) ? `+${duration(t - start)}`.padEnd(8) : '        ';
     const who = e.agent ? `[${e.agent.name}] ` : '';
+    const origin = originOf(e);
+    // Only the envelope's field tags a line: the words below already carry who spoke, and a legacy
+    // line's inference picks the words, not a tag.
+    const tag = e.origin && ORIGIN_TAG[origin] ? `${ORIGIN_TAG[origin]} ` : '';
     switch (e.type) {
       case 'status':
         state = e.state ?? state;
         break;
       case 'user_message':
-        if (e.id === 'initial') lines.push(`${at}brief: ${excerpt(e.text, 300)}`);
-        else if (String(e.id).startsWith('watchdog-')) lines.push(`${at}⚑ watchdog nudge`);
-        else lines.push(`${at}you: ${excerpt(e.text, 300)}`);
+        if (origin === 'watchdog') lines.push(`${at}⚑ watchdog nudge`);
+        else if (e.id === 'initial') lines.push(`${at}${tag}brief: ${excerpt(e.text, 300)}`);
+        else lines.push(`${at}${tag}you: ${excerpt(e.text, 300)}`);
         break;
       case 'assistant_text':
-        if (String(e.text ?? '').trim()) lines.push(`${at}${who}says: ${excerpt(e.text, 400)}`);
+        if (String(e.text ?? '').trim()) lines.push(`${at}${tag}${who}says: ${excerpt(e.text, 400)}`);
         break;
       case 'tool_call':
         calls.set(e.tool_call_id, e);
-        lines.push(`${at}${who}→ ${describeCall(e)}`);
+        lines.push(`${at}${tag}${who}→ ${describeCall(e)}`);
         break;
       case 'tool_result':
         if (e.is_error) {
           const call = calls.get(e.tool_call_id);
-          lines.push(`${at}${who}✗ ${call?.name ?? 'tool'} failed: ${excerpt(e.output, 240)}`);
+          lines.push(`${at}${tag}${who}✗ ${call?.name ?? 'tool'} failed: ${excerpt(e.output, 240)}`);
         }
         break;
       case 'question':
@@ -623,42 +654,43 @@ export function formatTranscript({ session = {}, events = [], logs = [] }) {
         break;
       case 'question_answered': {
         const wait = Number.isFinite(asked.get(e.question_id)) ? ` (after ${duration(t - asked.get(e.question_id))})` : '';
-        lines.push(`${at}✓ answered${wait}: ${excerpt(Object.values(e.answers ?? {}).flat().join('; ') || e.response, 200)}`);
+        const judge = origin === 'autonomy' ? '[judge] ' : '';
+        lines.push(`${at}✓ ${judge}answered${wait}: ${excerpt(Object.values(e.answers ?? {}).flat().join('; ') || e.response, 200)}`);
         break;
       }
       case 'turn_end':
-        lines.push(`${at}■ turn ${e.is_error ? 'FAILED' : 'ended'} after ${duration(e.duration_ms)}, ${usd(e.cost_usd)} so far${e.is_error && e.result ? `: ${excerpt(e.result, 200)}` : ''}`);
+        lines.push(`${at}${tag}■ turn ${e.is_error ? 'FAILED' : 'ended'} after ${duration(e.duration_ms)}, ${usd(e.cost_usd)} so far${e.is_error && e.result ? `: ${excerpt(e.result, 200)}` : ''}`);
         break;
       case 'log':
       case 'harness_log':
         if (e.level !== 'info' || PLAIN_TEXT_REPROMPT.test(e.message ?? '') || /watchdog/i.test(e.message ?? '')) {
-          lines.push(`${at}${e.level === 'info' ? 'ℹ' : '!'} ${e.source === 'harness' ? 'mothership' : 'runner'} ${e.level}: ${excerpt(e.message, 240)}`);
+          lines.push(`${at}${tag}${e.level === 'info' ? 'ℹ' : '!'} ${e.source === 'harness' ? 'mothership' : 'runner'} ${e.level}: ${excerpt(e.message, 240)}`);
         }
         break;
       case 'finding':
-        lines.push(`${at}◆ finding: ${excerpt(e.title, 160)}`);
+        lines.push(`${at}${tag}◆ finding: ${excerpt(e.title, 160)}`);
         break;
       case 'validated':
-        lines.push(`${at}✓ validated: ${excerpt(e.title, 160)}${e.severity ? ` (${e.severity})` : ''}`);
+        lines.push(`${at}${tag}✓ validated: ${excerpt(e.title, 160)}${e.severity ? ` (${e.severity})` : ''}`);
         break;
       case 'rejected':
-        lines.push(`${at}✗ rejected: ${excerpt(e.title, 160)} — ${excerpt(e.reason, 120)}`);
+        lines.push(`${at}${tag}✗ rejected: ${excerpt(e.title, 160)} — ${excerpt(e.reason, 120)}`);
         break;
       case 'fix_colony':
-        lines.push(`${at}⚒ fix colony ${e.session} for: ${excerpt(e.title, 160)}`);
+        lines.push(`${at}${tag}⚒ fix colony ${e.session} for: ${excerpt(e.title, 160)}`);
         break;
       case 'review':
-        lines.push(`${at}⚖ review ${e.session} of ${excerpt(e.pr, 120)}: ${e.verdict}`);
+        lines.push(`${at}${tag}⚖ review ${e.session} of ${excerpt(e.pr, 120)}: ${e.verdict}`);
         break;
       case 'merged':
-        lines.push(`${at}✔ merged ${excerpt(e.pr, 120)}`);
+        lines.push(`${at}${tag}✔ merged ${excerpt(e.pr, 120)}`);
         break;
       case 'verification':
         // Right after the claim's turn ended, so the claim and its verdict read side by side.
-        lines.push(`${at}∎ ${verificationLine(e)}`);
+        lines.push(`${at}${tag}∎ ${verificationLine(e)}`);
         break;
       case 'memory_proposal':
-        lines.push(`${at}◇ memory proposal (${e.scope}): ${excerpt(e.title, 160)}`);
+        lines.push(`${at}${tag}◇ memory proposal (${e.scope}): ${excerpt(e.title, 160)}`);
         break;
     }
   }
@@ -668,7 +700,7 @@ export function formatTranscript({ session = {}, events = [], logs = [] }) {
 // ---------------------------------------------------------------------------------------------- command
 
 function parseArgs(argv) {
-  const args = { data: [], json: false, worst: 10, since: null, repo: null, transcript: null };
+  const args = { data: [], json: false, worst: 10, since: null, repo: null, transcript: null, origins: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -681,6 +713,8 @@ function parseArgs(argv) {
     else if (a === '--since') args.since = value();
     else if (a === '--repo') args.repo = value();
     else if (a === '--transcript') args.transcript = value();
+    else if (a === '--origin') args.origins = parseOrigins(value());
+    else if (a.startsWith('--origin=')) args.origins = parseOrigins(a.slice('--origin='.length));
     else if (a === '-h' || a === '--help') args.help = true;
     else throw new Error(`unknown argument ${a}`);
   }
@@ -705,7 +739,7 @@ function main() {
   if (args.transcript) {
     const matches = colonies.filter((c) => String(c.session.id).startsWith(args.transcript));
     if (matches.length !== 1) throw new Error(matches.length ? `${args.transcript} matches ${matches.length} colonies` : `no colony ${args.transcript}`);
-    console.log(formatTranscript(matches[0]));
+    console.log(formatTranscript({ ...matches[0], origins: args.origins }));
     return;
   }
   if (args.repo) colonies = colonies.filter((c) => c.session.repo === args.repo);

@@ -12,6 +12,7 @@ use crate::{
     ApiResult, App, Shared, client_error,
     gateway::{ProviderUsage, UsageHealth, health},
     orgs::{OrgSettings, effective_notify},
+    protocol::Origin,
     providers::Provider,
     sessions::{Session, SessionStatus},
     util::{delete_secret, env_nonempty, read_secret, truncate, write_secret},
@@ -692,7 +693,7 @@ async fn deliver(
 /// stderr when it is about a provider, which has no colony to log into.
 async fn report_failure(app: &App, session: Option<&Session>, what: String) {
     match session {
-        Some(session) => app.session_log(&session.id, "warn", what).await,
+        Some(session) => app.session_log_as(Origin::Notify, &session.id, "warn", what).await,
         None => eprintln!("{what}"),
     }
 }

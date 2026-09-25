@@ -28,6 +28,10 @@ use tokio::sync::{Mutex, RwLock};
 
 /// How wide a swarm may be.
 const MAX_SWARM: usize = 8;
+
+/// The `Session.origin` a hunter carries (§6.7): how the run's stop finds its colonies, and how the
+/// event origin resolver (`events.rs`) reads a hunter's launch back.
+pub(crate) const REDTEAM_ORIGIN: &str = "redteam";
 /// The swarm size when the request does not name one.
 const DEFAULT_SWARM: usize = 3;
 /// The module a hunter runs when the request names none.
@@ -317,6 +321,7 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize) -> Value {
         "model_override": run.model,
         "subagent_model_override": run.subagent_model,
         "after": null,
+        "origin": REDTEAM_ORIGIN,
     })
 }
 
@@ -352,6 +357,7 @@ async fn launch_hunter(app: Shared, brief: Value) -> Result<Session, String> {
     session.repo = repo;
     session.branch = format!("colonizer/session-{id}");
     session.sandbox = format!("colonizer-{id}");
+    session.origin = Some(REDTEAM_ORIGIN.into());
     session.worktree = app
         .cfg
         .data_dir

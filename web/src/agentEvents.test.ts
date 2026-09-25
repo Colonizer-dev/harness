@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { initialStreamState, reduceFrame } from "./sessionStream";
-import type { AgentEventBody } from "./types";
+import { ORIGINS, type AgentEventBody } from "./types";
 
 const read = (path: string): string => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
@@ -54,6 +54,24 @@ describe("agent event types", () => {
     const lines = read("../../modules/agents/claude-code/test/fixtures/events.jsonl").split("\n").filter((l) => l.trim());
     const types = lines.map((l) => (JSON.parse(l) as { type: string }).type);
     expect(types.filter((t) => !(t in WEB_TYPES))).toEqual([]);
+  });
+
+  it("carry only the closed set of envelope origins, the ones the schema defines (issue #312)", () => {
+    const schema = JSON.parse(read("../../docs/agent-events.schema.json")) as {
+      $defs: Record<string, { enum?: string[] }>;
+    };
+    // `ORIGINS` is the browser's hand-kept side of `#/$defs/origin`: a value added to one without
+    // the other fails here rather than drifting apart.
+    expect([...ORIGINS]).toEqual(schema.$defs.origin.enum);
+
+    const lines = read("../../modules/agents/claude-code/test/fixtures/events.jsonl").split("\n").filter((l) => l.trim());
+    // A memory_proposal's body has carried its own `origin` (who proposed) since §6.2; that is a
+    // different field, not the envelope's.
+    const origins = lines
+      .filter((l) => (JSON.parse(l) as { type: string }).type !== "memory_proposal")
+      .map((l) => (JSON.parse(l) as { origin?: string }).origin)
+      .filter((o): o is string => o !== undefined);
+    expect(origins.filter((o) => !(ORIGINS as readonly string[]).includes(o))).toEqual([]);
   });
 
   it("a memory proposal or a finding on the stream moves the watermark and nothing else", () => {

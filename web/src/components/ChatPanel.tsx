@@ -30,7 +30,7 @@ import {
   type ToolResultPayload,
   type TurnSummary,
 } from "../sessionStream";
-import type { MemoryScope } from "../types";
+import type { MemoryScope, Origin } from "../types";
 import { AntAvatar, type AntActivity } from "./AntAvatar";
 import { antActivity, describeTool, isNoiseTool, toolDetail, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
@@ -195,11 +195,11 @@ export function ChatPanel({
                         <AssistantMessage />
                       )
                     ) : message.id === BRIEF_ID ? (
-                      <SessionBrief text={messageText(message)} />
-                    ) : isWatchdogMessageId(message.id) ? (
+                      <SessionBrief text={messageText(message)} origin={thread.origins[message.id]} />
+                    ) : thread.origins[message.id] === "watchdog" || isWatchdogMessageId(message.id) ? (
                       <WatchdogNotice text={messageText(message)} at={message.createdAt} />
                     ) : (
-                      <UserMessage />
+                      <UserMessage origin={thread.origins[message.id]} />
                     )}
                     {thread.turns[message.id]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}
                     {thread.notices[message.id]?.map((notice) => (
@@ -249,7 +249,11 @@ function EmptyChat({ connection, live }: { connection: StreamState["connection"]
   );
 }
 
-function SessionBrief({ text }: { text: string }) {
+/** The brief's label by the origin that launched the colony (issue #312): the scheduler's and the red
+ *  team's briefs are not the operator's words. */
+const BRIEF_LABEL: Partial<Record<Origin, string>> = { burn_down: "Burn-down brief", redteam: "Red-team brief" };
+
+function SessionBrief({ text, origin }: { text: string; origin?: Origin }) {
   const enter = useEnter();
   const trimmed = text.trim();
   const firstLine = trimmed.split("\n").find((line) => line.trim()) ?? "";
@@ -258,7 +262,9 @@ function SessionBrief({ text }: { text: string }) {
       <details className="group rounded-xl border border-border bg-panel text-[13px]">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-3 py-2 hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
           <IconChevron size={13} className="shrink-0 text-faint transition-transform group-open:rotate-90" />
-          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted">Colony brief</span>
+          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            {(origin && BRIEF_LABEL[origin]) || "Colony brief"}
+          </span>
           <span className="min-w-0 flex-1 truncate text-muted">{firstLine}</span>
         </summary>
         <div className="scroll-thin max-h-96 overflow-y-auto whitespace-pre-wrap border-t border-border px-3 py-2.5 leading-relaxed text-muted [overflow-wrap:anywhere]">
@@ -311,12 +317,27 @@ function MemoryNoticeRow({ notice, onOpen }: { notice: MemoryNotice; onOpen?: ()
   );
 }
 
-function UserMessage() {
+/** The tag a non-operator turn carries above its bubble (issue #312); the operator's own need none. */
+const ORIGIN_LABEL: Partial<Record<Origin, string>> = {
+  autonomy: "autonomy judge",
+  burn_down: "burn-down",
+  redteam: "red-team",
+  notify: "notification",
+  system: "system",
+};
+
+function UserMessage({ origin }: { origin?: Origin }) {
   const enter = useEnter();
+  const label = origin && origin !== "user" ? (ORIGIN_LABEL[origin] ?? origin) : null;
   return (
     <MessagePrimitive.Root className={cx("my-4 flex justify-end", enter)}>
-      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent-soft px-3.5 py-2 text-[14px] leading-relaxed">
-        <MessagePrimitive.Parts />
+      <div className="max-w-[85%]">
+        {label && (
+          <div className="mb-1 text-right text-[11px] font-semibold uppercase tracking-wide text-faint">{label}</div>
+        )}
+        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent-soft px-3.5 py-2 text-[14px] leading-relaxed">
+          <MessagePrimitive.Parts />
+        </div>
       </div>
     </MessagePrimitive.Root>
   );

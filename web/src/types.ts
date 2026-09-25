@@ -971,10 +971,29 @@ export interface AgentRef {
   description?: string | null;
 }
 
+/**
+ * Who set a recorded line in motion (issue #312): an envelope field beside `seq`/`ts`/`agent` on every
+ * line of `events.jsonl` and `harness.jsonl`, and on each stream event. Absent on lines recorded before
+ * the field existed, which readers infer as before (a `watchdog-` message id, an answered question).
+ */
+export const ORIGINS = [
+  "user",
+  "agent",
+  "subagent",
+  "watchdog",
+  "autonomy",
+  "burn_down",
+  "redteam",
+  "notify",
+  "system",
+] as const;
+export type Origin = (typeof ORIGINS)[number];
+
 interface Sequenced {
   seq?: number;
   ts?: string;
   agent?: AgentRef;
+  origin?: Origin;
 }
 
 export type AgentEventBody =
@@ -1029,7 +1048,7 @@ export type AgentEvent = Sequenced & AgentEventBody;
 export type ServerFrame =
   | AgentEvent
   | { type: "session"; session: Session }
-  | { type: "harness_log"; level: LogLevel; message: string; ts: string }
+  | { type: "harness_log"; level: LogLevel; message: string; ts: string; origin?: Origin }
   | { type: "memory_proposed"; proposal: MemoryProposal }
   | { type: "run_epoch"; epoch: number }
   /** The backlog replay is complete; everything after it is live. */

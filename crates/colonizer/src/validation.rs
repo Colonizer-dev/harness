@@ -244,6 +244,9 @@ pub(crate) fn is_host_chain_type(kind: &str) -> bool {
 /// back to the runner.
 pub(crate) async fn emit_chain(app: &Shared, session_id: &str, mut event: Value) {
     let rt = app.runtime(session_id).await;
+    // The chain is the mothership's own verdicts — validation, the autofix pipeline, verification —
+    // so every line speaks as `system`, whatever subsystem asked for it (docs/protocol.md §3).
+    event["origin"] = json!(crate::protocol::Origin::System.as_str());
     if event.get("ts").is_none() {
         // The same frame shape agentd stamps, so the browser renders it identically.
         event["ts"] = json!(Utc::now());
@@ -893,6 +896,7 @@ mod tests {
         let event: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(event["type"], "validated");
         assert_eq!(event["title"], "career pages");
+        assert_eq!(event["origin"], "system", "the host's chain speaks as system");
         assert_eq!(event["seq"], 1, "the next seq after nothing is 1");
         assert!(event["ts"].is_string(), "the ts is present for the browser's clock");
         let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();

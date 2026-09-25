@@ -19,7 +19,7 @@ import {
   type ToolBlock,
   type TurnSummary,
 } from "./sessionStream";
-import type { AgentEventBody, AgentRef, MemoryProposal, ServerFrame, Session } from "./types";
+import type { AgentEventBody, AgentRef, MemoryProposal, Origin, ServerFrame, Session } from "./types";
 import type { Api, SocketLike } from "./api";
 
 const SENT_AT = "2026-09-17T10:00:00Z";
@@ -32,6 +32,14 @@ let seq = 0;
 
 /** The next agent event on the wire; pass `n` to replay one the colony has already seen. */
 const event = (body: AgentEventBody, n?: number): ServerFrame => ({ seq: n ?? ++seq, ts: SENT_AT, ...body });
+
+/** The same event carrying the envelope's `origin` (issue #312). */
+const withOrigin = (origin: Origin, body: AgentEventBody, n?: number): ServerFrame => ({
+  seq: n ?? ++seq,
+  ts: SENT_AT,
+  origin,
+  ...body,
+});
 
 const colony = (): StreamState => initialStreamState();
 const send = (state: StreamState, frame: ServerFrame): StreamState => reduceFrame(state, frame);
@@ -320,6 +328,17 @@ describe("reduceFrame", () => {
       expect(s.submitting).toEqual({});
       expect(s.messages).toEqual([]);
     });
+
+    it("an answer keeps its origin, so the judge's answer never renders as the operator's (issue #312)", () => {
+      let s = send(colony(), event({ type: "question", question_id: "q1", questions: [ask] }));
+      s = send(s, withOrigin("autonomy", { type: "question_answered", question_id: "q1", answers: { "Push now?": "Yes" } }));
+      expect((s.messages[0].blocks[0] as QuestionBlock).answer?.origin).toBe("autonomy");
+
+      // A line recorded before the envelope carried no origin: the operator answered, as it always read.
+      s = send(colony(), event({ type: "question", question_id: "q1", questions: [ask] }));
+      s = send(s, event({ type: "question_answered", question_id: "q1", answers: { "Push now?": "Yes" } }));
+      expect((s.messages[0].blocks[0] as QuestionBlock).answer?.origin).toBeUndefined();
+    });
   });
 
   describe("user messages", () => {
@@ -341,6 +360,14 @@ describe("reduceFrame", () => {
     it("an echo that already arrived is not added twice", () => {
       let s = send(colony(), event({ type: "user_message", id: "u-1", text: "Hi" }));
       expectNoVisibleChange(s, send(s, event({ type: "user_message", id: "u-1", text: "Hi" })));
+    });
+
+    it("a message's origin rides along, so a nudge can be told from the operator's words (issue #312)", () => {
+      const s = send(colony(), withOrigin("watchdog", { type: "user_message", id: "wd-1", text: "Still there?" }));
+      expect(s.messages[0]).toMatchObject({ id: "wd-1", origin: "watchdog" });
+
+      const plain = send(colony(), event({ type: "user_message", id: "u-1", text: "Hi" }));
+      expect((plain.messages[0] as ChatMessage).origin).toBeUndefined();
     });
   });
 
@@ -582,6 +609,11 @@ describe("buildThread", () => {
       thread([orchestrator("m1", text("On it.")), userSaid("u1", "Thanks"), orchestrator("m2", text("More work."))]),
     );
     expect(view.messages.map((m) => m.role)).toEqual(["assistant", "user", "assistant"]);
+  });
+
+  it("a user message's origin is keyed by its id for the render (issue #312); the operator's is not", () => {
+    const view = buildThread(thread([{ ...userSaid("wd1", "Still there?"), origin: "watchdog" }, userSaid("u1", "Hi")]));
+    expect(view.origins).toEqual({ wd1: "watchdog" });
   });
 
   it("one settler, however many messages it took, gets one card", () => {

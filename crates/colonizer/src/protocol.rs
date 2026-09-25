@@ -10,7 +10,7 @@
 //! type can never make a line fail to deserialise. That matters because the browser receives every
 //! line regardless — pass-through happens before this dispatch (`events.rs`).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// The `state` of a `status` event (docs/protocol.md §2). A state a newer runner knows still
@@ -80,6 +80,68 @@ impl QuestionRisk {
         match risk {
             None | Some(Value::Null) => Self::WorkspaceWrite,
             Some(risk) => serde_json::from_value(risk.clone()).unwrap_or(Self::Unknown),
+        }
+    }
+}
+
+/// Who caused a line in a colony's `events.jsonl` or `harness.jsonl`: an envelope field the host
+/// stamps at write time (docs/protocol.md §3), a sibling of agentd's `seq`/`ts` and never part of
+/// the runner contract body. Unlike the event types, the vocabulary is closed — a value outside it
+/// is a writer's bug, which [`Origin::parse_logged`] names out loud instead of ignoring — and
+/// writing is enforced here, by the type: only these values can be stamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Origin {
+    /// A person drove it: a message typed into the colony, or their answer to a question.
+    User,
+    /// The colony's orchestrator agent — most runner lines, its questions included.
+    Agent,
+    /// A subagent inside the colony; the line also carries the `agent` ref (§2 rules).
+    Subagent,
+    /// The watchdog nudging a stalled colony (§6.3).
+    Watchdog,
+    /// The autonomy judge answering a question in autonomous mode (§6.2b).
+    Autonomy,
+    /// The burn-down scheduler, on a colony it launched (§6.2c).
+    BurnDown,
+    /// A red-team hunter colony (§6.7).
+    Redteam,
+    /// The notification dispatcher, about a dispatch it made or failed.
+    Notify,
+    /// The host itself: its validation chain, verification, lifecycle and bookkeeping.
+    System,
+}
+
+impl Origin {
+    /// The wire spelling, for stamping a line's `origin` field.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Subagent => "subagent",
+            Self::Watchdog => "watchdog",
+            Self::Autonomy => "autonomy",
+            Self::BurnDown => "burn_down",
+            Self::Redteam => "redteam",
+            Self::Notify => "notify",
+            Self::System => "system",
+        }
+    }
+
+    /// Reads a stored line's `origin`: `None` for a line from before the field existed, which is
+    /// legacy, not a bug — but a value outside the vocabulary is a writer's bug, so unlike an
+    /// unknown event type (which is ignored for forward compatibility, §2) it is logged loudly and
+    /// the line reads as unstamped rather than folding into some default.
+    pub(crate) fn parse_logged(wire: Option<&str>) -> Option<Self> {
+        match wire {
+            None => None,
+            Some(wire) => match serde_json::from_value(json!(wire)) {
+                Ok(origin) => Some(origin),
+                Err(_) => {
+                    eprintln!("events: unknown origin \"{wire}\" on a stored line; reading it as legacy");
+                    None
+                }
+            },
         }
     }
 }
@@ -338,14 +400,15 @@ mod tests {
         );
     }
 
-    /// agentd stamps `seq`/`ts` onto every event (crates/colonizer-agentd/src/store.rs) and
-    /// subagent events carry `agent`; neither is part of the runner contract body (§2), so neither
-    /// may change what the body deserialises to.
+    /// agentd stamps `seq`/`ts` onto every event (crates/colonizer-agentd/src/store.rs),
+    /// subagent events carry `agent`, and the host stamps `origin` onto every line it appends
+    /// (§3); none of these is part of the runner contract body (§2), so none may change what the
+    /// body deserialises to.
     #[test]
     fn agentds_envelope_around_the_body_does_not_change_the_variant() {
         let stored = r#"{"type":"turn_end","is_error":false,"result":"done","cost_usd":0.42,"duration_ms":81234,
             "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}},
-            "agent":{"id":"toolu_1","name":"Explore","description":null},"seq":41,"ts":"2026-09-18T10:00:00.000Z"}"#;
+            "agent":{"id":"toolu_1","name":"Explore","description":null},"seq":41,"ts":"2026-09-18T10:00:00.000Z","origin":"agent"}"#;
         match serde_json::from_str::<AgentEvent>(stored).unwrap() {
             AgentEvent::TurnEnd {
                 cost_usd,
@@ -402,6 +465,65 @@ mod tests {
         assert!(QuestionRisk::WorkspaceWrite < QuestionRisk::PublishAffecting);
         assert!(QuestionRisk::PublishAffecting < QuestionRisk::CredentialAdjacent);
         assert!(QuestionRisk::CredentialAdjacent < QuestionRisk::Unknown);
+    }
+
+    /// The origin vocabulary round-trips through its wire spelling, and a value outside it is not
+    /// the ignorable-unknown of an event type but a writer's bug: the deserialise refuses, and the
+    /// reading helper says so out loud and reports the line as unstamped instead of guessing.
+    #[test]
+    fn the_origin_vocabulary_round_trips_and_rejects_unknown_values_loudly() {
+        for (wire, origin) in [
+            ("user", Origin::User),
+            ("agent", Origin::Agent),
+            ("subagent", Origin::Subagent),
+            ("watchdog", Origin::Watchdog),
+            ("autonomy", Origin::Autonomy),
+            ("burn_down", Origin::BurnDown),
+            ("redteam", Origin::Redteam),
+            ("notify", Origin::Notify),
+            ("system", Origin::System),
+        ] {
+            assert_eq!(serde_json::from_value::<Origin>(json!(wire)).unwrap(), origin);
+            assert_eq!(origin.as_str(), wire);
+            assert_eq!(Origin::parse_logged(Some(wire)), Some(origin));
+        }
+        assert!(
+            serde_json::from_value::<Origin>(json!("the_runner_itself")).is_err(),
+            "outside a closed vocabulary is a bug, not a forward-compatibility case"
+        );
+        assert_eq!(Origin::parse_logged(None), None, "no origin is a legacy line, not a bug");
+        assert_eq!(Origin::parse_logged(Some("the_runner_itself")), None);
+    }
+
+    /// The schema's `#/$defs/origin` enum is this vocabulary's second hand-kept side: a variant
+    /// added here without the schema — or a wire spelling changed on one side only — fails here, the
+    /// same seam the fixture test above pins for the event types themselves.
+    #[test]
+    fn the_origin_variants_are_exactly_the_schemas_origin_enum() {
+        let schema: Value = serde_json::from_str(include_str!("../../../docs/agent-events.schema.json")).unwrap();
+        let mut schema_enum: Vec<&str> = schema["$defs"]["origin"]["enum"]
+            .as_array()
+            .expect("the schema defines #/$defs/origin as an enum")
+            .iter()
+            .map(|v| v.as_str().expect("an enum of strings"))
+            .collect();
+        schema_enum.sort_unstable();
+        let mut variants: Vec<&str> = [
+            Origin::User,
+            Origin::Agent,
+            Origin::Subagent,
+            Origin::Watchdog,
+            Origin::Autonomy,
+            Origin::BurnDown,
+            Origin::Redteam,
+            Origin::Notify,
+            Origin::System,
+        ]
+        .iter()
+        .map(|o| o.as_str())
+        .collect();
+        variants.sort_unstable();
+        assert_eq!(variants, schema_enum);
     }
 
     /// The schema's defaults, held by the type: a proposal without `scope` or `tags` proposes for
