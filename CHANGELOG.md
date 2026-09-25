@@ -133,6 +133,10 @@ setting) is called out under **Take care** rather than left for you to find.
   held announcements — provider_degraded ×2, question ×3") with counts by class only, no colony ids
   or question text. The tallies ride the authenticated `/api/status` as `ledger`. The watchdog's
   nudges join the ledger in a later slice. ([#311])
+- **Red-team synthesis.** A red-team run that finds something launches one more colony at `done` —
+  the synthesis judge — which merges the hunters' findings into a single ranked report, tracked by
+  the run's `synthesis` object and the tally's `merged` count. It fires exactly once, publishes
+  nothing, and is retried via `POST /api/redteam/runs/{id}/synthesize`. ([#309])
 
 ### Fixed
 
@@ -759,6 +763,7 @@ Macs. ([#74])
 [#321]: https://github.com/Colonizer-dev/harness/issues/321
 [#519]: https://github.com/Colonizer-dev/harness/pull/519
 [#527]: https://github.com/Colonizer-dev/harness/pull/527
+[#309]: https://github.com/Colonizer-dev/harness/issues/309
 [#329]: https://github.com/Colonizer-dev/harness/issues/329
 [#331]: https://github.com/Colonizer-dev/harness/issues/331
 [#326]: https://github.com/Colonizer-dev/harness/issues/326

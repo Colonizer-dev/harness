@@ -2094,11 +2094,38 @@ export function createMockApi(): Api {
         { session_id: "stall5678", title: "Dark-mode email fuzz", module: "email", version: null, focus: "template injection" },
         { session_id: "red-party1", title: "Discount stacking probe", module: "pricing", version: "0.9.1", focus: "multi-code carts" },
       ],
-      counts: { found: 3, validated: 2, rejected: 1, filed: 1 },
+      counts: { found: 3, validated: 2, rejected: 1, filed: 1, merged: null },
       created_at: ago(40),
       started_at: ago(39),
       ended_at: null,
       gate_reason: null,
+      synthesis: null,
+    },
+    {
+      // A finished raid whose synthesis merged the hunters' duplicates (issue #309).
+      id: "rt-demo2",
+      repo: "acme/webshop",
+      org: "acme",
+      state: "done",
+      swarm_size: 2,
+      modules: ["checkout", "email"],
+      autofix: false,
+      hunters: [
+        { session_id: "close0987", title: "Discount stacking probe", module: "pricing", version: "0.9.1", focus: "multi-code carts" },
+        { session_id: "old98765", title: "Cart totals rounding", module: "checkout", version: "1.2.0", focus: "money math" },
+      ],
+      counts: { found: 7, validated: 4, rejected: 2, filed: 3, merged: 4 },
+      created_at: ago(1500),
+      started_at: ago(1499),
+      ended_at: ago(1400),
+      gate_reason: null,
+      synthesis: {
+        state: "done",
+        session_id: "synth9f2a",
+        report: "/var/lib/colonizer/redteam/rt-demo2/report.json",
+        reason: null,
+        superseded: ["synth7c01"],
+      },
     },
   ];
   const redActive = (repo: string) =>
@@ -3258,7 +3285,8 @@ export function createMockApi(): Api {
         version: null,
         focus: "adversarial pass",
       })),
-    counts: { found: 0, validated: 0, rejected: 0, filed: 0 },
+    counts: { found: 0, validated: 0, rejected: 0, filed: 0, merged: null },
+    synthesis: null,
     created_at: now(),
     started_at: body.arm ? null : now(),
     ended_at: null,
@@ -3354,6 +3382,24 @@ export function createMockApi(): Api {
       s.patch({ status: "stopped", mesh: null });
     }
       }
+      return clone(run);
+    },
+    synthesizeRedTeamRun: async (id) => {
+      await sleep(250);
+      const run = redRuns.find((r) => r.id === id);
+      if (!run) throw new ApiError("no such red-team run", 404);
+      if (run.state !== "done") throw new ApiError("synthesis starts once the raid is done", 409);
+      const synth = run.synthesis;
+      // Idempotent while a synthesis is already on its way, like the server.
+      if (synth && (synth.state === "pending" || synth.state === "running")) return clone(run);
+      // Supersede the old colony and queue a fresh one; the old report stays until the new one lands.
+      run.synthesis = {
+        state: "pending",
+        session_id: `synth-${Math.random().toString(16).slice(2, 6)}`,
+        report: synth?.report ?? null,
+        reason: null,
+        superseded: synth?.session_id ? [...(synth.superseded ?? []), synth.session_id] : (synth?.superseded ?? []),
+      };
       return clone(run);
     },
   };

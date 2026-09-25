@@ -297,6 +297,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `PUT /api/redteam/schedules/{id}` | Same body; replaces the settings, keeps `id`, `created_at` and the last firing, and recomputes `next_run_at`. **404** for an unknown schedule |
 | `DELETE /api/redteam/schedules/{id}` | Removes it. **404** for an unknown schedule |
 | `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
+| `POST /api/redteam/runs/{id}/synthesize` | Re-run a `done` run's synthesis: launches a fresh judge colony, the previous one's id moving to `synthesis.superseded` (its report stays on disk, the linked `report` and `counts.merged` until the new one finishes). Idempotent while a synthesis is `pending` or `running` — the run comes back unchanged, no second colony. **409** unless the run is `done` with findings to merge; **404** for an unknown run |
+| `GET /api/redteam/runs/{id}/report` | The linked merged report (`synthesis.report`) as a JSON array of parsed defect objects, in file order (most severe first). **404** when no report is linked or the file is gone |
 | `GET /api/burn-down` · `POST /api/burn-down/stop` | Burn-down mode (§6.2c): the measured window and launch plan, and a stop that persistently switches the module off and halts every colony it launched |
 | `GET /api/activity` | The activity log (§6.9): colony outcomes recorded at the transition and what a person changed through the API, newest first, paged with `before`/`limit` and filtered by `kind`, `actor`, `org`, `repo` and `q`. **400** naming an unknown kind or actor, or a `limit` outside 1–500 |
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
@@ -2095,7 +2097,8 @@ path, so the parallel limit applies: a hunter may sit `queued` until a slot free
  "swarm_size": 3, "modules": ["general"], "autofix": false,
  "hunters": [{"session_id": "ab12cd34", "title": "Red-team hunter 1/3: …", "module": "general",
               "version": null, "focus": "error handling and edge cases"}],
- "counts": {"found": 0, "validated": 0, "rejected": 0, "filed": 0},
+ "counts": {"found": 0, "validated": 0, "rejected": 0, "filed": 0, "merged": null},
+ "synthesis": null,
  "created_at": "…", "started_at": null, "ended_at": null, "gate_reason": null}
 ```
 
@@ -2121,6 +2124,26 @@ its own — the run is still marked `stopped`. Stops are idempotent once the run
 persist to `data/redteam.json` and survive a restart, where the tick re-derives their state from the
 hunter sessions it finds: hunters whose sessions are gone count as ended, so a run interrupted
 mid-launch drains to `done` rather than re-launching a duplicate swarm.
+
+Synthesis. A run with findings that lands `done` launches one more colony — the synthesis judge —
+which merges the hunters' findings into one report and publishes nothing (autopilot, autofix and
+automerge off; the brief orders it to write only that one file). It fires exactly once, at the
+transition into `done` — never mid-run, never on a `stopped` run, never for a run already done.
+Colonies cannot mount host files, so the brief carries the hunters' ledgers inline (latest ledger
+state per finding, plus the body and evidence from the raw `finding` event, each cut to an equal
+share of the brief) and cites the host paths. The report is
+`sessions/<synthesis id>/out/redteam-report.jsonl`, JSON lines, one object per distinct defect,
+most severe first: `{"defect", "severity": "critical|high|medium|low", "reproduction":
+"reproduced|unconfirmed", "steps", "files": [..], "hunters": [<hunter session ids>], "merged_from":
+n, "validation": "validated|rejected|unvalidated"}` — a defect several hunters reported is one
+line naming all of them, and `validation` carries the ledger verdicts (§6.6): `validated` when any
+merged finding was validated, `rejected` when all were, else `unvalidated`. `synthesis` tracks the
+judge independently of the run's own state, which stays `done`: `null` | `{"state":
+"pending|running|done|failed", "session_id": <newest synthesis colony>, "report": <host path of
+the newest report, null until one finishes>, "reason": <why it failed>, "superseded": [<earlier
+synthesis colony ids, oldest first>]}`; `pending` → `running` → `done` (the report is linked and
+`counts.merged` is its parsed line count) or `failed` with `reason` (failed launch; colony failed,
+stopped or gone; ended without a report) — any previous report and `merged` stay in place.
 
 ### 6.8 Spend (per org and per day)
 

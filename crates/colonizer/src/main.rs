@@ -1580,6 +1580,8 @@ async fn serve() -> Result<()> {
         .route("/api/redteam/runs", get(redteam::list).post(redteam::create))
         .route("/api/redteam/runs/{id}", get(redteam::get))
         .route("/api/redteam/runs/{id}/stop", post(redteam::stop))
+        .route("/api/redteam/runs/{id}/synthesize", post(redteam::synthesize))
+        .route("/api/redteam/runs/{id}/report", get(redteam::report))
         .route(
             "/api/redteam/schedules",
             get(redteam::list_schedules).post(redteam::create_schedule),

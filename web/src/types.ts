@@ -1152,6 +1152,24 @@ export interface RedTeamHunter {
   focus: string;
 }
 
+/**
+ * The synthesis step (issue #309): once a run is `done`, the mothership launches one colony that
+ * merges every hunter's findings into a single deduplicated, severity-ranked report.
+ */
+export type RedTeamSynthesisState = "pending" | "running" | "done" | "failed";
+
+export interface RedTeamSynthesis {
+  state: RedTeamSynthesisState;
+  /** The current (newest) synthesis colony. */
+  session_id: string | null;
+  /** Host path of the newest successful merged report. */
+  report: string | null;
+  /** Why it failed. */
+  reason: string | null;
+  /** Earlier synthesis session ids, oldest first. */
+  superseded: string[];
+}
+
 /** GET /api/redteam/runs: one swarm against one repository. */
 export interface RedTeamRun {
   id: string;
@@ -1163,7 +1181,10 @@ export interface RedTeamRun {
   /** Whether the swarm may merge its finds; off by default, so a raid never touches main. */
   autofix: boolean;
   hunters: RedTeamHunter[];
-  counts: { found: number; validated: number; rejected: number; filed: number };
+  /** `merged` is the distinct defects after the synthesis dedup; null until a synthesis finishes. */
+  counts: { found: number; validated: number; rejected: number; filed: number; merged: number | null };
+  /** The run's synthesis step; null until one has launched (the mothership does it at `done`). */
+  synthesis: RedTeamSynthesis | null;
   created_at: string;
   started_at: string | null;
   ended_at: string | null;

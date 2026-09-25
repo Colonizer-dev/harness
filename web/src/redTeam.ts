@@ -2,7 +2,7 @@
 // What a run "is doing" — gated at the nest's edge, or raiding — lives here so the two
 // viewers cannot disagree about which ants to draw.
 import { isLive, type Tone } from "./components/ui";
-import type { RedTeamHunter, RedTeamRun, Session } from "./types";
+import type { RedTeamHunter, RedTeamRun, RedTeamSynthesis, Session } from "./types";
 
 /** How the UI reads each run state. `armed` and `waiting` are the gated pair; `running` and `draining` the raiding pair. */
 export const RED_TEAM_STATE: Record<RedTeamRun["state"], { label: string; tone: Tone }> = {
@@ -12,6 +12,14 @@ export const RED_TEAM_STATE: Record<RedTeamRun["state"], { label: string; tone: 
   draining: { label: "Draining", tone: "warn" },
   done: { label: "Done", tone: "ok" },
   stopped: { label: "Stopped", tone: "neutral" },
+};
+
+/** How the UI reads each synthesis state (issue #309): the merge colony's own lifecycle after a raid. */
+export const RED_TEAM_SYNTHESIS: Record<RedTeamSynthesis["state"], { label: string; tone: Tone }> = {
+  pending: { label: "Synthesis queued", tone: "warn" },
+  running: { label: "Synthesizing", tone: "accent" },
+  done: { label: "Synthesis done", tone: "ok" },
+  failed: { label: "Synthesis failed", tone: "err" },
 };
 
 /** How many colonies have their microVM up; the gate's foot-soldier count. */

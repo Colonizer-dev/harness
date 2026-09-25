@@ -85,6 +85,20 @@ describe("mock startRedTeamRun", () => {
   });
 });
 
+describe("mock synthesizeRedTeamRun (issue #309)", () => {
+  it("refuses a run that is not done, is idempotent while pending, and supersedes the old colony on a retry", async () => {
+    const api = createMockApi();
+    // The seed's rt-demo1 is still raiding acme/webshop.
+    await expect(api.synthesizeRedTeamRun("rt-demo1")).rejects.toThrow("synthesis starts once the raid is done");
+    // A re-run queues a fresh colony and supersedes the old one; a second call changes nothing.
+    const first = await api.synthesizeRedTeamRun("rt-demo2");
+    expect(first.synthesis).toMatchObject({ state: "pending", superseded: ["synth7c01", "synth9f2a"] });
+    const second = await api.synthesizeRedTeamRun("rt-demo2");
+    expect(second.synthesis?.session_id).toBe(first.synthesis?.session_id);
+    expect(second.synthesis?.superseded).toEqual(["synth7c01", "synth9f2a"]);
+  });
+});
+
 describe("mock set_model (issue #240)", () => {
   afterEach(() => {
     vi.useRealTimers();

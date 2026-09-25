@@ -109,6 +109,7 @@ export function OverviewView({
   liveStorage = null,
   onStart,
   onStop,
+  onSynthesize,
   onOpenColony,
   onOpenSettings,
   scopeOrg,
@@ -142,6 +143,8 @@ export function OverviewView({
   liveStorage?: StorageSummary | null;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
+  /** (Re)launches a done run's synthesis colony (issue #309); folded back into the runs list by the caller. */
+  onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
@@ -651,6 +654,7 @@ export function OverviewView({
         sessions={sessions}
         runs={runs}
         onStop={onStop}
+        onSynthesize={onSynthesize}
         onOpenColony={onOpenColony}
         onClose={() => setRedTeam((r) => (r?.view === "history" ? null : r))}
         onNew={(org) => setRedTeam({ org, view: "wizard" })}

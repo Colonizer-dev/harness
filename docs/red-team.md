@@ -56,6 +56,33 @@ filed (`filed` or `duplicate`) when it reached that stage. Lines written before 
 existed carry no `state` and are read by what they carry: an `issue` or `duplicate_of`
 counts as filed.
 
+- `found`: raw findings across hunters (a defect two hunters report counts twice).
+- `validated` / `rejected`: the validator's verdicts from the ledgers.
+- `filed`: filed as an issue, or matched to one already open.
+- `merged`: distinct defects after synthesis (null until one finishes).
+
+## Synthesis
+
+When a run with findings lands `done`, the tick launches one more colony — the synthesis
+judge — to merge the hunters' findings into a single report. It fires exactly once, at the
+transition into `done`: never mid-run, never on a stopped run, never for a run already done,
+and never when the hunters found nothing. The judge publishes nothing (autopilot, autofix and
+automerge off; the brief orders it to write only `/harness/out/redteam-report.jsonl` — file
+nothing, open no issue or pull request, no code changes). Colonies cannot mount host files, so
+the brief carries the hunters' ledgers inline, cut to an equal share under the instructions cap.
+
+The report is JSON lines, one object per distinct defect, most severe first (the schema is in
+protocol §6.7); each line names every hunter that reported the defect (`hunters`, `merged_from`)
+and carries the validator's verdict explicitly (`validation`, #211).
+
+`synthesis` on the run tracks the judge independently of the run's state, which stays `done`:
+`pending` → `running` → `done` (the report is linked, and `merged` counts its lines) or `failed`
+with a `reason`. `POST /api/redteam/runs/{id}/synthesize` (**409** on a run that is not done or found nothing)
+retries it: the previous colony's id moves to `superseded`, its report stays on disk, and the
+linked `report` and `merged` stay until the new colony finishes; while one is pending or running
+the route is idempotent. `GET /api/redteam/runs/{id}/report` serves the linked report parsed
+(**404** when nothing is linked or the file is gone).
+
 ## States
 
 `armed` → `waiting` / `running` → `draining` → `done`, plus `stopped`:
@@ -100,5 +127,6 @@ live first, with state, hunter, models, found / validated / filed / rejected, co
 a stop button.
 
 API: `GET`/`POST` `/api/redteam/runs`, `GET /api/redteam/runs/{id}`,
-`POST /api/redteam/runs/{id}/stop`, `GET`/`POST` `/api/redteam/schedules`,
+`POST /api/redteam/runs/{id}/stop`, `POST /api/redteam/runs/{id}/synthesize`,
+`GET /api/redteam/runs/{id}/report`, `GET`/`POST` `/api/redteam/schedules`,
 `PUT`/`DELETE` `/api/redteam/schedules/{id}`.

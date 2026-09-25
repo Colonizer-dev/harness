@@ -1922,7 +1922,7 @@ fn strip_nested_git(root: &FsPath) -> Result<Vec<PathBuf>> {
 /// the buffer past the cap. `O_NONBLOCK` is for the same trick with a FIFO: opening one for reading
 /// blocks until a writer turns up, and a publisher parked on that would hang; it is a no-op on the
 /// regular files that get this far.
-fn read_regular_file(path: &FsPath, cap: u64) -> std::io::Result<String> {
+pub(crate) fn read_regular_file(path: &FsPath, cap: u64) -> std::io::Result<String> {
     use std::io::Read;
     let file = std::fs::OpenOptions::new()
         .read(true)

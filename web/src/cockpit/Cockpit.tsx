@@ -83,6 +83,7 @@ export function Cockpit({
   onSessionChanged,
   onRedStart,
   onRedStop,
+  onRedSynthesize,
   onCreated,
   onOpenSettings,
   onOpenOrgSettings,
@@ -127,6 +128,8 @@ export function Cockpit({
   onSessionChanged: (session: Session) => void;
   onRedStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onRedStop?: (id: string) => Promise<void>;
+  /** (Re)launches a done run's synthesis colony (issue #309). */
+  onRedSynthesize?: (id: string) => Promise<void>;
   onCreated: (session: Session) => void;
   onOpenSettings: (section?: SectionId) => void;
   /** One org's settings dialog, which App owns; how a switched-off org gets switched back on. */
@@ -366,6 +369,7 @@ export function Cockpit({
             providers={providerSnapshots(status?.model_providers)}
             onStart={onRedStart}
             onStop={onRedStop}
+            onSynthesize={onRedSynthesize}
             onOpenColony={openColonyById}
             onOpenSettings={(section) => onOpenSettings(section)}
           />
