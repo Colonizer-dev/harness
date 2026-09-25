@@ -59,7 +59,8 @@ function run(overrides: Partial<RedTeamRun> = {}): RedTeamRun {
       { session_id: "h1", title: "hunter 1", module: "general", version: null, focus: "input validation and injection" },
       { session_id: "h2", title: "hunter 2", module: "general", version: null, focus: "concurrency and race conditions" },
     ],
-    counts: { found: 5, validated: 3, rejected: 1, filed: 2 },
+    counts: { found: 5, validated: 3, rejected: 1, filed: 2, merged: null },
+    synthesis: null,
     created_at: "2026-09-20T10:00:00Z",
     started_at: "2026-09-20T10:00:00Z",
     ended_at: "2026-09-20T12:00:00Z",
@@ -173,6 +174,42 @@ describe("the red-team history", () => {
     expect(html).toContain("$10.00");
     expect(html).toContain("Stop run");
     expect(html).not.toContain("other/x");
+  });
+
+  it("a run's row shows its merged count and synthesis state — re-run when done, retry when failed, neither while pending — over the count legend", () => {
+    const row = (synthesis: RedTeamRun["synthesis"], merged: number | null = null) =>
+      renderToStaticMarkup(
+        <ApiContext.Provider value={api}>
+          <HistoryBody
+            org="acme"
+            sessions={hunterSessions}
+            runs={[run({ counts: { found: 5, validated: 3, rejected: 1, filed: 2, merged }, synthesis })]}
+            onClose={noop}
+            onSynthesize={async () => {}}
+            onOpenColony={noop}
+            onNew={noop}
+            initialSchedules={[schedule]}
+          />
+        </ApiContext.Provider>,
+      );
+    const done = row({ state: "done", session_id: "synth1", report: "/r/report.json", reason: null, superseded: [] }, 3);
+    expect(done).toContain("5 found · 3 merged · 3 validated · 2 filed");
+    expect(done).toContain("Synthesis done");
+    expect(done).toContain("synthesis colony");
+    expect(done).toContain("Re-run synthesis");
+    expect(done).toContain("found — raw findings summed across hunters; a defect two hunters report counts twice");
+    expect(done).toContain("merged — distinct defects after the synthesis step deduplicates across hunters");
+    expect(done).toContain("validated / rejected — the validator verdicts on hunter findings");
+    expect(done).toContain("filed — findings filed as, or matched to, a GitHub issue");
+    const failed = row({ state: "failed", session_id: "synth2", report: null, reason: "the synthesis colony ran out of budget", superseded: [] });
+    expect(failed).toContain("Synthesis failed");
+    expect(failed).toContain("the synthesis colony ran out of budget");
+    expect(failed).toContain("Retry synthesis");
+    expect(failed).not.toContain("Re-run synthesis");
+    const pending = row({ state: "pending", session_id: "synth3", report: null, reason: null, superseded: [] });
+    expect(pending).toContain("Synthesis queued");
+    expect(pending).not.toContain("Retry synthesis");
+    expect(pending).not.toContain("Re-run synthesis");
   });
 });
 

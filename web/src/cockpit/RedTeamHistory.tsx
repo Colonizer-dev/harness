@@ -3,12 +3,23 @@
 // they found and what they cost. Replaces the Overview's old red-team card.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { Button, Spinner, cx, sameOrg } from "../components/ui";
+import { Button, Spinner, cx, sameOrg, type Tone } from "../components/ui";
 import { formatCost } from "../spend";
 import type { NewRedTeamSchedule, RedTeamRun, RedTeamSchedule, Session } from "../types";
+import { RED_TEAM_SYNTHESIS } from "../redTeam";
 import { describeCadence, runCost } from "./redTeamPlan";
 
 const ACTIVE = new Set(["armed", "waiting", "running", "draining"]);
+
+/** A state pill's classes per tone, the palette the run-state pill draws from. */
+const TONE_PILL: Record<Tone, string> = {
+  neutral: "bg-panel-3 text-muted",
+  info: "bg-accent-soft text-accent",
+  accent: "bg-accent-soft text-accent",
+  ok: "bg-ok/15 text-ok",
+  warn: "bg-warn/15 text-warn",
+  err: "bg-err/15 text-err",
+};
 
 export function RedTeamHistory({
   org,
@@ -17,6 +28,7 @@ export function RedTeamHistory({
   runs,
   onClose,
   onStop,
+  onSynthesize,
   onOpenColony,
   onNew,
 }: {
@@ -26,6 +38,7 @@ export function RedTeamHistory({
   runs: RedTeamRun[];
   onClose: () => void;
   onStop?: (id: string) => Promise<void>;
+  onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
   /** Opens the wizard for this org. */
   onNew: (org: string) => void;
@@ -45,7 +58,7 @@ export function RedTeamHistory({
       className="m-auto w-[min(760px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
     >
       {open && org && (
-        <HistoryBody org={org} sessions={sessions} runs={runs} onClose={onClose} onStop={onStop} onOpenColony={onOpenColony} onNew={onNew} />
+        <HistoryBody org={org} sessions={sessions} runs={runs} onClose={onClose} onStop={onStop} onSynthesize={onSynthesize} onOpenColony={onOpenColony} onNew={onNew} />
       )}
     </dialog>
   );
@@ -57,6 +70,7 @@ export function HistoryBody({
   runs,
   onClose,
   onStop,
+  onSynthesize,
   onOpenColony,
   onNew,
   initialSchedules = null,
@@ -66,6 +80,7 @@ export function HistoryBody({
   runs: RedTeamRun[];
   onClose: () => void;
   onStop?: (id: string) => Promise<void>;
+  onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
   onNew: (org: string) => void;
   /** Tests pass the schedules in, since static markup never runs the fetch. */
@@ -183,6 +198,8 @@ export function HistoryBody({
               {mine.map((r) => {
                 const cost = runCost(r, sessions);
                 const active = ACTIVE.has(r.state);
+                const synth = r.synthesis;
+                const synthSession = synth?.session_id ?? null;
                 return (
                   <li key={r.id} className="px-3.5 py-3">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -195,7 +212,7 @@ export function HistoryBody({
                       <span>{r.hunter === "swarm" || !r.hunter ? "Colony swarm" : r.hunter} · {r.hunters.length || r.swarm_size} hunters</span>
                       {(r.model || r.subagent_model) && <span>{[r.model, r.subagent_model].filter(Boolean).join(" / ")}</span>}
                       <span>
-                        {r.counts.found} found · {r.counts.validated} validated · {r.counts.filed} filed{r.counts.rejected > 0 ? ` · ${r.counts.rejected} rejected` : ""}
+                        {r.counts.found} found{r.counts.merged != null ? ` · ${r.counts.merged} merged` : ""} · {r.counts.validated} validated · {r.counts.filed} filed{r.counts.rejected > 0 ? ` · ${r.counts.rejected} rejected` : ""}
                       </span>
                       <span>{cost != null ? formatCost(cost) : "—"}</span>
                       {r.gate_reason && <span className="text-warn">{r.gate_reason}</span>}
@@ -223,9 +240,41 @@ export function HistoryBody({
                         )}
                       </div>
                     )}
+                    {synth && (
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
+                        <span className={cx("rounded-full px-2 py-px text-[11px] font-medium", TONE_PILL[RED_TEAM_SYNTHESIS[synth.state].tone])}>{RED_TEAM_SYNTHESIS[synth.state].label}</span>
+                        {synth.state === "failed" && synth.reason && <span className="text-warn">{synth.reason}</span>}
+                        {synthSession && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onClose();
+                              onOpenColony(synthSession);
+                            }}
+                            title="The colony that merged the hunters' findings"
+                            className="cursor-pointer rounded-full border border-border bg-transparent px-2 py-0.5 text-[11.5px] text-muted hover:text-text"
+                          >
+                            synthesis colony
+                          </button>
+                        )}
+                        {r.state === "done" && (synth.state === "done" || synth.state === "failed") && onSynthesize && (
+                          <Button size="sm" variant="ghost" disabled={pending === r.id} onClick={() => act(r.id, () => onSynthesize(r.id))} className="ml-auto">
+                            {synth.state === "done" ? "Re-run synthesis" : "Retry synthesis"}
+                          </Button>
+                        )}
+                      </div>
+                    )}
                   </li>
                 );
               })}
+            </ul>
+          )}
+          {mine.length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-[11.5px] text-faint">
+              <li>found — raw findings summed across hunters; a defect two hunters report counts twice</li>
+              <li>merged — distinct defects after the synthesis step deduplicates across hunters</li>
+              <li>validated / rejected — the validator verdicts on hunter findings</li>
+              <li>filed — findings filed as, or matched to, a GitHub issue</li>
             </ul>
           )}
         </section>

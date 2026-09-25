@@ -443,6 +443,15 @@ export function App() {
     [api],
   );
 
+  // The synthesis step (issue #309): the returned run carries the new synthesis state, fold it in.
+  const synthesizeRedRun = useCallback(
+    async (id: string) => {
+      const run = await api.synthesizeRedTeamRun(id);
+      setRedRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
+    },
+    [api],
+  );
+
   // Stable identity, so the notifier effect can call the latest selection without re-running on every render.
   const select = useCallback((id: string) => {
     setSelectedId(id);
@@ -715,6 +724,7 @@ export function App() {
               onSessionChanged={upsertSession}
               onRedStart={startRedRun}
               onRedStop={stopRedRun}
+              onRedSynthesize={synthesizeRedRun}
               onCreated={(session) => {
                 upsertSession(session);
                 select(session.id);

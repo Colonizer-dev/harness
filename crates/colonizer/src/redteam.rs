@@ -2,14 +2,15 @@
 //! only while no colony is live — the "nest is empty" — either now (start-now) or, for an armed run,
 //! when the background tick sees the nest empty. The tick walks runs armed → running (or waiting
 //! while every launched hunter is still queued) → draining → done; a stop marks the run `stopped`
-//! and stops the hunters it started that are still live or queued.
+//! and stops the hunters it started that are still live or queued. A run with findings that lands
+//! `done` launches one synthesis colony to merge the hunters' findings into a single ranked report.
 
 #[cfg(not(test))]
 use crate::sessions::{self, NewSession};
 use crate::{
     ApiResult, App, Shared, client_error, findings,
     sessions::{Session, SessionStatus},
-    util::{short_id, valid_repo, write_atomic},
+    util::{short_id, truncate, valid_repo, write_atomic},
 };
 use anyhow::Result;
 use axum::{
@@ -21,6 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     path::{Path as FsPath, PathBuf},
     time::Duration,
 };
@@ -89,6 +91,46 @@ pub struct Counts {
     pub validated: u32,
     pub rejected: u32,
     pub filed: u32,
+    /// Distinct defects in the linked synthesis report; `None` until a synthesis finishes.
+    pub merged: Option<u32>,
+}
+
+/// Where a run's synthesis is, independent of the run's own state (which stays `done`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SynthesisState {
+    /// Not yet launched, or launched and still queued for a parallel slot.
+    #[default]
+    Pending,
+    Running,
+    Done,
+    /// The launch failed, the colony died, or it ended without a report; `reason` says which.
+    Failed,
+}
+
+/// A done run's synthesis: one judge colony merging the hunters' findings into a single ranked
+/// report (`redteam-report.jsonl` in its own session directory).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Synthesis {
+    pub state: SynthesisState,
+    /// The current (newest) synthesis colony.
+    pub session_id: Option<String>,
+    /// Host path of the newest successful report; a retry keeps the previous one until it is beaten.
+    pub report: Option<String>,
+    /// Why the synthesis failed; `None` otherwise.
+    pub reason: Option<String>,
+    /// Earlier synthesis colony ids, oldest first; their reports stay on disk.
+    pub superseded: Vec<String>,
+}
+
+impl Synthesis {
+    /// A launch in progress: a retry must not start a second colony. `pending` without a colony is
+    /// a launch stranded by a crash — nothing will finish it, so it counts as retryable, not in
+    /// flight.
+    fn in_flight(&self) -> bool {
+        self.session_id.is_some() && matches!(self.state, SynthesisState::Pending | SynthesisState::Running)
+    }
 }
 
 /// One hunter colony of a run.
@@ -118,6 +160,9 @@ pub struct RedTeamRun {
     pub autofix: bool,
     pub hunters: Vec<Hunter>,
     pub counts: Counts,
+    /// The synthesis phase, `None` until a run with findings lands `done` (and forever `None` for
+    /// stopped, found-nothing or already-done runs).
+    pub synthesis: Option<Synthesis>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
@@ -145,6 +190,7 @@ impl Default for RedTeamRun {
             autofix: false,
             hunters: Vec::new(),
             counts: Counts::default(),
+            synthesis: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             started_at: None,
             ended_at: None,
@@ -578,18 +624,384 @@ fn counts_for(app: &App, run: &RedTeamRun) -> Counts {
             counts.filed += u32::from(has(&["filed", "duplicate"]));
         }
     }
+    // `merged` counts the synthesis report's lines, not ledger lines, so it is carried over from
+    // the run: a retry keeps the previous count until the new report lands.
+    counts.merged = run.counts.merged;
     counts
+}
+
+// ---------------------------------------------------------------------------
+// Synthesis: one judge colony merges the hunters' findings into one report
+// ---------------------------------------------------------------------------
+
+/// The file a synthesis colony writes in its own `out`.
+const REPORT_NAME: &str = "redteam-report.jsonl";
+/// More than this in a merged report is a judge that has lost the plot; the read refuses it.
+const REPORT_CAP: u64 = 1_000_000;
+/// The synthesis brief stays under this, below the 20,000 characters a session's instructions are
+/// truncated to (sessions.rs `create`).
+const SYNTHESIS_BRIEF_CAP: usize = 19_000;
+
+/// One line of a merged report: one distinct defect, ranked most severe first. Written by the
+/// synthesis colony, so every field is read tolerantly and a line without a title costs itself.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MergedDefect {
+    pub defect: String,
+    pub severity: String,
+    pub reproduction: String,
+    pub steps: String,
+    pub files: Vec<String>,
+    /// The hunter session ids that reported this defect.
+    pub hunters: Vec<String>,
+    pub merged_from: u32,
+    pub validation: String,
+}
+
+/// Parse a merged report: lines that do not parse to a defect with a title are skipped, the rest
+/// stay in file order (the judge writes them most severe first).
+fn parse_report(content: &str) -> Vec<MergedDefect> {
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<MergedDefect>(line).ok())
+        .filter(|d| !d.defect.is_empty())
+        .collect()
+}
+
+/// One hunter finding as the synthesis brief carries it: the ledger's latest verdict, plus the
+/// body and evidence of the raw `finding` event, which the ledger does not hold.
+struct HunterFinding {
+    title: String,
+    verdict: Verdict,
+    body: String,
+    evidence: String,
+}
+
+/// A finding's latest ledger verdict: its state, severity and reason.
+type Verdict = (Option<String>, Option<String>, Option<String>);
+
+/// A hunter's findings, grouped by title in first-seen order (the way `counts_for` counts them)
+/// with the latest ledger verdict per title and prose from the hunter's last raw `finding` event.
+/// The events log goes through the bounded regular-file reader: a live VM appending to it cannot
+/// grow the read past the cap, and a planted symlink cannot turn it into a host-file read.
+fn hunter_findings(app: &App, hunter: &Hunter) -> Vec<HunterFinding> {
+    let dir = app.session_dir(&hunter.session_id);
+    let mut titles: Vec<String> = Vec::new();
+    let mut verdicts: HashMap<String, Verdict> = HashMap::new();
+    for line in findings::records(&dir.join("findings.jsonl")) {
+        if !titles.contains(&line.title) {
+            titles.push(line.title.clone());
+        }
+        let verdict = verdicts.entry(line.title).or_default();
+        if line.state.is_some() {
+            verdict.0 = line.state;
+        }
+        if line.severity.is_some() {
+            verdict.1 = line.severity;
+        }
+        if line.reason.is_some() {
+            verdict.2 = line.reason;
+        }
+    }
+    let mut prose: HashMap<String, (String, String)> = HashMap::new();
+    if let Ok(content) = crate::github::read_regular_file(&dir.join("events.jsonl"), 2_000_000) {
+        for line in content.lines() {
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if event["type"] == "finding" && event["title"].is_string() {
+                let body = event["body"].as_str().unwrap_or_default().to_string();
+                let evidence = event["evidence"].as_str().unwrap_or_default().to_string();
+                prose.insert(event["title"].as_str().unwrap().to_string(), (body, evidence));
+            }
+        }
+    }
+    titles
+        .into_iter()
+        .map(|title| {
+            let (body, evidence) = prose.remove(&title).unwrap_or_default();
+            let verdict = verdicts.remove(&title).unwrap_or_default();
+            HunterFinding {
+                title,
+                verdict,
+                body,
+                evidence,
+            }
+        })
+        .collect()
+}
+
+/// The brief the synthesis judge gets, as the request body of `POST /api/sessions`. Colonies cannot
+/// mount host files, so the hunters' ledgers travel inline — each finding's verdict, body and
+/// evidence cut to an equal share of what the intro, the task and the per-hunter headers leave of
+/// the budget — with each ledger's host path named for the record. The task is a merge only.
+fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
+    let mut text = format!(
+        "You are the synthesis judge for red-team run {} on {}. A colony cannot read files on the\n\
+         mothership host, so every hunter's findings ledger is quoted inline below, its host path\n\
+         named for the record.\n",
+        run.id, run.repo,
+    );
+    let per_hunter: Vec<(&Hunter, Vec<HunterFinding>)> = run.hunters.iter().map(|h| (h, hunter_findings(app, h))).collect();
+    let task = "\nYour task\n\
+         \n\
+         Merge the findings above into one deduplicated report of the real defects. The same defect\n\
+         reported by several hunters is ONE line: list every hunter session id that reported it in\n\
+         \"hunters\" and count the findings merged into the line in \"merged_from\". Keep the best\n\
+         reproduction per defect in \"steps\" — you may re-check it against the checked-out repository —\n\
+         and mark anything not reproduced \"reproduction\": \"unconfirmed\". Rank the lines most severe\n\
+         first. Carry each line's \"validation\" from the ledgers above: \"validated\" when any finding\n\
+         merged into it was validated, \"rejected\" when all of them were, otherwise \"unvalidated\" —\n\
+         stated explicitly on every line, never implied.\n\
+         \n\
+         Write ONLY /harness/out/redteam-report.jsonl, one JSON object per line, one line per distinct\n\
+         defect, exactly this shape:\n\
+         {\"defect\": \"<one-line title>\", \"severity\": \"critical|high|medium|low\", \"reproduction\":\n\
+         \"reproduced|unconfirmed\", \"steps\": \"<the best reproduction>\", \"files\": [\"<path>\"],\n\
+         \"hunters\": [\"<hunter session id>\"], \"merged_from\": 2, \"validation\":\n\
+         \"validated|rejected|unvalidated\"}\n\
+         \n\
+         File nothing, open no issue or pull request, do not write /harness/out/pr.md, do not change\n\
+         the code, and do not use the findings tool.\n";
+    let total: usize = per_hunter.iter().map(|(_, list)| list.len()).sum();
+    let share = SYNTHESIS_BRIEF_CAP.saturating_sub(text.len() + task.len() + 400 * per_hunter.len()) / total.max(1);
+    for (hunter, list) in &per_hunter {
+        text.push_str(&format!(
+            "\nHunter session {}, focus: {} — ledger: {}\n",
+            hunter.session_id,
+            hunter.focus,
+            app.session_dir(&hunter.session_id).join("findings.jsonl").display(),
+        ));
+        for finding in list {
+            let (state, severity, reason) = &finding.verdict;
+            let verdict = match state {
+                None => "no ledger state".to_string(),
+                Some(state) => format!(
+                    "state {state}{}{}",
+                    severity.as_deref().map(|s| format!(", severity {s}")).unwrap_or_default(),
+                    reason
+                        .as_deref()
+                        .map(|r| format!(", reason: {}", truncate(r, 200)))
+                        .unwrap_or_default(),
+                ),
+            };
+            let mut block = format!("- \"{}\" — {verdict}\n", truncate(&finding.title, 200));
+            let rest = share.saturating_sub(block.len() + 40);
+            let body_max = rest * 3 / 5;
+            block.push_str(&format!("  body: {}\n", truncate(&finding.body, body_max)));
+            block.push_str(&format!("  evidence: {}\n", truncate(&finding.evidence, rest - body_max)));
+            text.push_str(&block);
+        }
+    }
+    text.push_str(task);
+    json!({
+        "repo": run.repo,
+        "issue": null,
+        "title": format!("Red-team synthesis: {}", run.repo),
+        "instructions": text,
+        "autopilot": false,
+        "autofix": false,
+        "automerge": false,
+        "allow_duplicate": true,
+        "model_tier": null,
+        "model_override": run.model,
+        "subagent_model_override": run.subagent_model,
+        "after": null,
+        "origin": REDTEAM_ORIGIN,
+    })
+}
+
+/// Serializes a synthesis launch from its record to its attach, so a retry or tick racing one queues
+/// here instead of slipping into the record-to-attach gap and launching a second judge.
+static SYNTHESIS_LAUNCH: Mutex<()> = Mutex::const_new(());
+
+/// Launch the synthesis colony of a done run: record the pending phase first — with the run's whole
+/// state, persist-first like `launch_run`, so a stop, retry or tick racing this one cannot launch
+/// two — then launch and attach. A launch failure lands `failed`; a previous report and
+/// `counts.merged` stay until a new synthesis beats them.
+async fn launch_synthesis(app: &Shared, run: &mut RedTeamRun) {
+    let id = run.id.clone();
+    let _launch = SYNTHESIS_LAUNCH.lock().await;
+    if run.synthesis.as_ref().is_some_and(Synthesis::in_flight) {
+        return; // already pending or running: a retry is answered with the run unchanged
+    }
+    let old = run.synthesis.clone().unwrap_or_default();
+    let mut superseded = old.superseded.clone();
+    superseded.extend(old.session_id);
+    run.synthesis = Some(Synthesis {
+        state: SynthesisState::Pending,
+        session_id: None,
+        report: old.report,
+        reason: None,
+        superseded,
+    });
+    let recorded = app
+        .redteam
+        .update(&id, |r| {
+            if r.state == RedTeamState::Stopped || r.synthesis.as_ref().is_some_and(Synthesis::in_flight) {
+                return false; // a stop beat this launch, or a concurrent retry or tick won it
+            }
+            *r = run.clone(); // done state and pending phase land together, before any colony exists
+            true
+        })
+        .await
+        .is_some_and(|(_, recorded)| recorded);
+    if recorded {
+        // A stop may have landed since the record: its terminal state wins, and no judge launches
+        // onto a stopped run.
+        let stopped = !app
+            .redteam
+            .runs
+            .read()
+            .await
+            .iter()
+            .find(|r| r.id == id)
+            .is_some_and(|r| r.state == RedTeamState::Done);
+        if stopped {
+            app.redteam
+                .update(&id, |r| {
+                    if let Some(s) = &mut r.synthesis {
+                        s.state = SynthesisState::Failed;
+                        s.reason = Some("the run was stopped".to_string());
+                    }
+                })
+                .await;
+        } else {
+            let launched = launch_hunter(app.clone(), synthesis_brief(app, run)).await;
+            attach_synthesis(app, &id, launched).await;
+        }
+    }
+    // Fold the stored phase back into the caller's run, so a later write cannot clobber the launch.
+    if let Some(r) = app.redteam.runs.read().await.iter().find(|r| r.id == id) {
+        run.synthesis = r.synthesis.clone();
+    }
+}
+
+/// Land a launched judge — or a launch failure — into the run's synthesis. A stop that landed while
+/// the colony was being created wins: the judge is not attached, the synthesis fails, and the colony
+/// is stopped through the real path, so no judge is left orbiting a stopped run.
+async fn attach_synthesis(app: &Shared, id: &str, launched: Result<Session, String>) {
+    let created = launched.clone().ok();
+    app.redteam
+        .update(id, move |r| match launched {
+            Ok(session) => {
+                let Some(s) = &mut r.synthesis else { return };
+                if r.state == RedTeamState::Done {
+                    s.session_id = Some(session.id);
+                } else {
+                    // A stop beat the attach: it wins, and the judge stays unattached.
+                    s.state = SynthesisState::Failed;
+                    s.reason = Some("the run was stopped".to_string());
+                }
+            }
+            Err(message) => {
+                if let Some(s) = &mut r.synthesis {
+                    s.state = SynthesisState::Failed;
+                    s.reason = Some(message);
+                }
+            }
+        })
+        .await;
+    // The judge was created but a stop refused the attach: stop it like any other hunter.
+    if let Some(session) = created {
+        let attached = app.redteam.runs.read().await.iter().find(|r| r.id == id).is_some_and(|r| {
+            r.synthesis
+                .as_ref()
+                .is_some_and(|s| s.session_id.as_deref() == Some(session.id.as_str()))
+        });
+        if !attached && let Err(e) = crate::lifecycle::stop(State(app.clone()), Path(session.id.clone())).await {
+            eprintln!("redteam: could not stop the unattached judge {}: {}", session.id, e.message());
+        }
+    }
+}
+
+/// Progress a done run's synthesis against its colony's status: `pending` while queued, `running`
+/// while live, `done` when the colony ended and left a readable report (linked, its parsed line
+/// count in `counts.merged`), `failed` with a reason otherwise. The run's own state never moves
+/// because of synthesis — it stays `done` — and nothing is stored unless something changed.
+async fn synthesis_step(app: &Shared, id: &str) {
+    let Some(run) = app.redteam.runs.read().await.iter().find(|r| r.id == id).cloned() else {
+        return;
+    };
+    let Some(synthesis) = &run.synthesis else { return };
+    if !synthesis.in_flight() {
+        return;
+    }
+    // Mid-launch (pending, no colony yet): leave it for the next tick.
+    let Some(sid) = &synthesis.session_id else { return };
+    let session = app.sessions.read().await.iter().find(|s| s.id == *sid).cloned();
+    let path = app.session_dir(sid).join("out").join(REPORT_NAME);
+    let (state, reason, done) = match session.as_ref().map(|s| s.status) {
+        None => (SynthesisState::Failed, Some("the synthesis colony is gone".to_string()), None),
+        Some(SessionStatus::Queued) => (SynthesisState::Pending, None, None),
+        Some(status) if status.is_live() && status != SessionStatus::Idle => (SynthesisState::Running, None, None),
+        Some(SessionStatus::Failed) => (
+            SynthesisState::Failed,
+            Some(
+                session
+                    .and_then(|s| s.error)
+                    .unwrap_or_else(|| "the synthesis colony failed".to_string()),
+            ),
+            None,
+        ),
+        Some(SessionStatus::Stopped) => (
+            SynthesisState::Failed,
+            Some("stopped before writing a report".to_string()),
+            None,
+        ),
+        // Idle counts as live for the nest gate, but a judge gone idle has said all it is going to
+        // say; publishing, PR open, merged, closed and no changes are over the same way: the report
+        // is either there, or the synthesis failed without one.
+        Some(_) => {
+            let read = crate::github::read_regular_file(&path, REPORT_CAP);
+            match read.ok().map(|c| parse_report(&c)) {
+                Some(defects) => (
+                    SynthesisState::Done,
+                    None,
+                    Some((path.display().to_string(), defects.len() as u32)),
+                ),
+                None => (
+                    SynthesisState::Failed,
+                    Some("ended without writing redteam-report.jsonl".to_string()),
+                    None,
+                ),
+            }
+        }
+    };
+    let merged = done.as_ref().map(|(_, n)| *n);
+    let mut next = synthesis.clone();
+    next.state = state;
+    next.reason = reason;
+    if let Some((path, _)) = &done {
+        next.report = Some(path.clone());
+    }
+    if *synthesis == next && run.counts.merged == merged {
+        return;
+    }
+    app.redteam
+        .update(id, |r| {
+            let Some(s) = &mut r.synthesis else { return };
+            *s = next.clone();
+            if let Some(n) = merged {
+                r.counts.merged = Some(n);
+            }
+        })
+        .await;
 }
 
 // ---------------------------------------------------------------------------
 // The tick
 // ---------------------------------------------------------------------------
 
-/// One pass over every run. The 5s loop calls this; tests drive it directly.
+/// One pass over every run. The 5s loop calls this; tests drive it directly. A done run's synthesis
+/// steps after its run: `one_step` returns early once a run is over, so the synthesis colony is
+/// followed from here.
 pub(crate) async fn tick_once(app: &Shared) {
     let ids: Vec<String> = app.redteam.runs.read().await.iter().map(|r| r.id.clone()).collect();
     for id in ids {
         one_step(app, &id).await;
+        synthesis_step(app, &id).await;
     }
 }
 
@@ -623,6 +1035,11 @@ async fn one_step(app: &Shared, id: &str) {
         advance_state(&mut run, &sessions);
     }
     run.counts = counts_for(app, &run);
+    // Synthesis fires exactly once, at this transition into done and only with something to merge:
+    // `stored` is the pre-tick record, so a run already done (or stopped) never synthesizes.
+    if stored.state != RedTeamState::Done && run.state == RedTeamState::Done && run.counts.found > 0 {
+        launch_synthesis(app, &mut run).await;
+    }
     if run != stored {
         let _ = app
             .redteam
@@ -764,6 +1181,7 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
             autofix,
             hunters: Vec::new(),
             counts: Counts::default(),
+            synthesis: None,
             created_at: now,
             started_at: if armed { None } else { Some(now) },
             ended_at: None,
@@ -841,6 +1259,47 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         .cloned()
         .expect("the run exists: its stop just updated it");
     Ok(Json(run))
+}
+
+/// The stored run with this id, or a 404 for an unknown one.
+async fn stored(app: &Shared, id: &str) -> Result<RedTeamRun, crate::AppError> {
+    let run = app.redteam.runs.read().await.iter().find(|r| r.id == id).cloned();
+    run.ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such red-team run"))
+}
+
+/// Re-run a done run's synthesis: launches a fresh judge colony, superseding the previous one
+/// (whose report stays on disk and linked until the new one finishes). Idempotent while a synthesis
+/// is pending or running — the run comes back unchanged, no second colony. **409** unless the run
+/// is `done` with findings to merge; **404** for an unknown run.
+pub async fn synthesize(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<RedTeamRun> {
+    let mut run = stored(&app, &id).await?;
+    if run.state != RedTeamState::Done {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "synthesis runs only on a done red-team run",
+        ));
+    }
+    if run.counts.found == 0 && run.synthesis.is_none() {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "nothing to merge: the hunters found no findings",
+        ));
+    }
+    launch_synthesis(&app, &mut run).await;
+    Ok(Json(stored(&app, &id).await.unwrap_or(run)))
+}
+
+/// The linked merged report, parsed. **404** when no report is linked or the file is gone.
+pub async fn report(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Vec<MergedDefect>> {
+    let run = stored(&app, &id).await?;
+    let path = run
+        .synthesis
+        .as_ref()
+        .and_then(|s| s.report.as_deref())
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no synthesis report is linked to this run"))?;
+    let content = crate::github::read_regular_file(FsPath::new(path), REPORT_CAP)
+        .map_err(|_| client_error(StatusCode::NOT_FOUND, "the linked synthesis report is gone"))?;
+    Ok(Json(parse_report(&content)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1584,62 @@ mod tests {
             autofix: None,
             arm: Some(arm),
         }
+    }
+
+    /// A findings ledger for one hunter, as validation (#211) writes it: one line per stage.
+    fn write_ledger(app: &Shared, hunter: &str, lines: &str) {
+        std::fs::create_dir_all(app.session_dir(hunter)).unwrap();
+        std::fs::write(app.session_dir(hunter).join("findings.jsonl"), lines).unwrap();
+    }
+
+    /// How many synthesis colonies the app has launched so far.
+    async fn synthesis_colonies(app: &Shared) -> usize {
+        app.sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.issue_title.starts_with("Red-team synthesis"))
+            .count()
+    }
+
+    /// A two-hunter run with findings worth synthesizing: both hunters reported "a" and each one
+    /// finding of its own, so `found` is 3 raw findings over 3 distinct defects. Hunter 2's "a"
+    /// also has a raw `finding` event with a body far past any brief budget.
+    async fn seeded_run(app: &Shared) -> (String, Vec<String>) {
+        let run = create(State(app.clone()), Json(new_run("acme/repo", Some(2), false)))
+            .await
+            .unwrap()
+            .0;
+        let id = run.id.clone();
+        let ids: Vec<String> = run.hunters.iter().map(|h| h.session_id.clone()).collect();
+        write_ledger(
+            app,
+            &ids[0],
+            "{\"title\":\"a\",\"state\":\"validated\",\"severity\":\"high\"}\n{\"title\":\"b\",\"state\":\"rejected\",\"reason\":\"not a bug\"}\n",
+        );
+        write_ledger(
+            app,
+            &ids[1],
+            "{\"title\":\"a\",\"state\":\"validated\",\"severity\":\"high\"}\n",
+        );
+        std::fs::write(
+            app.session_dir(&ids[1]).join("events.jsonl"),
+            format!(
+                "{{\"type\":\"finding\",\"title\":\"a\",\"body\":\"{}\",\"evidence\":\"panic on input 7\"}}\n",
+                "x".repeat(40_000)
+            ),
+        )
+        .unwrap();
+        (id, ids)
+    }
+
+    /// Ends both hunters of a seeded run and runs the tick that lands it done — which also
+    /// launches synthesis.
+    async fn land_done(app: &Shared, ids: &[String]) {
+        for id in ids {
+            app.update_session(id, |s| s.status = SessionStatus::Merged).await;
+        }
+        tick_once(app).await;
     }
 
     #[tokio::test]
@@ -1495,8 +2010,272 @@ mod tests {
                 validated: 3,
                 rejected: 1,
                 filed: 3,
+                merged: None,
             }
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn synthesis_fires_once_at_done_with_an_inline_brief_and_never_anywhere_else() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let (id, ids) = seeded_run(&app).await;
+        for sid in &ids {
+            app.update_session(sid, |s| s.status = SessionStatus::Running).await;
+        }
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Running);
+        assert!(run.synthesis.is_none(), "never mid-run");
+        land_done(&app, &ids).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Done);
+        assert_eq!(run.counts.found, 3, "raw findings: a defect two hunters report counts twice");
+        let synthesis = run.synthesis.clone().expect("a done run with findings synthesizes");
+        assert!(matches!(synthesis.state, SynthesisState::Pending | SynthesisState::Running));
+        assert!(synthesis.session_id.is_some(), "the synthesis colony is attached");
+        assert_eq!(synthesis_colonies(&app).await, 1);
+        tick_once(&app).await;
+        assert_eq!(synthesis_colonies(&app).await, 1, "further ticks never launch a second one");
+        // The brief publishes nothing and carries the ledgers inline, cut under the cap.
+        let brief = synthesis_brief(&app, &run);
+        for key in ["autopilot", "autofix", "automerge"] {
+            assert_eq!(brief[key], false, "the judge publishes nothing: {key} is off");
+        }
+        assert_eq!(brief["allow_duplicate"], true);
+        let instructions = brief["instructions"].as_str().unwrap();
+        for hunter in &run.hunters {
+            assert!(instructions.contains(&hunter.session_id) && instructions.contains(&hunter.focus));
+        }
+        assert!(instructions.contains("state validated, severity high"), "{instructions}");
+        assert!(instructions.contains("state rejected, reason: not a bug"), "{instructions}");
+        assert!(instructions.contains("body: xxx") && instructions.contains("panic on input 7"));
+        assert!(instructions.contains("…"), "an oversized body is cut with a marker");
+        assert!(instructions.chars().count() < 20_000, "fits the instructions cap");
+        // The phase moves independently of the run, which stays done: queued for a slot it is
+        // still pending (a colony dying fails the synthesis with its error — shown in the retry
+        // test below — and the run is untouched either way).
+        let sid = run.synthesis.unwrap().session_id.unwrap();
+        app.update_session(&sid, |s| s.status = SessionStatus::Queued).await;
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Done);
+        assert_eq!(run.synthesis.as_ref().unwrap().state, SynthesisState::Pending);
+        // A done run that found nothing has nothing to merge — and with the colony gone idle the
+        // nest is empty again.
+        let empty = create(State(app.clone()), Json(new_run("other/repo", Some(2), false)))
+            .await
+            .unwrap()
+            .0;
+        let empty_ids: Vec<String> = empty.hunters.iter().map(|h| h.session_id.clone()).collect();
+        land_done(&app, &empty_ids).await;
+        let empty_id = empty.id.clone();
+        let run = get(State(app.clone()), Path(empty_id.clone())).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Done);
+        assert_eq!(run.counts.found, 0);
+        assert!(run.synthesis.is_none(), "nothing to merge, no synthesis");
+        let err = synthesize(State(app.clone()), Path(empty_id)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(err.message().contains("nothing to merge"), "{}", err.message());
+        // And a stop wins too: no synthesis follows a stopped run.
+        let stopped = create(State(app.clone()), Json(new_run("third/repo", Some(1), false)))
+            .await
+            .unwrap()
+            .0;
+        let stopped = stop(State(app.clone()), Path(stopped.id)).await.unwrap().0;
+        assert_eq!(stopped.state, RedTeamState::Stopped);
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(stopped.id)).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Stopped);
+        assert!(run.synthesis.is_none(), "never on a stopped run");
+        // The stop race, deterministically: the pending record lands while the run is done and a
+        // stop lands before the attach — the judge is refused, the synthesis fails with why, and
+        // the just-created colony is stopped instead of orbiting a stopped run forever.
+        let race = create(State(app.clone()), Json(new_run("fourth/repo", Some(1), false)))
+            .await
+            .unwrap()
+            .0;
+        app.redteam
+            .update(&race.id, |r| {
+                r.state = RedTeamState::Done; // the tick landed done and recorded the phase…
+                r.counts.found = 1;
+                r.synthesis = Some(Synthesis {
+                    state: SynthesisState::Pending,
+                    session_id: None,
+                    report: None,
+                    reason: None,
+                    superseded: vec![],
+                });
+            })
+            .await;
+        app.redteam.update(&race.id, |r| r.state = RedTeamState::Stopped).await; // …then a stop won
+        use crate::sessions::tests::colony;
+        let mut judge = colony("fourth", SessionStatus::Starting);
+        judge.id = "judge_race".into();
+        tokio::fs::create_dir_all(app.session_dir(&judge.id)).await.unwrap();
+        app.sessions.write().await.push(judge.clone());
+        attach_synthesis(&app, &race.id, Ok(judge)).await;
+        let run = get(State(app.clone()), Path(race.id)).await.unwrap().0;
+        let synthesis = run.synthesis.expect("the phase outlives the race");
+        assert_eq!(synthesis.state, SynthesisState::Failed);
+        assert_eq!(synthesis.reason.as_deref(), Some("the run was stopped"));
+        assert!(synthesis.session_id.is_none(), "the judge is not attached to a stopped run");
+        let sessions = app.sessions.read().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "judge_race").unwrap().status,
+            SessionStatus::Stopped,
+            "the unattached judge is stopped, not left live"
+        );
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_finished_synthesis_links_its_report_counts_merged_and_a_retry_supersedes_it() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let (id, ids) = seeded_run(&app).await;
+        land_done(&app, &ids).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        let first = run
+            .synthesis
+            .expect("synthesis launched")
+            .session_id
+            .expect("the colony is attached");
+        // The synthesis colony merges the two hunters' shared defect into one line naming both,
+        // writes the report (plus a line that parses to nothing) and ends.
+        let defect = |title: &str, hunters: &[&str], merged_from: u32, validation: &str| {
+            json!({"defect": title, "severity": "high", "reproduction": "reproduced", "steps": "curl it",
+                "files": ["src/a.rs"], "hunters": hunters, "merged_from": merged_from, "validation": validation})
+            .to_string()
+        };
+        let (h1, h2) = (ids[0].as_str(), ids[1].as_str());
+        let out = app.session_dir(&first).join("out");
+        let linked = out.join("redteam-report.jsonl").display().to_string();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("redteam-report.jsonl"),
+            format!(
+                "{}\n{}\nnot json at all\n",
+                defect("sql injection", &[h1, h2], 2, "validated"),
+                defect("loop off by one", &[h2], 1, "unvalidated"),
+            ),
+        )
+        .unwrap();
+        app.update_session(&first, |s| s.status = SessionStatus::Idle).await;
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        let synthesis = run.synthesis.expect("the synthesis finished");
+        assert_eq!(synthesis.state, SynthesisState::Done);
+        assert_eq!(synthesis.report.as_deref(), Some(linked.as_str()));
+        assert_eq!(run.counts.merged, Some(2), "the unparseable line is skipped");
+        assert!(run.counts.merged.unwrap() <= run.counts.found);
+        // The linked report parses back out of the read route, both hunters on the shared defect.
+        let defects = report(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(defects.len(), 2);
+        assert_eq!(defects[0].hunters, ids, "the merged line names both hunters");
+        assert_eq!(defects[0].merged_from, 2);
+        assert_eq!(defects[0].validation, "validated");
+        assert_eq!(defects[1].hunters, vec![ids[1].clone()]);
+        // A retry from done supersedes the colony and keeps the old report linked until beaten.
+        let run = synthesize(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        let synthesis = run.synthesis.unwrap();
+        let second = synthesis.session_id.clone().unwrap();
+        assert_eq!(synthesis.superseded, vec![first.clone()]);
+        assert_eq!(synthesis.report.as_deref(), Some(linked.as_str()));
+        assert_eq!(run.counts.merged, Some(2));
+        // A second POST while it is in flight is idempotent: the run comes back unchanged.
+        let again = synthesize(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(again.synthesis.as_ref().unwrap().session_id.as_deref(), Some(second.as_str()));
+        assert_eq!(again.synthesis.as_ref().unwrap().superseded, vec![first.clone()]);
+        assert_eq!(
+            synthesis_colonies(&app).await,
+            2,
+            "the idempotent retry launched no second colony"
+        );
+        // The second colony dies: the synthesis fails with its error, and the first report stays
+        // linked — a failed retry never unlinks the newest success, and the run stays done.
+        app.update_session(&second, |s| {
+            s.status = SessionStatus::Failed;
+            s.error = Some("the microVM died".into());
+        })
+        .await;
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Done);
+        assert_eq!(run.synthesis.as_ref().unwrap().state, SynthesisState::Failed);
+        assert_eq!(run.synthesis.as_ref().unwrap().reason.as_deref(), Some("the microVM died"));
+        assert_eq!(run.synthesis.as_ref().unwrap().report.as_deref(), Some(linked.as_str()));
+        // Retrying the failed one works too: the third colony finishes and its report wins, while
+        // the superseded reports stay on disk.
+        let run = synthesize(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(
+            run.synthesis.as_ref().unwrap().superseded,
+            vec![first.clone(), second.clone()]
+        );
+        let third = run.synthesis.as_ref().unwrap().session_id.clone().unwrap();
+        let third_report = app.session_dir(&third).join("out").join("redteam-report.jsonl");
+        std::fs::create_dir_all(app.session_dir(&third).join("out")).unwrap();
+        let lines: Vec<String> = (0..2)
+            .map(|i| defect(&format!("defect {i}"), &["h1"], 1, "validated"))
+            .collect();
+        std::fs::write(&third_report, lines.join("\n") + "\n").unwrap();
+        app.update_session(&third, |s| s.status = SessionStatus::Merged).await;
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        let synthesis = run.synthesis.unwrap();
+        assert_eq!(synthesis.state, SynthesisState::Done);
+        assert_eq!(
+            synthesis.report.as_deref(),
+            Some(third_report.display().to_string()).as_deref()
+        );
+        assert_eq!(run.counts.merged, Some(2));
+        assert!(out.join("redteam-report.jsonl").exists(), "superseded reports stay on disk");
+        // A `pending` stranded without a colony — a crash between the record and the attach — is
+        // not in flight: the tick leaves it alone and a retry launches a fresh judge instead of
+        // queueing behind it forever.
+        app.redteam
+            .update(&id, |r| {
+                if let Some(s) = &mut r.synthesis {
+                    let (report, superseded) = (s.report.clone(), s.superseded.clone());
+                    *s = Synthesis {
+                        state: SynthesisState::Pending,
+                        session_id: None,
+                        report,
+                        reason: None,
+                        superseded,
+                    };
+                }
+            })
+            .await;
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(run.synthesis.as_ref().unwrap().state, SynthesisState::Pending);
+        assert!(run.synthesis.as_ref().unwrap().session_id.is_none());
+        let run = synthesize(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        let synthesis = run.synthesis.unwrap();
+        assert!(synthesis.session_id.is_some(), "the stranded phase is retryable");
+        assert_eq!(
+            synthesis.superseded,
+            vec![first.clone(), second.clone()],
+            "a stranded phase had no colony to supersede"
+        );
+        assert_eq!(
+            synthesis.report.as_deref(),
+            Some(third_report.display().to_string()).as_deref(),
+            "the newest success stays linked"
+        );
+        assert_eq!(synthesis_colonies(&app).await, 4);
+        // Synthesis on a run that is not done is a 409; an unknown run is a 404.
+        let armed = create(State(app.clone()), Json(new_run("other/repo", Some(1), true)))
+            .await
+            .unwrap()
+            .0;
+        let err = synthesize(State(app.clone()), Path(armed.id)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        let err = synthesize(State(app.clone()), Path("rt_nope".into())).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1527,6 +2306,7 @@ mod tests {
                 focus: "error handling and edge cases".into(),
             }],
             counts: Counts::default(),
+            synthesis: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             started_at: None,
             ended_at: None,
@@ -1543,10 +2323,35 @@ mod tests {
         assert_eq!(value["hunters"][0]["module"], "general");
         assert!(value["hunters"][0]["version"].is_null(), "version stays null until #216");
         assert!(value["started_at"].is_null() && value["ended_at"].is_null() && value["gate_reason"].is_null());
+        assert!(value["synthesis"].is_null(), "no synthesis before it fires");
         assert_eq!(value["created_at"], "1970-01-01T00:00:00Z", "timestamps are RFC 3339 strings");
         for key in ["found", "validated", "rejected", "filed"] {
             assert_eq!(value["counts"][key], 0, "count key {key}");
         }
+        assert!(
+            value["counts"]["merged"].is_null(),
+            "merged stays null until a synthesis finishes"
+        );
+        // A synthesised run carries the phase under its fixed keys.
+        let mut done = run.clone();
+        done.synthesis = Some(Synthesis {
+            state: SynthesisState::Done,
+            session_id: Some("deadbeef".into()),
+            report: Some("/data/sessions/deadbeef/out/redteam-report.jsonl".into()),
+            reason: None,
+            superseded: vec!["cafe1111".into()],
+        });
+        done.counts.merged = Some(3);
+        let value = serde_json::to_value(&done).unwrap();
+        assert_eq!(value["synthesis"]["state"], "done");
+        assert_eq!(value["synthesis"]["session_id"], "deadbeef");
+        assert_eq!(
+            value["synthesis"]["report"],
+            "/data/sessions/deadbeef/out/redteam-report.jsonl"
+        );
+        assert!(value["synthesis"]["reason"].is_null());
+        assert_eq!(value["synthesis"]["superseded"][0], "cafe1111");
+        assert_eq!(value["counts"]["merged"], 3);
     }
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
