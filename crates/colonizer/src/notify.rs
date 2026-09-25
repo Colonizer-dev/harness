@@ -102,11 +102,16 @@ impl Event {
         truncate(&format!("{subject} {what}"), MAX_TEXT)
     }
 
-    /// The one line for [`Event::ProviderDegraded`]: the provider, and its failure rate. It carries
-    /// no repository content — the provider event carries no repository at all, only the id and name
-    /// the operator chose and the counters the gateway tallied.
-    pub fn provider_text(name: &str, failure_pct: f64) -> String {
-        truncate(&format!("{name} is failing {failure_pct:.1}% of its requests"), MAX_TEXT)
+    /// The one line for [`Event::ProviderDegraded`]: the provider, its failure rate, and — when one
+    /// has been seen — the code of its most recent failure. It carries no repository content — the
+    /// provider event carries no repository at all, only the id and name the operator chose and the
+    /// counters the gateway tallied.
+    pub fn provider_text(name: &str, failure_pct: f64, last_failure: Option<&str>) -> String {
+        let failure = last_failure.map(|code| format!("; last failure {code}")).unwrap_or_default();
+        truncate(
+            &format!("{name} is failing {failure_pct:.1}% of its requests{failure}"),
+            MAX_TEXT,
+        )
     }
 }
 
@@ -424,7 +429,7 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
     json!({
         "event": Event::ProviderDegraded.name(),
         "at": at.to_rfc3339(),
-        "text": Event::provider_text(name, health.failure_pct),
+        "text": Event::provider_text(name, health.failure_pct, health.last_failure.as_deref()),
         "colony": None::<Value>,
         "pr_url": None::<Value>,
         "provider": {
@@ -433,6 +438,7 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
             "failure_pct": health.failure_pct,
             "avg_latency_ms": health.avg_latency_ms,
             "requests": requests,
+            "failure": health.last_failure,
         },
     })
 }
@@ -703,7 +709,7 @@ async fn announce_provider(
         return;
     }
     let name = &event.provider.name;
-    let text = Event::provider_text(name, event.health.failure_pct);
+    let text = Event::provider_text(name, event.health.failure_pct, event.health.last_failure.as_deref());
     let payload = provider_payload(&event.provider.id, name, event.usage.requests, &event.health, Utc::now());
     if deliver(app, client, &text, &payload, None, settings, reasons).await {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
@@ -1183,12 +1189,14 @@ mod tests {
             avg_latency_ms: 1_200,
             rated: true,
             degraded: true,
+            last_failure: None,
         };
         let ok = UsageHealth {
             failure_pct: 3.2,
             avg_latency_ms: 900,
             rated: true,
             degraded: false,
+            last_failure: None,
         };
         // A provider seen for the first time only seeds, whatever its rate: a restart must not
         // announce every provider that was already failing before it.
@@ -1204,6 +1212,7 @@ mod tests {
             avg_latency_ms: 900,
             rated: true,
             degraded: false,
+            last_failure: None,
         };
         assert_eq!(decide_provider(&s, Some(true), &hovering), (false, true));
         assert_eq!(decide_provider(&s, Some(false), &hovering), (false, false));
@@ -1213,6 +1222,7 @@ mod tests {
             avg_latency_ms: 900,
             rated: true,
             degraded: false,
+            last_failure: None,
         };
         assert_eq!(decide_provider(&s, Some(true), &recovered), (false, false));
         assert_eq!(decide_provider(&s, Some(false), &degraded), (true, true));
@@ -1225,6 +1235,7 @@ mod tests {
             avg_latency_ms: 1_200,
             rated: true,
             degraded: true,
+            last_failure: None,
         };
         let mut s = settings();
         s.enabled = false;
@@ -1243,6 +1254,7 @@ mod tests {
             avg_latency_ms: 800,
             rated: false,
             degraded: false,
+            last_failure: None,
         };
         for was in [None, Some(false), Some(true)] {
             assert_eq!(decide_provider(&settings(), was, &unrated), (false, false));
@@ -1291,10 +1303,17 @@ mod tests {
 
     #[test]
     fn the_provider_text_and_payload_carry_no_repository_content() {
-        assert_eq!(Event::provider_text("zai", 29.4), "zai is failing 29.4% of its requests");
+        assert_eq!(
+            Event::provider_text("zai", 29.4, None),
+            "zai is failing 29.4% of its requests"
+        );
+        assert_eq!(
+            Event::provider_text("zai", 29.4, Some("quota_exhausted")),
+            "zai is failing 29.4% of its requests; last failure quota_exhausted"
+        );
         let long_name: String = "z".repeat(MAX_TEXT + 50);
         assert_eq!(
-            Event::provider_text(&long_name, 29.4).chars().count(),
+            Event::provider_text(&long_name, 29.4, None).chars().count(),
             MAX_TEXT + 1,
             "capped, ellipsis included, like the session text"
         );
@@ -1309,7 +1328,7 @@ mod tests {
         let verdict = health(&tallies);
         let body = serde_json::to_string(&provider_payload("zai", "zai", tallies.requests, &verdict, at)).unwrap();
         assert_eq!(
-            Event::provider_text("zai", verdict.failure_pct),
+            Event::provider_text("zai", verdict.failure_pct, verdict.last_failure.as_deref()),
             "zai is failing 29.4% of its requests"
         );
         assert!(!body.contains("acme"), "a provider event carries no repository: {body}");
@@ -1326,12 +1345,26 @@ mod tests {
         assert_eq!(value["event"], "provider_degraded");
         let mut provider_keys: Vec<&str> = value["provider"].as_object().unwrap().keys().map(String::as_str).collect();
         provider_keys.sort_unstable();
-        assert_eq!(provider_keys, ["avg_latency_ms", "failure_pct", "id", "name", "requests"]);
+        assert_eq!(
+            provider_keys,
+            ["avg_latency_ms", "failure", "failure_pct", "id", "name", "requests"]
+        );
         assert_eq!(
             value["provider"],
             json!({
-                "id": "zai", "name": "zai", "failure_pct": 29.4, "avg_latency_ms": 48_000, "requests": 1_000
+                "id": "zai", "name": "zai", "failure_pct": 29.4, "avg_latency_ms": 48_000, "requests": 1_000,
+                "failure": null
             })
+        );
+
+        // A provider the gateway has seen fail names the code it last failed with.
+        let mut last = verdict.clone();
+        last.last_failure = Some("unreachable".into());
+        let payload = provider_payload("zai", "zai", tallies.requests, &last, at);
+        assert_eq!(payload["provider"]["failure"], "unreachable");
+        assert_eq!(
+            payload["text"],
+            "zai is failing 29.4% of its requests; last failure unreachable"
         );
     }
 

@@ -504,6 +504,46 @@ test('the summary and the report carry the categories', () => {
   assert.match(report, /\| replay \| 5600 \| 79%/);
 });
 
+/** A colony whose gateway logged one routed request and two failures. Every line smuggles the fields
+ *  a real audit record carries beside the allowlisted ones — keys and the request body itself. */
+const secrets = { authorization: 'Bearer sk-ant-api03-FAKEKEY', x_api_key: 'sk-FAKE', body: 'SECRET_PROMPT_TEXT' };
+const routed = (ts, extra = {}) => ({
+  type: 'gateway_request', ts, colony: 'gatew01', provider: 'downstream', wire: 'anthropic',
+  method: 'POST', path: '/v1/messages', fallback: false, queue_ms: 0, duration_ms: 40,
+  request_bytes: 512, response_bytes: 0, input_tokens: null, output_tokens: null, ...secrets, ...extra,
+});
+const gatewayColony = {
+  mothership: 'test',
+  session: { id: 'gatew01', repo: 'acme/webshop', status: 'pr_opened' },
+  events: [{ type: 'status', state: 'working', ts: at(0) }],
+  logs: [],
+  // Stored out of order: the transcript still reads them by their ts.
+  gateway: [
+    routed(at(3), { status: 429, failure: 'queue_full', queue_ms: 5_000, duration_ms: 5_001, model: 'claude-opus-5', wire_model: 'claude-opus-5' }),
+    routed(at(1), { provider: 'zai', wire: 'openai', status: 200, failure: null, queue_ms: 3, duration_ms: 812, request_bytes: 1024, response_bytes: 4096, input_tokens: 100, output_tokens: 50, model: 'claude-opus-5', wire_model: 'glm-5.3-flash' }),
+    routed(at(2), { status: 502, failure: 'unreachable', fallback: true, model: null, wire_model: null }),
+  ],
+};
+
+test('a transcript renders gateway requests in ts order, from the allowlisted fields only', () => {
+  const text = formatTranscript(gatewayColony);
+  const gate = text.split('\n').filter((l) => l.includes('~ gateway'));
+  assert.equal(gate.length, 3);
+  assert.match(gate[0], /~ gateway zai claude-opus-5→glm-5\.3-flash POST \/v1\/messages 200 812ms q3ms 1024B→4096B$/);
+  assert.match(gate[1], /~ gateway downstream – POST \/v1\/messages 502 40ms q0ms 512B→0B failure unreachable fallback/);
+  assert.match(gate[2], /~ gateway downstream claude-opus-5 POST \/v1\/messages 429 5001ms q5000ms 512B→0B failure queue_full$/);
+  // What the lines were carrying beside the allowlisted fields stays in the file.
+  assert.doesNotMatch(text, /sk-|Bearer |SECRET_PROMPT_TEXT/);
+});
+
+test('gateway requests and their failures are counted per colony', () => {
+  const r = analyze(gatewayColony);
+  assert.equal(r.gateway_requests, 3);
+  assert.deepEqual(r.gateway_failures, { unreachable: 1, queue_full: 1 });
+  assert.ok(reasons(r).includes('2 gateway requests failed'), reasons(r).join('; '));
+  assert.deepEqual(analyze({ session: { id: 'quiet' }, events: [] }).gateway_failures, {});
+});
+
 /** A data dir whose one colony is known only from its sessions/ directory; removed after the test. */
 function dataDir(t, sessionsJson) {
   const dir = mkdtempSync(join(tmpdir(), 'colony-report-'));
@@ -516,7 +556,7 @@ function dataDir(t, sessionsJson) {
 test('a sessions.json that is valid JSON but not an array is treated as corrupt, not fatal', (t) => {
   for (const body of ['{}', 'null', '"x"', '{broken']) {
     const [colony] = loadColonies(dataDir(t, body), 'd');
-    assert.deepEqual(colony, { mothership: 'd', session: { id: 'lost' }, events: [], logs: [] });
+    assert.deepEqual(colony, { mothership: 'd', session: { id: 'lost' }, events: [], logs: [], gateway: [] });
   }
 });
 

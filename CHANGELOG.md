@@ -170,6 +170,14 @@ setting) is called out under **Take care** rather than left for you to find.
   what it only suggests (guidance), how a finding classifies on arrival, and the planned watchdog
   signatures on denial events — and [docs/runner-authoring.md](docs/runner-authoring.md), the
   checklist for a new agent module. ([#304])
+- **Every gateway request leaves one audit line.** The provider gateway now appends a per-request
+  record to the colony's `gateway.jsonl`: what was asked for (provider, wire, method, path, the
+  requested and sent model), how it ended (status, a typed failure code, whether the Claude fallback
+  was licensed, queue and total duration, bytes, token counts) — and nothing else. The record is a
+  fixed struct that is the whole allowlist, so keys, tokens and request bodies never reach the log,
+  and the colony's own credential headers are never forwarded upstream. `colony-report` counts each
+  colony's gateway requests and failures, Settings shows a provider's last failure code beside its
+  failure rate, and the provider-degraded notification carries it. ([#302])
 
 ### Fixed
 
@@ -807,6 +815,7 @@ Macs. ([#74])
 [#474]: https://github.com/Colonizer-dev/harness/issues/474
 [#311]: https://github.com/Colonizer-dev/harness/issues/311
 [#300]: https://github.com/Colonizer-dev/harness/issues/300
+[#302]: https://github.com/Colonizer-dev/harness/issues/302
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

@@ -2,7 +2,7 @@
 // recomputed — `degraded` and `rated` are taken as given, at and around the 10% boundary included.
 import { describe, expect, it } from "vitest";
 
-import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "./providerHealth";
+import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, lastFailureText, quotaExhaustedText, quotaTone, usageHealthTone } from "./providerHealth";
 import type { ProviderUsageHealth } from "./types";
 
 const NOW = Date.parse("2026-09-19T08:12:00Z");
@@ -86,6 +86,16 @@ describe("avgLatencyText", () => {
     expect(avgLatencyText(DEGRADED, 32_689)).toBe("12.8s avg");
     expect(avgLatencyText(DEGRADED, 0)).toBeNull();
     expect(avgLatencyText(undefined, 32_689)).toBeNull();
+  });
+});
+
+describe("lastFailureText", () => {
+  it("names the provider's most recent typed failure, or nothing when none is named", () => {
+    expect(lastFailureText("unreachable")).toBe("last failure: unreachable");
+    expect(lastFailureText("quota_exhausted")).toBe("last failure: quota_exhausted");
+    expect(lastFailureText(null)).toBeNull();
+    expect(lastFailureText(undefined)).toBeNull();
+    expect(lastFailureText("")).toBeNull();
   });
 });
 

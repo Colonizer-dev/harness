@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// How colonies actually went, from what the mothership already records: every colony's events.jsonl and
-// harness.jsonl, and sessions.json. Nothing leaves the machine. Use it to find the colonies worth reading
+// How colonies actually went, from what the mothership already records: every colony's events.jsonl,
+// harness.jsonl and gateway.jsonl, and sessions.json. Nothing leaves the machine. Use it to find the colonies worth reading
 // before changing a prompt or a module setting, and to compare a fixed set of tasks before and after.
 //
 //   node scripts/colony-report.mjs                        # this mothership (COLONIZER_DATA_DIR or ~/.local/share/colonizer)
@@ -53,6 +53,7 @@ export function loadColonies(dataDir, label = basename(resolve(dataDir))) {
     session: byId.get(id) ?? { id },
     events: readJsonLines(join(sessionsDir, id, 'events.jsonl')),
     logs: readJsonLines(join(sessionsDir, id, 'harness.jsonl')),
+    gateway: readJsonLines(join(sessionsDir, id, 'gateway.jsonl')),
   }));
 }
 
@@ -109,7 +110,7 @@ function modelTokens(usage) {
 }
 
 /** One colony's numbers. Pure: takes what loadColonies read, so it can be tested without a mothership. */
-export function analyze({ mothership = '', session = {}, events = [], logs = [] }) {
+export function analyze({ mothership = '', session = {}, events = [], logs = [], gateway = [] }) {
   const tools = {};
   const reads = new Map();
   const commands = new Map();
@@ -151,6 +152,10 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
     watchdog_nudges: 0,
     plain_text_reprompts: 0,
     rate_limit_hits: 0,
+    // The gateway's per-request audit lines (issue #302): how many went out, and how many ended in
+    // each typed failure.
+    gateway_requests: 0,
+    gateway_failures: {},
     errors_logged: 0,
     longest_silence_ms: 0,
     findings: 0,
@@ -332,6 +337,12 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [] 
     if (log.level === 'error') r.errors_logged += 1;
     if (log.level !== 'info' && RATE_LIMIT.test(log.message ?? '')) r.rate_limit_hits += 1;
   }
+  // Counted, never printed whole: an audit line carries the request it served, secrets included.
+  for (const g of gateway) {
+    if (g?.type !== 'gateway_request') continue;
+    r.gateway_requests += 1;
+    if (g.failure) r.gateway_failures[g.failure] = (r.gateway_failures[g.failure] ?? 0) + 1;
+  }
 
   // A turn's duration includes the time it waited for an answer, which is the user's time, not the agent's.
   r.working_ms = Math.max(0, r.working_ms - r.answer_wait_ms);
@@ -357,6 +368,8 @@ export function reasons(r, costThreshold = Infinity) {
   if (failedReviews > 0) out.push(`${failedReviews} fix review${failedReviews === 1 ? '' : 's'} failed`);
   if (r.contradicted_claims > 0) out.push(`${r.contradicted_claims} contradicted completion claim${r.contradicted_claims === 1 ? '' : 's'}`);
   if (r.rate_limit_hits > 0) out.push(`${r.rate_limit_hits} rate-limit hit${r.rate_limit_hits === 1 ? '' : 's'}`);
+  const gatewayFailures = Object.values(r.gateway_failures ?? {}).reduce((a, n) => a + n, 0);
+  if (gatewayFailures > 0) out.push(`${gatewayFailures} gateway request${gatewayFailures === 1 ? '' : 's'} failed`);
   if (r.longest_silence_ms >= 5 * 60_000) out.push(`silent ${duration(r.longest_silence_ms)} while working`);
   if (r.tool_calls >= 10 && r.tool_errors / r.tool_calls >= 0.2) out.push(`${pct(r.tool_errors / r.tool_calls)} of tool calls failed`);
   if (r.plain_text_reprompts > 0) out.push(`asked in plain text ${r.plain_text_reprompts}×`);
@@ -612,11 +625,30 @@ function screeningLines(e) {
   ];
 }
 
+/** One gateway audit record as a line, built only from its allowlisted fields: the record also
+ *  carries what it served (keys, request bodies), which must never reach the transcript. */
+function gatewayLine(e) {
+  const model = e.model && e.wire_model && e.model !== e.wire_model ? `${e.model}→${e.wire_model}` : (e.wire_model ?? e.model ?? '–');
+  const parts = [
+    e.provider ?? 'unknown',
+    model,
+    `${e.method ?? 'POST'} ${e.path ?? '–'}`,
+    `${e.status ?? 0}`,
+    `${Number(e.duration_ms) || 0}ms`,
+    `q${Number(e.queue_ms) || 0}ms`,
+    `${Number(e.request_bytes) || 0}B→${Number(e.response_bytes) || 0}B`,
+  ];
+  if (e.failure) parts.push(`failure ${e.failure}`);
+  if (e.fallback) parts.push('fallback');
+  return `~ gateway ${parts.join(' ')}`;
+}
+
 /** One colony, one line per step, with the time since it started and gaps worth noticing. */
-export function formatTranscript({ session = {}, events = [], logs = [], origins = null }) {
+export function formatTranscript({ session = {}, events = [], logs = [], gateway = [], origins = null }) {
   const all = [
     ...events.map((e) => ({ ...e, source: 'event' })),
     ...logs.map((l) => ({ ...l, source: 'harness' })),
+    ...gateway.map((g) => ({ ...g, source: 'gateway' })),
   ]
     .filter((e) => !origins || origins.has(originOf(e)))
     .sort((a, b) => (ms(a.ts) || 0) - (ms(b.ts) || 0));
@@ -708,6 +740,9 @@ export function formatTranscript({ session = {}, events = [], logs = [], origins
         break;
       case 'screening':
         for (const line of screeningLines(e)) lines.push(`${at}${tag}${line}`);
+        break;
+      case 'gateway_request':
+        lines.push(`${at}${gatewayLine(e)}`);
         break;
     }
   }

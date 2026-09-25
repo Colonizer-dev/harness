@@ -579,6 +579,11 @@ export interface ProviderUsageHealth {
   rated: boolean;
   /** `rated` and at least 10% of requests failed. */
   degraded: boolean;
+  /**
+   * The typed failure code of the provider's most recent failed request (issue #302: the gateway's
+   * per-request audit). Optional: a Mothership from before it kept it sends nothing here.
+   */
+  last_failure?: string | null;
 }
 
 /** A provider's quota record (issue #225): when its plan refills, as words and as a timestamp. */

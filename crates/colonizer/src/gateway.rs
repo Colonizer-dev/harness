@@ -4,8 +4,10 @@
 //! and report which colonies are waiting on a model. Colonies authenticate with a per-colony token.
 
 use crate::{
-    ApiResult, App, Shared, client_error, openai, orgs, provider_quota,
-    providers::{Provider, ProviderQuirks, Usage, Wire, strip_oauth_betas},
+    ApiResult, App, Shared, client_error,
+    gateway_audit::{GatewayAudit, GatewayFailure},
+    openai, orgs, provider_quota,
+    providers::{Provider, ProviderQuirks, Usage, Wire, strip_oauth_betas, valid_model},
     util::read_trimmed,
 };
 use axum::{
@@ -87,6 +89,9 @@ const USAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 ///   timestamps here.
 /// - `since`: when the tally for this provider started — the first counted request, RFC3339 like the other
 ///   timestamps here. Absent for a tally with no requests yet or one kept by an older build.
+/// - `last_failure`: the code of the most recent failure, one of [`gateway_audit::GatewayFailure`]'s;
+///   `null` while nothing has failed. Served once, under `health`, where the cockpit and the
+///   notifications read it; the tally itself starts a restart without it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderUsage {
@@ -96,6 +101,8 @@ pub struct ProviderUsage {
     pub duration_ms: u64,
     pub last_request_at: Option<DateTime<Utc>>,
     pub since: Option<DateTime<Utc>>,
+    #[serde(skip_serializing)]
+    pub last_failure: Option<String>,
 }
 
 /// Enough requests to judge a provider by its failure rate.
@@ -106,7 +113,7 @@ pub const DEGRADED_PCT: f64 = 10.0;
 /// What [`ProviderUsage`] says about a provider at a glance: its failure rate and latency, and whether
 /// there is enough data to judge it. One rule for every surface — the providers API, `/api/status` and
 /// notifications — so a provider the fan-out is drowning looks the same everywhere.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageHealth {
     /// `failures/requests * 100`, rounded to one decimal place; `0.0` when there are no requests.
     pub failure_pct: f64,
@@ -117,6 +124,8 @@ pub struct UsageHealth {
     /// `rated && failure_pct >= DEGRADED_PCT`. An unrated provider is never degraded: a handful of
     /// early failures is noise, and the fan-out this reports on starts at tens of requests.
     pub degraded: bool,
+    /// The code of the most recent failure (`gateway_audit::GatewayFailure`), or `null`.
+    pub last_failure: Option<String>,
 }
 
 /// Rates a provider's cumulative usage by the one rule every surface shares. Pure: same usage in, same
@@ -133,6 +142,7 @@ pub fn health(usage: &ProviderUsage) -> UsageHealth {
         avg_latency_ms: usage.duration_ms.checked_div(usage.requests).unwrap_or_default(),
         rated: usage.requests >= HEALTH_MIN_SAMPLE,
         degraded: usage.requests >= HEALTH_MIN_SAMPLE && failure_pct >= DEGRADED_PCT,
+        last_failure: usage.last_failure.clone(),
     }
 }
 
@@ -231,6 +241,8 @@ struct UsageCounters {
     duration_ms: AtomicU64,
     last_request_at: Mutex<Option<DateTime<Utc>>>,
     since: Mutex<Option<DateTime<Utc>>>,
+    /// The most recent failure's code, kept with the counts it belongs to.
+    last_failure: Mutex<Option<String>>,
     /// Set by every change; `flush_usage` clears it and writes.
     dirty: AtomicBool,
 }
@@ -244,6 +256,7 @@ impl UsageCounters {
             duration_ms: AtomicU64::new(usage.duration_ms),
             last_request_at: Mutex::new(usage.last_request_at),
             since: Mutex::new(usage.since),
+            last_failure: Mutex::new(usage.last_failure),
             dirty: AtomicBool::new(false),
         }
     }
@@ -266,16 +279,17 @@ impl UsageCounters {
 
     /// A failure with no fallback answer: an upstream status >= 400, or an openai-wire body that failed or
     /// never finished. The colony's router retries none of these — only the gateway's own three fallback
-    /// errors get that.
-    fn add_failure(&self) {
+    /// errors get that. `failure` names the branch, kept as the provider's `last_failure`.
+    fn add_failure(&self, failure: GatewayFailure) {
+        *self.last_failure.lock().unwrap() = Some(failure.code().to_string());
         self.failures.fetch_add(1, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
     }
 
     /// One of the three gateway-level fallback errors, and — when the provider has a fallback model —
     /// the fallback to Claude the colony's router will make with it (see [`ProviderUsage::fallbacks`]).
-    fn add_failure_with_fallback(&self, provider: &Provider) {
-        self.add_failure();
+    fn add_failure_with_fallback(&self, provider: &Provider, failure: GatewayFailure) {
+        self.add_failure(failure);
         if provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) {
             self.fallbacks.fetch_add(1, Ordering::SeqCst);
             self.dirty.store(true, Ordering::SeqCst);
@@ -290,6 +304,7 @@ impl UsageCounters {
             duration_ms: self.duration_ms.load(Ordering::SeqCst),
             last_request_at: *self.last_request_at.lock().unwrap(),
             since: *self.since.lock().unwrap(),
+            last_failure: self.last_failure.lock().unwrap().clone(),
         }
     }
 }
@@ -865,25 +880,42 @@ impl SseTap {
 }
 
 /// Wraps a body that is being forwarded to a colony, counting the tokens that pass through `tap` and
-/// handing the totals to `record` once the body ends. The bytes themselves are never changed: whatever
-/// the tap makes of the body, every chunk forwards exactly as it arrived.
+/// handing the totals to `record` once the body ends. `audit` rides along for the request's one
+/// audit line: it counts the forwarded bytes and is finished — writing the line — when the body
+/// ends, or when the stream holding it is dropped unread. The bytes themselves are never changed:
+/// whatever the tap makes of the body, every chunk forwards exactly as it arrived.
 fn counted_body(
     inner: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
     tap: UsageTap,
     record: Option<Recorder>,
+    audit: Option<GatewayAudit>,
 ) -> impl Stream<Item = std::io::Result<Bytes>> + Send + 'static {
-    let state = (Box::pin(inner), tap, record);
-    futures_util::stream::unfold(state, |(mut inner, mut tap, record)| async move {
+    let state = (Box::pin(inner), tap, record, audit);
+    futures_util::stream::unfold(state, |(mut inner, mut tap, record, audit)| async move {
         let item = match inner.next().await {
             Some(Ok(chunk)) => {
                 tap.push(&chunk);
+                if let Some(audit) = &audit {
+                    audit.add_bytes(chunk.len());
+                }
                 Some(Ok(chunk))
             }
-            other => other,
+            // An error mid-body is a response the colony never got whole; the audit says so when
+            // the line lands. The error itself forwards exactly as it arrived.
+            Some(Err(e)) => {
+                if let Some(audit) = &audit {
+                    audit.note_body_error();
+                }
+                Some(Err(e))
+            }
+            None => None,
         };
         let Some(item) = item else {
             // The body is over (or its error was delivered): report whatever the tap managed to read.
             let usage = tap.finish();
+            if let Some(audit) = &audit {
+                audit.finish(usage);
+            }
             if usage.total_tokens() > 0
                 && let Some(record) = record
             {
@@ -891,7 +923,7 @@ fn counted_body(
             }
             return None;
         };
-        Some((item, (inner, tap, record)))
+        Some((item, (inner, tap, record, audit)))
     })
 }
 
@@ -1080,21 +1112,29 @@ fn micro_usd(usd: f64) -> u64 {
 /// the request's own `max_tokens` — `max_completion_tokens` in OpenAI's spelling — falling back to
 /// [`ESTIMATED_MAX_TOKENS`] when it names neither or is not JSON; the input side is the body's bytes
 /// over four, the usual tokens-per-byte rule of thumb. A provider without pricing estimates at $0,
-/// exactly what recording it would cost.
-fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> f64 {
+/// exactly what recording it would cost. This being the body's one parse, the requested model rides
+/// along for the audit record — which only ever names a model the model-id validator passed, never
+/// raw body text.
+fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f64, Option<String>) {
     let request: Value = serde_json::from_slice(body).unwrap_or_default();
     let output_tokens = request
         .get("max_tokens")
         .or_else(|| request.get("max_completion_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(ESTIMATED_MAX_TOKENS);
-    provider.cost_usd(Usage {
-        input_tokens: body.len() as u64 / 4,
-        output_tokens,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        thinking_tokens: 0,
-    })
+    let model = request["model"]
+        .as_str()
+        .and_then(|m| valid_model(m).then_some(m.to_string()));
+    (
+        provider.cost_usd(Usage {
+            input_tokens: body.len() as u64 / 4,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            thinking_tokens: 0,
+        }),
+        model,
+    )
 }
 
 async fn proxy(
@@ -1115,7 +1155,21 @@ async fn proxy(
         );
     };
     let colony = session.id.clone();
+    // The request's one audit record starts here — past the token check, so an unknown token is
+    // the only request that leaves no line: it cannot be attributed to a colony. `rest` is the
+    // provider-relative path; the query string never reaches the record. The requested model lands
+    // later, from the body's one parse, in `estimate_request_cost_usd`.
+    let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
+    let audit = GatewayAudit::start(
+        crate::gateway_audit::log_path(&app, &colony),
+        &colony,
+        &id,
+        method.as_str(),
+        rest,
+        body.len(),
+    );
     let Some(provider) = app.providers().into_iter().find(|p| p.id == id) else {
+        audit.fail(StatusCode::NOT_FOUND.as_u16(), GatewayFailure::UnknownProvider);
         return api_error(
             StatusCode::NOT_FOUND,
             "not_found_error",
@@ -1123,6 +1177,7 @@ async fn proxy(
             None,
         );
     };
+    audit.set_wire(crate::gateway_audit::wire_name(provider.wire));
     // A configured provider is not necessarily this colony's (issue #409): providers.json is
     // mothership-wide, so the token alone must not open one the colony's model settings never
     // routed to. Refused with the other local refusals — before credentials, budget, or any
@@ -1132,6 +1187,7 @@ async fn proxy(
         .as_ref()
         .is_some_and(|allowed| !allowed.contains(&id))
     {
+        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::NotRouted);
         return api_error(
             StatusCode::FORBIDDEN,
             "permission_error",
@@ -1153,6 +1209,7 @@ async fn proxy(
         .and_then(crate::sensitivity::Sensitivity::parse)
         .is_some_and(|sensitivity| !crate::sensitivity::eligible(sensitivity, provider.trusted))
     {
+        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::Restricted);
         app.session_log(
             &colony,
             "warn",
@@ -1174,6 +1231,7 @@ async fn proxy(
     // and answer with a bare 401 that says nothing about why. Refused here instead, before any upstream
     // call, naming the provider and where the key goes.
     if provider.auth != "none" && credential_header(&app, &provider).is_none() {
+        audit.fail(StatusCode::BAD_GATEWAY.as_u16(), GatewayFailure::MissingKey);
         return api_error(
             StatusCode::BAD_GATEWAY,
             "api_error",
@@ -1186,6 +1244,7 @@ async fn proxy(
     // Refused before it waits for a slot, and the colony is stopped like the max-duration path stops one.
     // The 403 follows the empty-balance precedent in openai.rs: Claude Code does not retry it in a loop.
     if crate::lifecycle::enforce_budget(&app, &colony).await {
+        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::Budget);
         return api_error(
             StatusCode::FORBIDDEN,
             "permission_error",
@@ -1201,7 +1260,9 @@ async fn proxy(
     // `enforce_budget`'s job, for overspend that has actually been recorded.
     let modules = app.modules.read().await.clone();
     let budget = orgs::budget_usd(&modules, &app.org_settings(&session.org));
-    let estimate = estimate_request_cost_usd(&provider, &body);
+    // The body's one parse, shared by the estimate and the audit record's requested model.
+    let (estimate, model) = estimate_request_cost_usd(&provider, &body);
+    audit.set_model(model.clone());
     let reserved = app.gateway.colony_reserved(&colony);
     // Recorded spend and the reservation are read and claimed together, under the sessions read
     // lock: a recorder hands its estimate back under the write lock in the same step that adds the
@@ -1217,6 +1278,7 @@ async fn proxy(
         match Reserved::try_new(&reserved, micro_usd(estimate), fits) {
             Ok(reservation) => reservation,
             Err(outstanding) => {
+                audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::Budget);
                 return api_error(
                     StatusCode::FORBIDDEN,
                     "permission_error",
@@ -1229,12 +1291,12 @@ async fn proxy(
             }
         }
     };
-    let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
     // Everything that can refuse the request happens here, before it waits for a slot. The anthropic wire
     // never parses the body; the openai wire has to rebuild it.
     let (url, upstream_headers, body, translation) = match provider.wire {
         Wire::Anthropic => {
             let Some(url) = upstream_url(&provider.base_url, rest, uri.query()) else {
+                audit.fail(StatusCode::BAD_REQUEST.as_u16(), GatewayFailure::BadRequest);
                 return api_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
@@ -1250,11 +1312,15 @@ async fn proxy(
                 eprintln!("gateway: provider \"{id}\": normalized request body preemptively ({note})");
                 body = normalized;
             }
+            // The body goes out with the model it came in with: normalization rewrites fields,
+            // never the model.
+            audit.set_wire_model(model);
             (url, forward_headers(&headers, credential_header(&app, &provider)), body, None)
         }
         Wire::Openai => {
             // 404 is also what tells the colony router to estimate `count_tokens` itself.
             let Some(path) = openai::upstream_path(rest) else {
+                audit.fail(StatusCode::NOT_FOUND.as_u16(), GatewayFailure::BadRequest);
                 return api_error(
                     StatusCode::NOT_FOUND,
                     "not_found_error",
@@ -1265,6 +1331,7 @@ async fn proxy(
             let (body, info) = match openai::translate_request(&body) {
                 Ok(translated) => translated,
                 Err(message) => {
+                    audit.fail(StatusCode::BAD_REQUEST.as_u16(), GatewayFailure::BadRequest);
                     return api_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
@@ -1273,6 +1340,7 @@ async fn proxy(
                     );
                 }
             };
+            audit.set_wire_model(valid_model(&info.model).then(|| info.model.clone()));
             let mut upstream_headers = HeaderMap::new();
             upstream_headers.insert("content-type", HeaderValue::from_static("application/json"));
             if let Some((name, value)) = credential_header(&app, &provider) {
@@ -1300,12 +1368,17 @@ async fn proxy(
         Some(slots) => {
             let queue_timeout = provider.queue_timeout_secs();
             let waiting = Counted::new(&stats.queued);
+            let queued_at = Instant::now();
             let acquired = tokio::time::timeout(Duration::from_secs(queue_timeout), slots.acquire_owned()).await;
             drop(waiting);
             match acquired {
-                Ok(Ok(permit)) => Some(permit),
+                Ok(Ok(permit)) => {
+                    audit.set_queue_ms(queued_at.elapsed().as_millis() as u64);
+                    Some(permit)
+                }
                 _ => {
-                    usage.add_failure_with_fallback(&provider);
+                    usage.add_failure_with_fallback(&provider, GatewayFailure::QueueFull);
+                    audit.fail(StatusCode::SERVICE_UNAVAILABLE.as_u16(), GatewayFailure::QueueFull);
                     return api_error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "overloaded_error",
@@ -1330,7 +1403,8 @@ async fn proxy(
             } else {
                 "request failed"
             };
-            usage.add_failure_with_fallback(&provider);
+            usage.add_failure_with_fallback(&provider, GatewayFailure::Unreachable);
+            audit.fail(StatusCode::BAD_GATEWAY.as_u16(), GatewayFailure::Unreachable);
             return api_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -1339,7 +1413,8 @@ async fn proxy(
             );
         }
         Err(_) => {
-            usage.add_failure_with_fallback(&provider);
+            usage.add_failure_with_fallback(&provider, GatewayFailure::Timeout);
+            audit.fail(StatusCode::GATEWAY_TIMEOUT.as_u16(), GatewayFailure::Timeout);
             return api_error(
                 StatusCode::GATEWAY_TIMEOUT,
                 "api_error",
@@ -1371,6 +1446,7 @@ async fn proxy(
             quota_fallback,
             &id,
             Some((&app, &colony)),
+            Some(audit),
         )
         .await;
     }
@@ -1379,7 +1455,7 @@ async fn proxy(
     if status.as_u16() >= 400 {
         // Buffered, not streamed: the body still forwards verbatim, but only a buffered error can
         // be classified for quota exhaustion before answering.
-        return anthropic_error(&app, &colony, upstream, guards, reservation, usage, &provider, timeout).await;
+        return anthropic_error(&app, &colony, upstream, guards, reservation, usage, &provider, timeout, audit).await;
     }
     // A 2xx from upstream proves the plan is back: a quota record from an earlier error lapses now,
     // so the queue unpauses and parked colonies resume on the next tick.
@@ -1399,10 +1475,14 @@ async fn proxy(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|c| c.contains("text/event-stream"));
     // The body forwards exactly as upstream sent it; the tap only watches a private copy for usage.
+    // The audit rides in the body: its line lands when the body ends (or is dropped), so the record
+    // counts the whole streamed response.
+    audit.set_status(status.as_u16());
     let body = counted_body(
         stream_body(upstream.bytes_stream(), guards, timeout, is_sse),
         UsageTap::anthropic(is_sse),
         Some(usage_recorder(&app, &colony, &provider, reservation)),
+        Some(audit),
     );
     let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = status;
@@ -1425,8 +1505,10 @@ async fn anthropic_error(
     usage: Arc<UsageCounters>,
     provider: &Provider,
     timeout: Duration,
+    audit: GatewayAudit,
 ) -> Response {
     let status = upstream.status();
+    audit.set_status(status.as_u16());
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
         if !DROP_RESPONSE_HEADERS.contains(&name.as_str()) {
@@ -1438,7 +1520,8 @@ async fn anthropic_error(
         // Past the headers the failure is one unpriced error either way; the distinction the
         // request path draws (unreachable vs timeout) no longer applies.
         _ => {
-            usage.add_failure();
+            usage.add_failure(GatewayFailure::BodyReadFailed);
+            audit.fail(StatusCode::BAD_GATEWAY.as_u16(), GatewayFailure::BodyReadFailed);
             return api_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -1470,10 +1553,16 @@ async fn anthropic_error(
     }
     let fallback =
         quota.is_some() && provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
-    if fallback {
-        usage.add_failure_with_fallback(provider);
+    if quota.is_some() {
+        audit.fail_with(status.as_u16(), GatewayFailure::QuotaExhausted, fallback);
+        if fallback {
+            usage.add_failure_with_fallback(provider, GatewayFailure::QuotaExhausted);
+        } else {
+            usage.add_failure(GatewayFailure::QuotaExhausted);
+        }
     } else {
-        usage.add_failure();
+        audit.fail(status.as_u16(), GatewayFailure::UpstreamError);
+        usage.add_failure(GatewayFailure::UpstreamError);
     }
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = status;
@@ -1505,7 +1594,6 @@ fn quota_header_value(hit: &provider_quota::QuotaExhaustion) -> HeaderValue {
 /// have arrived there is no transport fallback — except quota exhaustion, which names
 /// `x-colonizer-quota-exhausted` (and the Claude fallback when one is configured). The usage
 /// the translation already extracted is teed out to `record_routed_usage` on both paths.
-/// have arrived there is no fallback, so none of these errors carries `x-colonizer-fallback`.
 #[allow(clippy::too_many_arguments)]
 async fn openai_response(
     upstream: reqwest::Response,
@@ -1520,6 +1608,8 @@ async fn openai_response(
     id: &str,
     // Who to flag for attention on an upstream 4xx/5xx; `None` in tests, which have no session store.
     attention: Option<(&Shared, &str)>,
+    // The request's audit record; `None` in tests that call this handler directly.
+    audit: Option<GatewayAudit>,
 ) -> Response {
     let status = upstream.status();
     let retry_after = upstream.headers().get("retry-after").cloned();
@@ -1529,11 +1619,21 @@ async fn openai_response(
         if let Some((app, colony)) = attention {
             clear_model_error(app, colony).await;
         }
-        let body = stream_body(
-            openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record),
-            guards,
-            timeout,
-            true,
+        if let Some(audit) = &audit {
+            audit.set_status(status.as_u16());
+        }
+        // The translated SSE stream forwards through the same byte counter and audit finish as the
+        // anthropic wire; its tokens are already priced inside the translation.
+        let body = counted_body(
+            stream_body(
+                openai::translate_stream(upstream.bytes_stream(), info.model.clone(), record),
+                guards,
+                timeout,
+                true,
+            ),
+            UsageTap::Skip,
+            None,
+            audit,
         );
         let mut response = Response::new(Body::from_stream(body));
         response
@@ -1547,7 +1647,10 @@ async fn openai_response(
     let bytes = match tokio::time::timeout(timeout, upstream.bytes()).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {
-            usage.add_failure();
+            usage.add_failure(GatewayFailure::BodyReadFailed);
+            if let Some(audit) = &audit {
+                audit.fail(StatusCode::BAD_GATEWAY.as_u16(), GatewayFailure::BodyReadFailed);
+            }
             return api_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -1556,7 +1659,10 @@ async fn openai_response(
             );
         }
         Err(_) => {
-            usage.add_failure();
+            usage.add_failure(GatewayFailure::BodyReadFailed);
+            if let Some(audit) = &audit {
+                audit.fail(StatusCode::GATEWAY_TIMEOUT.as_u16(), GatewayFailure::BodyReadFailed);
+            }
             return api_error(
                 StatusCode::GATEWAY_TIMEOUT,
                 "api_error",
@@ -1574,15 +1680,25 @@ async fn openai_response(
                 if let Some((app, colony)) = attention {
                     clear_model_error(app, colony).await;
                 }
+                if let Some(audit) = &audit {
+                    audit.set_status(StatusCode::OK.as_u16());
+                    audit.add_bytes(bytes.len());
+                    audit.finish(priced);
+                }
                 record(priced);
                 (StatusCode::OK, Json(message)).into_response()
             }
-            Err(message) => api_error(
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                format!("provider \"{id}\": {message}"),
-                None,
-            ),
+            Err(message) => {
+                if let Some(audit) = &audit {
+                    audit.fail(StatusCode::BAD_GATEWAY.as_u16(), GatewayFailure::BodyReadFailed);
+                }
+                api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    format!("provider \"{id}\": {message}"),
+                    None,
+                )
+            }
         }
     } else {
         let upstream_status = status.as_u16();
@@ -1595,10 +1711,13 @@ async fn openai_response(
         match provider_quota::classify_quota_exhaustion(upstream_status, code, &message) {
             Some(hit) => {
                 gateway.mark_quota_exhausted(id, hit.reset_at.clone(), hit.reset_unix);
+                if let Some(audit) = &audit {
+                    audit.fail_with(status.as_u16(), GatewayFailure::QuotaExhausted, quota_fallback);
+                }
                 if quota_fallback {
-                    usage.add_failure_with_fallback(provider);
+                    usage.add_failure_with_fallback(provider, GatewayFailure::QuotaExhausted);
                 } else {
-                    usage.add_failure();
+                    usage.add_failure(GatewayFailure::QuotaExhausted);
                 }
                 let mut response = api_error(
                     status,
@@ -1613,7 +1732,10 @@ async fn openai_response(
             }
             None => {
                 if upstream_status >= 400 {
-                    usage.add_failure();
+                    usage.add_failure(GatewayFailure::UpstreamError);
+                    if let Some(audit) = &audit {
+                        audit.fail(status.as_u16(), GatewayFailure::UpstreamError);
+                    }
                     if let Some((app, colony)) = attention {
                         // Named, not invisible: a 400 here is usually a field the provider's dialect
                         // rejects, and any 4xx/5xx flags the colony for attention instead of leaving
@@ -1622,6 +1744,8 @@ async fn openai_response(
                         eprintln!("gateway: provider \"{id}\" answered {upstream_status} for colony {colony}");
                         flag_model_error(app, colony).await;
                     }
+                } else if let Some(audit) = &audit {
+                    audit.set_status(upstream_status);
                 }
                 api_error(status, kind, message, None)
             }
@@ -1873,6 +1997,11 @@ mod tests {
             0,
             "refused locally, so nothing counts as provider usage"
         );
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "missing_key");
+        assert_eq!(lines[0]["status"], 502);
+        assert_eq!(lines[0]["fallback"], false, "a missing key earns no Claude retry");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1922,6 +2051,10 @@ mod tests {
             0,
             "refused locally, so nothing counts as provider usage"
         );
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "not_routed");
+        assert_eq!(lines[0]["status"], 403);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1973,6 +2106,225 @@ mod tests {
             1,
             "passed the allowlist, so the request dispatched"
         );
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1, "exactly one audit line per request");
+        assert_eq!(lines[0]["failure"], Value::Null, "a forwarded 2xx did not fail");
+        assert_eq!(lines[0]["model"], Value::Null, "the body had no model to validate");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The audit lines one colony's `gateway.jsonl` holds, parsed. Only meaningful once every
+    /// response body under test has been drained: a streamed line lands when the body ends.
+    fn audit_lines(app: &Shared, colony: &str) -> Vec<Value> {
+        std::fs::read_to_string(app.session_dir(colony).join("gateway.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// A running colony `c1` — token file written, session dir created — routed to `allowed`, with
+    /// `providers` as the mothership's providers.json. Returns the app and the colony token.
+    async fn colony_with_providers(root: &std::path::Path, allowed: &[&str], providers: Value) -> (Shared, String) {
+        let app = crate::tests::test_app(root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = Some(allowed.iter().map(|id| id.to_string()).collect());
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/providers.json"), serde_json::to_string(&providers).unwrap()).unwrap();
+        (app, token)
+    }
+
+    /// Serves one POST route that captures every request's headers and answers `body`. Returns the
+    /// base URL and the headers of the last request it saw.
+    async fn capturing_upstream(path: &str, body: Value) -> (String, Arc<Mutex<HeaderMap>>) {
+        let seen = Arc::new(Mutex::new(HeaderMap::new()));
+        let capture = seen.clone();
+        let router = Router::new().route(
+            path,
+            axum::routing::post(move |headers: HeaderMap| {
+                let capture = capture.clone();
+                let body = body.clone();
+                async move {
+                    *capture.lock().unwrap() = headers;
+                    axum::Json(body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// The placeholder credentials a colony's runner forwards, which must never reach an upstream.
+    fn placeholder_credentials() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("sk-ant-api03-FAKEFAKEFAKEFAKE"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer sk-FAKEFAKEFAKEFAKE"));
+        headers
+    }
+
+    /// POSTs `body` to `provider` on the gateway as a colony carrying `token` and `credentials`.
+    async fn post_to_gateway(app: &Shared, token: &str, provider: &str, credentials: HeaderMap, body: Bytes) -> Response {
+        let mut headers = credentials;
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(token).unwrap());
+        proxy(
+            State(app.clone()),
+            Path((provider.to_string(), "v1/messages".into())),
+            Method::POST,
+            format!("/providers/{provider}/v1/messages").parse().unwrap(),
+            headers,
+            body,
+        )
+        .await
+    }
+
+    /// A forwarded 2xx leaves one audit line per request carrying the outcome and the usage, and
+    /// none of what the request carried: keys, bearer tokens, the colony's own gateway token, prompt
+    /// text — the record's fixed struct is the whole allowlist (issue #302). The mock upstreams
+    /// double as the credential check: on neither wire may the colony's placeholder credentials
+    /// reach the upstream — the anthropic wire forwards an allowlist, the openai wire builds its
+    /// headers from scratch.
+    #[tokio::test]
+    async fn a_forwarded_request_leaves_one_redacted_audit_line_and_no_colony_credential_upstream() {
+        let (anthropic_base, anthropic_seen) = capturing_upstream(
+            "/v1/messages",
+            json!({
+                "id": "msg_1", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+                "model": "claude-sonnet-5", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+        )
+        .await;
+        let (openai_base, openai_seen) = capturing_upstream(
+            "/v1/chat/completions",
+            json!({
+                "id": "cpl_1", "object": "chat.completion", "created": 1, "model": "gpt-5.5",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "hi"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+            }),
+        )
+        .await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-audit-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek", "strix"],
+            json!([
+                {"id": "deepseek", "name": "DeepSeek", "base_url": anthropic_base, "auth": "none"},
+                {"id": "strix", "name": "Strix", "base_url": openai_base, "auth": "none", "wire": "openai"},
+            ]),
+        )
+        .await;
+
+        let request_body = Bytes::from(
+            r#"{"model":"claude-sonnet-5","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"SECRET_PROMPT_TEXT"}]}]}"#,
+        );
+        let response = post_to_gateway(&app, &token, "deepseek", placeholder_credentials(), request_body.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "strix",
+            placeholder_credentials(),
+            Bytes::from_static(br#"{"model":"gpt-5.5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Only the mothership's own saved key may reach an upstream, and neither provider has one.
+        for seen in [anthropic_seen, openai_seen] {
+            let headers = seen.lock().unwrap().clone();
+            assert!(headers.get("x-api-key").is_none(), "no x-api-key may reach the upstream");
+            assert!(headers.get("authorization").is_none(), "no bearer may reach the upstream");
+        }
+
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 2, "exactly one audit line per request");
+        let logged = serde_json::to_string(&lines).unwrap();
+        for secret in [
+            "sk-ant-api03-FAKEFAKEFAKEFAKE",
+            "sk-FAKEFAKEFAKEFAKE",
+            &token,
+            "SECRET_PROMPT_TEXT",
+        ] {
+            assert!(
+                !logged.contains(secret),
+                "the audit lines carry no secret ({secret}): {logged}"
+            );
+        }
+        assert!(!logged.contains("sk-"), "no key shape in the audit lines: {logged}");
+        assert!(!logged.contains("Bearer "), "no bearer shape in the audit lines: {logged}");
+
+        let anthropic_line = &lines[0];
+        assert_eq!(anthropic_line["failure"], Value::Null);
+        assert_eq!(anthropic_line["fallback"], false);
+        assert_eq!(anthropic_line["wire"], "anthropic");
+        assert_eq!(anthropic_line["method"], "POST");
+        assert_eq!(anthropic_line["path"], "/v1/messages");
+        assert_eq!(anthropic_line["model"], "claude-sonnet-5");
+        assert_eq!(anthropic_line["wire_model"], "claude-sonnet-5");
+        assert_eq!(anthropic_line["status"], 200);
+        assert_eq!(
+            anthropic_line["input_tokens"], 10,
+            "the usage tap's counts land in the record"
+        );
+        assert_eq!(anthropic_line["output_tokens"], 5);
+        assert_eq!(anthropic_line["request_bytes"], request_body.len());
+        assert_eq!(
+            anthropic_line["response_bytes"],
+            response_body.len(),
+            "exactly what was forwarded"
+        );
+        let openai_line = &lines[1];
+        assert_eq!(openai_line["wire"], "openai");
+        assert_eq!(
+            openai_line["wire_model"], "gpt-5.5",
+            "the translated request's model, validator applied"
+        );
+        assert_eq!(openai_line["status"], 200);
+        assert_eq!(openai_line["input_tokens"], 3);
+        assert_eq!(openai_line["output_tokens"], 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider that cannot be reached answers 502 with the fallback header, and the audit line
+    /// names the branch. An unknown colony token leaves no line at all: it cannot be attributed.
+    #[tokio::test]
+    async fn an_unreachable_provider_logs_unreachable_and_an_unknown_token_logs_nothing() {
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-unreachable-{}", uuid::Uuid::new_v4()));
+        // Port 9 (discard) refuses: the dispatch fails without touching the network.
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            json!([{"id": "deepseek", "name": "DeepSeek", "base_url": "http://127.0.0.1:9", "auth": "none"}]),
+        )
+        .await;
+
+        let response = post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.headers().get(FALLBACK_HEADER).and_then(|v| v.to_str().ok()),
+            Some("unreachable"),
+            "the router gets its fallback licence"
+        );
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "unreachable");
+        assert_eq!(lines[0]["fallback"], true);
+        assert_eq!(lines[0]["status"], 502);
+
+        // An unknown token is refused before anything is attributed: no second line.
+        let response = post_to_gateway(&app, "not-a-colony", "deepseek", HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_lines(&app, "c1").len(), 1, "the unattributable request leaves no line");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2024,6 +2376,10 @@ mod tests {
             0,
             "refused locally, so nothing counts as provider usage"
         );
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "restricted");
+        assert_eq!(lines[0]["status"], 403);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2098,23 +2454,23 @@ mod tests {
 
         let anthropic = Bytes::from(r#"{"model":"m","max_tokens":3000,"messages":[]}"#);
         assert!(
-            (estimate_request_cost_usd(&priced, &anthropic) - expected(&anthropic, 3000)).abs() < 1e-12,
+            (estimate_request_cost_usd(&priced, &anthropic).0 - expected(&anthropic, 3000)).abs() < 1e-12,
             "the request's own max_tokens is the estimated output"
         );
         let openai = Bytes::from(r#"{"model":"gpt-5.5","max_completion_tokens":500,"messages":[]}"#);
         assert!(
-            (estimate_request_cost_usd(&priced, &openai) - expected(&openai, 500)).abs() < 1e-12,
+            (estimate_request_cost_usd(&priced, &openai).0 - expected(&openai, 500)).abs() < 1e-12,
             "the OpenAI spelling of the same cap is read too"
         );
 
         // No cap named, or not JSON at all: the documented fallback bounds the output side.
         let bare = Bytes::from(r#"{"model":"m","messages":[]}"#);
-        assert!((estimate_request_cost_usd(&priced, &bare) - expected(&bare, ESTIMATED_MAX_TOKENS)).abs() < 1e-12);
+        assert!((estimate_request_cost_usd(&priced, &bare).0 - expected(&bare, ESTIMATED_MAX_TOKENS)).abs() < 1e-12);
         let junk = Bytes::from("not json");
-        assert!((estimate_request_cost_usd(&priced, &junk) - expected(&junk, ESTIMATED_MAX_TOKENS)).abs() < 1e-12);
+        assert!((estimate_request_cost_usd(&priced, &junk).0 - expected(&junk, ESTIMATED_MAX_TOKENS)).abs() < 1e-12);
 
         // No pricing configured: nothing to reserve, exactly as recording it costs nothing.
-        assert_eq!(estimate_request_cost_usd(&provider("strix", None), &anthropic), 0.0);
+        assert_eq!(estimate_request_cost_usd(&provider("strix", None), &anthropic).0, 0.0);
     }
 
     /// A reservation holds until its guard drops: while held it counts against the cap, and once
@@ -2187,7 +2543,7 @@ mod tests {
         // A budget one request fits and two never do: 1.5x the estimate leaves room for the first
         // alone, and the first plus the second's estimate crosses it.
         let body = Bytes::from(r#"{"model":"m","max_tokens":3000,"messages":[]}"#);
-        let budget = estimate_request_cost_usd(&provider, &body) * 1.5;
+        let budget = estimate_request_cost_usd(&provider, &body).0 * 1.5;
         app.modules
             .write()
             .await
@@ -2341,7 +2697,7 @@ mod tests {
         );
         assert_eq!(
             app.gateway.colony_reserved("c1").load(Ordering::SeqCst),
-            micro_usd(estimate_request_cost_usd(&provider, &body)),
+            micro_usd(estimate_request_cost_usd(&provider, &body).0),
             "the body has fully streamed, yet the reservation is held until the cost lands"
         );
         drop(sessions);
@@ -2636,7 +2992,7 @@ mod tests {
         let fallback = provider("strix", Some("sonnet"));
         for _ in 0..3 {
             usage.add_request();
-            usage.add_failure_with_fallback(&fallback);
+            usage.add_failure_with_fallback(&fallback, GatewayFailure::Unreachable);
         }
         let after_errors = usage.snapshot();
         assert_eq!(
@@ -2646,7 +3002,7 @@ mod tests {
 
         // An upstream status >= 400 is a failure without a fallback answer.
         usage.add_request();
-        usage.add_failure();
+        usage.add_failure(GatewayFailure::UpstreamError);
         let after_status = usage.snapshot();
         assert_eq!(
             (after_status.requests, after_status.failures, after_status.fallbacks),
@@ -2658,7 +3014,7 @@ mod tests {
         );
 
         // Without a fallback model the failure is counted, the predicted fallback is not.
-        usage.add_failure_with_fallback(&provider("strix", None));
+        usage.add_failure_with_fallback(&provider("strix", None), GatewayFailure::UpstreamError);
         assert_eq!(usage.snapshot().fallbacks, 3);
         assert_eq!(usage.snapshot().failures, 5);
     }
@@ -2691,6 +3047,7 @@ mod tests {
             duration_ms,
             last_request_at: None,
             since: None,
+            last_failure: None,
         }
     }
 
@@ -2703,7 +3060,8 @@ mod tests {
                 failure_pct: 0.0,
                 avg_latency_ms: 0,
                 rated: false,
-                degraded: false
+                degraded: false,
+                last_failure: None
             }
         );
     }
@@ -2779,7 +3137,7 @@ mod tests {
         )
         .await;
         assert!(acquired.is_err(), "the wait gives up while the first request holds the slot");
-        usage.add_failure_with_fallback(&queued_out);
+        usage.add_failure_with_fallback(&queued_out, GatewayFailure::QueueFull);
 
         let snapshot = usage.snapshot();
         assert_eq!((snapshot.requests, snapshot.failures, snapshot.fallbacks), (1, 1, 1));
@@ -2827,6 +3185,7 @@ mod tests {
             false,
             "strix",
             None,
+            None,
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -2845,6 +3204,7 @@ mod tests {
             false,
             "strix",
             None,
+            None,
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -2852,6 +3212,43 @@ mod tests {
             usage.snapshot().failures,
             2,
             "one per request, never a header-phase count on top of the body-phase one"
+        );
+        assert_eq!(
+            usage.snapshot().last_failure.as_deref(),
+            Some("body_read_failed"),
+            "the body-phase failure names its branch"
+        );
+
+        // A plain upstream error (not quota) counts one failure and names its own branch, with no
+        // Claude retry on offer.
+        let response = openai_response(
+            reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(500)
+                    .body(reqwest::Body::from(r#"{"error":{"message":"kaboom"}}"#))
+                    .unwrap(),
+            ),
+            guards(),
+            usage.clone(),
+            Box::new(|_| {}),
+            Duration::from_secs(30),
+            &info,
+            &gateway,
+            &strix,
+            false,
+            "strix",
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            !response.headers().contains_key(FALLBACK_HEADER),
+            "an upstream error earns no retry"
+        );
+        assert_eq!(
+            usage.snapshot().last_failure.as_deref(),
+            Some("upstream_error"),
+            "the non-quota branch names itself"
         );
     }
 
@@ -2893,6 +3290,7 @@ mod tests {
                     model.is_some(),
                     "strix",
                     None,
+                    None,
                 )
                 .await
             }
@@ -2915,6 +3313,11 @@ mod tests {
         assert!(
             !response.headers().contains_key(FALLBACK_HEADER),
             "no fallback_model, no retry"
+        );
+        assert_eq!(
+            gateway.usage("strix").last_failure.as_deref(),
+            Some("quota_exhausted"),
+            "the last failure code is the quota, whatever the fallback"
         );
     }
 
@@ -3302,6 +3705,7 @@ mod tests {
             futures_util::stream::iter(chunks),
             UsageTap::anthropic(is_sse),
             Some(Box::new(move |usage| *sink.lock().unwrap() = Some(usage))),
+            None,
         );
         tokio::pin!(body);
         let mut forwarded = Vec::new();

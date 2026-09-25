@@ -86,6 +86,20 @@ Two settings layers sit next to the modules:
   the first time asks instead of being adopted silently. A colony belongs to its repository
   owner's org.
 
+### The gateway's audit log
+
+Every authenticated gateway request appends one line to the colony's `gateway.jsonl`: provider, wire,
+method and path, the requested and upstream model (each admitted only through the model-id
+validator), status, failure code, whether the answer licensed the Claude fallback, queue and total
+duration, request and response bytes, and token counts. The failure codes: `unknown_provider` (no
+such provider), `not_routed` (not this colony's), `restricted` (untrusted provider for a restricted
+task), `missing_key`, `budget`, `bad_request` (path or body the wire cannot serve), `queue_full`,
+`unreachable`, `timeout`, `upstream_error` (a 4xx/5xx that is not quota), `quota_exhausted`,
+`body_read_failed` (the response broke after its headers). The record is a fixed struct and nothing
+else — no keys, tokens, or request or response bodies ever reach it — and upstream requests are
+built from scratch: the colony's own credential headers are dropped at the gateway and only the
+mothership's saved key for the provider is injected.
+
 ## Shared memory access
 
 Shared memory is read-only from inside a colony. What each part of a colony may do:
