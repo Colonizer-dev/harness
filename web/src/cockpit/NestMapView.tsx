@@ -4,18 +4,32 @@
 // are tunnels, and each live colony's ants walk the tunnels to the chambers whose files it is
 // changing (GET /api/touched). Only real data: a repository with no map says so and offers to draw
 // one; a colony with no changes yet waits at the mouth.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
 import { SESSION_STATUS, isLive, store, stored, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
 import type { RepoMap, Session } from "../types";
-import { SURFACE_Y, normalizeBox, surfaceGrass, type NestBox } from "./nest";
+import { SURFACE_Y, surfaceGrass, type NestBox } from "./nest";
 import { FileTreePane } from "./FileTreePane";
 import { RepoCard, RepoPicker } from "./RepoPicker";
 import { AntBubble } from "./AntBubble";
 import { BUBBLE_TONE, MAX_ANT_BUBBLES } from "./bubbles";
-import { componentForPath, antRoute, boundaryBox, componentsForFiles, entryComponent, layoutMap, mouthPath, tunnelPaths } from "./nestMap";
+import {
+  LABEL_MIN_ZOOM,
+  SUBLABEL_MIN_ZOOM,
+  antRoute,
+  clampView,
+  componentForPath,
+  componentsForFiles,
+  entryComponent,
+  fitView,
+  layoutMap,
+  mouthPath,
+  tunnelPaths,
+  zoomAt,
+  type MapView,
+} from "./nestMap";
 import { taskLine } from "../summary";
 
 const REPO_KEY = "colonizer.mapRepo";
@@ -108,14 +122,15 @@ export function NestMapView({
   const [starting, setStarting] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
   const plotRef = useRef<HTMLDivElement | null>(null);
-  const [box, setBox] = useState<NestBox>(() => normalizeBox(960, 560));
+  // The viewport the map is shown in, as measured; the plot itself (layout.width × height) can be larger.
+  const [viewport, setViewport] = useState<NestBox>({ width: 960, height: 560 });
 
   useLayoutEffect(() => {
     const el = plotRef.current;
     if (!el) return;
     const measure = () => {
-      const next = normalizeBox(el.clientWidth, el.clientHeight);
-      setBox((cur) => (cur.width === next.width && cur.height === next.height ? cur : next));
+      const next = { width: Math.max(1, el.clientWidth || 960), height: Math.max(1, el.clientHeight || 560) };
+      setViewport((cur) => (cur.width === next.width && cur.height === next.height ? cur : next));
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -198,7 +213,72 @@ export function NestMapView({
 
   const stored_ = data && data.repo === repo ? data.map : null;
   const map = stored_?.map ?? null;
-  const layout = useMemo(() => (map ? layoutMap(map, box) : null), [map, box]);
+  const layout = useMemo(() => (map ? layoutMap(map, viewport) : null), [map, viewport]);
+  // The plot: the map's own size when there is one, else just the viewport.
+  const box: NestBox = layout ? { width: layout.width, height: layout.height } : viewport;
+  // Pan and zoom: fitted until the viewer moves it, and fitted again whenever the layout changes.
+  const [userView, setUserView] = useState<MapView | null>(null);
+  useEffect(() => setUserView(null), [layout]);
+  const fitted = fitView(box, viewport);
+  const view = userView ? clampView(userView, box, viewport) : fitted;
+  const zoomedIn = view.k > fitted.k + 0.001;
+  // Text too small to read is left off rather than drawn as a smudge; hovering a chamber still names it.
+  const labelsShown = view.k >= LABEL_MIN_ZOOM;
+  const sublabelsShown = view.k >= SUBLABEL_MIN_ZOOM;
+  const viewRef = useRef({ view, box, viewport });
+  viewRef.current = { view, box, viewport };
+  const zoomBy = (factor: number, px = viewport.width / 2, py = viewport.height / 2) =>
+    setUserView(zoomAt(viewRef.current.view, factor, px, py, viewRef.current.box, viewRef.current.viewport));
+  // Pinch (and ctrl/⌘ + wheel) zooms about the pointer; a sideways swipe pans a plot wider than the
+  // viewport. A plain vertical wheel is left to scroll the page.
+  useEffect(() => {
+    const el = plotRef.current;
+    if (!el || !layout) return;
+    const onWheel = (e: WheelEvent) => {
+      const { view: v, box: b, viewport: vp } = viewRef.current;
+      const rect = el.getBoundingClientRect();
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        setUserView(zoomAt(v, Math.exp(-e.deltaY * 0.01), e.clientX - rect.left, e.clientY - rect.top, b, vp));
+      } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && b.width * v.k > vp.width + 1) {
+        e.preventDefault();
+        setUserView(clampView({ ...v, x: v.x - e.deltaX }, b, vp));
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [layout]);
+  // Drag to pan, two fingers to pinch — started only off the chambers, ants and panels.
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!layout || (e.target as HTMLElement).closest("button, a, [role=dialog], input")) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const pts = pointers.current;
+    const prev = pts.get(e.pointerId);
+    if (!prev) return;
+    const { view: v, box: b, viewport: vp } = viewRef.current;
+    if (pts.size === 1) {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      setUserView(clampView({ ...v, x: v.x + e.clientX - prev.x, y: v.y + e.clientY - prev.y }, b, vp));
+      return;
+    }
+    const other = pts.get([...pts.keys()].find((id) => id !== e.pointerId)!)!;
+    const before = Math.hypot(prev.x - other.x, prev.y - other.y);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const after = Math.hypot(e.clientX - other.x, e.clientY - other.y);
+    if (before < 1) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mx = (e.clientX + other.x) / 2 - rect.left;
+    const my = (e.clientY + other.y) / 2 - rect.top;
+    const zoomed = zoomAt(v, after / before, mx, my, b, vp);
+    setUserView(clampView({ ...zoomed, x: zoomed.x + (e.clientX - prev.x) / 2, y: zoomed.y + (e.clientY - prev.y) / 2 }, b, vp));
+  };
+  const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    pointers.current.delete(e.pointerId);
+  };
   const tunnels = useMemo(() => (map && layout ? tunnelPaths(map, layout) : []), [map, layout]);
   const entry = map && layout ? entryComponent(map, layout) : null;
   const inRepo = sessions.filter((s) => s.repo === repo);
@@ -275,8 +355,21 @@ export function NestMapView({
       )}
       {rawOpen && stored_ && <RawMapDialog value={stored_} onClose={() => setRawOpen(false)} />}
 
-      <div className="flex min-h-0 flex-1">
-      <div ref={plotRef} className="map-plot relative min-h-[420px] min-w-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 flex-1">
+      <div
+        ref={plotRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        className="map-plot relative h-[clamp(420px,72vh,1000px)] min-w-0 flex-1 overflow-hidden"
+        style={{ touchAction: zoomedIn ? "none" : "pan-y", cursor: layout ? "grab" : undefined }}
+      >
+        {/* The plot, panned and zoomed: everything on it moves together, ants and tunnels included. */}
+        <div
+          className="map-world absolute left-0 top-0"
+          style={{ width: box.width, height: box.height, transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})`, transformOrigin: "0 0" }}
+        >
         {/* Sky and soil, as in the nest. */}
         <div
           aria-hidden="true"
@@ -303,48 +396,22 @@ export function NestMapView({
           </svg>
         </span>
 
-        {!repo ? (
-          <MapNote title="No colonies in this workspace yet">A map is drawn per repository; launch a colony and its repository shows up here.</MapNote>
-        ) : !map ? (
-          drawing || drawingQueued ? (
-            <MapNote title={`Drawing ${repo}…`}>
-              A colony is reading the code and drawing it with archify{drawingQueued ? " (queued for a free slot)" : ""}.{" "}
-              {data?.mapping && (
-                <button type="button" onClick={() => onOpen(data.mapping!.id)} className="cursor-pointer border-0 bg-transparent p-0 text-accent underline underline-offset-2">
-                  Watch it work
-                </button>
-              )}
-            </MapNote>
-          ) : (
-            <MapNote title={`No map for ${repo} yet`}>
-              {mappingEnded
-                ? `The last mapping colony ended (${SESSION_STATUS[mappingStatus!]?.label.toLowerCase() ?? mappingStatus}) without a map it could keep. Its log says why; you can try again.`
-                : "A colony reads the repository and draws its architecture — every component tied to the files it lives in — so the ants can walk it."}
-              <div className="mt-4">
-                <button
-                  type="button"
-                  disabled={starting || !data}
-                  onClick={() => void drawMap()}
-                  className="cursor-pointer rounded-md border-0 bg-text px-3.5 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85 disabled:opacity-50"
-                >
-                  {starting ? "Starting…" : "Map this repo"}
-                </button>
-              </div>
-            </MapNote>
-          )
-        ) : (
-          layout && (
+        {map && layout && (
             <>
-              {/* Mounds: the boundaries archify drew, behind their chambers. */}
-              {map.boundaries.map((b, i) => {
-                const r = boundaryBox(layout, b.wraps);
-                if (!r) return null;
-                return (
-                  <div key={i} aria-hidden="true" className="map-mound absolute" style={{ left: r.x, top: r.y, width: r.w, height: r.h }}>
-                    {b.label && <span className="absolute left-1/2 top-2.5 -translate-x-1/2 whitespace-nowrap text-[10.5px] uppercase tracking-[0.1em] text-faint">{b.label}</span>}
-                  </div>
-                );
-              })}
+              {/* Mounds: the boundaries archify drew, behind their chambers, titled where no other text is. */}
+              {layout.mounds.map((m, i) => (
+                <div key={i} aria-hidden="true" className="map-mound absolute" style={{ left: m.box.x, top: m.box.y, width: m.box.w, height: m.box.h }}>
+                  {m.title && labelsShown && (
+                    <span
+                      title={m.label}
+                      className="map-text absolute truncate whitespace-nowrap text-[10.5px] uppercase tracking-[0.1em] text-faint"
+                      style={{ left: m.title.x - m.box.x, top: m.title.y - m.box.y, width: m.title.w, textAlign: "center" }}
+                    >
+                      {m.label}
+                    </span>
+                  )}
+                </div>
+              ))}
 
               <svg viewBox={`0 0 ${box.width} ${box.height}`} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
                 <line x1="0" y1={SURFACE_Y} x2={box.width} y2={SURFACE_Y} stroke="var(--border-strong)" strokeWidth="1.5" />
@@ -354,44 +421,59 @@ export function NestMapView({
                 ))}
               </svg>
 
-              {/* Chambers: holes dug where archify put the components. */}
+              {/* Chambers: holes dug where archify put the components, each named where no other name is. */}
               {layout.chambers.map((c) => {
                 const inside = places.byChamber.get(c.id) ?? [];
                 const selected = inside.some((p) => p.session.id === selectedId);
+                const full = c.component.sublabel ? `${c.component.label} — ${c.component.sublabel}` : c.component.label;
+                const toggle = () => setOpen((cur) => (cur === c.id ? null : c.id));
                 return (
-                  <div key={c.id} className="absolute z-[2]" style={{ left: c.x, top: c.y }}>
-                    <button
-                      type="button"
-                      onClick={() => setOpen((cur) => (cur === c.id ? null : c.id))}
-                      aria-label={`${c.component.label}${inside.length ? ` · ${inside.length} ${inside.length === 1 ? "colony" : "colonies"} inside` : ""}`}
-                      data-active={inside.length > 0}
-                      data-selected={selected || open === c.id}
-                      data-external={c.component.type === "external"}
-                      className="map-hole absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer rounded-full"
-                      style={{ width: c.r * 2, height: c.r * 2 }}
-                    >
-                      {inside.length > 0 && (
-                        <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 font-mono text-[10.5px] font-semibold text-on-accent tabular-nums">
-                          {inside.length}
-                        </span>
-                      )}
-                      {/* One ant idles in the chamber for the colonies working there. */}
-                      {inside.length > 0 && (
-                        <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                          <AntAvatar
-                            state={inside.every((p) => p.blocked) ? "thinking" : "working"}
-                            size={Math.min(26, c.r)}
-                            framed={false}
-                            ground={false}
-                            phase={c.x % 5}
-                          />
-                        </span>
-                      )}
-                    </button>
-                    <span className="pointer-events-none absolute left-1/2 w-max max-w-[150px] -translate-x-1/2 text-center" style={{ top: c.r + 6 }}>
-                      <span className="block truncate text-[12px] font-medium text-text">{c.component.label}</span>
-                      {c.component.sublabel && <span className="block truncate text-[10.5px] text-faint">{c.component.sublabel}</span>}
-                    </span>
+                  <div key={c.id}>
+                    <div className="absolute z-[2]" style={{ left: c.x, top: c.y }}>
+                      <button
+                        type="button"
+                        onClick={toggle}
+                        title={full}
+                        aria-label={`${c.component.label}${inside.length ? ` · ${inside.length} ${inside.length === 1 ? "colony" : "colonies"} inside` : ""}`}
+                        data-active={inside.length > 0}
+                        data-selected={selected || open === c.id}
+                        data-external={c.component.type === "external"}
+                        className="map-hole absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer rounded-full"
+                        style={{ width: c.r * 2, height: c.r * 2 }}
+                      >
+                        {inside.length > 0 && (
+                          <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 font-mono text-[10.5px] font-semibold text-on-accent tabular-nums">
+                            {inside.length}
+                          </span>
+                        )}
+                        {/* One ant idles in the chamber for the colonies working there. */}
+                        {inside.length > 0 && (
+                          <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+                            <AntAvatar
+                              state={inside.every((p) => p.blocked) ? "thinking" : "working"}
+                              size={Math.min(26, c.r)}
+                              framed={false}
+                              ground={false}
+                              phase={c.x % 5}
+                            />
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                    {labelsShown && (
+                      <span
+                        aria-hidden="true"
+                        title={full}
+                        onClick={toggle}
+                        className="map-text absolute z-[2] cursor-pointer"
+                        style={{ left: c.label.x, top: c.label.y, width: c.label.w, textAlign: layout.labelSide === "below" ? "center" : "left" }}
+                      >
+                        <span className="block truncate text-[12px] font-medium leading-[17px] text-text">{c.component.label}</span>
+                        {c.component.sublabel && sublabelsShown && !c.compact && (
+                          <span className="block truncate text-[10.5px] leading-[15px] text-faint">{c.component.sublabel}</span>
+                        )}
+                      </span>
+                    )}
                   </div>
                 );
               })}
@@ -463,22 +545,70 @@ export function NestMapView({
                   <AntAvatar state="thinking" size={20} phase={i} ground={false} framed={false} />
                 </button>
               ))}
-
-              {openChamber && (
-                <ChamberPanel
-                  chamber={openChamber}
-                  box={box}
-                  inside={places.byChamber.get(openChamber.id) ?? []}
-                  onClose={() => setOpen(null)}
-                  onSelect={onSelect}
-                  onOpen={onOpen}
-                />
-              )}
             </>
+        )}
+        </div>
+
+        {!repo ? (
+          <MapNote title="No colonies in this workspace yet">A map is drawn per repository; launch a colony and its repository shows up here.</MapNote>
+        ) : !map ? (
+          drawing || drawingQueued ? (
+            <MapNote title={`Drawing ${repo}…`}>
+              A colony is reading the code and drawing it with archify{drawingQueued ? " (queued for a free slot)" : ""}.{" "}
+              {data?.mapping && (
+                <button type="button" onClick={() => onOpen(data.mapping!.id)} className="cursor-pointer border-0 bg-transparent p-0 text-accent underline underline-offset-2">
+                  Watch it work
+                </button>
+              )}
+            </MapNote>
+          ) : (
+            <MapNote title={`No map for ${repo} yet`}>
+              {mappingEnded
+                ? `The last mapping colony ended (${SESSION_STATUS[mappingStatus!]?.label.toLowerCase() ?? mappingStatus}) without a map it could keep. Its log says why; you can try again.`
+                : "A colony reads the repository and draws its architecture — every component tied to the files it lives in — so the ants can walk it."}
+              <div className="mt-4">
+                <button
+                  type="button"
+                  disabled={starting || !data}
+                  onClick={() => void drawMap()}
+                  className="cursor-pointer rounded-md border-0 bg-text px-3.5 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85 disabled:opacity-50"
+                >
+                  {starting ? "Starting…" : "Map this repo"}
+                </button>
+              </div>
+            </MapNote>
           )
+        ) : null}
+
+        {openChamber && (
+          <ChamberPanel
+            chamber={{ x: openChamber.x * view.k + view.x, y: openChamber.y * view.k + view.y, r: openChamber.r * view.k, component: openChamber.component }}
+            box={viewport}
+            inside={places.byChamber.get(openChamber.id) ?? []}
+            onClose={() => setOpen(null)}
+            onSelect={onSelect}
+            onOpen={onOpen}
+          />
+        )}
+
+        {/* Zoom: in, out, and back to the whole map. Pinch or ctrl/⌘ + scroll zooms too; drag to pan. */}
+        {map && layout && (
+          <div className="absolute bottom-3 right-3 z-[5] flex items-center gap-1" role="group" aria-label="map zoom">
+            <button type="button" aria-label="zoom out" onClick={() => zoomBy(1 / 1.25)} className={ZOOM_BUTTON}>
+              −
+            </button>
+            <button type="button" aria-label="zoom in" onClick={() => zoomBy(1.25)} className={ZOOM_BUTTON}>
+              +
+            </button>
+            <button type="button" onClick={() => setUserView(null)} disabled={!userView} className={`${ZOOM_BUTTON} w-auto px-2.5 text-[12px]`}>
+              Fit
+            </button>
+          </div>
         )}
       </div>
       {openChamber && repo && (
+        // Beside the map on a wide screen; over it, full width, on a phone.
+        <div className="flex max-md:absolute max-md:inset-0 max-md:z-[8] max-md:[&>aside]:w-full">
         <FileTreePane
           repo={repo}
           revision={files?.repo === repo ? files.revision : (stored_?.revision ?? null)}
@@ -495,6 +625,7 @@ export function NestMapView({
           onOpenColony={onOpen}
           onClose={() => setOpen(null)}
         />
+        </div>
       )}
       </div>
     </div>
@@ -635,6 +766,9 @@ function ChamberPanel({
 }
 
 type RepoMapComponent = NonNullable<RepoMap["map"]>["map"]["components"][number];
+
+const ZOOM_BUTTON =
+  "grid h-8 w-8 cursor-pointer place-items-center rounded-lg border border-border bg-panel text-[15px] text-muted shadow-[0_4px_14px_rgb(0_0_0/0.25)] transition-colors hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50";
 
 const MAP_BUTTON =
   "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-3 text-[12.5px] text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50";

@@ -2078,3 +2078,13 @@ body {
 .chat-md > :last-child {
   margin-bottom: 0;
 }
+
+/* Nest map names sit over tunnels and mounds: a halo in the ground's colour keeps them legible. */
+.map-text {
+  text-shadow:
+    0 0 3px var(--bg),
+    0 0 6px var(--bg);
+}
+.map-plot:active {
+  cursor: grabbing;
+}
