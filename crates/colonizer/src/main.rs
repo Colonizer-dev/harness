@@ -68,6 +68,7 @@ mod queue;
 mod rebase;
 mod reclaim;
 mod redteam;
+mod remote;
 mod repo_meta;
 mod restack;
 mod routing;
@@ -281,6 +282,8 @@ pub struct App {
     pub stream: stream::Hub,
     /// The activity log behind `GET /api/activity` and History (activity.rs).
     pub activity: activity::ActivityLog,
+    /// Remote access: the switch, the tunnel identity and the live link (remote.rs).
+    pub remote: remote::Remote,
 }
 
 pub type Shared = Arc<App>;
@@ -930,20 +933,29 @@ async fn delete_claude_token(State(app): State<Shared>) -> ApiResult<Value> {
 /// check (no CORS preflight is ever granted); cookie writes and upgrades keep the same-origin
 /// requirement. Unauthenticated `GET /api/status` answers the reduced body; other `/api` requests
 /// get a 401; page loads get the sign-in page, or set the cookie from the link's `?token=`.
-async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> Response {
+/// A request that arrived through the remote tunnel (remote.rs, issue #533) skips the allowlist:
+/// it is admitted only while remote access is on, only under its own tunnel host, and the Origin
+/// fence accepts exactly `https://<host>` for it — the tunnel host is never a LAN host.
+pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    let tunnelled = match req.extensions().get::<remote::Tunnelled>().map(|t| t.host.as_str()) {
+        Some(tunnel_host) if tunnel_host == host && app.remote.enabled().await => true,
+        Some(_) => return (StatusCode::SERVICE_UNAVAILABLE, "remote access is off").into_response(),
+        None => false,
+    };
     let hostname = if host.starts_with('[') {
         host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default()
     } else {
         host.split(':').next().unwrap_or_default().to_string()
     };
     let bind_host = app.cfg.bind.rsplit_once(':').map_or(app.cfg.bind.as_str(), |(h, _)| h);
-    let allowed = matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    let allowed = tunnelled
+        || matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]")
         || hostname == bind_host
         || app.cfg.allowed_hosts.contains(&hostname);
     if !allowed {
@@ -959,11 +971,15 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
         // Cookie-authenticated writes and upgrades keep the same-origin requirement; header
         // authentication already proves a non-browser caller.
         if !bearer_ok && (req.method() != Method::GET || upgrade) {
-            let same_origin = req
-                .headers()
-                .get(header::ORIGIN)
-                .and_then(|o| o.to_str().ok())
-                .is_some_and(|origin| origin.split("://").nth(1) == Some(host.as_str()));
+            let same_origin = if tunnelled {
+                // Through the tunnel the cockpit is served from https://<host>, and nothing else.
+                req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) == Some(format!("https://{host}").as_str())
+            } else {
+                req.headers()
+                    .get(header::ORIGIN)
+                    .and_then(|o| o.to_str().ok())
+                    .is_some_and(|origin| origin.split("://").nth(1) == Some(host.as_str()))
+            };
             if !same_origin {
                 return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
             }
@@ -1334,6 +1350,7 @@ async fn serve() -> Result<()> {
         stream: stream::Hub::new(),
         activity: activity::ActivityLog::new(),
         api_tokens: api_tokens::Registry::load(&cfg.config_dir),
+        remote: remote::Remote::new(&cfg.config_dir)?,
         api_token,
         cfg,
     });
@@ -1374,6 +1391,8 @@ async fn serve() -> Result<()> {
         .route("/api/hunters/{id}/install", post(hunters::install_handler))
         .route("/api/hunters/{id}/probe", get(hunters::probe_handler))
         .route("/api/telemetry", get(telemetry::status).put(telemetry::put))
+        .route("/api/remote", get(remote::status).put(remote::put))
+        .route("/api/remote/reset", post(remote::reset))
         .route("/api/version", get(version::version))
         .route("/api/update", get(version::status).put(version::put))
         .route("/api/update/apply", post(update::apply))
@@ -1605,6 +1624,9 @@ async fn serve() -> Result<()> {
     tokio::spawn(telemetry::run(app.clone()));
     tokio::spawn(version::run(app.clone()));
     tokio::spawn(gateway::flush_loop(app.clone()));
+    // The remote-access tunnel: dials the relay while the switch is on (remote.rs). A clone of the
+    // finished router, so tunnelled requests land on exactly what localhost would.
+    tokio::spawn(remote::run(app.clone(), router.clone()));
     let mesh_vendored = app.cfg.assets.as_deref().is_some_and(mesh::binaries_present);
     if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
         // Restarting would never help: the binaries are missing from this install, and the app does
@@ -1739,6 +1761,7 @@ pub(crate) mod tests {
             stream: stream::Hub::new(),
             activity: activity::ActivityLog::new(),
             api_tokens: api_tokens::Registry::load(&root.join("config")),
+            remote: remote::Remote::new(&root.join("config")).unwrap(),
         })
     }
 
