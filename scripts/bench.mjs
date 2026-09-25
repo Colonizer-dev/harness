@@ -280,6 +280,14 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
   return {
     id: task.id,
     family: familyOf(task),
+    // Which harness ran the task, and on what model (issue #296): the colony report's reading when
+    // there is one, else the session's. The model is a launch override, else what boot recorded the
+    // routing as (crates/colonizer/src/boot.rs) — null when the colony stayed on its module's own
+    // model, which lives in settings, not on the session. A tier is a label, not a model, so it
+    // rides beside it as `tier` and never stands in for one.
+    agent: colony?.agent || session.agent || null,
+    model: session.model_override ?? session.model_routing?.model ?? null,
+    tier: session.model_routing?.tier ?? null,
     passed: failures.length === 0,
     failures,
     pr_url: session.pr_url ?? null,
@@ -347,6 +355,9 @@ const delta = (after, before, digits = 2) => {
 
 export function formatComparison(before, after) {
   const ids = [...new Set([...before.results.map((r) => r.id), ...after.results.map((r) => r.id)])];
+  // Which harness ran the task and on what model, when the run recorded it (issue #296). Joined by
+  // `·`, not `/`: model names carry slashes of their own (zai/glm-5.3-flash).
+  const harness = (r) => (r ? `${r.agent ?? '–'} · ${r.model ?? '–'}` : '–');
   const rows = ids.map((id) => {
     const b = before.results.find((r) => r.id === id);
     const a = after.results.find((r) => r.id === id);
@@ -354,6 +365,7 @@ export function formatComparison(before, after) {
     const cleanMark = (r) => (r?.clean === false ? 'HACKED' : r?.clean === true ? 'clean' : '–');
     return [
       id,
+      `${harness(b)} → ${harness(a)}`,
       `${mark(b)} → ${mark(a)}`,
       `${cleanMark(b)} → ${cleanMark(a)}`,
       `${spent(b)?.toFixed(2) ?? '–'} → ${spent(a)?.toFixed(2) ?? '–'} (${delta(spent(a), spent(b))})`,
@@ -362,7 +374,7 @@ export function formatComparison(before, after) {
       (a?.failures ?? []).join('; ') || '',
     ];
   });
-  const head = ['Task', 'Result', 'Clean', 'Cost', 'Worked', 'Questions', 'Why it failed'];
+  const head = ['Task', 'Harness · model', 'Result', 'Clean', 'Cost', 'Worked', 'Questions', 'Why it failed'];
   const line = (cells) => `| ${cells.join(' | ')} |`;
   const bs = summarizeRun(before.results);
   const as = summarizeRun(after.results);

@@ -9,9 +9,16 @@
 //   node scripts/colony-report.mjs --json > report.json
 //   node scripts/colony-report.mjs --transcript fc742075  # one colony, step by step, secrets redacted
 //   node scripts/colony-report.mjs --transcript fc742075 --origin autonomy,watchdog  # only those origins' lines
+//   node scripts/colony-report.mjs --costs                # spend.jsonl by colony: estimated vs metered, harness × model
+//   node scripts/colony-report.mjs --costs --since 2026-09-01 --days 90   # move the window (default: the spend history's last 30 days)
 //
 // Only the metadata of tool calls is summarised (names, file paths, commands). Transcripts print short
 // excerpts of text and failed output, with common credential patterns redacted, but read them before sharing.
+//
+// Cost reads two channels (issue #296): `estimated` is the agent's own per-turn figure, `metered` is what
+// the gateway priced for a routed provider, and a colony whose provider has no prices shows its tokens as
+// `unpriced — tokens only`, never as $0. Rows the journal carries without a session — older rows, cockpit
+// chat — report under `unattributed`, so the totals always sum to the whole window.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -125,6 +132,8 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [],
     title: session.issue_title ?? null,
     status: session.status ?? 'unknown',
     pr_url: session.pr_url ?? null,
+    // The agent module the colony ran on — the harness half of harness × model (issue #296).
+    agent: session.agent || null,
     created_at: session.created_at ?? events[0]?.ts ?? null,
     boot_ms: session.boot_timing?.total_ms ?? null,
     wall_ms: 0,
@@ -452,6 +461,186 @@ export function summarize(reports) {
   };
 }
 
+// ----------------------------------------------------------------------------------------- spend journal
+
+const nonneg = (n) => (Number.isInteger(n) && n > 0 ? n : 0);
+const SPEND_TOKENS = ['input', 'output', 'cache_read', 'cache_write'];
+
+/** A journal row's four token classes, read the way spend.rs reads a `usage` row: a count that is
+ *  absent or absurd is zero, never an error. */
+const rowTokens = (row) => Object.fromEntries(SPEND_TOKENS.map((k) => [k, nonneg(row[`${k}_tokens`])]));
+
+/** `<data>/spend.jsonl`, keeping what the server's reader keeps (crates/colonizer/src/spend.rs
+ *  `read_journal`): a torn line, a row without a day or an org, and — serde drops a row whole when
+ *  a field has a type it refuses — a row whose token counts are not non-negative integers, whose
+ *  cost is not a number, or whose day, org, session, agent or model is not a string. No file means
+ *  no spend, not a failure. */
+const optionalName = (v) => v == null || typeof v === 'string';
+// Absent counts are the container default's zero; an explicit null, fraction or negative is a type
+// serde's u64 refuses, and the row drops whole with it.
+const tokenCount = (v) => v === undefined || (typeof v === 'number' && Number.isInteger(v) && v >= 0);
+export function loadSpend(dataDir) {
+  return readJsonLines(join(dataDir, 'spend.jsonl')).filter(
+    (r) =>
+      r &&
+      typeof r.day === 'string' && r.day && typeof r.org === 'string' && r.org &&
+      tokenCount(r.input_tokens) && tokenCount(r.output_tokens) && tokenCount(r.cache_read_tokens) && tokenCount(r.cache_write_tokens) &&
+      (r.cost_usd == null || typeof r.cost_usd === 'number') &&
+      optionalName(r.session) && optionalName(r.agent) && optionalName(r.model),
+  );
+}
+
+const emptySpend = (meta) => ({
+  session: null, agent: null, mothership: null, repo: null, issue: null, status: null,
+  ...meta,
+  models: {},
+  ...Object.fromEntries(SPEND_TOKENS.map((k) => [`${k}_tokens`, 0])),
+  estimated_usd: null,
+  metered_usd: null,
+  launched: 0,
+  returned: 0,
+});
+
+/** One row into one bucket, by spend.rs's `aggregate`: a `usage` row carries the four token classes
+ *  and, measured, one estimated dollar — on its model's row when the turn ran one model, on its own
+ *  un-modeled row otherwise, so a model's cost is only what rode that model's rows. A `routed` row is
+ *  the gateway's metered dollar and never names a model. `launched`/`returned` only count, and a kind
+ *  a newer build added is ignored rather than fatal. */
+function addSpendRow(bucket, row) {
+  if (row.kind !== 'usage') {
+    if (row.kind === 'routed' && typeof row.cost_usd === 'number') bucket.metered_usd = (bucket.metered_usd ?? 0) + row.cost_usd;
+    else if (row.kind === 'launched') bucket.launched += 1;
+    else if (row.kind === 'returned') bucket.returned += 1;
+    return;
+  }
+  const t = rowTokens(row);
+  for (const k of SPEND_TOKENS) bucket[`${k}_tokens`] += t[k];
+  if (typeof row.cost_usd === 'number') bucket.estimated_usd = (bucket.estimated_usd ?? 0) + row.cost_usd;
+  if (!row.model) return;
+  const m = (bucket.models[row.model] ??= { input: 0, output: 0, cache_read: 0, cache_write: 0, tokens: 0, cost_usd: null });
+  let sum = 0;
+  for (const k of SPEND_TOKENS) {
+    m[k] += t[k];
+    sum += t[k];
+  }
+  m.tokens += sum;
+  if (typeof row.cost_usd === 'number') m.cost_usd = (m.cost_usd ?? 0) + row.cost_usd;
+}
+
+/** A bucket's derived shape: tokens in one count, the total by the web's rule (unmeasured stays null,
+ *  web/src/spend.ts), the unpriced label, and the models largest first. */
+function finishSpend(bucket) {
+  const tokens = SPEND_TOKENS.reduce((a, k) => a + bucket[`${k}_tokens`], 0);
+  const priced = bucket.estimated_usd != null || bucket.metered_usd != null;
+  return {
+    ...bucket,
+    tokens,
+    priced,
+    total_usd: totalCost(bucket.estimated_usd, bucket.metered_usd),
+    label: !priced && tokens > 0 ? 'unpriced — tokens only' : null,
+    models: Object.entries(bucket.models)
+      .map(([model, m]) => ({ model, ...m }))
+      .sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model)),
+  };
+}
+
+/** The window `--costs` sums, the same one `GET /api/spend/history` answers by default
+ *  (crates/colonizer/src/spend.rs `day_window`): `days` days ending today UTC, counting back from
+ *  `today - (days - 1)`, so the default 30 spans `today - 29 ..= today`, clamped to 365 like the
+ *  endpoint. A `--since` value overrides the floor; the today ceiling stays, so future-dated rows
+ *  drop either way. An unparseable `since` keeps the meaning it always had here: nothing. */
+const todayUtc = () => new Date().toISOString().slice(0, 10);
+
+export function spendWindow({ since = null, days = 30, today = todayUtc() } = {}) {
+  const end = today || todayUtc();
+  const endMs = Date.parse(`${end}T00:00:00Z`);
+  const n = days == null || days === '' ? NaN : Number(days);
+  const count = Number.isFinite(n) ? Math.min(365, Math.max(1, Math.trunc(n))) : 30;
+  const sinceMs = since ? Date.parse(since) : NaN;
+  const floor = Number.isFinite(sinceMs)
+    ? new Date(sinceMs).toISOString().slice(0, 10)
+    : since
+      ? '9999-12-31' // beyond the ceiling, so an unparseable --since answers nothing, as before
+      : Number.isFinite(endMs)
+        ? new Date(endMs - (count - 1) * 86_400_000).toISOString().slice(0, 10)
+        : end;
+  return { floor, today: end };
+}
+
+/** What `--costs` answers (issue #296): the journal of every --data dir, grouped by the colony that
+ *  spent it — its harness (`agent`) with it — with repo, issue and status resolved through
+ *  sessions.json when the colony is known there. Rows without a `session` (older rows, cockpit chat)
+ *  land in `unattributed`, so the totals always sum to the whole window. `--repo` keeps only rows
+ *  whose colony sessions.json names with that repo; rows without a colony have neither. A `window`
+ *  (`spendWindow`'s shape) keeps only rows whose `day` is inside it, and is echoed on the report so
+ *  the two views can be told apart; without one, every row counts. Colonies rank by spend, and the
+ *  same rows roll up once more by harness × model, the question the per-colony table cannot answer. */
+export function costsReport(rows, colonies = [], { repo = null, window = null } = {}) {
+  if (window) rows = rows.filter((r) => r.day >= window.floor && r.day <= window.today);
+  const known = new Map();
+  for (const c of colonies) if (!known.has(c.session.id)) known.set(c.session.id, c);
+  const buckets = new Map();
+  const harness = new Map();
+  const bucketOf = (id, agent) => {
+    let bucket = buckets.get(id);
+    if (!bucket) {
+      const c = id != null ? known.get(id) : null;
+      bucket = emptySpend({
+        session: id,
+        agent,
+        mothership: c?.mothership ?? null,
+        repo: c?.session.repo ?? null,
+        issue: c?.session.issue ?? null,
+        status: c?.session.status ?? null,
+      });
+      buckets.set(id, bucket);
+    }
+    return bucket;
+  };
+  for (const row of rows) {
+    const id = typeof row.session === 'string' && row.session ? row.session : null;
+    const meta = id != null ? known.get(id) : null;
+    if (repo && meta?.session.repo !== repo) continue;
+    const agent = row.agent || meta?.session.agent || null;
+    addSpendRow(bucketOf(id, agent), row);
+    if (id == null || agent == null || !row.model) continue;
+    const key = `${agent}|${row.model}`;
+    let h = harness.get(key);
+    if (!h) harness.set(key, (h = { agent, model: row.model, colonies: new Set(), ...Object.fromEntries(SPEND_TOKENS.map((k) => [`${k}_tokens`, 0])), tokens: 0, cost_usd: null }));
+    h.colonies.add(id);
+    const t = rowTokens(row);
+    let sum = 0;
+    for (const k of SPEND_TOKENS) {
+      h[`${k}_tokens`] += t[k];
+      sum += t[k];
+    }
+    h.tokens += sum;
+    if (row.kind === 'usage' && typeof row.cost_usd === 'number') h.cost_usd = (h.cost_usd ?? 0) + row.cost_usd;
+  }
+  const dollars = (pick) => {
+    let total = null;
+    for (const bucket of buckets.values()) if (pick(bucket) != null) total = (total ?? 0) + pick(bucket);
+    return total;
+  };
+  const counts = (pick) => [...buckets.values()].reduce((a, b) => a + pick(b), 0);
+  const totals = {
+    estimated_usd: dollars((b) => b.estimated_usd),
+    metered_usd: dollars((b) => b.metered_usd),
+    ...Object.fromEntries(SPEND_TOKENS.map((k) => [`${k}_tokens`, counts((b) => b[`${k}_tokens`])])),
+  };
+  totals.tokens = SPEND_TOKENS.reduce((a, k) => a + totals[`${k}_tokens`], 0);
+  totals.total_usd = totalCost(totals.estimated_usd, totals.metered_usd);
+  return {
+    window,
+    colonies: [...buckets.values()].filter((b) => b.session != null).map(finishSpend).sort((a, b) => (b.total_usd ?? -Infinity) - (a.total_usd ?? -Infinity)),
+    unattributed: finishSpend(buckets.get(null) ?? emptySpend({})),
+    totals,
+    harness_model: [...harness.values()]
+      .map((h) => ({ ...h, colonies: h.colonies.size }))
+      .sort((a, b) => b.tokens - a.tokens || a.agent.localeCompare(b.agent) || a.model.localeCompare(b.model)),
+  };
+}
+
 // ---------------------------------------------------------------------------------------------- printing
 
 export function redact(text) {
@@ -533,7 +722,7 @@ export function formatReport(summary, reports, worst = 10) {
   out.push('', '## Colonies', '');
   out.push(
     table(
-      ['Colony', 'Repo', 'Status', 'Cost', 'Routed', 'Worked', 'Turns', 'Tools (failed)', 'Questions', 'Longest silence'],
+      ['Colony', 'Repo', 'Status', 'Cost', 'Routed', 'Worked', 'Turns', 'Tools (failed)', 'Questions', 'Longest silence', 'Agent'],
       [...reports]
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
         .map((r) => [
@@ -547,6 +736,7 @@ export function formatReport(summary, reports, worst = 10) {
           `${r.tool_calls} (${r.tool_errors})`,
           r.questions,
           duration(r.longest_silence_ms),
+          r.agent,
         ]),
     ),
   );
@@ -557,6 +747,28 @@ export function formatReport(summary, reports, worst = 10) {
   }
   if (summary.worth_reading.length > 0) out.push('', 'Read one with `node scripts/colony-report.mjs --transcript <id>`.');
   return out.join('\n');
+}
+
+/** `--costs` for people: colonies ranked by spend (the unattributed rest beneath them), the grand
+ *  total split by which channel measured it, then the harness × model rollup. */
+export function formatCosts(costs) {
+  const u = costs.unattributed;
+  const rows = u.tokens > 0 || u.estimated_usd != null || u.metered_usd != null ? [...costs.colonies, u] : costs.colonies;
+  const t = costs.totals;
+  return [
+    '# Spend',
+    '',
+    table(
+      ['Colony', 'Agent', 'Repo', 'Status', 'Tokens', 'Estimated', 'Metered', 'Total'],
+      rows.map((c) => [c.session ?? 'unattributed', c.agent, c.repo, c.status, c.tokens, usd(c.estimated_usd), usd(c.metered_usd), c.label ?? usd(c.total_usd)]),
+    ),
+    '',
+    `- Total ${usd(t.total_usd)}${costs.window ? ` over ${costs.window.floor}..${costs.window.today}` : ''}: estimated ${usd(t.estimated_usd)} (the agent's own per-turn estimate), metered ${usd(t.metered_usd)} (priced by the gateway). A – is unmeasured, not $0.`,
+    '',
+    '## Harness × model',
+    '',
+    table(['Agent', 'Model', 'Colonies', 'Tokens', 'Cost'], costs.harness_model.map((h) => [h.agent, h.model, h.colonies, h.tokens, usd(h.cost_usd)])),
+  ].join('\n');
 }
 
 function excerpt(text, max) {
@@ -752,7 +964,7 @@ export function formatTranscript({ session = {}, events = [], logs = [], gateway
 // ---------------------------------------------------------------------------------------------- command
 
 function parseArgs(argv) {
-  const args = { data: [], json: false, worst: 10, since: null, repo: null, transcript: null, origins: null };
+  const args = { data: [], json: false, worst: 10, since: null, days: null, repo: null, transcript: null, origins: null, costs: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -762,7 +974,9 @@ function parseArgs(argv) {
     if (a === '--data') args.data.push(value());
     else if (a === '--json') args.json = true;
     else if (a === '--worst') args.worst = Number(value());
+    else if (a === '--costs') args.costs = true;
     else if (a === '--since') args.since = value();
+    else if (a === '--days') args.days = value();
     else if (a === '--repo') args.repo = value();
     else if (a === '--transcript') args.transcript = value();
     else if (a === '--origin') args.origins = parseOrigins(value());
@@ -788,6 +1002,17 @@ function main() {
     // A copied data dir is named after its directory; the one this machine uses needs no name.
     return loadColonies(dir, args.here ? 'this mothership' : undefined);
   });
+  if (args.costs) {
+    // The journal windows by its own `day`, not the colony's created_at, and by default sums the
+    // same window GET /api/spend/history answers, so the two views reconcile. `--since` overrides
+    // the floor and parses the same way the colony filters below do, so an unparseable one keeps
+    // meaning "nothing".
+    const rows = args.data.flatMap((dir) => loadSpend(dir));
+    const window = spendWindow({ since: args.since, days: args.days });
+    const costs = costsReport(rows, colonies, { repo: args.repo, window });
+    console.log(args.json ? JSON.stringify(costs, null, 2) : formatCosts(costs));
+    return;
+  }
   if (args.transcript) {
     const matches = colonies.filter((c) => String(c.session.id).startsWith(args.transcript));
     if (matches.length !== 1) throw new Error(matches.length ? `${args.transcript} matches ${matches.length} colonies` : `no colony ${args.transcript}`);

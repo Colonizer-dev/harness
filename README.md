@@ -419,8 +419,16 @@ every deployment, and a default that silently stopped running colonies on upgrad
   removing a colony's work is your call: clean up or raise the quota and press Resume to continue.
 
 An org's own value beats the sandbox default, and an org set to `0` opts out of a global limit. Routed
-providers need `pricing` — dollars per million tokens for input, output, cached read and cache write — to
-count toward the budget; an unpriced provider still counts its tokens but contributes $0.
+providers need `pricing` — dollars per million tokens for input, output, cached read, cache write and
+thinking — to count toward the budget; an unpriced provider still counts its tokens but contributes $0,
+so a colony that spends only through one never reaches `budget_usd` and is never stopped for spend.
+
+Every colony-scoped row of the spend journal (`<data>/spend.jsonl`) names the colony (`session`) and the
+agent module that ran it (`agent`), and splits its spend by who measured it: the agent's own turn-end
+estimate (first-party traffic never passes the gateway) against the gateway's metered price for routed
+providers. `node scripts/colony-report.mjs --costs` reads the journal back grouped per colony and per
+harness × model, by default over the same last-30-days window the spend history answers
+([docs/protocol.md](docs/protocol.md) §6.8).
 
 A few things belong in neither the UI nor the environment. They live in `~/.config/colonizer/colonizer.toml`,
 which you write and Colonizer only reads — a missing file means the defaults:
@@ -450,6 +458,7 @@ node --test scripts/test/colony-report.test.mjs
 node scripts/colony-report.mjs                  # how colonies went, from what they already log
 node scripts/colony-e2e.mjs                     # boots a real colony against a stub model (CI's colony-e2e job)
 node scripts/colony-report.mjs --transcript <id> # one colony, step by step
+node scripts/colony-report.mjs --costs          # spend.jsonl by colony, last 30 days: estimated vs metered, harness × model
 node --test scripts/test/bench.test.mjs
 node scripts/bench.mjs run --repo owner/bench --label before   # the fixed tasks, scored (docs/bench.md)
 node scripts/trajectory-monitor.mjs --session <id>  # post-hoc: was a resolved colony clean? (docs/trajectory-monitor.md)

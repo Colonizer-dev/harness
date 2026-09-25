@@ -451,7 +451,7 @@ pub async fn record_routed_usage(
     };
     // Told to the append-only journal now, while the colony still exists to name its org: the
     // routed dollar has to survive the cleanup or delete that will forget it.
-    spend::record_routed(app, &session.org, cost).await;
+    spend::record_routed(app, &session, cost).await;
     enforce_budget(app, colony).await;
 }
 

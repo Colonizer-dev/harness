@@ -169,6 +169,40 @@ test('token categories ride through scoring, the run summary and the comparison'
   assert.doesNotMatch(both, /search/, 'a category neither run spent is not on the line');
 });
 
+test('scoring records the harness and model beside the cost, and compare shows them', () => {
+  const plain = scoreTask({ task, session, answers: [], timed_out: false, branchScore: clean, colony });
+  assert.equal(plain.agent, null, 'neither record names one');
+  assert.equal(plain.model, null);
+  assert.equal(plain.tier, null);
+  const scored = scoreTask({
+    task,
+    session: { ...session, agent: 'claude-code', model_override: 'zai/glm-5.3-flash' },
+    answers: [],
+    timed_out: false,
+    branchScore: clean,
+    colony: { ...colony, agent: 'codex' },
+  });
+  assert.equal(scored.agent, 'codex', 'the colony report’s reading wins when there is one');
+  assert.equal(scored.model, 'zai/glm-5.3-flash', 'a launch override is the model that ran');
+  const routed = scoreTask({
+    task,
+    session: { ...session, model_routing: { tier: 'low', model: 'zai/glm-5.3-flash' } },
+    answers: [],
+    timed_out: false,
+    branchScore: clean,
+    colony,
+  });
+  assert.equal(routed.model, 'zai/glm-5.3-flash', 'the model boot recorded the routing as');
+  assert.equal(routed.tier, 'low');
+  // Routing off — or a routed model equal to the module's own — records no model (boot.rs keeps
+  // model_routing.model null): the module's default lives in settings, not on the session.
+  const tiered = scoreTask({ task, session: { ...session, model_routing: { tier: 'medium', model: null } }, answers: [], timed_out: false, branchScore: clean, colony });
+  assert.equal(tiered.model, null, 'a tier is never a model');
+  assert.equal(tiered.tier, 'medium', 'the tier rides beside the model, not in its place');
+  const text = formatComparison({ label: 'before', results: [plain] }, { label: 'after', results: [scored] });
+  assert.match(text, /\| add-helper \| – · – → codex · zai\/glm-5\.3-flash \|/);
+});
+
 test('the run summary counts clean resolutions, and the gap between the two rates', () => {
   const row = (passed, clean) => ({ passed, clean, cost_usd: 0, routed_cost_usd: 0, working_ms: 0, questions: 0, tool_errors: 0 });
   const s = summarizeRun([row(true, true), row(true, false), row(false, true), row(true, null)]);

@@ -432,7 +432,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 })
                 .await
             {
-                spend::record_turn_usage(app, &s.org, old_cost, old_usage.as_ref(), cost, s.model_usage.as_ref()).await;
+                spend::record_turn_usage(app, &s, old_cost, old_usage.as_ref(), cost, s.model_usage.as_ref()).await;
                 // Claude's own cost just landed, so the budget can trip here exactly as it can in the
                 // gateway; checked before autopilot, which must not publish a colony the budget stopped.
                 enforce_budget(app, id).await;

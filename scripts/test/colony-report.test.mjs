@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { analyze, formatReport, formatTranscript, loadColonies, parseOrigins, reasons, redact, summarize, TOKEN_CATEGORIES, totalCost } from '../colony-report.mjs';
+import { analyze, costsReport, formatCosts, formatReport, formatTranscript, loadColonies, loadSpend, parseOrigins, reasons, redact, spendWindow, summarize, TOKEN_CATEGORIES, totalCost } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -565,4 +566,163 @@ test('a colony with more events than Math.max can take still reports its span', 
   const events = Array.from({ length: n }, (_, i) => ({ type: 'tool_call', tool_call_id: `t${i}`, name: 'Read', input: {}, ts: at(i) }));
   const r = analyze({ session: { id: 'big' }, events, logs: [] });
   assert.equal(r.wall_ms, (n - 1) * 1000);
+});
+
+// -------------------------------------------------------------------------------------------- --costs
+
+/** The shared journal fixture, also read by the Rust reader test (crates/colonizer/src/spend.rs
+ *  include_str!s it), as a data dir with the sessions its rows name. */
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'spend-costs.jsonl');
+// The window the fixture tests are pinned to: it covers the fixture's days (2026-09-14..15), so the
+// totals below stay the whole journal's whatever day the suite runs on.
+const WINDOW = { floor: '2026-09-01', today: '2026-09-30' };
+const SESSIONS = [
+  { id: 'claudeaa', repo: 'acme/webshop', issue: 296, status: 'pr_opened', agent: 'claude-code' },
+  { id: 'routedbb', repo: 'acme/gateway', status: 'merged', agent: 'codex' },
+  { id: 'freecc', repo: 'acme/webshop', status: 'failed', agent: 'opencode' },
+];
+function spendDir(t) {
+  const dir = dataDir(t, JSON.stringify(SESSIONS));
+  writeFileSync(join(dir, 'spend.jsonl'), readFileSync(FIXTURE, 'utf8'));
+  return dir;
+}
+
+/** The server's own sum over the whole journal (crates/colonizer/src/spend.rs `aggregate`): usage
+ *  rows carry the four token classes and the estimated dollar, routed rows the metered one. */
+function historyTotals(rows) {
+  const t = { cost_usd: null, routed_cost_usd: null, input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  for (const row of rows) {
+    if (row.kind !== 'usage') {
+      if (row.kind === 'routed' && typeof row.cost_usd === 'number') t.routed_cost_usd = (t.routed_cost_usd ?? 0) + row.cost_usd;
+      continue;
+    }
+    for (const k of ['input', 'output', 'cache_read', 'cache_write']) t[k] += row[`${k}_tokens`] ?? 0;
+    if (typeof row.cost_usd === 'number') t.cost_usd = (t.cost_usd ?? 0) + row.cost_usd;
+  }
+  return t;
+}
+
+test('--costs groups the journal by colony, harness first, and ranks by spend', (t) => {
+  const dir = spendDir(t);
+  const rows = loadSpend(dir);
+  assert.equal(rows.length, 17, 'the torn line is skipped, the rest read');
+  const costs = costsReport(rows, loadColonies(dir), { window: WINDOW });
+  assert.deepEqual(
+    costs.colonies.map((c) => [c.session, c.agent, c.total_usd]),
+    [['claudeaa', 'claude-code', 1.0], ['routedbb', 'codex', 0.375], ['freecc', 'opencode', null]],
+    'priced colonies first, the unpriced one last',
+  );
+  const cc = costs.colonies[0];
+  assert.equal(cc.repo, 'acme/webshop');
+  assert.equal(cc.status, 'pr_opened');
+  assert.equal(cc.estimated_usd, 1.0);
+  assert.equal(cc.metered_usd, null, 'no routed rows, no metered dollars');
+  assert.deepEqual(cc.models.map((m) => m.model), ['claude-opus-5', 'zai/glm-5.3-flash', 'deepseek/deepseek-flash'], 'largest first');
+  const opus = cc.models[0];
+  assert.deepEqual([opus.tokens, opus.input, opus.output, opus.cache_read], [660, 400, 60, 200]);
+  assert.equal(opus.cost_usd, 0.75, 'the single-model turns’ cost rides the model row');
+  assert.equal(cc.models[1].cost_usd, null);
+  assert.equal(cc.models[2].cost_usd, null, 'the multi-model turn’s dollar is attributed nowhere');
+  assert.deepEqual([cc.launched, cc.returned], [1, 1], 'run edges count, and add no dollars');
+  const rb = costs.colonies[1];
+  assert.equal(rb.estimated_usd, null);
+  assert.equal(rb.metered_usd, 0.375);
+  assert.equal(rb.models[0].cost_usd, null, 'metered dollars never ride a model row');
+});
+
+test('--costs sends legacy and chat rows to unattributed, so the totals sum to the whole journal', (t) => {
+  const dir = spendDir(t);
+  const costs = costsReport(loadSpend(dir), loadColonies(dir), { window: WINDOW });
+  const u = costs.unattributed;
+  assert.equal(u.session, null);
+  assert.equal(u.agent, null);
+  assert.equal(u.estimated_usd, 0.1875);
+  assert.equal(u.metered_usd, null);
+  assert.equal(u.models[0].model, 'claude-opus-5');
+  assert.equal(u.models[0].cost_usd, 0.1875);
+  // Reconciliation: the same fixture, summed the way GET /api/spend/history sums it. The Rust reader
+  // test (crates/colonizer/src/spend.rs) asserts these same constants over the same fixture.
+  const history = historyTotals(loadSpend(dir));
+  assert.ok(Math.abs(history.cost_usd - 1.1875) < 1e-9, 'usage-row cost, chat and legacy included');
+  assert.ok(Math.abs(history.routed_cost_usd - 0.375) < 1e-9);
+  assert.equal(history.input, 1300);
+  assert.equal(history.output, 305);
+  assert.equal(history.cache_read, 200);
+  assert.equal(history.cache_write, 0);
+  assert.ok(Math.abs(costs.totals.estimated_usd - history.cost_usd) < 1e-9);
+  assert.ok(Math.abs(costs.totals.metered_usd - history.routed_cost_usd) < 1e-9);
+  assert.equal(costs.totals.input_tokens, 1300);
+  assert.equal(costs.totals.output_tokens, 305);
+  assert.equal(costs.totals.cache_read_tokens, 200);
+  assert.equal(costs.totals.cache_write_tokens, 0);
+  assert.ok(Math.abs(costs.totals.total_usd - 1.5625) < 1e-9);
+});
+
+test('an unpriced colony shows its tokens under the unpriced label, never as $0', (t) => {
+  const dir = spendDir(t);
+  const costs = costsReport(loadSpend(dir), loadColonies(dir), { window: WINDOW });
+  const free = costs.colonies.find((c) => c.session === 'freecc');
+  assert.equal(free.priced, false);
+  assert.equal(free.label, 'unpriced — tokens only');
+  assert.equal(free.total_usd, null);
+  assert.deepEqual([free.input_tokens, free.output_tokens], [500, 120]);
+  const text = formatCosts(costs);
+  assert.match(text, /unpriced — tokens only/);
+  assert.match(text, /\| claudeaa \| claude-code \| acme\/webshop \| pr_opened \| 775 \| \$1\.00 \| – \| \$1\.00 \|/);
+  assert.match(text, /\| unattributed \| – \| – \| – \| 170 \| \$0\.19 \| – \| \$0\.19 \|/);
+  assert.match(text, /Total \$1\.56 over 2026-09-01\.\.2026-09-30: estimated \$1\.19 \(the agent's own per-turn estimate\), metered \$0\.38 \(priced by the gateway\)/);
+  assert.match(text, /\| codex \| deepseek\/deepseek-flash \| 1 \| 240 \| – \|/, 'a model’s cost stays – until a dollar rode its rows');
+  assert.equal(costs.harness_model.filter((h) => h.model === 'claude-opus-5').length, 1, 'legacy and chat rows name no harness, so roll up nowhere');
+});
+
+test('--costs honours --repo through sessions.json, and rows without a session have neither', (t) => {
+  const dir = spendDir(t);
+  const costs = costsReport(loadSpend(dir), loadColonies(dir), { repo: 'acme/webshop', window: WINDOW });
+  assert.deepEqual(costs.colonies.map((c) => c.session), ['claudeaa', 'freecc']);
+  assert.equal(costs.unattributed.tokens, 0, 'legacy and chat name no repo, so they drop with it');
+  assert.ok(Math.abs(costs.totals.estimated_usd - 1.0) < 1e-9);
+  assert.equal(costs.totals.metered_usd, null);
+});
+
+test('--costs defaults to the window the spend history answers: 30 days ending today, floor at today - 29', () => {
+  // spend.rs `day_window`: the floor is today - (days - 1), so days=1 is just today.
+  assert.deepEqual(spendWindow({ today: '2026-09-25' }), { floor: '2026-08-27', today: '2026-09-25' });
+  assert.deepEqual(spendWindow({ days: 1, today: '2026-09-25' }), { floor: '2026-09-25', today: '2026-09-25' });
+  assert.deepEqual(spendWindow({ days: 400, today: '2026-09-25' }), { floor: '2025-09-26', today: '2026-09-25' }, 'clamped to 365, like the endpoint');
+  assert.deepEqual(spendWindow({ since: '2026-09-01T12:00:00Z', today: '2026-09-25' }), { floor: '2026-09-01', today: '2026-09-25' }, '--since overrides the floor, the today ceiling stays');
+  assert.deepEqual(spendWindow({ since: 'garbage', today: '2026-09-25' }), { floor: '9999-12-31', today: '2026-09-25' }, 'an unparseable --since still means nothing');
+});
+
+test('--costs keeps only the rows inside its window, future-dated ones with the rest', (t) => {
+  const dir = spendDir(t);
+  const rows = loadSpend(dir);
+  const colonies = loadColonies(dir);
+  assert.ok(Math.abs(costsReport(rows, colonies, { window: WINDOW }).totals.estimated_usd - 1.1875) < 1e-9, 'a window over the fixture keeps every row');
+  const day = costsReport(rows, colonies, { window: { floor: '2026-09-15', today: '2026-09-15' } });
+  assert.ok(Math.abs(day.totals.estimated_usd - 0.0625) < 1e-9, "the 14th's usage rows drop");
+  assert.ok(Math.abs(day.totals.metered_usd - 0.375) < 1e-9);
+  assert.deepEqual(day.colonies.map((c) => c.session), ['routedbb', 'freecc']);
+  const future = { kind: 'usage', ts: 'x', day: '2026-10-01', org: 'acme', session: 'claudeaa', input_tokens: 9 };
+  assert.equal(
+    costsReport([...rows, future], colonies, { window: WINDOW }).totals.input_tokens,
+    costsReport(rows, colonies, { window: WINDOW }).totals.input_tokens,
+    'a row dated after today drops',
+  );
+});
+
+test('loadSpend drops a row whole when a field has the type the server would refuse', (t) => {
+  const dir = dataDir(t, '[]');
+  const good = { ts: '2026-09-15T10:00:00Z', day: '2026-09-15', org: 'acme', kind: 'usage', session: 's1', input_tokens: 3, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.1 };
+  const rows = [
+    { ...good, input_tokens: -1 },
+    { ...good, output_tokens: 1.5 },
+    { ...good, cache_read_tokens: null },
+    { ...good, cost_usd: '0.1' },
+    { ...good, session: 7 },
+    { ...good, day: 20260915 },
+    good,
+    { ...good, cost_usd: null, session: null, model: null }, // Option fields: null is "absent", kept
+  ];
+  writeFileSync(join(dir, 'spend.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  assert.deepEqual(loadSpend(dir), [rows[6], rows[7]]);
 });
