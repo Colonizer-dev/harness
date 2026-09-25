@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { analyze, formatReport, formatTranscript, loadColonies, reasons, redact, summarize, TOKEN_CATEGORIES, totalCost } from '../colony-report.mjs';
+import { analyze, formatReport, formatTranscript, loadColonies, parseOrigins, reasons, redact, summarize, TOKEN_CATEGORIES, totalCost } from '../colony-report.mjs';
 
 const at = (s) => new Date(1_789_000_000_000 + s * 1000).toISOString();
 
@@ -124,6 +124,72 @@ test('a transcript reads as steps, with the question, the wait and the failure',
   assert.match(text, /✗ Bash failed: HTTP 429 rate limit exceeded/);
   assert.match(text, /■ turn ended after 5m00s, \$0.40 so far/);
   assert.match(text, /mothership warn: the private mesh is unavailable/);
+});
+
+/** A colony whose lines carry the envelope `origin` (issue #312): a burn-down brief, a nudge, an
+ *  operator note, a judge-answered question, the agent, a settler and a mothership line. */
+const origins = {
+  mothership: 'test',
+  session: { id: 'origin01', repo: 'acme/webshop', status: 'pr_opened' },
+  events: [
+    { type: 'status', state: 'working', ts: at(0), origin: 'system' },
+    { type: 'user_message', id: 'initial', text: 'Sweep the backlog', origin: 'burn_down', ts: at(0) },
+    { type: 'user_message', id: 'watchdog-o1', text: 'Are you still working?', origin: 'watchdog', ts: at(60) },
+    { type: 'user_message', id: 'u-1', text: 'skip the flaky one', origin: 'user', ts: at(90) },
+    { type: 'question', question_id: 'q1', questions: [{ question: 'Keep going?', options: [{ label: 'Yes' }] }], ts: at(100) },
+    { type: 'question_answered', question_id: 'q1', answers: { 'Keep going?': 'Yes' }, origin: 'autonomy', ts: at(110) },
+    { type: 'assistant_text', message_id: 'm1', text: 'Done.', origin: 'agent', ts: at(120) },
+    { type: 'tool_call', tool_call_id: 't1', name: 'Read', input: { file_path: '/workspace/a.js' }, agent: { id: 'k1', name: 'Explore' }, origin: 'subagent', ts: at(130) },
+  ],
+  logs: [{ type: 'harness_log', level: 'warn', message: 'restarting the colony', ts: at(140), origin: 'system' }],
+};
+
+test('a transcript tags each line by its origin, and a judge’s answer reads apart from the operator’s', () => {
+  const text = formatTranscript(origins);
+  assert.match(text, /\[burn-down\] brief: Sweep the backlog/);
+  assert.match(text, /⚑ watchdog nudge/);
+  assert.match(text, /you: skip the flaky one/);
+  assert.match(text, /✓ \[judge\] answered \(after 10s\): Yes/, 'a judge’s answer is not the operator’s ✓ answered');
+  assert.match(text, /says: Done\./, "the agent's own words need no tag");
+  assert.match(text, /\[Explore\] → Read \/workspace\/a\.js/, 'a settler’s [name] is its tag');
+  assert.match(text, /\[system\] ! mothership warn: restarting the colony/);
+});
+
+test('--origin filters a transcript to the origins named, and refuses anything outside the set', () => {
+  const judge = formatTranscript({ ...origins, origins: parseOrigins('autonomy,watchdog') });
+  assert.match(judge, /✓ \[judge\] answered: Yes/, 'the agent’s question is filtered out, so no wait is measured');
+  assert.match(judge, /⚑ watchdog nudge/);
+  assert.doesNotMatch(judge, /Sweep the backlog/);
+  assert.doesNotMatch(judge, /skip the flaky one/);
+  assert.doesNotMatch(judge, /says: Done\./);
+
+  assert.throws(() => parseOrigins('autonomy,nope'), /unknown origin nope \(one of /);
+  assert.throws(() => parseOrigins(','), /--origin needs/);
+});
+
+test('a line recorded before the envelope keeps today’s reading, tag-free and filterable by it', () => {
+  const legacy = {
+    mothership: 'test',
+    session: { id: 'legacy01' },
+    events: [
+      { type: 'user_message', id: 'initial', text: 'Resolve issue 42', ts: at(0) },
+      { type: 'user_message', id: 'watchdog-l1', text: 'Are you still working?', ts: at(60) },
+      { type: 'user_message', id: 'u-1', text: 'try the other file', ts: at(120) },
+      { type: 'question', question_id: 'q1', questions: [{ question: 'Which one?', options: [{ label: 'A' }] }], ts: at(130) },
+      { type: 'question_answered', question_id: 'q1', answers: { 'Which one?': 'A' }, ts: at(140) },
+    ],
+  };
+  const text = formatTranscript(legacy);
+  assert.match(text, /brief: Resolve issue 42/);
+  assert.match(text, /⚑ watchdog nudge/);
+  assert.match(text, /you: try the other file/);
+  assert.match(text, /✓ answered \(after 10s\): A/, 'an answer with no origin is the operator’s, as it always read');
+  assert.doesNotMatch(text, /\[judge\]|\[burn-down\]|\[system\]/);
+
+  assert.match(formatTranscript({ ...legacy, origins: parseOrigins('watchdog') }), /⚑ watchdog nudge/);
+  assert.doesNotMatch(formatTranscript({ ...legacy, origins: parseOrigins('watchdog') }), /try the other file/);
+  // The agent's question is filtered away with the rest of its lines, so no wait is measured to show.
+  assert.match(formatTranscript({ ...legacy, origins: parseOrigins('user') }), /\+2m20s\s+✓ answered: A/);
 });
 
 /** A finding that is validated, fixed by a colony, reviewed and merged, end to end. */

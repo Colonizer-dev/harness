@@ -10,7 +10,7 @@ use crate::{
     diagnosis, github,
     modules::{AgentModule, schema_for},
     orgs,
-    protocol::QuestionRisk,
+    protocol::{Origin, QuestionRisk},
     restack, spend,
     stack::Stacked,
     store::SessionStore,
@@ -37,7 +37,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -271,8 +271,9 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack_fork: Option<String>,
     /// Who launched the colony when the operator did not: `Some("burn_down")` marks a colony the
-    /// burn-down scheduler auto-launched, so the global stop can find it and the UI can label it.
-    /// `None` for anything a person started.
+    /// burn-down scheduler auto-launched, so the global stop can find it and the UI can label it;
+    /// `Some("redteam")` a red-team hunter, `Some("map")` a mapping colony. `None` for anything a
+    /// person started. The event origin resolver (`events.rs`) reads the machine launchers back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
     pub worktree: String,
@@ -541,6 +542,11 @@ pub struct Runtime {
     /// The open question: its id, the questions themselves — which autonomous mode needs to answer
     /// among the options the agent offered — and the question's risk class, which its ceiling reads.
     pub(crate) open_question: Mutex<Option<(String, Vec<Value>, QuestionRisk)>>,
+    /// Question ids the autonomy judge has sent an `answer` for and whose `question_answered` echo
+    /// has not come back yet (autonomy.rs writes, events.rs spends one entry resolving that echo's
+    /// origin). In memory only: after a mothership restart the set is empty, so a judge answer still
+    /// in flight reads as the person's — a mislabelled line, never a wrong decision.
+    pub(crate) judged_questions: Mutex<HashSet<String>>,
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
@@ -688,6 +694,7 @@ impl Runtime {
                     .as_ref()
                     .map(|(id, questions, _, risk)| (id.clone(), questions.clone(), *risk)),
             ),
+            judged_questions: Mutex::new(HashSet::new()),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
@@ -893,8 +900,17 @@ impl App {
             .clone()
     }
 
+    /// The colony log, stamped `system`: the host's own bookkeeping. A subsystem that speaks in its
+    /// own voice — the watchdog's nudges, the judge's narration, a burn-down launch, a notification
+    /// failure — logs through [`App::session_log_as`] so the line names what caused it (§3).
     pub async fn session_log(&self, id: &str, level: &str, message: String) {
-        let entry = json!({"type": "harness_log", "level": level, "message": message, "ts": Utc::now()});
+        self.session_log_as(Origin::System, id, level, message).await
+    }
+
+    /// [`App::session_log`] with the `origin` the line is stamped with (docs/protocol.md §3).
+    pub(crate) async fn session_log_as(&self, origin: Origin, id: &str, level: &str, message: String) {
+        let entry =
+            json!({"type": "harness_log", "origin": origin.as_str(), "level": level, "message": message, "ts": Utc::now()});
         let rt = self.runtime(id).await;
         let persisted = {
             let _guard = rt.file_lock.lock().await;
@@ -2838,7 +2854,7 @@ pub(crate) mod tests {
         );
         let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
         assert_eq!(
-            events, "{\"seq\":2,\"type\":\"status\",\"state\":\"idle\"}\n",
+            events, "{\"origin\":\"agent\",\"seq\":2,\"state\":\"idle\",\"type\":\"status\"}\n",
             "seq 1 stays lost"
         );
         let _ = std::fs::remove_dir_all(root);

@@ -20,7 +20,7 @@ use crate::{
     App, Shared,
     config::{ModulesConfig, setting, setting_str, setting_u64},
     modules::schema_for,
-    protocol::QuestionRisk,
+    protocol::{Origin, QuestionRisk},
     providers::{Provider, Wire, api_model, split_url},
     sessions::SessionStatus,
     util::truncate,
@@ -522,6 +522,9 @@ async fn judge_one(
     let reply = ask_model(app, &judge.model, &prompt(task, questions, &context)).await?;
     let (answers, reason) = decide(&reply, questions, judge.free_text).map_err(JudgeError::Refused)?;
     let chosen = answers.values().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+    // The echo this answer will produce is the only trace of who answered, so the id goes into the
+    // runtime's set first and `handle_agent_event` spends it stamping that echo `autonomy` (§3).
+    rt.judged_questions.lock().await.insert(question_id.to_string());
     rt.send_command(json!({
         "type": "answer",
         "question_id": question_id,
@@ -571,7 +574,8 @@ pub async fn run(app: Shared) {
                 // answers, so the next question within the ceiling is still judged.
                 if announce {
                     rt.activity.lock().await.risk_announced = Some(question_id);
-                    app.session_log(
+                    app.session_log_as(
+                        Origin::Autonomy,
                         &s.id,
                         "warn",
                         format!(
@@ -587,7 +591,7 @@ pub async fn run(app: Shared) {
             let task = crate::memory::task_query(&s.issue_title, None, &s.instructions);
             match judge_one(&app, &s.id, &judge, &task, &question_id, &questions).await {
                 Ok(line) => {
-                    app.session_log(&s.id, "info", line).await;
+                    app.session_log_as(Origin::Autonomy, &s.id, "info", line).await;
                     app.update_session(&s.id, |x| x.attention = None).await;
                     rt.activity.lock().await.judge_failures = 0;
                 }
@@ -600,7 +604,8 @@ pub async fn run(app: Shared) {
                     if escalates(&failure, failures) {
                         // Left for the person: the watchdog's own flag is what surfaces it.
                         rt.activity.lock().await.judged = judge.max_answers;
-                        app.session_log(
+                        app.session_log_as(
+                            Origin::Autonomy,
                             &s.id,
                             "warn",
                             format!("autonomous: left this question for you ({})", describe(&failure)),
@@ -608,7 +613,8 @@ pub async fn run(app: Shared) {
                         .await;
                     } else {
                         // One unreachable tick is a blip, not an answer spent: try the next tick again.
-                        app.session_log(
+                        app.session_log_as(
+                            Origin::Autonomy,
                             &s.id,
                             "warn",
                             format!(

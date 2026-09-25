@@ -2,7 +2,7 @@
 //! the user when nudging doesn't help. The decision is a pure function so it can be tested with a
 //! fixed clock; the loop around it runs once a minute.
 
-use crate::{Shared, orgs::effective_watchdog, sessions::SessionStatus, util::short_id};
+use crate::{Shared, orgs::effective_watchdog, protocol::Origin, sessions::SessionStatus, util::short_id};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 
@@ -181,7 +181,8 @@ async fn check_all(app: &Shared) {
                     "text": nudge_text(settings.stall_minutes),
                 });
                 rt.send_command(command);
-                app.session_log(
+                app.session_log_as(
+                    Origin::Watchdog,
                     &s.id,
                     "info",
                     format!(
@@ -206,7 +207,7 @@ async fn check_all(app: &Shared) {
                         activity.nudges
                     ),
                 };
-                app.session_log(&s.id, "error", message).await;
+                app.session_log_as(Origin::Watchdog, &s.id, "error", message).await;
                 let since = if reason == "waiting_for_answer" {
                     activity.question_since.unwrap_or(now)
                 } else {

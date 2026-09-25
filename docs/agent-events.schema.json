@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://colonizer.dev/agent-events.schema.json",
   "title": "Colonizer agent event",
-  "description": "The runner→agentd event contract of docs/protocol.md §2, plus the §6.2 memory_proposal and §6.6 finding additions, as one machine-readable document. One source of truth for three hand-kept sides (#73 item 4), only two of which this schema actually covers: the Claude Code runner (modules/agents/claude-code) is tested against the committed fixture modules/agents/claude-code/test/fixtures/events.jsonl, and the Rust harness deserialises the events it acts on into the AgentEvent enum (crates/colonizer/src/protocol.rs). The browser's hand-written AgentEventBody (web/src/types.ts) is not generated or checked from this schema: it declares every event type this schema defines, memory_proposal and finding included. Events a subagent produced may carry the agent ref, and events stored by agentd carry seq and ts (docs/protocol.md §3); neither is part of the runner contract body, so this schema does not enumerate them. Unknown fields and unknown types must be ignored for forward compatibility (§1), which is why additionalProperties is deliberately left open.",
+  "description": "The runner→agentd event contract of docs/protocol.md §2, plus the §6.2 memory_proposal and §6.6 finding additions, as one machine-readable document. One source of truth for three hand-kept sides (#73 item 4), only two of which this schema actually covers: the Claude Code runner (modules/agents/claude-code) is tested against the committed fixture modules/agents/claude-code/test/fixtures/events.jsonl, and the Rust harness deserialises the events it acts on into the AgentEvent enum (crates/colonizer/src/protocol.rs). The browser's hand-written AgentEventBody (web/src/types.ts) is not generated or checked from this schema: it declares every event type this schema defines, memory_proposal and finding included. Events a subagent produced may carry the agent ref, and events stored by agentd carry seq and ts (docs/protocol.md §3); neither is part of the runner contract body, so this schema does not enumerate them. The host stamps an envelope origin onto every line it appends (docs/protocol.md §3 Origins), defined at #/$defs/origin and likewise outside every body definition. Unknown fields and unknown types must be ignored for forward compatibility (§1), which is why additionalProperties is deliberately left open.",
   "oneOf": [
     { "$ref": "#/$defs/status" },
     { "$ref": "#/$defs/user_message" },
@@ -20,6 +20,11 @@
     { "$ref": "#/$defs/finding" }
   ],
   "$defs": {
+    "origin": {
+      "type": "string",
+      "description": "Envelope-only field the host stamps onto every line it appends to a colony's events.jsonl and harness.jsonl at write time (docs/protocol.md §3 Origins): which subsystem caused the line. Not part of the runner contract body, which this schema defines unchanged. The vocabulary is closed: unlike the event types (§1), a value outside it is a bug in the writer and is logged loudly, not ignored. Lines written before the field existed omit it. Exception: memory_proposal's body origin names the proposer (§6.2) and predates the envelope, so those lines are not stamped and keep the proposer's value.",
+      "enum": ["user", "agent", "subagent", "watchdog", "autonomy", "burn_down", "redteam", "notify", "system"]
+    },
     "agent_ref": {
       "type": "object",
       "description": "The subagent that produced the event: the Task tool call that started it (docs/protocol.md §2 rules). Omitted entirely on the orchestrator's own events, never null.",

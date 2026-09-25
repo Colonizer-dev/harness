@@ -14,6 +14,7 @@ use crate::{
     Shared,
     config::{ModuleChoice, ModulesConfig, setting, setting_f64, setting_str, setting_u64},
     lifecycle, modules,
+    protocol::Origin,
     sessions::{self, Session, SessionStatus},
 };
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -347,7 +348,8 @@ async fn launch(app: &Shared, repo: &str, instructions: &str) {
     };
     match sessions::create(State(app.clone()), Json(new_session)).await {
         Ok(Json(session)) => {
-            app.session_log(
+            app.session_log_as(
+                Origin::BurnDown,
                 &session.id,
                 "info",
                 format!("burn-down: launched a bug-hunt colony on {repo}"),
@@ -437,7 +439,8 @@ pub async fn stop(State(app): State<Shared>) -> impl IntoResponse {
             })
             .await;
             app.note_cleared_attention(&s.id, attention).await;
-            app.session_log(
+            app.session_log_as(
+                Origin::BurnDown,
                 &s.id,
                 "info",
                 "burn-down stop: halted by the operator before it started".into(),
