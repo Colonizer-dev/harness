@@ -117,22 +117,26 @@ export function SessionView({
   const stackParent = parentOf(sessions, session);
   const stackedChildren = childrenOf(sessions, session);
 
-  /** What deleting this colony takes with it, in the words the confirmation uses. */
+  /** What deleting this colony takes with it, in the words the confirmation uses. The logs are no longer gone: they land in the log archive (issue #496). */
   const deleteWarning =
     session.status === "queued"
       ? "Remove this colony from the queue and the list? It never started, so nothing else is lost."
       : ["pr_opened", "merged", "closed"].includes(session.status)
-        ? "Delete this colony? Its chat, logs and local worktree are removed. The pull request and its pushed branch stay on GitHub."
+        ? "Delete this colony? Its chat and local worktree are removed; its logs are kept in the log archive (Storage). The pull request and its pushed branch stay on GitHub."
         : session.cleaned_up
-          ? "Delete this colony's chat and logs? Its worktree was already cleaned up. This cannot be undone."
-          : "Delete this colony? Its worktree — including any changes that were never published — its chat and its logs are removed. This cannot be undone.";
+          ? "Delete this colony? Its chat is removed — its worktree was already cleaned up — and its logs are kept in the log archive (Storage). This cannot be undone."
+          : "Delete this colony? Its worktree — including any changes that were never published — and its chat are removed; its logs are kept in the log archive (Storage). This cannot be undone.";
 
   const remove = async () => {
     if (!window.confirm(deleteWarning)) return;
+    // Only a colony that ran has logs to archive, so only there is the follow-up worth asking;
+    // accepting it purges the archived bundle too, declining (the default) keeps it (issue #496).
+    const purgeLogs = session.status !== "queued" && window.confirm("Also delete this colony's archived logs? Cancel keeps them in the log archive.");
     setBusy("delete");
     try {
-      const result = (await api.deleteSession(session.id)) as { leftover?: string | null } | null;
+      const result = (await api.deleteSession(session.id, { purgeLogs })) as { leftover?: string | null; purge_error?: string | null } | null;
       if (result?.leftover) toast(`Colony deleted, but some files could not be removed: ${result.leftover}`, "error");
+      if (result?.purge_error) toast(`Colony deleted, but its archived logs could not all be removed: ${result.purge_error}`, "error");
       onSessionDeleted(session.id);
     } catch (error) {
       toast(errorMessage(error), "error");

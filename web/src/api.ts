@@ -64,6 +64,9 @@ import type {
   NewRedTeamSchedule,
   HunterProbe,
   Repo,
+  ArchiveListing,
+  RetentionPlan,
+  RetentionRequest,
   SaveProviderRequest,
   Session,
   SessionStatus,
@@ -219,8 +222,16 @@ export interface Api {
   storageSummary(): Promise<StorageSummary>;
   /** POST /api/sessions/{id}/retain: keep (`{keep: true}`) or release this colony's worktree from automatic reclamation. */
   setKeep(id: string, keep: boolean): Promise<Session>;
-  /** Forgets a colony: worktree, local branch, chat and logs. Its pull request stays on GitHub. */
-  deleteSession(id: string): Promise<unknown>;
+  /**
+   * Forgets a colony: worktree, local branch, chat and logs. Its pull request stays on GitHub.
+   * The logs are archived into `<data_dir>/archive` first (issue #496); `purgeLogs` deletes that
+   * archived bundle too, instead of keeping it.
+   */
+  deleteSession(id: string, opts?: { purgeLogs?: boolean }): Promise<unknown>;
+  /** GET /api/archive (issue #496): the archived colony logs under `<data_dir>/archive`. */
+  archive(): Promise<ArchiveListing>;
+  /** POST /api/archive/retention (issue #496): preview (`dry_run`) or apply an archive cleanup pass. */
+  archiveRetention(body: RetentionRequest): Promise<RetentionPlan>;
   /** GET /api/sessions/{id}/behind: how far the colony branch lags origin/{base} (issue #173). */
   behindSession(id: string): Promise<BehindInfo>;
   /** POST /api/sessions/{id}/catch-up: merge origin/{base} into the colony branch (issue #173). */
@@ -535,7 +546,9 @@ export const httpApi: Api = {
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   storageSummary: () => request("/api/storage"),
   setKeep: (id, keep) => post(`/api/sessions/${enc(id)}/retain`, { keep }),
-  deleteSession: (id) => del(`/api/sessions/${enc(id)}`),
+  deleteSession: (id, opts) => del(`/api/sessions/${enc(id)}${query({ purge_logs: opts?.purgeLogs ? "true" : undefined })}`),
+  archive: () => request("/api/archive"),
+  archiveRetention: (body) => post("/api/archive/retention", body),
   behindSession: (id) => request(`/api/sessions/${enc(id)}/behind`),
   catchUpSession: (id) => post(`/api/sessions/${enc(id)}/catch-up`),
   burnDown: () => request("/api/burn-down"),

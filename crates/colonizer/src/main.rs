@@ -8,6 +8,7 @@
 //! provider keys are added by the mothership's provider gateway.
 
 mod activity;
+mod archive;
 mod auth;
 mod authority;
 mod autonomy;
@@ -1571,6 +1572,8 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/stop", post(lifecycle::stop))
         .route("/api/sessions/{id}/cleanup", post(lifecycle::cleanup))
         .route("/api/storage", get(reclaim::storage))
+        .route("/api/archive", get(archive::list))
+        .route("/api/archive/retention", post(archive::retention))
         .route("/api/stream", get(stream::handler))
         .route("/api/sessions/{id}/retain", post(reclaim::retain))
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
