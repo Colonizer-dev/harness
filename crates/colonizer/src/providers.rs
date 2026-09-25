@@ -19,7 +19,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 /// The protocol an endpoint speaks. An `anthropic` endpoint is proxied byte-for-byte; an `openai` one
 /// has to be translated in both directions, so the wire is recorded per provider rather than guessed
@@ -163,6 +163,15 @@ pub struct Provider {
     /// default for a field nobody has set yet.
     #[serde(default)]
     pub trusted: bool,
+    /// What this connection serves (#295): canonical model id (the part after `<id>/`) → the wire name
+    /// the endpoint knows it by, sent verbatim. An empty wire name sends the canonical as is. When
+    /// non-empty the map is authoritative — the connection serves exactly the canonicals it lists,
+    /// which the boot checks — when empty, anything goes, as it always has.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_map: BTreeMap<String, String>,
+    /// Claude Code tools stripped from every request through this connection (#295).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
 }
 
 impl Provider {
@@ -189,6 +198,144 @@ impl Provider {
     pub fn cost_usd(&self, usage: Usage) -> f64 {
         self.pricing.map_or(0.0, |pricing| pricing.cost_usd(usage))
     }
+}
+
+/// The Claude Code built-in tool names, as they arrive in a request's `tools[].name` — the one list a
+/// `disabled_tools` entry may name.
+const KNOWN_TOOLS: &[&str] = &[
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "Glob",
+    "Grep",
+    "LS",
+    "NotebookEdit",
+    "NotebookRead",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "Agent",
+    "TodoWrite",
+    "TodoRead",
+    "ExitPlanMode",
+    "BashOutput",
+    "KillShell",
+    "SlashCommand",
+    "Skill",
+];
+
+/// Claude Code sends its web tools as Anthropic server tools, whose wire name differs from the
+/// built-in's: disabling `WebSearch` has to strip `{"type":"web_search_…","name":"web_search"}` too.
+const SERVER_TOOL_ALIASES: &[(&str, &str)] = &[("WebSearch", "web_search"), ("WebFetch", "web_fetch")];
+
+/// The connection-policy faults of one provider, named as `provider '<id>': <row>: <problem>`. Pure,
+/// so the PUT and the boot check see the same rule (#295).
+fn policy_errors(id: &str, model_map: &BTreeMap<String, String>, disabled_tools: &[String]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (canonical, wire) in model_map {
+        let row = format!("provider '{id}': model_map['{canonical}']");
+        if !valid_model(canonical) {
+            errors.push(format!("{row}: a canonical model id must be 1-120 characters without spaces"));
+        } else if canonical.starts_with(&format!("{id}/")) {
+            errors.push(format!("{row}: the canonical id must not repeat the '{id}/' prefix"));
+        } else if !wire.is_empty() && !valid_model(wire) {
+            errors.push(format!(
+                "{row}: wire name '{wire}' must be empty (send the canonical id) or a model ID without spaces"
+            ));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for tool in disabled_tools {
+        if !KNOWN_TOOLS.contains(&tool.as_str()) {
+            errors.push(format!(
+                "provider '{id}': disabled_tools['{tool}']: unknown tool (known: {})",
+                KNOWN_TOOLS.join(", ")
+            ));
+        } else if seen.contains(&tool.as_str()) {
+            errors.push(format!("provider '{id}': disabled_tools: '{tool}' is listed twice"));
+        }
+        seen.push(tool.as_str());
+    }
+    errors
+}
+
+/// The first fault in a loaded providers.json, prefixed with the file name: a hand-edited row the PUT
+/// would have refused fails the colony launch instead of surfacing as a request-time 400 (#295).
+pub(crate) fn config_error(providers: &[Provider]) -> Option<String> {
+    providers
+        .iter()
+        .find_map(|p| policy_errors(&p.id, &p.model_map, &p.disabled_tools).into_iter().next())
+        .map(|error| format!("providers.json: {error}"))
+}
+
+/// Rewrites a request body for one connection's policy (#295): the `model_map`'s wire name replaces
+/// the canonical model id, and `disabled_tools` entries — with their [`SERVER_TOOL_ALIASES`] — are
+/// stripped from `tools`, `tool_choice` following when it named a stripped tool, and both dropped
+/// when no tool survives. Returns `None` when nothing here applies to this body, so the caller keeps
+/// the original bytes and the anthropic passthrough stays byte-identical; a body that is not JSON is
+/// also left alone. The canonical is what the runner sends (it strips the `<provider>/` prefix), and
+/// pricing/estimation keep keying off it because the rewrite happens after the cost estimate.
+pub fn apply_connection_policy(body: &[u8], provider: &Provider) -> Option<Vec<u8>> {
+    if provider.model_map.is_empty() && provider.disabled_tools.is_empty() {
+        return None;
+    }
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object_mut()?;
+    let mut changed = false;
+    if let Some(wire) = object
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(|canonical| provider.model_map.get(canonical))
+        .filter(|wire| !wire.is_empty())
+    {
+        object.insert("model".into(), json!(wire));
+        changed = true;
+    }
+    if !provider.disabled_tools.is_empty() {
+        // Every `tools[].name` a disabled entry removes: the built-in itself plus its server-tool alias.
+        let removed: Vec<&str> = provider
+            .disabled_tools
+            .iter()
+            .flat_map(|tool| {
+                let mut names = vec![tool.as_str()];
+                names.extend(
+                    SERVER_TOOL_ALIASES
+                        .iter()
+                        .filter(|(builtin, _)| builtin == tool)
+                        .map(|(_, server)| *server),
+                );
+                names
+            })
+            .collect();
+        let dropped = object
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .map(|tools| {
+                let before = tools.len();
+                tools.retain(|tool| {
+                    !tool
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| removed.contains(&name))
+                });
+                before - tools.len()
+            })
+            .unwrap_or(0);
+        if dropped > 0 {
+            changed = true;
+            let choice = object.get("tool_choice").and_then(|c| c.get("name")).and_then(Value::as_str);
+            let emptied = object.get("tools").and_then(Value::as_array).is_some_and(Vec::is_empty);
+            if choice.is_some_and(|name| removed.contains(&name)) || emptied {
+                object.remove("tool_choice");
+            }
+            if emptied {
+                object.remove("tools");
+            }
+        }
+    }
+    changed.then(|| serde_json::to_vec(&value).ok()).flatten()
 }
 
 /// Models served by Anthropic with the Claude login, offered as suggestions in model pickers.
@@ -226,6 +373,9 @@ const MODEL_VARS: [&str; 5] = [
     "COLONIZER_MODEL_LOW",
     "COLONIZER_MODEL_HIGH",
 ];
+
+/// The model settings behind [`MODEL_VARS`], same order: the names a boot refusal can point a fix at.
+const SETTING_NAMES: [&str; 5] = ["model", "subagent_model", "background_model", "model_low", "model_high"];
 
 impl App {
     fn providers_file(&self) -> PathBuf {
@@ -400,24 +550,53 @@ impl ColonyRoutes {
             .collect()
     }
 
-    /// The first model setting that names a provider nobody configured, as `(value, prefix)` — enough
-    /// to refuse the boot with. The same MODEL_VARS walk as [`ColonyRoutes::used`] read the other way
-    /// round: a value shaped like `<provider>/<model>` that no configured provider's `id/` matches
-    /// would have the runner quietly send those requests to Anthropic, so the boot says no instead.
-    /// Bare names and values that don't shape up as a prefix are Claude's own models and pass.
-    pub fn unrouted_provider<'a>(&self, runner_env: &'a Map<String, Value>) -> Option<(&'a str, &'a str)> {
-        MODEL_VARS
-            .iter()
-            .filter_map(|var| runner_env.get(*var)?.as_str())
-            .find_map(|m| {
-                let prefix = provider_prefix(m)?;
-                let configured = self
-                    .providers
-                    .iter()
-                    .any(|p| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/')));
-                (!configured).then_some((m, prefix))
-            })
+    /// The first model setting whose connection cannot serve this colony, as the boot-refusal message
+    /// naming the agent module and the fix (#295): a `<provider>/` prefix nobody configured — the
+    /// runner would quietly send those requests to Anthropic (router.mjs) — or a configured provider
+    /// whose non-empty `model_map` does not list the canonical the setting names. The same MODEL_VARS
+    /// walk as [`ColonyRoutes::used`]: bare names and values that don't shape up as a prefix are
+    /// Claude's own models and pass.
+    pub fn unusable_route(&self, backend: &str, runner_env: &Map<String, Value>) -> Option<String> {
+        for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
+            let Some(value) = runner_env.get(*var).and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(prefix) = provider_prefix(value) else { continue };
+            let Some(provider) = self.providers.iter().find(|p| p.id == prefix) else {
+                return Some(format!(
+                    "backend '{backend}' has no provider for model '{value}': add a provider '{prefix}' in \
+                     Settings → Providers (providers.json), or change the '{setting}' setting of the '{backend}' agent module"
+                ));
+            };
+            let canonical = &value[prefix.len() + 1..];
+            if provider.model_map.is_empty() || provider.model_map.contains_key(canonical) {
+                continue;
+            }
+            return Some(format!(
+                "backend '{backend}' has no provider for model '{value}': add '{canonical}' to the model_map of \
+                 provider '{prefix}', or pick one of: {}",
+                provider.model_map.keys().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        None
     }
+}
+
+/// The boot-refusal for a used provider probed unreachable with no `fallback_model` (#295): the colony
+/// would boot into a model its connection can never deliver. One with a fallback still serves on
+/// Claude, so it stays the caller's warning. `health` is the fresh probe the boot runs for this
+/// refusal (the cached answer is stale-able, boot.rs), whose `error` names the base_url problem.
+pub fn unreachable_route(backend: &str, provider: &Provider, health: &Value, runner_env: &Map<String, Value>) -> Option<String> {
+    let value = MODEL_VARS
+        .iter()
+        .filter_map(|var| runner_env.get(*var).and_then(Value::as_str))
+        .find(|m| m.strip_prefix(provider.id.as_str()).is_some_and(|rest| rest.starts_with('/')))?;
+    let error = health.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+    Some(format!(
+        "backend '{backend}' has no provider for model '{value}': the endpoint {} is unreachable ({error}); \
+         set a fallback model on provider '{}' to use Claude instead",
+        provider.base_url, provider.id
+    ))
 }
 
 /// The `<provider>` half of a `<provider>/<model>` setting, when the value shapes up as one: a leading
@@ -462,6 +641,39 @@ pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
     ColonyRoutes { routes, providers }
 }
 
+/// The boot log lines for the connection half of the tool policy (#295): one per tool each used
+/// provider strips, so the colony report can read back what the colony never gets.
+pub fn connection_disabled_tool_lines(providers: &[Provider]) -> Vec<String> {
+    providers
+        .iter()
+        .flat_map(|p| {
+            p.disabled_tools
+                .iter()
+                .map(move |tool| format!("tool '{tool}' disabled (level: connection, connection: '{}')", p.id))
+        })
+        .collect()
+}
+
+/// The boot log lines for the harness half of the tool policy (#295): one per tool the agent module
+/// disables via `COLONIZER_DISABLED_TOOLS` (comma-separated [`KNOWN_TOOLS`] names), or the message the
+/// boot refuses with when a name is not a Claude Code built-in. Missing or empty means nothing disabled.
+pub fn harness_disabled_tool_lines(backend: &str, runner_env: &Map<String, Value>) -> Result<Vec<String>, String> {
+    let Some(raw) = runner_env.get("COLONIZER_DISABLED_TOOLS").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let mut lines = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        if !KNOWN_TOOLS.contains(&name) {
+            return Err(format!(
+                "agent module '{backend}' setting 'disabled_tools': unknown tool '{name}' (known: {})",
+                KNOWN_TOOLS.join(", ")
+            ));
+        }
+        lines.push(format!("tool '{name}' disabled (level: harness, harness: '{backend}')"));
+    }
+    Ok(lines)
+}
+
 /// The model settings (`model`, `subagent_model`, `background_model`, `model_low`, `model_high`)
 /// whose resolved value — schema default, global setting or org override — routes to this provider as
 /// `<provider-id>/<model>`, named for a human, e.g. `["subagent_model"]`. Empty means no model setting
@@ -469,9 +681,8 @@ pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
 /// doesn't match, same rule as [`ColonyRoutes::used`].
 fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> {
     let mut used: Vec<&'static str> = Vec::new();
-    let settings = ["model", "subagent_model", "background_model", "model_low", "model_high"];
     for env in envs {
-        for (var, setting) in MODEL_VARS.iter().zip(settings) {
+        for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
             let points_here = env
                 .get(*var)
                 .and_then(Value::as_str)
@@ -524,6 +735,8 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "context_tokens": provider.context_tokens,
         "fallback_model": provider.fallback_model,
         "pricing": provider.pricing,
+        "model_map": provider.model_map,
+        "disabled_tools": provider.disabled_tools,
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
         "queued": queued,
@@ -645,6 +858,13 @@ pub struct PutProvider {
     context_tokens: Option<u64>,
     #[serde(default)]
     fallback_model: Option<String>,
+    /// Omitted keeps the saved policy (model_map, disabled_tools), like pricing: a Settings save from
+    /// a web build that predates the fields must not quietly reopen a restricted connection. An empty
+    /// map or list is an explicit clear.
+    #[serde(default)]
+    model_map: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    disabled_tools: Option<Vec<String>>,
     /// Omitted keeps the saved pricing, like the key: a Settings save from a web build that predates the
     /// field must not quietly stop a budget from counting. All-`0` rates are how a caller clears it,
     /// which also is exactly what "no pricing" means, so nothing becomes unreachable.
@@ -749,6 +969,19 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     if fallback_model.as_deref().is_some_and(|m| !valid_model(m) || m.contains('/')) {
         return Err(bad("fallback model must be a Claude model such as sonnet or claude-sonnet-5"));
     }
+    // The same rule the boot later checks a loaded providers.json against ([`config_error`]): a row
+    // the policy can't honour — an id with a space, a wire name that is only spaces, a tool Claude
+    // Code does not have — is refused here with the provider and row named (#295). Only what the
+    // caller sent is checked; an omitted field keeps the saved value, which its own save checked.
+    if let Some(error) = policy_errors(
+        &id,
+        req.model_map.as_ref().unwrap_or(&BTreeMap::new()),
+        req.disabled_tools.as_deref().unwrap_or(&[]),
+    )
+    .first()
+    {
+        return Err(bad(error));
+    }
     // The whole read-modify-write of providers.json — the api-key secret and the pricing and
     // normalize-cache-ttl keep-lookups included — is one critical section over a strict read
     // (#408): a file that will not parse is refused before the key is written or deleted, rather
@@ -798,6 +1031,20 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         context_tokens: req.context_tokens,
         fallback_model,
         pricing,
+        model_map: req.model_map.unwrap_or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.model_map.clone())
+                .unwrap_or_default()
+        }),
+        disabled_tools: req.disabled_tools.unwrap_or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.disabled_tools.clone())
+                .unwrap_or_default()
+        }),
         normalize_cache_ttl: req.normalize_cache_ttl.unwrap_or_else(|| {
             providers
                 .iter()
@@ -883,6 +1130,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_map: BTreeMap::new(),
+            disabled_tools: Vec::new(),
             normalize_cache_ttl: false,
             trusted: false,
         }
@@ -1147,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn unrouted_providers_are_reported_with_the_value_and_prefix() {
+    fn an_unconfigured_provider_prefix_refuses_the_launch_naming_the_fix() {
         let routes = ColonyRoutes {
             routes: vec![],
             providers: vec![provider("strix"), provider("str")],
@@ -1157,26 +1406,84 @@ mod tests {
         env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strixish/qwen"));
         // "strixish" shares "strix" as a partial id prefix but is its own provider, so it is the
         // first setting naming a provider nobody configured.
-        assert_eq!(routes.unrouted_provider(&env), Some(("strixish/qwen", "strixish")));
-
-        // The runner warns per setting; the boot refuses on the first one it would meet.
-        let mut env = Map::new();
-        env.insert("COLONIZER_MODEL".into(), json!("locall/deepseek-flash"));
-        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("deepseek/v4"));
-        assert_eq!(routes.unrouted_provider(&env), Some(("locall/deepseek-flash", "locall")));
-
-        // `anthropic` can never be a provider id (valid_id refuses it), so it is always unrouted.
-        let mut env = Map::new();
-        env.insert("COLONIZER_MODEL".into(), json!("anthropic/claude-x"));
-        assert_eq!(routes.unrouted_provider(&env), Some(("anthropic/claude-x", "anthropic")));
-
-        // An empty providers list leaves every prefixed setting unrouted.
-        let mut env = Map::new();
-        env.insert("COLONIZER_MODEL_LOW".into(), json!("deepseek/v4"));
         assert_eq!(
-            ColonyRoutes::default().unrouted_provider(&env),
-            Some(("deepseek/v4", "deepseek"))
+            routes.unusable_route("claude-code", &env),
+            Some(
+                "backend 'claude-code' has no provider for model 'strixish/qwen': add a provider 'strixish' in \
+                 Settings → Providers (providers.json), or change the 'subagent_model' setting of the 'claude-code' \
+                 agent module"
+                    .to_string()
+            )
         );
+
+        // `anthropic` can never be a provider id (valid_id refuses it), and an empty providers list
+        // leaves every prefixed setting unrouted.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL_LOW".into(), json!("anthropic/claude-x"));
+        let refused = ColonyRoutes::default().unusable_route("claude-code", &env);
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|m| m.contains("model 'anthropic/claude-x'") && m.contains("'model_low' setting")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_map_without_the_canonical_refuses_the_launch_naming_the_served_models() {
+        let mut proxy = provider("proxy");
+        proxy.model_map = BTreeMap::from([
+            ("deepseek-v4-flash".into(), String::new()),
+            ("qwen3".into(), "Qwen/Qwen3".into()),
+        ]);
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![proxy],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/glm-5.3"));
+        let refused = routes.unusable_route("claude-code", &env);
+        assert!(
+            refused.as_deref().is_some_and(|m| {
+                m.contains("has no provider for model 'proxy/glm-5.3'")
+                    && m.contains("add 'glm-5.3' to the model_map of provider 'proxy'")
+                    && m.contains("or pick one of: deepseek-v4-flash, qwen3")
+            }),
+            "{refused:?}"
+        );
+
+        // A canonical the map lists passes.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/qwen3"));
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
+
+        // An empty map is not authoritative: the connection serves anything, as it always has.
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("proxy")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/anything-else"));
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
+    }
+
+    #[test]
+    fn an_unreachable_provider_without_a_fallback_refuses_the_launch() {
+        let routes_provider = provider("proxy");
+        let health = json!({"reachable": false, "error": "connection failed"});
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/qwen3"));
+        let refused = unreachable_route("claude-code", &routes_provider, &health, &env);
+        assert!(
+            refused.as_deref().is_some_and(|m| {
+                m.contains("has no provider for model 'proxy/qwen3'")
+                    && m.contains("http://100.80.225.14:8000 is unreachable (connection failed)")
+                    && m.contains("set a fallback model on provider 'proxy'")
+            }),
+            "{refused:?}"
+        );
+        // No model setting points at this provider: the caller keeps its warning, there is no route to refuse.
+        assert_eq!(unreachable_route("claude-code", &routes_provider, &health, &Map::new()), None);
     }
 
     #[test]
@@ -1190,7 +1497,7 @@ mod tests {
         env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("str/llama"));
         env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("opus"));
         assert_eq!(
-            routes.unrouted_provider(&env),
+            routes.unusable_route("claude-code", &env),
             None,
             "a configured id/ prefix matches at the first slash, extra slashes included"
         );
@@ -1200,14 +1507,14 @@ mod tests {
         env.insert("COLONIZER_MODEL".into(), json!("claude-opus-5-5"));
         env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("us.anthropic.claude-opus-5-5"));
         env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("fable"));
-        assert_eq!(routes.unrouted_provider(&env), None);
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
 
         // Shapes the runner's PROVIDER_PREFIX rejects are Claude's to interpret, not ours.
         let mut env = Map::new();
         env.insert("COLONIZER_MODEL".into(), json!("/leading-slash"));
         env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("two words/x"));
         env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!(".hidden/x"));
-        assert_eq!(routes.unrouted_provider(&env), None);
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
     }
 
     #[test]
@@ -1233,6 +1540,217 @@ mod tests {
         assert_eq!(used_by("strix", &[aliases]), Vec::<&str>::new());
     }
 
+    // -- the connection policy: model_map and disabled_tools (#295) --------------------------------
+
+    /// The anthropic passthrough is byte-identical whenever the policy has nothing to say, so the
+    /// rewrite never reaches a body it did not need to touch.
+    #[test]
+    fn a_connection_without_a_policy_for_the_body_is_byte_identical() {
+        let body = br#"{"model":"qwen3","max_tokens":8,"system":"t"}"#;
+        assert_eq!(apply_connection_policy(body, &provider("proxy")), None, "no policy at all");
+        let mut mapped = provider("proxy");
+        mapped.model_map = BTreeMap::from([("qwen3".into(), String::new())]);
+        assert_eq!(
+            apply_connection_policy(body, &mapped),
+            None,
+            "an empty wire name sends the canonical, so the bytes stand"
+        );
+        let mut unmapped = provider("proxy");
+        unmapped.model_map = BTreeMap::from([("deepseek-v4".into(), "DeepSeek-V4".into())]);
+        assert_eq!(
+            apply_connection_policy(body, &unmapped),
+            None,
+            "an unmapped model is not rewritten"
+        );
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["Write".into()];
+        assert_eq!(
+            apply_connection_policy(body, &strip),
+            None,
+            "no tools in the body, nothing to strip"
+        );
+        assert_eq!(
+            apply_connection_policy(b"not json", &mapped),
+            None,
+            "only real requests are rewritten"
+        );
+    }
+
+    #[test]
+    fn a_mapped_model_is_rewritten_to_the_wire_name_verbatim() {
+        let mut mapped = provider("proxy");
+        mapped.model_map = BTreeMap::from([("qwen3".into(), "Qwen/Qwen3-32B".into())]);
+        let body = br#"{"model":"qwen3","messages":[]}"#;
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body, &mapped).unwrap()).unwrap();
+        assert_eq!(out["model"], "Qwen/Qwen3-32B");
+        assert_eq!(out["messages"], json!([]), "everything else passes through");
+    }
+
+    #[test]
+    fn disabled_tools_strip_client_and_server_entries_and_their_choice() {
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["WebSearch".into()];
+        let body = serde_json::json!({
+            "model": "qwen3",
+            "tools": [
+                {"name": "Bash", "input_schema": {}},
+                {"name": "WebSearch", "input_schema": {}},
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+                {"type": "web_fetch_20250910", "name": "web_fetch"}
+            ],
+            "tool_choice": {"type": "tool", "name": "WebSearch"}
+        })
+        .to_string();
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body.as_bytes(), &strip).unwrap()).unwrap();
+        // The built-in `WebSearch` and its server-tool `web_search` alias both go; other server tools stay.
+        assert_eq!(
+            out["tools"],
+            json!([{"name": "Bash", "input_schema": {}}, {"type": "web_fetch_20250910", "name": "web_fetch"}])
+        );
+        assert_eq!(out["tool_choice"], Value::Null, "a choice naming a stripped tool is dropped");
+    }
+
+    #[test]
+    fn an_emptied_tools_list_is_dropped_with_its_choice() {
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["WebFetch".into(), "WebSearch".into()];
+        let body = serde_json::json!({
+            "model": "qwen3",
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "auto"}
+        })
+        .to_string();
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body.as_bytes(), &strip).unwrap()).unwrap();
+        assert!(out.get("tools").is_none(), "an empty tools array is not sent");
+        assert!(
+            out.get("tool_choice").is_none(),
+            "a choice with no tools to choose is not sent either"
+        );
+        // A partial strip leaves both fields when the choice names nothing removed.
+        let body = serde_json::json!({
+            "model": "qwen3",
+            "tools": [{"name": "Bash", "input_schema": {}}, {"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "auto"}
+        })
+        .to_string();
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["WebSearch".into()];
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body.as_bytes(), &strip).unwrap()).unwrap();
+        assert_eq!(out["tool_choice"], json!({"type": "auto"}));
+        assert_eq!(out["tools"], json!([{"name": "Bash", "input_schema": {}}]));
+    }
+
+    /// The PUT refuses a row the policy can't honour, with the provider and the row named; the boot
+    /// re-runs the same check over a loaded providers.json ([`config_error`]).
+    #[test]
+    fn policy_errors_name_the_provider_and_the_row() {
+        let errs = |map: BTreeMap<&str, &str>, tools: &[&str]| {
+            policy_errors(
+                "proxy",
+                &map.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                &tools.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            errs(BTreeMap::from([("has space", "")]), &[]),
+            vec!["provider 'proxy': model_map['has space']: a canonical model id must be 1-120 characters without spaces"]
+        );
+        assert_eq!(
+            errs(BTreeMap::from([("proxy/qwen3", "")]), &[]),
+            vec!["provider 'proxy': model_map['proxy/qwen3']: the canonical id must not repeat the 'proxy/' prefix"]
+        );
+        assert_eq!(
+            errs(BTreeMap::from([("qwen3", "  ")]), &[]),
+            vec![
+                "provider 'proxy': model_map['qwen3']: wire name '  ' must be empty (send the canonical id) or a model ID without spaces"
+            ]
+        );
+        let unknown = errs(BTreeMap::new(), &["Nope"]);
+        assert_eq!(unknown.len(), 1);
+        assert!(
+            unknown[0].starts_with("provider 'proxy': disabled_tools['Nope']: unknown tool (known: "),
+            "{}",
+            unknown[0]
+        );
+        assert_eq!(
+            errs(BTreeMap::new(), &["Bash", "Bash"]),
+            vec!["provider 'proxy': disabled_tools: 'Bash' is listed twice"]
+        );
+        // The shapes that are fine: a versioned SKU, a blank send-as-is, real tools.
+        assert!(
+            errs(
+                BTreeMap::from([("qwen3", "Qwen/Qwen3-32B"), ("ds", "")]),
+                &["Bash", "WebSearch"]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_providers_json_row_fails_the_launch_naming_the_file() {
+        let mut bad = provider("proxy");
+        bad.model_map = BTreeMap::from([("nope model".into(), String::new())]);
+        assert_eq!(
+            config_error(&[provider("ok"), bad]),
+            Some(
+                "providers.json: provider 'proxy': model_map['nope model']: a canonical model id must be \
+                 1-120 characters without spaces"
+                    .to_string()
+            )
+        );
+        assert_eq!(config_error(&[provider("ok")]), None);
+    }
+
+    #[test]
+    fn disabled_tool_lines_name_their_level_and_source() {
+        let mut proxy = provider("proxy");
+        proxy.disabled_tools = vec!["WebSearch".into(), "Write".into()];
+        assert_eq!(
+            connection_disabled_tool_lines(&[provider("ok"), proxy]),
+            vec![
+                "tool 'WebSearch' disabled (level: connection, connection: 'proxy')",
+                "tool 'Write' disabled (level: connection, connection: 'proxy')",
+            ]
+        );
+
+        let mut env = Map::new();
+        env.insert("COLONIZER_DISABLED_TOOLS".into(), json!("WebSearch , Write"));
+        assert_eq!(
+            harness_disabled_tool_lines("claude-code", &env).unwrap(),
+            vec![
+                "tool 'WebSearch' disabled (level: harness, harness: 'claude-code')",
+                "tool 'Write' disabled (level: harness, harness: 'claude-code')",
+            ]
+        );
+        assert_eq!(
+            harness_disabled_tool_lines("claude-code", &Map::new()).unwrap(),
+            Vec::<String>::new()
+        );
+        let mut unknown = Map::new();
+        unknown.insert("COLONIZER_DISABLED_TOOLS".into(), json!("WebSearch, Sed"));
+        assert_eq!(
+            harness_disabled_tool_lines("claude-code", &unknown),
+            Err(format!(
+                "agent module 'claude-code' setting 'disabled_tools': unknown tool 'Sed' (known: {})",
+                KNOWN_TOOLS.join(", ")
+            ))
+        );
+    }
+
+    /// The key lives in its own 0600 file, outside the struct: nothing serialises into a secret.
+    #[test]
+    fn a_serialised_provider_carries_no_key() {
+        let fields = serde_json::to_value(provider("proxy")).unwrap();
+        assert!(
+            fields
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|field| !field.contains("key") && !field.contains("secret") && !field.contains("token")),
+            "{fields}"
+        );
+    }
+
     // -- the strict providers.json rule (#408) -----------------------------------------------------
 
     fn providers_app() -> (Shared, PathBuf) {
@@ -1255,6 +1773,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_map: None,
+            disabled_tools: None,
             normalize_cache_ttl: None,
             trusted: None,
         }
@@ -1378,6 +1898,50 @@ mod tests {
         assert!(
             std::fs::read_to_string(&path).unwrap().contains("First"),
             "the file is not touched by the refused save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_put_with_an_unusable_policy_row_is_refused_naming_the_provider_and_row() {
+        let (app, root) = providers_app();
+        let mut req = put_req("Proxy");
+        req.model_map = Some(BTreeMap::from([("nope model".into(), String::new())]));
+        let err = put(State(app), Path("proxy".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("provider 'proxy'") && err.message().contains("model_map['nope model']"),
+            "{}",
+            err.message()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The web Settings form predates `model_map`/`disabled_tools` and sends neither, so a save that
+    /// omits them keeps a hand-edited policy — only an explicit empty map or list clears it.
+    #[tokio::test]
+    async fn a_put_that_omits_the_policy_keeps_it_and_an_explicit_empty_clears_it() {
+        let (app, root) = providers_app();
+        let mut req = put_req("Proxy");
+        req.model_map = Some(BTreeMap::from([("qwen3".into(), "Qwen/Qwen3".into())]));
+        req.disabled_tools = Some(vec!["WebSearch".into()]);
+        let _saved = put(State(app.clone()), Path("proxy".into()), Json(req)).await.unwrap();
+
+        let _saved = put(State(app.clone()), Path("proxy".into()), Json(put_req("Proxy")))
+            .await
+            .unwrap();
+        let saved = app.providers().into_iter().find(|p| p.id == "proxy").unwrap();
+        assert_eq!(saved.model_map, BTreeMap::from([("qwen3".into(), "Qwen/Qwen3".into())]));
+        assert_eq!(saved.disabled_tools, vec!["WebSearch".to_string()]);
+
+        let mut req = put_req("Proxy");
+        req.model_map = Some(BTreeMap::new());
+        req.disabled_tools = Some(Vec::new());
+        let _saved = put(State(app.clone()), Path("proxy".into()), Json(req)).await.unwrap();
+        let saved = app.providers().into_iter().find(|p| p.id == "proxy").unwrap();
+        assert!(
+            saved.model_map.is_empty() && saved.disabled_tools.is_empty(),
+            "explicitly cleared"
         );
         let _ = std::fs::remove_dir_all(root);
     }

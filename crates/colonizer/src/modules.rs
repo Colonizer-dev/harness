@@ -1214,4 +1214,28 @@ mod tests {
         }
         assert!(checked >= 6, "expected the six shipped agent modules, walked {checked}");
     }
+
+    #[test]
+    fn every_shipped_agent_module_appears_in_the_provider_compatibility_table() {
+        // CI enforcement (#304): a shipped runner missing from the docs is a named failure, so the
+        // connection → backends table in docs/providers.md cannot silently rot when an agent module
+        // is added.
+        const TABLE: &str = include_str!("../../../docs/providers.md");
+        let agents = FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/agents");
+        let mut listed = 0;
+        for entry in std::fs::read_dir(&agents).unwrap().flatten() {
+            let dir = entry.path();
+            if !dir.join("module.json").is_file() {
+                continue;
+            }
+            let id = dir.file_name().unwrap().to_string_lossy();
+            let row = format!("| `{id}` |");
+            assert!(
+                TABLE.contains(&row),
+                "docs/providers.md: no compatibility-table row for `{id}`; add the runner to the connection → backends table (a line starting with \"{row}\")"
+            );
+            listed += 1;
+        }
+        assert!(listed >= 6, "expected the six shipped agent modules, walked {listed}");
+    }
 }

@@ -249,6 +249,13 @@
         "description": "Command to run for the pre-flight scan, resolved inside the colony \u2014 for example a scanner mounted through 'Plugin directories'. Split on whitespace and run without a shell. Empty means no scan runs.",
         "default": "",
         "env": "COLONIZER_SCAN_COMMAND"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Claude Code tool names this colony never gets, such as Write, WebSearch, Task. The tool is removed from the agent's context and cannot be called, whatever endpoint serves the model; a provider can also strip tools per connection. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS"
       }
     }
   }

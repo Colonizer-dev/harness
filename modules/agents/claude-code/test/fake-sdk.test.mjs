@@ -492,6 +492,16 @@ test('options come from the environment', () => {
   assert.deepEqual(childEnv({ CLAUDE_PID: '1', HOME: '/root' }), { HOME: '/root' });
 });
 
+test('disabled tools become the session disallow list, and stay absent by default', () => {
+  // Harness-level switch (module.json `disabled_tools`): whatever endpoint serves the model, these
+  // tools are gone — distinct from the per-connection strip the provider gateway does.
+  assert.equal(buildOptions({}).options.disallowedTools, undefined);
+  assert.equal(buildOptions({ COLONIZER_DISABLED_TOOLS: '' }).options.disallowedTools, undefined);
+  assert.equal(buildOptions({ COLONIZER_DISABLED_TOOLS: '  ,  ' }).options.disallowedTools, undefined);
+  const { options } = buildOptions({ COLONIZER_DISABLED_TOOLS: ' WebSearch , Write,,Bash ' });
+  assert.deepEqual(options.disallowedTools, ['WebSearch', 'Write', 'Bash']);
+});
+
 test('subagent effort redefines the built-in agents the orchestrator delegates to', () => {
   // Unset: only repo-explorer is added; the two built-ins stay and inherit the orchestrator's effort.
   const unset = buildOptions({ COLONIZER_EFFORT: 'xhigh' }).options.agents;

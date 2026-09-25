@@ -568,11 +568,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             Value::String(serde_json::to_string(&routing.routes)?),
         );
     }
+    // A hand-edited providers.json row the PUT would have refused fails the launch here, with the
+    // file, provider and row named (#295).
+    if let Some(message) = providers::config_error(&routing.providers) {
+        bail!("{message}");
+    }
     // A `<provider>/` prefix nobody configured is a typo'd route, not a Claude model: the runner would
     // only warn and send those requests to Anthropic (router.mjs), so the boot refuses instead — here,
     // after tier substitution, so only the models this colony will actually run are checked.
-    if let Some((value, prefix)) = routing.unrouted_provider(&runner_env) {
-        bail!("model setting '{value}' names provider '{prefix}', which is not configured");
+    if let Some(message) = routing.unusable_route(&agent.id, &runner_env) {
+        bail!("{message}");
     }
     let used = routing.used(&runner_env);
     // Recorded on the session because the gateway needs it long after boot: every proxied call is
@@ -581,12 +586,51 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect())
     })
     .await;
+    // The tool policy the colony is being launched under, recorded for the colony report (#295): the
+    // connection level per used provider, then the harness level the agent module configured.
+    for line in providers::connection_disabled_tool_lines(&used) {
+        app.session_log(id, "info", line).await;
+    }
+    match providers::harness_disabled_tool_lines(&agent.id, &runner_env) {
+        Ok(lines) => {
+            for line in lines {
+                app.session_log(id, "info", line).await;
+            }
+        }
+        Err(message) => bail!("{message}"),
+    }
     let probes = futures_util::future::join_all(used.iter().map(|p| crate::gateway::probe_cached(app, p))).await;
     for (provider, health) in used.iter().zip(probes) {
         if health["reachable"] != true {
+            // The cached probe only feeds a warning; a refusal is decided on a fresh one, so an
+            // endpoint that came back within the probe TTL is not refused on a stale answer (#295).
+            let health = if provider.fallback_model.is_some() {
+                health.clone()
+            } else {
+                crate::gateway::probe(app, provider).await
+            };
+            if health["reachable"] == true {
+                app.session_log(
+                    id,
+                    "info",
+                    format!(
+                        "model provider {} was unreachable on the cached probe but answered a fresh one; its requests will go through",
+                        provider.id
+                    ),
+                )
+                .await;
+                continue;
+            }
             let then = match &provider.fallback_model {
                 Some(model) => format!("its requests will fall back to {model}"),
-                None => "its requests will fail until it is back (set a fallback model to use Claude instead)".into(),
+                // Without a fallback every request through this connection can only fail, so the
+                // launch is refused with the fix instead of warned about (#295).
+                None => bail!(
+                    "{}",
+                    providers::unreachable_route(&agent.id, provider, &health, &runner_env).unwrap_or_else(|| {
+                        format!("model provider {} is unreachable and has no fallback model", provider.id)
+                    })
+                ),
             };
             let error = health["error"].as_str().unwrap_or("unknown error");
             app.session_log(
