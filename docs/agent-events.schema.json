@@ -140,7 +140,16 @@
         "type": { "const": "tool_result" },
         "tool_call_id": { "type": "string" },
         "output": { "type": "string" },
-        "is_error": { "type": "boolean" }
+        "is_error": { "type": "boolean" },
+        "denial": {
+          "type": "object",
+          "description": "Present when the output reads as a sandbox or colony refusal. Guidance only: it never changes is_error and never grants anything (§2).",
+          "properties": {
+            "class": { "type": "string", "enum": ["egress", "read_only", "tool_disabled"] },
+            "hint": { "type": "string" }
+          },
+          "required": ["class", "hint"]
+        }
       },
       "required": ["type", "tool_call_id", "output", "is_error"]
     },

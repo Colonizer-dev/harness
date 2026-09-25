@@ -301,20 +301,20 @@ mod tests {
             AgentEvent::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
         ));
         assert!(matches!(
-            &events[18],
+            &events[20],
             AgentEvent::Status {
                 state: AgentState::Idle,
                 detail: None
             }
         ));
         assert!(matches!(
-            &events[19],
+            &events[21],
             AgentEvent::Status {
                 state: AgentState::Exited,
                 detail: None
             }
         ));
-        match &events[17] {
+        match &events[19] {
             AgentEvent::TurnEnd {
                 is_error,
                 cost_usd,
@@ -336,6 +336,8 @@ mod tests {
         assert_eq!(events[12], AgentEvent::Other, "thinking");
         assert_eq!(events[13], AgentEvent::Other, "tool_call");
         assert_eq!(events[14], AgentEvent::Other, "tool_result");
+        assert_eq!(events[17], AgentEvent::Other, "tool_call");
+        assert_eq!(events[18], AgentEvent::Other, "tool_result with a denial");
     }
 
     /// The regression guard for browser pass-through: a type a newer runner adds, or a known body

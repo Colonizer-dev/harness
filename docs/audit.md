@@ -60,6 +60,11 @@ The public ones, each with its issue:
 | **F10.** Release provenance and pinned inputs | [#89](https://github.com/Colonizer-dev/harness/issues/89), with CI and real-colony tests in [#73](https://github.com/Colonizer-dev/harness/issues/73) and [#368](https://github.com/Colonizer-dev/harness/issues/368) |
 | The installer's app swap isn't atomic | [#90](https://github.com/Colonizer-dev/harness/issues/90) |
 
+Classify a finding on arrival: [boundaries.md](boundaries.md) splits what the harness enforces
+from what it only suggests. "Hit a wall" — a denial the colony could not cross — is a guidance gap,
+never a security finding. "Defeated a control" — a boundary crossed — is one, and it is the
+watchdog's stop-and-flag signal.
+
 ## Checkpoints
 
 Four gates have to pass before unattended work is on the table.

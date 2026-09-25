@@ -481,7 +481,11 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   &nbsp;·&nbsp;
   <a href="docs/audit.md">Audit</a>
   &nbsp;·&nbsp;
+  <a href="docs/boundaries.md">Boundaries</a>
+  &nbsp;·&nbsp;
   <a href="docs/gaps.md">Gaps</a>
+  &nbsp;·&nbsp;
+  <a href="docs/runner-authoring.md">Runner authoring</a>
 </p>
 
 <p align="center">

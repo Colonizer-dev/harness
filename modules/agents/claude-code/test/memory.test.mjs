@@ -147,7 +147,7 @@ test('only the orchestrator proposes: a subagent is told to report instead', () 
 
 test('the memory gate is registered only with memory, and refuses a subagent even when delegation is off', async () => {
   const memoryServer = { type: 'sdk', name: MEMORY_SERVER, instance: {} };
-  assert.equal(buildOptions({}, { memoryServer }).options.hooks, undefined, 'no memory, no gate');
+  assert.equal(buildOptions({}, { memoryServer }).options.hooks.PreToolUse, undefined, 'no memory, no gate');
 
   const { options } = buildOptions({ COLONIZER_MEMORY_DIR: '/colonizer/memory' }, { memoryServer });
   const hooks = options.hooks.PreToolUse.flatMap((entry) => entry.hooks);

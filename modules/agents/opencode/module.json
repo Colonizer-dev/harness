@@ -15,6 +15,12 @@
     "image": "glibc + node >= 20"
   },
   "secrets": [],
+  "egress": {
+    "api": [],
+    "auth": [],
+    "telemetry": [],
+    "extra": ["registry.npmjs.org", "models.dev"]
+  },
   "settings": {
     "properties": {
       "model": {

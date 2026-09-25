@@ -126,7 +126,8 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
 {"type":"assistant_text","message_id":"msg_…","block_index":0,"text":"Hello"}        // final block text; supersedes deltas
 {"type":"thinking","message_id":"msg_…","block_index":1,"text":"summary"}            // optional
 {"type":"tool_call","message_id":"msg_…","tool_call_id":"toolu_…","name":"Bash","input":{"command":"ls"}}
-{"type":"tool_result","tool_call_id":"toolu_…","output":"…","is_error":false}        // output ≤ 20 000 chars
+{"type":"tool_result","tool_call_id":"toolu_…","output":"…","is_error":false}        // output ≤ 20 000 chars; optional `denial` (below) marks a refusal
+{"type":"tool_result","tool_call_id":"toolu_…","is_error":true,"denial":{"class":"egress|read_only|tool_disabled","hint":"…"}}  // denial is guidance the runner attaches when a result reads as a colony refusal — it never changes `is_error` and never grants anything; the runner also feeds the hint to the agent itself, at most once per class per session
 {"type":"question","question_id":"toolu_…","message_id":"msg_…","risk":"workspace_write","questions":[
   {"question":"Which database?","header":"Database","multi_select":false,
    "options":[{"label":"Postgres","description":"…","preview":null},{"label":"SQLite","description":"…"}]}

@@ -3510,6 +3510,7 @@ pub(crate) mod tests {
             entry: vec!["run".into()],
             needs_claude: false,
             schema: json!({}),
+            egress: None,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
         // The org is still awaiting an answer when the colony starts, sighting and avatar both.
@@ -3573,6 +3574,7 @@ pub(crate) mod tests {
             entry: vec!["run".into()],
             needs_claude: false,
             schema: json!({}),
+            egress: None,
         };
         crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))
     }
