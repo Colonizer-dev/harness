@@ -723,6 +723,7 @@ mod tests {
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
+            sensitivity: None,
             cleaned_up: false,
             keep_worktree: false,
             attention: None,
@@ -902,6 +903,7 @@ mod tests {
             fallback_model: None,
             pricing: None,
             normalize_cache_ttl: false,
+            trusted: false,
         }];
 
         let batch = build(

@@ -1141,6 +1141,35 @@ async fn proxy(
             None,
         );
     }
+    // A task whose issue named restricted paths — secrets, .env, infra config — may only reach a
+    // provider an operator has explicitly marked trusted (sensitivity.rs, issue #472): cheap is not
+    // the same as private, and "configured" is not "vetted". Checked independently of
+    // allowed_providers above, which is about which providers this colony's *models* route to, not
+    // which ones its *task* may trust with sensitive content. The policy itself lives in
+    // `eligible`; the gateway only reads the class back off the session record.
+    if session
+        .sensitivity
+        .as_deref()
+        .and_then(crate::sensitivity::Sensitivity::parse)
+        .is_some_and(|sensitivity| !crate::sensitivity::eligible(sensitivity, provider.trusted))
+    {
+        app.session_log(
+            &colony,
+            "warn",
+            format!(
+                "colonizer gateway: refused provider \"{id}\" — this colony's task touches restricted paths and \"{id}\" is not marked trusted"
+            ),
+        )
+        .await;
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "sensitivity_error",
+            format!(
+                "colonizer gateway: provider \"{id}\" is not eligible for colony {colony}'s restricted-sensitivity task; mark it trusted in providers.json to allow it"
+            ),
+            None,
+        );
+    }
     // A keyed provider with no saved key would otherwise be sent the request with no credential at all,
     // and answer with a bare 401 that says nothing about why. Refused here instead, before any upstream
     // call, naming the provider and where the key goes.
@@ -1947,6 +1976,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A colony whose task touches restricted paths is refused a provider nobody has marked
+    /// trusted (issue #472): the allowlist above admits the provider, but the sensitivity gate
+    /// still refuses it before any upstream call.
+    #[tokio::test]
+    async fn a_restricted_task_is_refused_a_provider_not_marked_trusted() {
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-sensitivity-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        // The allowlist lets deepseek by, so the sensitivity gate is what refuses.
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.sensitivity = Some("restricted".into());
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // Port 9 (discard) is never reached: nothing may be sent upstream. No "trusted" key: the
+        // default is false, exactly as a provider nobody has vetted reads.
+        std::fs::write(
+            root.join("config/providers.json"),
+            r#"[{"id":"deepseek","name":"DeepSeek","base_url":"http://127.0.0.1:9","auth":"none"}]"#,
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(&token).unwrap());
+        let response = proxy(
+            State(app.clone()),
+            Path(("deepseek".into(), "v1/messages".into())),
+            Method::POST,
+            "/providers/deepseek/v1/messages".parse().unwrap(),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "sensitivity_error");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("\"deepseek\""), "names the provider: {message}");
+        assert!(message.contains("trusted"), "says what would fix it: {message}");
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            0,
+            "refused locally, so nothing counts as provider usage"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The same restricted colony passes straight through to a provider an operator has marked
+    /// `trusted` in providers.json: vetting it is the fix the refusal names (issue #472).
+    #[tokio::test]
+    async fn a_restricted_task_dispatches_to_a_provider_marked_trusted() {
+        let router = Router::new().route("/v1/messages", axum::routing::post(|| async { axum::Json(json!({})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-sensitivity-ok-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.sensitivity = Some("restricted".into());
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(&[json!({
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "base_url": format!("http://{addr}"),
+                "auth": "none",
+                "trusted": true,
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(&token).unwrap());
+        let response = proxy(
+            State(app.clone()),
+            Path(("deepseek".into(), "v1/messages".into())),
+            Method::POST,
+            "/providers/deepseek/v1/messages".parse().unwrap(),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "a trusted provider is not refused");
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            1,
+            "marked trusted, so the request dispatched"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The estimate reads the request's own `max_tokens` (OpenAI's `max_completion_tokens` too) and
     /// falls back to the documented constant when the body names neither, is not JSON, or the provider
     /// carries no pricing at all — which estimates, like it records, at nothing (issue #409).
@@ -2478,6 +2611,7 @@ mod tests {
             fallback_model: fallback_model.map(str::to_string),
             pricing: None,
             normalize_cache_ttl: false,
+            trusted: false,
         }
     }
 

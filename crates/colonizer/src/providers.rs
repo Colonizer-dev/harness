@@ -157,6 +157,12 @@ pub struct Provider {
     /// normalizes exactly like its catalogue twin; without it, a `custom` preset keeps default behaviour.
     #[serde(default)]
     pub normalize_cache_ttl: bool,
+    /// Whether an operator has vetted this provider to receive restricted-sensitivity work — secrets,
+    /// `.env` files, infra config (sensitivity.rs, issue #472). Defaults to `false`: a provider is not
+    /// trusted with a colony's secrets just because it is configured, and "not marked trusted" is a safe
+    /// default for a field nobody has set yet.
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 impl Provider {
@@ -648,6 +654,10 @@ pub struct PutProvider {
     /// this flag suppresses.
     #[serde(default)]
     normalize_cache_ttl: Option<bool>,
+    /// Omitted keeps the saved trust mark (sensitivity.rs, issue #472): a Settings save from a web
+    /// build that predates the field must not quietly un-vet a restricted-capable provider.
+    #[serde(default)]
+    trusted: Option<bool>,
 }
 
 fn default_auth() -> String {
@@ -795,6 +805,9 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
                 .map(|p| p.normalize_cache_ttl)
                 .unwrap_or(false)
         }),
+        trusted: req
+            .trusted
+            .unwrap_or_else(|| providers.iter().find(|p| p.id == id).map(|p| p.trusted).unwrap_or(false)),
     };
     match providers.iter_mut().find(|p| p.id == id) {
         Some(existing) => *existing = provider.clone(),
@@ -871,6 +884,7 @@ mod tests {
             fallback_model: None,
             pricing: None,
             normalize_cache_ttl: false,
+            trusted: false,
         }
     }
 
@@ -1242,6 +1256,7 @@ mod tests {
             fallback_model: None,
             pricing: None,
             normalize_cache_ttl: None,
+            trusted: None,
         }
     }
 

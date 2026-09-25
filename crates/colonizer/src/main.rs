@@ -65,6 +65,7 @@ mod runtime;
 mod sandbox;
 mod schedule;
 mod secrets;
+mod sensitivity;
 mod sessions;
 mod spend;
 mod stack;
