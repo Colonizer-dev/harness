@@ -1310,16 +1310,22 @@ async fn proxy(
             // policy (model_map, disabled tools) runs first, for the same reason and with the same
             // byte-identical escape hatch (#295).
             let mut body = body;
+            let mut wire_model = model;
             if let Some(policy) = apply_connection_policy(&body, &provider) {
+                // A `model_map` entry renames the model on the wire, so the audit record's wire model
+                // is read back from the rewritten body — validator applied, like the requested one.
+                wire_model = serde_json::from_slice::<Value>(&policy)
+                    .ok()
+                    .and_then(|v| v["model"].as_str().filter(|m| valid_model(m)).map(str::to_string));
                 body = Bytes::from(policy);
             }
             if let Some((normalized, note)) = normalize_anthropic_body(&body, provider.quirks()) {
                 eprintln!("gateway: provider \"{id}\": normalized request body preemptively ({note})");
                 body = normalized;
             }
-            // The body goes out with the model it came in with: normalization rewrites fields,
-            // never the model.
-            audit.set_wire_model(model);
+            // Normalization rewrites fields, never the model: what goes out is the requested model,
+            // or the connection policy's mapped name for it.
+            audit.set_wire_model(wire_model);
             (url, forward_headers(&headers, credential_header(&app, &provider)), body, None)
         }
         Wire::Openai => {
@@ -2302,6 +2308,47 @@ mod tests {
         assert_eq!(openai_line["status"], 200);
         assert_eq!(openai_line["input_tokens"], 3);
         assert_eq!(openai_line["output_tokens"], 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A `model_map` entry renames the model on the anthropic wire, and the audit record says so:
+    /// `model` is what the colony asked for, `wire_model` what went upstream (#295 meets #302).
+    #[tokio::test]
+    async fn a_model_mapped_anthropic_request_audits_the_mapped_wire_model() {
+        let (base, _seen) = capturing_upstream(
+            "/v1/messages",
+            json!({
+                "id": "msg_1", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+                "model": "deepseek-v4-pro", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+        )
+        .await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-mapped-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            json!([
+                {"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none",
+                 "model_map": {"claude-sonnet-5": "deepseek-v4-pro"}},
+            ]),
+        )
+        .await;
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            placeholder_credentials(),
+            Bytes::from_static(br#"{"model":"claude-sonnet-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["model"], "claude-sonnet-5", "the requested model");
+        assert_eq!(lines[0]["wire_model"], "deepseek-v4-pro", "the model_map's wire name");
         let _ = std::fs::remove_dir_all(root);
     }
 
