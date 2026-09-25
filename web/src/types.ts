@@ -452,9 +452,11 @@ export interface ModuleProviderInfo {
 
 /** A small JSON-Schema subset: an object whose properties are scalar settings. */
 export interface SchemaField {
-  type?: "string" | "number" | "integer" | "boolean";
+  type?: "string" | "number" | "integer" | "boolean" | "array";
   /** A rendering hint: `plugin-dirs` shows a comma-separated list of plugin names as skillset switches. */
   format?: string;
+  /** For `type: "array"`: what the entries are. Only string arrays are supported. */
+  items?: { type?: "string" };
   title?: string;
   description?: string;
   enum?: (string | number)[];

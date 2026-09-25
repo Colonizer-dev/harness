@@ -381,7 +381,7 @@ Module `schema` is a JSON Schema subset (also used for `settings` in agent `modu
 Digests in these examples are cut short on purpose: the exact hex a release boots lives in
 `crates/colonizer/images.lock`, and quoting a full one here would only rot the next time a pin bumps.
 
-Supported property keys: `type` (`string` | `integer` | `number` | `boolean`), `title`, `description`,
+Supported property keys: `type` (`string` | `integer` | `number` | `boolean` | `array` of strings, edited as one comma-separated line), `title`, `description`,
 `default`, `enum` (renders a select), `minimum`, `maximum`. `settings` holds the current values;
 missing values mean the `default`.
 

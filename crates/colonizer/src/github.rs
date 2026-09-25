@@ -1505,7 +1505,43 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     async fn stage_all(&self) -> Result<bool> {
+        // Path policy (docs/path-policy.md): the boot's placeholders for absent masked or protected
+        // entries must never land in a pull request, so the still-empty ones go before staging.
+        // What the colony filled — through a path the policy let it reach — is real work and stays.
+        let vm_dir = self.session_dir.join("vm");
+        let placeholders = std::fs::read_to_string(vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE)).unwrap_or_default();
+        let mut removed = crate::path_policy::clean_placeholders(&self.wt, &vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE))?;
+        // Second line of defence for the same accident: an empty path at a policy entry goes even
+        // when the boot's placeholder list was lost — but only if git does not track it (a tracked
+        // file is the checkout's, never ours to delete) and it is not a symlink.
+        let policy = crate::path_policy::from_bind_list(
+            &std::fs::read_to_string(vm_dir.join(crate::path_policy::POLICY_FILE)).unwrap_or_default(),
+        );
+        let mut policy_paths: Vec<String> = policy.masked.iter().chain(policy.protected.iter()).cloned().collect();
+        policy_paths.extend(crate::path_policy::read_list(&placeholders));
+        if !policy_paths.is_empty() {
+            let mut ls = self.wt_git();
+            ls.arg("ls-files").arg("-z").arg("--").args(&policy_paths);
+            let tracked = crate::path_policy::z_paths(&exec(&mut ls).await?);
+            removed.extend(crate::path_policy::remove_empty_untracked(&self.wt, &policy_paths, &tracked));
+        }
+        for rel in removed {
+            self.log
+                .info(format!("path policy: removed the empty placeholder for {rel}"))
+                .await;
+        }
         exec(self.wt_git().args(["add", "-A"])).await?;
+        // Changed masked or protected paths are reported, not rewritten: the commit stays the
+        // colony's, and the colony record is where an operator reads what it touched (issue #300).
+        // Each line once per colony: publish retries re-stage the same tree, and the record does
+        // not need the same warning twice.
+        let changed = exec(self.wt_git().args(["diff", "--cached", "--name-only", "-z"])).await?;
+        let runtime = self.app.runtime(&self.s.id).await;
+        for message in crate::path_policy::violations(&crate::path_policy::z_paths(&changed), &policy) {
+            if runtime.warn_path_policy_once(&message).await {
+                self.app.session_log(&self.s.id, "warn", message).await;
+            }
+        }
         Ok(!exec_status(self.wt_git().args(["diff", "--cached", "--quiet"])).await?)
     }
 

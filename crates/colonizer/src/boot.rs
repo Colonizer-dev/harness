@@ -954,6 +954,31 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // operator or the org pinned — and anything set explicitly in modules.json
     // still wins. See crates/colonizer/src/presets.rs.
     let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&stack));
+    // Path policy (docs/path-policy.md, issue #300): credential-shaped files in the worktree are
+    // masked out of the colony's view and its agent-facing config pinned read-only. The host plans
+    // the enforcement — binds, plus an empty placeholder for every listed path the checkout does
+    // not have, since the guest's bind needs a target — then writes the intended placeholder list
+    // BEFORE creating anything: a crash in between would leave an empty file git could stage with
+    // no record that it was ours (issue #300 review). Publish later removes the still-empty ones,
+    // so nothing placeholder-shaped lands in a pull request. All before the VM starts, on purpose:
+    // the guest enforces the policy as it boots, before the agent can run a command.
+    let policy = crate::path_policy::from_settings(&sandbox_settings, &sandbox_schema);
+    let previous = crate::path_policy::read_list(
+        &std::fs::read_to_string(vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE)).unwrap_or_default(),
+    );
+    let planned = crate::path_policy::plan(&wt, &policy, &previous)?;
+    // Only targets guaranteed to exist get a bind: a skipped entry has no bind line, or the guest
+    // mount would fail and brick the boot.
+    crate::path_policy::write_list(&vm_dir.join(crate::path_policy::POLICY_FILE), &planned.binds)?;
+    crate::path_policy::write_list(
+        &vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE),
+        &planned.placeholder_names(),
+    )?;
+    crate::path_policy::apply(&wt, &planned)?;
+    log.info(crate::path_policy::summary(&policy, &planned)).await;
+    if let Some(note) = crate::path_policy::opt_outs(&policy) {
+        app.session_log(id, "warn", note).await;
+    }
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
@@ -1101,6 +1126,44 @@ if [ -f /colonizer/mesh-authkey ]; then
     --hostname="$COLONIZER_MESH_HOSTNAME" --accept-dns=false >>/var/lib/colonizer/tailscaled.log 2>&1 \
     || echo "colonizer: joining the mesh failed" >&2
 fi
+# Path policy (docs/path-policy.md): the host lists what must be hidden or read-only inside the
+# worktree. A masked file is covered by a bind of /dev/null (reads see nothing, writes land in
+# the void), a masked directory by an empty read-only tmpfs (a tiny explicit size: size=0 means
+# unlimited), a protected path by a read-only bind of itself. Fail closed: a policy the guest
+# cannot enforce — a missing file, a symlink where a real path was expected (what the mount would
+# follow is not the checkout's file), a kind the host does not write, a missing list — must not
+# boot into a colony that assumes it was. The variables default the real paths but let the loop
+# run as-is in a mount namespace against a stand-in workspace, which is how it was verified.
+ws="${COLONIZER_WORKSPACE:-/workspace}"
+policy="${COLONIZER_PATH_POLICY:-/colonizer/path-policy}"
+[ -f "$policy" ] || { echo "colonizer: path policy: $policy is missing" >&2; exit 1; }
+while read -r kind rel || [ -n "${rel:-}" ]; do
+  [ -n "${kind:-}" ] || continue
+  [ -n "${rel:-}" ] || { echo "colonizer: path policy: empty path" >&2; exit 1; }
+  target="$ws/$rel"
+  # The host resolves symlinks to their in-worktree target before writing this list, so a link
+  # here means the checkout changed under the policy — refuse rather than follow it.
+  [ -L "$target" ] && { echo "colonizer: path policy: $rel is a symlink" >&2; exit 1; }
+  [ -e "$target" ] || { echo "colonizer: path policy: $rel is missing" >&2; exit 1; }
+  case "$kind" in
+    mask-file)
+      mount --bind /dev/null "$target" || { echo "colonizer: path policy: cannot mask $rel" >&2; exit 1; }
+      ;;
+    mask-dir)
+      mount -t tmpfs -o ro,size=4k,mode=0555 colonizer-mask "$target" || { echo "colonizer: path policy: cannot mask $rel" >&2; exit 1; }
+      ;;
+    protect)
+      mount --bind "$target" "$target" && mount -o remount,bind,ro "$target" || {
+        echo "colonizer: path policy: cannot protect $rel" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "colonizer: path policy: unknown kind $kind" >&2
+      exit 1
+      ;;
+  esac
+done <"$policy"
 exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --state-dir /var/lib/colonizer
 "#;
 
@@ -1321,6 +1384,35 @@ mod tests {
         assert!(
             BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:$PATH""#),
             "node first, claude entry unchanged"
+        );
+    }
+
+    /// The path policy is enforced in the guest before the agent starts, and every kind the host
+    /// writes has a branch — a policy line the guest did not act on would be silent non-enforcement.
+    #[test]
+    fn boot_script_enforces_the_path_policy_before_the_agent_starts() {
+        for kind in ["mask-file", "mask-dir", "protect"] {
+            assert!(BOOT_SCRIPT.contains(kind), "the guest handles {kind}");
+        }
+        let policy = BOOT_SCRIPT.find("/colonizer/path-policy").expect("the policy file is read");
+        let exec = BOOT_SCRIPT.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
+        assert!(policy < exec, "the binds happen before the agent can run a command");
+        // Fail closed: an unenforceable bind stops the boot rather than starting without it — a
+        // missing target, a symlink the mount would follow, a kind the host does not write, and a
+        // lost policy file are all loud stops, not silent starts.
+        assert!(BOOT_SCRIPT.contains("cannot mask"), "mask failures are loud");
+        assert!(BOOT_SCRIPT.contains("cannot protect"), "protect failures are loud");
+        assert!(BOOT_SCRIPT.contains("unknown kind"), "an unknown kind is loud");
+        assert!(BOOT_SCRIPT.contains("is missing"), "a missing target is loud");
+        assert!(BOOT_SCRIPT.contains("is a symlink"), "a symlink target is loud");
+        // And the whole list, not just its lines: a lost path-policy file stops the boot before
+        // the loop would silently enforce nothing.
+        let guard = BOOT_SCRIPT
+            .find("is missing\" >&2; exit 1; }")
+            .expect("a lost policy file is loud");
+        assert!(
+            guard < BOOT_SCRIPT.find("while read").unwrap(),
+            "the missing-list check precedes the loop"
         );
     }
 

@@ -45,7 +45,8 @@ mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of th
 it's going, is in [docs/vision.md](docs/vision.md); what the design shows that the code has not built
 yet is in [docs/gaps.md](docs/gaps.md). What has been decided against, and why, is in
 [docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without
-losing colonies, is in [docs/updates.md](docs/updates.md).
+losing colonies, is in [docs/updates.md](docs/updates.md). Which worktree paths a colony must never
+read and which it cannot rewrite is in [docs/path-policy.md](docs/path-policy.md).
 
 ---
 

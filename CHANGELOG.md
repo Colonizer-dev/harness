@@ -33,6 +33,15 @@ setting) is called out under **Take care** rather than left for you to find.
   out. Flag emoji, ZWJ sequences, and Arabic or Hebrew prose without direction controls pass
   clean; direction embeddings, isolates and overrides are flagged even when balanced. Off until
   configured, like notify. See [docs/prompt-screening.md](docs/prompt-screening.md).
+- **Path policy: masked and protected worktree paths.** Credential files in a checkout — `.env`,
+  `.envrc`, `.npmrc`, `.netrc`, `.git-credentials`, `.pypirc` — are now masked out of a colony's
+  view (the guest gets an empty file instead, before the agent starts), and agent-facing config —
+  `.git/config`, `.git/hooks/`, `.gitmodules`, `.claude/`, `.codex/`, `.mcp.json`, `.devcontainer/`,
+  `.vscode/`, `.idea/` — is pinned read-only. Three sandbox settings add to the lists or opt paths
+  out of them (`mask_paths`, `protect_paths`, `unmask_paths`; every opt-out is logged at boot);
+  unusable entries are refused at save time. At publish, empty boot placeholders are removed before
+  staging and changed masked or protected paths are logged on the colony — reported, not rewritten.
+  See [docs/path-policy.md](docs/path-policy.md). ([#300])
 - **Wait behind the holder.** A launch on an issue another colony already holds can now queue for
   the issue instead of being refused or duplicating it: `queue_behind_holder` on `POST /api/sessions`
   admits the colony as a `claim_wait` successor (`queued_behind` naming the holder), the oldest
@@ -797,6 +806,7 @@ Macs. ([#74])
 [#472]: https://github.com/Colonizer-dev/harness/issues/472
 [#474]: https://github.com/Colonizer-dev/harness/issues/474
 [#311]: https://github.com/Colonizer-dev/harness/issues/311
+[#300]: https://github.com/Colonizer-dev/harness/issues/300
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
