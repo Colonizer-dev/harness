@@ -9,7 +9,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNo
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
 import type { SectionId } from "../components/SettingsDialog";
-import { isLive, orgOf, sameOrg, store, stored } from "../components/ui";
+import { isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "../components/ui";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { sortSessions } from "../sessionOrder";
@@ -29,6 +29,7 @@ import { InboxView } from "./InboxView";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
+import { NestDashboard } from "./NestDashboard";
 import { OverviewView } from "./OverviewView";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
@@ -38,6 +39,14 @@ import { providerSnapshots } from "./dash";
 const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
 
 const VIEW_KEY = "colonizer.cockpitView";
+
+const DASH_KEY = "colonizer.nestDashboard";
+
+/** The dashboard choice: true/false once the visitor picked, null to follow the window width. */
+function storedDashOpen(): boolean | null {
+  const saved = stored(DASH_KEY);
+  return saved === "open" ? true : saved === "closed" ? false : null;
+}
 
 const THEME_KEY = "colonizer.theme";
 
@@ -134,7 +143,8 @@ export function Cockpit({
   onOpenSettings: (section?: SectionId) => void;
   /** One org's settings dialog, which App owns; how a switched-off org gets switched back on. */
   onOpenOrgSettings?: (org: string) => void;
-  /** Told whether the inspector is on screen, so App can keep its fixed cards clear of it. */
+  /** Told whether the inspector — or the dashboard that shares its slot — is on screen, so App can
+   *  keep its fixed cards clear of the right-hand aside. */
   onInspectorShown?: (shown: boolean) => void;
   /** The open colony's own pane, wired by App (chat, terminal, publish). */
   colony: ReactNode;
@@ -150,15 +160,27 @@ export function Cockpit({
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
+  // The nest dashboard: null follows the width (open on wide screens, closed on narrow), an
+  // explicit choice from a hide/show click sticks until the next one. It owns the nest's right-hand
+  // slot only while nothing is picked and the nest is the view; a colony selection swaps it for the
+  // inspector, and closing the inspector brings it back.
+  const roomy = useMediaQuery("(min-width: 1280px)");
+  const [dashOpen, setDashOpen] = useState<boolean | null>(storedDashOpen);
+  const dashShown = view === "home" && inspector === null && (dashOpen ?? roomy);
 
   useEffect(() => {
     store(VIEW_KEY, view);
   }, [view]);
 
-  // The inspector renders only on the home view, and only while something is picked.
   useEffect(() => {
-    onInspectorShown?.(view === "home" && inspector !== null);
-  }, [view, inspector, onInspectorShown]);
+    store(DASH_KEY, dashOpen === null ? null : dashOpen ? "open" : "closed");
+  }, [dashOpen]);
+
+  // The inspector renders only on the home view, and only while something is picked; the dashboard
+  // takes that same slot, and the fixed cards App owns keep clear of whichever aside is showing.
+  useEffect(() => {
+    onInspectorShown?.((view === "home" && inspector !== null) || dashShown);
+  }, [view, inspector, dashShown, onInspectorShown]);
 
   // An explicit choice is written on the root, where index.css's :root[data-theme] blocks pick it
   // up; clearing it hands the page back to prefers-color-scheme.
@@ -235,6 +257,17 @@ export function Cockpit({
   const backlogCount = repos
     .filter((r) => !selectedOrg || sameOrg(r.full_name.split("/")[0], selectedOrg))
     .reduce((total, r) => total + r.open_issues_count, 0);
+
+  const selectColony = useCallback(
+    (id: string) => {
+      const session = sessions.find((s) => s.id === id);
+      if (session) {
+        setInspector({ kind: "colony", session });
+        onSelectSession(id);
+      }
+    },
+    [sessions, onSelectSession],
+  );
 
   // Avatars come from /api/orgs, which keys them by org; a colony whose owner is not a workspace
   // (or an older mothership that sends none) falls back to the initial the Avatar draws.
@@ -481,13 +514,7 @@ export function Cockpit({
             liveDetail={state.agentDetail}
             backlogCount={backlogCount}
             avatarFor={avatarFor}
-            onSelect={(id) => {
-              const session = sessions.find((s) => s.id === id);
-              if (session) {
-                setInspector({ kind: "colony", session });
-                onSelectSession(id);
-              }
-            }}
+            onSelect={selectColony}
             onOpen={openColonyById}
             onSelectMothership={() => setInspector({ kind: "mothership" })}
             onLaunch={() => setView("launch")}
@@ -550,7 +577,21 @@ export function Cockpit({
               onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
             />
           ) : null}
-          {body()}
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {body()}
+            {/* The way back into the dashboard once it has been hidden: a small pill parked above
+                the nest's own Nest/Map toggle, in the header's empty top-right corner, so it
+                collides with neither that toggle nor the strip below it. */}
+            {view === "home" && inspector === null && !dashShown && (
+              <button
+                type="button"
+                onClick={() => setDashOpen(true)}
+                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-[12.5px] text-muted transition-colors hover:text-text"
+              >
+                Dashboard
+              </button>
+            )}
+          </div>
           {/* The composer floats over every overview-style view; the launch form, an open colony and
               settings have their own inputs. */}
           {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory" || view === "host") && (
@@ -572,8 +613,9 @@ export function Cockpit({
           )}
         </div>
         {/* Only while something is picked: closing it (×) gives the nest the full width back, and
-            clicking a chamber or the mothership opens it again. */}
-        {view === "home" && inspector !== null && (
+            clicking a chamber or the mothership opens it again. With nothing picked, the workspace
+            dashboard takes the same slot — it reads the same scoped list the nest draws. */}
+        {view === "home" && inspector !== null ? (
           <Inspector
             target={inspector}
             avatarUrl={inspector?.kind === "colony" ? avatarFor(orgOf(inspector.session)) : null}
@@ -595,6 +637,17 @@ export function Cockpit({
             onLaunch={() => setView("launch")}
             onOpenSettings={(section) => onOpenSettings(section)}
           />
+        ) : (
+          dashShown && (
+            <NestDashboard
+              org={selectedOrg}
+              avatar={selectedOrg ? avatarFor(selectedOrg) : null}
+              sessions={inOrg}
+              maxParallel={status?.sandbox.max_parallel ?? null}
+              onSelect={selectColony}
+              onHide={() => setDashOpen(false)}
+            />
+          )
         )}
       </div>
       </div>
