@@ -16,6 +16,13 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **A workspace dashboard beside the nest.** With no colony picked, the cockpit home's right-hand
+  pane now summarises the chosen workspace's colonies — working against parallelism, needs-you with
+  each colony's reason, queued, returned, failed or stopped, total spend, and the last colonies to
+  move — read from the same scoped list the nest draws, so switching workspaces switches the panel
+  with it. Clearing the workspace filter aggregates every workspace under "All workspaces". It
+  occupies the inspector's slot, gives it back on a chamber click, and yields on narrow windows to
+  a Dashboard button parked above the nest's own view toggle. ([#200])
 - **A read-only `repo-explorer` subagent.** A new first-party agent alongside Explore, always
   available regardless of `subagent_effort`: before grepping, it checks the Skill tool for a shipped
   retrieval skill (starting with graft's code map) and prefers it, falling back to find/grep like
@@ -796,6 +803,7 @@ Macs. ([#74])
 [#328]: https://github.com/Colonizer-dev/harness/issues/328
 [#472]: https://github.com/Colonizer-dev/harness/issues/472
 [#474]: https://github.com/Colonizer-dev/harness/issues/474
+[#200]: https://github.com/Colonizer-dev/harness/issues/200
 [#311]: https://github.com/Colonizer-dev/harness/issues/311
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
