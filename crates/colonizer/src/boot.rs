@@ -532,6 +532,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "score": tier_decision.score,
         "reason": tier_decision.reason,
         "model": if model_changed { json!(effective_model) } else { Value::Null },
+        // The harness the decision was made for, so a routing record can be joined against the
+        // spend journal's per-harness rows (issue #296).
+        "agent": agent.id.clone(),
         "misroute": tier_decision.misroute(),
         "signals": task_signals,
         "jev": tier_decision.jev,

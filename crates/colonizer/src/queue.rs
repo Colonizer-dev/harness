@@ -400,7 +400,7 @@ pub(crate) async fn start_queued(app: &Shared) {
                 // A queued colony that can never start crosses straight into its terminal state
                 // outside `update_session` (the claim writes the record directly), so the journal
                 // hears about the return here, not there.
-                spend::record_returned(app, &retired.org).await;
+                spend::record_returned(app, &retired).await;
                 crate::activity::record_transition(app, crate::sessions::SessionStatus::Queued, &retired).await;
                 app.persist_and_broadcast(&retired).await;
                 app.session_log(&retired.id, "warn", message).await;

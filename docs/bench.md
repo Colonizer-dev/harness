@@ -76,12 +76,17 @@ else.
 ## Reading a comparison
 
 ```
-| Task | Result | Cost | Worked | Questions | Why it failed |
-| ambiguous-rounding | pass → FAIL | 0.31 → 0.28 (-0.03) | 94s → 71s | 1 → 0 | asked 0 questions, expected 1 |
+| Task | Harness · model | Result | Cost | Worked | Questions | Why it failed |
+| ambiguous-rounding | claude-code · opus → claude-code · opus | pass → FAIL | 0.31 → 0.28 (-0.03) | 94s → 71s | 1 → 0 | asked 0 questions, expected 1 |
 ```
 
 One run of one task is one sample. A cost difference of a few cents is noise; a task that flips from pass to
 fail, or a question that stops being asked, is not.
+
+Each scored task also records the harness (`agent`), the model it ran on — a launch override, else what
+boot's routing recorded, `–` when the colony stayed on its module's own model — with the routing `tier`
+beside it, and `compare` shows the pair per row (issue #296). Read down that column across runs and it
+answers which harness × model is cheapest — or fastest — for a task shape.
 
 Every result also carries `clean`: after scoring, the [trajectory monitor](trajectory-monitor.md) audits the
 colony's persisted event log for shortcut shapes — history mining, weakened tests, writes to what the scorer

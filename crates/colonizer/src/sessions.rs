@@ -825,7 +825,7 @@ impl App {
         };
         let (returned, status_before) = returned;
         if returned {
-            spend::record_returned(self, &session.org).await;
+            spend::record_returned(self, &session).await;
             // The colony's actual dollar cost, next to the decision that routed it (issue #470): the
             // estimate recorded at boot can be checked against this once the colony finishes. Guarded
             // on `model_routing` so a future colony type that skips routing never grows a spurious
@@ -1613,7 +1613,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     app.runtime(&id).await;
     // Heard about by the append-only spend journal now, before the colony does anything else: the
     // `launched` edge has to survive the cleanup or delete that will forget this record.
-    spend::record_launched(&app, owner).await;
+    spend::record_launched(&app, &session).await;
     // The launch claims the issue on GitHub itself, so a second mothership sees it: best effort in
     // the background, never failing the launch. A `claim_wait` waiter (issue #321) publishes
     // nothing — the holder's mark is the issue's claim until the waiter is promoted and takes it.

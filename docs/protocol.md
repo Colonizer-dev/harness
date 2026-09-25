@@ -1262,12 +1262,15 @@ The decision is recorded three ways:
   body, no checklist items, 1 path named`), naming the model when it differs from `model`, the
   cost gate when it kept the colony on `model`, and the rule's tier when an override disagrees;
 - a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
-  misroute, signals, jev, cost}`, where `source` is `off`/`rule`/`override`, `model` is set only
-  when the tier changed it, `misroute` is true when an operator override lands somewhere the rule
-  did not want, `signals` is what the rule read off the issue, `jev` is the shadow opinion when one
-  was asked for (§6.1c), and `cost` is the gate's estimate — the three token counts, both dollar
-  figures, whether routing was worth it and whether the gate fired — or `null` when the gate had
-  nothing to say;
+  agent, misroute, signals, jev, cost, sensitivity}`, where `source` is `off`/`rule`/`override`,
+  `model` is set only when the tier changed it, `agent` names the agent module — the harness — the
+  decision was made for, the same name the spend journal's colony rows carry (§6.8), so a routing
+  decision can be joined with what the colony went on to spend, `misroute` is true when an operator
+  override lands somewhere the rule did not want, `signals` is what the rule read off the issue,
+  `jev` is the shadow opinion when one was asked for (§6.1c), `cost` is the gate's estimate — the
+  three token counts, both dollar figures, whether routing was worth it and whether the gate fired —
+  or `null` when the gate had nothing to say, and `sensitivity` is the strictest class the paths the
+  task names classified to (`open`/`standard`/`custom`/`restricted`);
 - one JSON line per boot appended to `routing.jsonl` in the mothership's data directory, tagged
   `"kind": "decision"` — the recorded set a future replacement for the heuristic could be evaluated
   against. When a colony that went through routing reaches a terminal state, a second line, tagged
@@ -2212,15 +2215,17 @@ The journal behind it is `spend.jsonl` in the data dir, next to `sessions.json` 
 append-only, one JSON line per event, never rewritten. Colony cleanup and deletion do not touch it,
 so the history outlives the sessions that made it. A line that fails to parse, or a row from a newer
 build whose extra keys this one does not know, is skipped rather than fatal. The rows, with the UTC
-day each one is filed under and `cost_usd` omitted while nothing measured it:
+day each one is filed under and `cost_usd` omitted while nothing measured it. Colony-scoped rows
+also name the colony (`session`) and the agent module that ran it (`agent`, the harness); chat rows
+and rows from builds before those fields existed carry neither, and both still parse:
 
 ```json
-{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "usage", "model": "claude-opus-5",
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "usage", "session": "clgay4wk", "agent": "claude-code", "model": "claude-opus-5",
  "input_tokens": 400, "output_tokens": 10, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd": 1.50}
-{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "usage", "cost_usd": 0.09}
-{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "routed", "cost_usd": 0.03}
-{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "launched"}
-{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "returned"}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "usage", "session": "clgay4wk", "agent": "claude-code", "cost_usd": 0.09}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "routed", "session": "clgay4wk", "agent": "claude-code", "cost_usd": 0.03}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "launched", "session": "clgay4wk", "agent": "claude-code"}
+{"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "returned", "session": "clgay4wk", "agent": "claude-code"}
 ```
 
 `usage` rows are a turn's increment over the turn before it (the session record keeps the
@@ -2228,6 +2233,30 @@ cumulative; the journal gets the deltas). A one-model turn files its cost on tha
 multi-model turn files per-model token rows and its cost on an un-modeled row, mirroring the
 attribution rule. A failed append is reported through the app's sticky storage alert and leaves
 the run unchanged: a lost row is a lost measurement, not a failed run.
+
+Which channel measured a row's `cost_usd` splits each colony's spend in two. A `usage` row's dollar
+is the agent's own turn-end estimate: first-party traffic never passes the gateway — microsandbox
+swaps the credential for `api.anthropic.com` at its TLS edge — so the only witness to that spend is
+the agent itself, and the figure arrives once a turn, already an estimate. A `routed` row's dollar
+is the gateway's metered price, computed from the provider's `pricing` rates as it counts the
+response (§6.5). The split bounds the budget the same way: a routed provider without `pricing`
+still counts its tokens but contributes $0, so a colony that spends only through one never reaches
+`budget_usd` and is never stopped for spend — give such a provider its rates first (§6.5 lists the
+five). Past `budget_usd` the mothership stops the colony and the gateway refuses its further routed
+requests with `403` (§6.5); past `host_disk` it stops the colony the same way, the footprint
+measured every five minutes. Either way the worktree is kept, so raising the limit and pressing
+Resume continues the colony.
+
+`scripts/colony-report.mjs --costs` reads the journal and answers per colony instead of per org:
+each colony's rows grouped under its `session` id with the `agent` that ran them, `estimated` and
+`metered` shown separately (a `–` is unmeasured, never $0), a colony with tokens but no measured
+dollar labelled `unpriced — tokens only`, and rows that carry no `session` — chat, and every row
+from a build before the field existed — reported as `unattributed`, so the totals still sum to the
+whole window. A second table rolls the same rows up by harness × model. By default the report sums
+the same window `GET /api/spend/history` answers — the last 30 days ending today UTC — keeping rows
+by `day`: `--days` (clamped 1–365) changes the length, `--since` overrides the floor, rows dated
+after today drop either way, the Total line names the window, and `--json` emits the same shape
+with `window` on it; `--repo` keeps the colonies sessions.json names with that repository.
 
 ### 6.9 Activity log
 

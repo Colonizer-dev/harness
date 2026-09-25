@@ -1,0 +1,18 @@
+{"ts":"2026-09-14T09:00:00Z","day":"2026-09-14","org":"acme","kind":"launched","session":"claudeaa","agent":"claude-code"}
+{"ts":"2026-09-14T09:05:00Z","day":"2026-09-14","org":"acme","kind":"usage","session":"claudeaa","agent":"claude-code","model":"claude-opus-5","input_tokens":100,"output_tokens":50,"cache_read_tokens":200,"cache_write_tokens":0,"cost_usd":0.25}
+{"ts":"2026-09-14T09:20:00Z","day":"2026-09-14","org":"acme","kind":"usage","session":"claudeaa","agent":"claude-code","model":"claude-opus-5","input_tokens":300,"output_tokens":10,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.5}
+{"ts":"2026-09-14T09:40:00Z","day":"2026-09-14","org":"acme","kind":"usage","session":"claudeaa","agent":"claude-code","model":"zai/glm-5.3-flash","input_tokens":70,"output_tokens":30,"cache_read_tokens":0,"cache_write_tokens":0}
+{"ts":"2026-09-14T09:40:01Z","day":"2026-09-14","org":"acme","kind":"usage","session":"claudeaa","agent":"claude-code","model":"deepseek/deepseek-flash","input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_write_tokens":0}
+{"ts":"2026-09-14T09:40:02Z","day":"2026-09-14","org":"acme","kind":"usage","session":"claudeaa","agent":"claude-code","input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.25}
+{"ts":"2026-09-14T10:00:00Z","day":"2026-09-14","org":"acme","kind":"returned","session":"claudeaa","agent":"claude-code"}
+{"ts":"2026-09-14T11:00:00Z","day":"2026-09-14","org":"acme","kind":"usage","model":"claude-opus-5","input_tokens":40,"output_tokens":20,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.125}
+{"ts":"2026-09-15T08:00:00Z","day":"2026-09-15","org":"acme","kind":"launched","session":"routedbb","agent":"codex"}
+{"ts":"2026-09-15T08:10:00Z","day":"2026-09-15","org":"acme","kind":"routed","session":"routedbb","agent":"codex","input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.25}
+{"ts":"2026-09-15T08:30:00Z","day":"2026-09-15","org":"acme","kind":"usage","session":"routedbb","agent":"codex","model":"deepseek/deepseek-flash","input_tokens":200,"output_tokens":40,"cache_read_tokens":0,"cache_write_tokens":0}
+{"ts":"2026-09-15T08:45:00Z","day":"2026-09-15","org":"acme","kind":"routed","session":"routedbb","agent":"codex","input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.125}
+{"ts":"2026-09-15T09:00:00Z","day":"2026-09-15","org":"acme","kind":"returned","session":"routedbb","agent":"codex"}
+{"ts":"2026-09-15T09:30:00Z","day":"2026-09-15","org":"bee","kind":"launched","session":"freecc","agent":"opencode"}
+{"ts":"2026-09-15T09:40:00Z","day":"2026-09-15","org":"bee","kind":"usage","session":"freecc","agent":"opencode","model":"minimax/minimax-01","input_tokens":500,"output_tokens":120,"cache_read_tokens":0,"cache_write_tokens":0}
+{"ts":"2026-09-15T10:00:00Z","day":"2026-09-15","org":"chat","kind":"usage","model":"claude-opus-5","input_tokens":80,"output_tokens":30,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.0625}
+{"ts":"2026-09-15T10:05:00Z","day":"2026-09-15","org":"acme","kind":"harvested","session":"routedbb","agent":"codex"}
+{"this line is not a journal row at all"}

@@ -234,6 +234,14 @@ struct SpendRow {
     day: String,
     org: String,
     kind: String,
+    /// The colony the row belongs to (`Session::id`) and the agent module — the harness — that ran
+    /// it (issue #296), so spend can later be grouped per harness as well as per org. Colony-scoped
+    /// rows carry both; chat rows carry neither, and rows a build before the fields existed wrote
+    /// neither. Omitted while absent, never an empty string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     input_tokens: u64,
@@ -264,6 +272,15 @@ fn base_row(kind: &str, org: &str) -> SpendRow {
     }
 }
 
+/// Stamps a colony-scoped row with the session it belongs to and the agent module that ran it. A
+/// session record that never learned its module stays unnamed rather than an empty string; chat
+/// rows never pass through here.
+fn colony_row(mut row: SpendRow, s: &Session) -> SpendRow {
+    row.session = Some(s.id.clone());
+    row.agent = (!s.agent.is_empty()).then(|| s.agent.clone());
+    row
+}
+
 /// Appends one row to the journal. A lost row is a lost measurement, not a reason to fail whatever
 /// just happened, so a failed append is reported through the app's sticky storage alert and the
 /// caller carries on — the same deal a lost routing record gets.
@@ -277,22 +294,22 @@ async fn append_row(app: &App, row: SpendRow) {
 }
 
 /// A colony was admitted, queued or starting: the journal's `launched` edge, filed today.
-pub(crate) async fn record_launched(app: &App, org: &str) {
-    append_row(app, base_row("launched", org)).await;
+pub(crate) async fn record_launched(app: &App, s: &Session) {
+    append_row(app, colony_row(base_row("launched", &s.org), s)).await;
 }
 
 /// A colony crossed into its terminal state — PR opened, merged or closed, nothing to push,
 /// stopped or failed: the journal's `returned` edge. Recorded at the transition ([`App::update_session`]
 /// and the queue's retire both call this), never on the updates that follow.
-pub(crate) async fn record_returned(app: &App, org: &str) {
-    append_row(app, base_row("returned", org)).await;
+pub(crate) async fn record_returned(app: &App, s: &Session) {
+    append_row(app, colony_row(base_row("returned", &s.org), s)).await;
 }
 
 /// The gateway routed and priced one response: its cost joins today's `routed` spend. There is no
 /// model on the row: the gateway counts what the provider charged in total for a response and does
 /// not know which of its models served it.
-pub(crate) async fn record_routed(app: &App, org: &str, cost: f64) {
-    let mut row = base_row("routed", org);
+pub(crate) async fn record_routed(app: &App, s: &Session, cost: f64) {
+    let mut row = colony_row(base_row("routed", &s.org), s);
     row.cost_usd = Some(cost);
     append_row(app, row).await;
 }
@@ -351,19 +368,25 @@ fn turn_deltas(old_cost: Option<f64>, old_usage: Option<&Value>, new_cost: Optio
 /// The journal rows one turn's delta files: a one-model turn's cost rides on that model's row; a
 /// multi-model turn's cost has no single owner, so it goes on its own un-modeled row — per-model
 /// cost rows there would have to split a dollar, which is fabrication. Cost alone, with nothing to
-/// pin it to, files the same un-modeled row.
-fn usage_rows(day: &str, org: &str, delta: &TurnDelta) -> Vec<SpendRow> {
-    let usage = |model: &str, tokens: &Tokens, cost| SpendRow {
-        ts: Utc::now().to_rfc3339(),
-        day: day.to_string(),
-        org: org.to_string(),
-        kind: "usage".into(),
-        model: Some(model.to_string()),
-        input_tokens: tokens.input,
-        output_tokens: tokens.output,
-        cache_read_tokens: tokens.cache_read,
-        cache_write_tokens: tokens.cache_write,
-        cost_usd: cost,
+/// pin it to, files the same un-modeled row. Every row names the session and its harness.
+fn usage_rows(day: &str, s: &Session, delta: &TurnDelta) -> Vec<SpendRow> {
+    let usage = |model: &str, tokens: &Tokens, cost| {
+        colony_row(
+            SpendRow {
+                ts: Utc::now().to_rfc3339(),
+                day: day.to_string(),
+                org: s.org.clone(),
+                kind: "usage".into(),
+                model: Some(model.to_string()),
+                input_tokens: tokens.input,
+                output_tokens: tokens.output,
+                cache_read_tokens: tokens.cache_read,
+                cache_write_tokens: tokens.cache_write,
+                cost_usd: cost,
+                ..SpendRow::default()
+            },
+            s,
+        )
     };
     let mut rows = Vec::new();
     if delta.models.len() == 1 && delta.cost.is_some() {
@@ -374,13 +397,16 @@ fn usage_rows(day: &str, org: &str, delta: &TurnDelta) -> Vec<SpendRow> {
             rows.push(usage(model, tokens, None));
         }
         if let Some(cost) = delta.cost {
-            rows.push(SpendRow {
-                day: day.to_string(),
-                org: org.to_string(),
-                kind: "usage".into(),
-                cost_usd: Some(cost),
-                ..SpendRow::default()
-            });
+            rows.push(colony_row(
+                SpendRow {
+                    day: day.to_string(),
+                    org: s.org.clone(),
+                    kind: "usage".into(),
+                    cost_usd: Some(cost),
+                    ..SpendRow::default()
+                },
+                s,
+            ));
         }
     }
     rows
@@ -392,7 +418,7 @@ fn usage_rows(day: &str, org: &str, delta: &TurnDelta) -> Vec<SpendRow> {
 /// file keeps summing to the same totals however many turns a colony took.
 pub(crate) async fn record_turn_usage(
     app: &App,
-    org: &str,
+    s: &Session,
     old_cost: Option<f64>,
     old_usage: Option<&Value>,
     new_cost: Option<f64>,
@@ -403,7 +429,7 @@ pub(crate) async fn record_turn_usage(
         return;
     }
     let day = today();
-    for row in usage_rows(&day, org, &delta) {
+    for row in usage_rows(&day, s, &delta) {
         append_row(app, row).await;
     }
 }
@@ -639,14 +665,22 @@ mod tests {
 
     #[test]
     fn a_multi_model_turn_files_cost_on_its_own_row() {
+        let mut s = colony("acme", SessionStatus::Running);
+        s.id = "col-1".into();
+        s.agent = "claude-code".into();
         let delta = turn_deltas(
             None,
             None,
             Some(3.0),
             Some(&json!({"a": {"input_tokens": 10}, "b": {"input_tokens": 20}})),
         );
-        let rows = usage_rows("2026-09-20", "acme", &delta);
+        let rows = usage_rows("2026-09-20", &s, &delta);
         assert_eq!(rows.len(), 3, "one row per model plus the unattributable cost");
+        assert!(
+            rows.iter()
+                .all(|r| r.session.as_deref() == Some("col-1") && r.agent.as_deref() == Some("claude-code")),
+            "every row of the turn names the colony and its harness"
+        );
         let model_rows: Vec<&SpendRow> = rows.iter().filter(|r| r.model.is_some()).collect();
         let cost_rows: Vec<&SpendRow> = rows.iter().filter(|r| r.model.is_none()).collect();
         assert_eq!(model_rows.len(), 2);
@@ -659,7 +693,7 @@ mod tests {
 
         // A single-model turn carries its cost on that one model's row.
         let single = turn_deltas(None, None, Some(1.5), Some(&json!({"a": {"input_tokens": 5}})));
-        let rows = usage_rows("2026-09-20", "acme", &single);
+        let rows = usage_rows("2026-09-20", &s, &single);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.as_deref(), Some("a"));
         assert_eq!(rows[0].cost_usd, Some(1.5));
@@ -667,7 +701,7 @@ mod tests {
         // Cost alone, with tokens flat, is one un-modeled row.
         let flat = json!({"a": {"input_tokens": 5}});
         let only_cost = turn_deltas(Some(1.0), Some(&flat), Some(2.0), Some(&flat));
-        let rows = usage_rows("2026-09-20", "acme", &only_cost);
+        let rows = usage_rows("2026-09-20", &s, &only_cost);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, None);
         assert_eq!(rows[0].cost_usd, Some(1.0));
@@ -678,16 +712,21 @@ mod tests {
         let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
         let app = crate::tests::test_app(&root);
         let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        let mut acme = colony("acme", SessionStatus::Running);
+        acme.id = "col-1".into();
+        acme.agent = "claude-code".into();
+        let mut team = colony("team", SessionStatus::Running);
+        team.id = "col-2".into();
 
         // A day's activity, filed through the same helpers every other path calls.
-        record_launched(&app, "acme").await;
-        record_launched(&app, "acme").await;
-        record_returned(&app, "acme").await;
-        record_launched(&app, "team").await;
-        record_routed(&app, "acme", 0.25).await;
+        record_launched(&app, &acme).await;
+        record_launched(&app, &acme).await;
+        record_returned(&app, &acme).await;
+        record_launched(&app, &team).await;
+        record_routed(&app, &acme, 0.25).await;
         record_turn_usage(
             &app,
-            "acme",
+            &acme,
             None,
             None,
             Some(1.0),
@@ -697,7 +736,7 @@ mod tests {
         // The second turn's cumulative replaced the record; the journal gets only the increment.
         record_turn_usage(
             &app,
-            "acme",
+            &acme,
             Some(1.0),
             Some(&json!({"claude-opus-5": {"input_tokens": 100}})),
             Some(2.5),
@@ -750,14 +789,16 @@ mod tests {
     async fn history_answers_in_the_contracts_shape_and_clamps_days() {
         let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
         let app = crate::tests::test_app(&root);
-        record_launched(&app, "acme").await;
-        record_launched(&app, "acme").await;
-        record_returned(&app, "acme").await;
-        record_launched(&app, "team").await;
-        record_routed(&app, "acme", 0.5).await;
+        let mut acme = colony("acme", SessionStatus::Running);
+        acme.id = "col-1".into();
+        record_launched(&app, &acme).await;
+        record_launched(&app, &acme).await;
+        record_returned(&app, &acme).await;
+        record_launched(&app, &colony("team", SessionStatus::Running)).await;
+        record_routed(&app, &acme, 0.5).await;
         record_turn_usage(
             &app,
-            "acme",
+            &acme,
             None,
             None,
             Some(3.0),
@@ -816,10 +857,10 @@ mod tests {
 
         // The same session filed as its journal rows: a `routed` row for the dollar, a `usage`
         // row for the model with no cost to ride on it. The history sums to the same picture.
-        record_routed(&app, "acme", 0.5).await;
+        record_routed(&app, &routed, 0.5).await;
         record_turn_usage(
             &app,
-            "acme",
+            &routed,
             None,
             None,
             None, // Claude reported no cost for this routed turn
@@ -870,6 +911,165 @@ mod tests {
         let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
         assert_eq!(acme.spend.cost_usd, Some(1.0));
         assert_eq!(acme.spend.models.get("claude-opus-5").unwrap().tokens, 100);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn colony_rows_name_their_session_and_harness_chat_rows_neither() {
+        let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut s = colony("acme", SessionStatus::Running);
+        s.id = "col-1".into();
+        s.agent = "claude-code".into();
+
+        record_launched(&app, &s).await;
+        record_routed(&app, &s, 0.25).await;
+        record_turn_usage(
+            &app,
+            &s,
+            None,
+            None,
+            Some(1.0),
+            Some(&json!({"claude-opus-5": {"input_tokens": 100}})),
+        )
+        .await;
+        // A record that never learned its module is unnamed, not an empty string.
+        let mut unnamed = colony("acme", SessionStatus::Running);
+        unnamed.id = "col-2".into();
+        record_returned(&app, &unnamed).await;
+        // The cockpit's chat spend is nobody's colony: no session, no harness.
+        record_chat_usage(&app, "chat", "claude-opus-5", 10, 5, None).await;
+
+        let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &today);
+        assert_eq!(rows.len(), 5);
+        let named: Vec<&SpendRow> = rows.iter().filter(|r| r.session.as_deref() == Some("col-1")).collect();
+        assert_eq!(named.len(), 3, "launched, routed and the turn's usage row");
+        assert!(
+            named.iter().all(|r| r.agent.as_deref() == Some("claude-code")),
+            "every colony-scoped row names the harness that ran it"
+        );
+        let unnamed_row = rows.iter().find(|r| r.session.as_deref() == Some("col-2")).unwrap();
+        assert_eq!(unnamed_row.agent, None);
+        let chat = rows.iter().find(|r| r.org == "chat").unwrap();
+        assert_eq!(chat.session, None, "a chat row is nobody's colony");
+        assert_eq!(chat.agent, None);
+
+        // The new fields ride along without changing what the history sums.
+        let days = aggregate(&rows, Utc::now().date_naive(), 30);
+        let (_, orgs) = &days[0];
+        let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
+        assert_eq!(acme.spend.cost_usd, Some(1.0));
+        assert_eq!(acme.spend.routed_cost_usd, Some(0.25));
+        assert_eq!(acme.spend.input_tokens, 100);
+
+        // Omitted, not empty, on the wire: the chat line carries neither key.
+        let raw = std::fs::read_to_string(spend_file(&app.cfg.data_dir)).unwrap();
+        let chat_line = raw.lines().find(|l| l.contains("chat")).unwrap();
+        assert!(!chat_line.contains("session") && !chat_line.contains("agent"), "{chat_line}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rows_from_before_session_and_agent_still_parse_and_aggregate() {
+        let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let day = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        // The spelling a build before the fields wrote: no session, no agent on any row.
+        let row = |kind: &str, extra: &str| {
+            format!(
+                r#"{{"ts":"{}","day":"{day}","org":"acme","kind":"{kind}"{extra}}}"#,
+                Utc::now().to_rfc3339()
+            )
+        };
+        let legacy = format!(
+            "{}\n{}\n{}\n",
+            row(
+                "usage",
+                r#","model":"claude-opus-5","input_tokens":100,"output_tokens":10,"cost_usd":1.0"#
+            ),
+            row("routed", r#","cost_usd":0.5"#),
+            row("launched", ""),
+        );
+        std::fs::write(spend_file(&app.cfg.data_dir), legacy).unwrap();
+
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &day);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.session.is_none() && r.agent.is_none()));
+        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30);
+        assert_eq!(days.len(), 1);
+        let (_, orgs) = &days[0];
+        let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
+        assert_eq!(acme.spend.cost_usd, Some(1.0));
+        assert_eq!(acme.spend.routed_cost_usd, Some(0.5));
+        assert_eq!(acme.spend.input_tokens, 100);
+        assert_eq!(acme.spend.output_tokens, 10);
+        assert_eq!(acme.launched, 1);
+        assert_eq!(acme.spend.models.get("claude-opus-5").unwrap().tokens, 110);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Reconciliation with the node half of issue #296: the shared fixture is read and summed the
+    /// exact way `GET /api/spend/history` reads and sums a `spend.jsonl`, and the sums must equal
+    /// the constants `scripts/test/colony-report.test.mjs` asserts for the same file (its
+    /// `--costs` reconciliation test). Change the fixture, or either side's expectations, and the
+    /// other two follow.
+    #[test]
+    fn the_shared_spend_fixture_sums_the_same_on_both_sides_of_the_language_split() {
+        let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        std::fs::write(
+            spend_file(&app.cfg.data_dir),
+            include_str!("../../../scripts/test/fixtures/spend-costs.jsonl"),
+        )
+        .unwrap();
+
+        // A fixed window wide enough for every day the fixture names (2026-09-14 and 2026-09-15),
+        // so the test does not age out as the real calendar moves.
+        let today = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+        let days = journal_days(&app.cfg.data_dir, today, 30);
+        assert_eq!(days.len(), 2, "the two days the fixture mentions, oldest first");
+        let (mut cost, mut routed, mut input, mut output, mut cache_read, mut cache_write) = (0.0, 0.0, 0, 0, 0, 0);
+        for (_, orgs) in &days {
+            for (_, org) in orgs {
+                cost += org.spend.cost_usd.unwrap_or_default();
+                routed += org.spend.routed_cost_usd.unwrap_or_default();
+                input += org.spend.input_tokens;
+                output += org.spend.output_tokens;
+                cache_read += org.spend.cache_read_tokens;
+                cache_write += org.spend.cache_write_tokens;
+            }
+        }
+        // Every dollar the fixture carries is a binary fraction, so the f64 sums are exact; the
+        // epsilon keeps the comparison honest should the fixture ever grow one that is not.
+        assert!(
+            (cost - 1.1875).abs() < 1e-9,
+            "usage-row dollars, chat and legacy included, got {cost}"
+        );
+        assert!((routed - 0.375).abs() < 1e-9, "the routed/gateway dollars, got {routed}");
+        assert_eq!(input, 1300);
+        assert_eq!(output, 305);
+        assert_eq!(cache_read, 200);
+        assert_eq!(cache_write, 0);
+
+        // The new-format rows name their colony and harness; the fixture's one legacy row and its
+        // chat row still parse, unnamed.
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", "2026-09-30");
+        assert_eq!(rows.len(), 17, "the torn line is skipped, everything else reads");
+        assert!(
+            rows.iter()
+                .filter(|r| r.session.as_deref() == Some("claudeaa"))
+                .all(|r| r.agent.as_deref() == Some("claude-code")),
+            "the claudeaa rows carry their harness"
+        );
+        let legacy = rows.iter().find(|r| r.session.is_none() && r.day == "2026-09-14").unwrap();
+        assert_eq!(legacy.agent, None, "the fixture's legacy row parses unnamed");
+        let chat = rows.iter().find(|r| r.org == "chat").unwrap();
+        assert_eq!(chat.session, None);
+        assert_eq!(chat.agent, None);
 
         let _ = std::fs::remove_dir_all(root);
     }
