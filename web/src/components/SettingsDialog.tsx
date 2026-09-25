@@ -40,7 +40,7 @@ import type {
   LoginItemStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
-import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
+import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, lastFailureText, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
 import { useModels } from "../useModels";
 import { type ImagePull } from "../useImagePull";
 import { setupTone, type SetupView } from "../setup";
@@ -3016,6 +3016,7 @@ function UsageLine({ provider }: { provider: ModelProvider }) {
   const tone = usageHealthTone(health);
   const rate = failureRateText(health, requests);
   const avg = avgLatencyText(health, requests);
+  const lastFailure = lastFailureText(health?.last_failure);
   const since = formatSince(usage?.since);
 
   const segments: { text: string; title?: string; tone?: "warn" | "err" | "lift" }[] = [];
@@ -3031,6 +3032,12 @@ function UsageLine({ provider }: { provider: ModelProvider }) {
         tone: tone === "err" ? "err" : undefined,
       });
     if (avg) segments.push({ text: avg, title: AVG_LATENCY_TITLE });
+    if (lastFailure)
+      segments.push({
+        text: lastFailure,
+        title: "The typed failure code of this provider's most recent failed request, as the gateway recorded it in its audit log.",
+        tone: "warn",
+      });
     segments.push({ text: `${requests.toLocaleString()} ${requests === 1 ? "request" : "requests"}${since ? ` since ${since}` : ""}` });
     if (lastUsed) segments.push({ text: `last used ${lastUsed}` });
     if (failures > 0)

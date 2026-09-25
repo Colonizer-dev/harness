@@ -31,6 +31,7 @@ mod execution;
 mod findings;
 mod fleet;
 mod gateway;
+mod gateway_audit;
 mod github;
 mod graft;
 mod headroom;

@@ -320,7 +320,7 @@ fn duplicate_provider_ids(providers: &[Provider]) -> Vec<String> {
     dups
 }
 
-fn valid_model(model: &str) -> bool {
+pub(crate) fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 120 && model.chars().all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c))
 }
 

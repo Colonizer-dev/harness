@@ -57,6 +57,15 @@ export function avgLatencyText(health: ProviderUsageHealth | null | undefined, r
 }
 
 /**
+ * The provider's most recent typed failure as shown: `last failure: unreachable`, the gateway's own
+ * failure code (issue #302) reported as given. Null when the Mothership names none.
+ */
+export function lastFailureText(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return `last failure: ${code}`;
+}
+
+/**
  * The Mothership's verdict as a tone: `err` for degraded, `ok` for rated and fine, and none when it
  * does not rate the provider at all — no data, no verdict.
  */
