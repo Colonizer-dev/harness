@@ -1,15 +1,17 @@
 // The storage panel (issue #220): data-dir usage by category, free space against the warn and
 // floor thresholds, and one row per reclaimable colony with a Clean up button each (the same
 // confirm SessionView uses). The microsandbox home row is informational — it holds the shared
-// image cache, so it is never offered for cleanup. The pure view is what the tests render.
+// image cache, so it is never offered for cleanup. Below that sits the log archive (issue #496):
+// its size, and a preview-then-apply retention form. The pure view is what the tests render.
 import { useEffect, useState, type ReactElement } from "react";
 
+import { ApiError } from "../api";
 import { IconExternal, IconSettings, IconTrash } from "../components/icons";
 import { diskSize } from "../components/SessionView";
 import type { SectionId } from "../components/SettingsDialog";
 import { Button, SESSION_STATUS, Spinner, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
-import type { StorageSummary } from "../types";
+import type { ArchiveListing, RetentionPlan, RetentionRequest, StorageSummary } from "../types";
 
 /** The colony-cleanup confirm, word for word the one SessionView's Clean up button uses. */
 export const CLEANUP_CONFIRM =
@@ -21,12 +23,115 @@ export function prReclaimable(summary: StorageSummary): { bytes: number; colonie
   return { bytes: rows.reduce((total, row) => total + row.bytes, 0), colonies: rows.length };
 }
 
+/** A preview's one-line readout: what the pass would take — or, when the single-copy rule held
+ *  every candidate back, that nothing goes until deleting the only copy is allowed. The backend
+ *  never answers both a non-empty `remove` and a `kept_single_copy` count, so the held-back case
+ *  is just `kept_single_copy > 0`. */
+export function retentionSummary(plan: RetentionPlan): string {
+  if (plan.kept_single_copy > 0) {
+    const bundle = plan.kept_single_copy === 1 ? "bundle is" : "bundles are";
+    return `Nothing would be removed: ${plan.kept_single_copy} ${bundle} the only copy (tick "Allow deleting the only copy")`;
+  }
+  return `This would remove ${plan.count} ${plan.count === 1 ? "bundle" : "bundles"}, ${diskSize(plan.bytes)}`;
+}
+
+const ARCHIVE_FIELD = "w-16 rounded-md border border-border bg-transparent px-1.5 py-0.5 text-right font-mono text-[11px] text-text outline-none focus:border-border-strong";
+
+/** A field's number, or null when it is blank or not a usable non-negative number (the request sends null = unset). */
+const numeric = (value: string): number | null => {
+  const n = Number(value);
+  return value.trim() === "" || !Number.isFinite(n) || n < 0 ? null : n;
+};
+
+/** The archive's Automatic cleanup form (issue #496): keep N days and/or cap at X GB, with a
+ *  Preview that words the plan and an Apply that only goes out once a preview is on the table,
+ *  carrying its bundle list as `expect`. Changing any input voids the preview; a 409 — the
+ *  archive moved under us — does the same and asks for a fresh one. */
+function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) => Promise<RetentionPlan>; onApplied: () => void }): ReactElement {
+  const [keepDays, setKeepDays] = useState("");
+  const [maxGb, setMaxGb] = useState("");
+  const [singleCopy, setSingleCopy] = useState(false);
+  const [preview, setPreview] = useState<RetentionPlan | null>(null);
+  const [stale, setStale] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  /** Any input change voids the preview it would have been applied against. */
+  const retool = (set: () => void) => {
+    set();
+    setPreview(null);
+    setStale(false);
+  };
+
+  const run = async (dryRun: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const plan = await onRun({
+        keep_days: numeric(keepDays),
+        max_gb: numeric(maxGb),
+        allow_single_copy: singleCopy,
+        dry_run: dryRun,
+        expect: dryRun ? null : (preview?.remove.map((row) => row.bundle) ?? null),
+      });
+      if (dryRun) {
+        setPreview(plan);
+        setStale(false);
+      } else {
+        setPreview(null);
+        onApplied();
+      }
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) {
+        setPreview(null);
+        setStale(true);
+      } else {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12.5px] text-muted">
+      <span className="text-faint">Automatic cleanup</span>
+      <label className="flex items-center gap-1">
+        keep
+        <input type="number" min={0} value={keepDays} placeholder="—" onChange={(e) => retool(() => setKeepDays(e.target.value))} className={ARCHIVE_FIELD} />
+        days
+      </label>
+      <label className="flex items-center gap-1">
+        cap
+        <input type="number" min={0} value={maxGb} placeholder="—" onChange={(e) => retool(() => setMaxGb(e.target.value))} className={ARCHIVE_FIELD} />
+        GB
+      </label>
+      <label className="flex items-center gap-1" title="A bundle that is the only copy of a colony's logs is never deleted unless this is set">
+        <input type="checkbox" checked={singleCopy} onChange={(e) => retool(() => setSingleCopy(e.target.checked))} />
+        Allow deleting the only copy
+      </label>
+      <Button size="sm" disabled={busy} onClick={() => void run(true)}>
+        Preview
+      </Button>
+      <Button size="sm" variant="danger" disabled={busy || preview == null} onClick={() => void run(false)}>
+        Apply
+      </Button>
+      {stale && <span className="text-warn">The archive changed since the preview — preview again.</span>}
+      {error && <span className="text-warn">{error}</span>}
+      {preview && !stale && <span className="font-mono text-[11px] text-faint">{retentionSummary(preview)}</span>}
+    </div>
+  );
+}
+
 export function StoragePanelView({
   summary,
   onOpenColony,
   onCleanup,
   cleaningId,
   onOpenSettings,
+  archive = null,
+  onRetention,
+  onArchiveChanged,
 }: {
   summary: StorageSummary;
   /** Jumps to the colony, the same navigation the overview's colony rows use. */
@@ -36,6 +141,12 @@ export function StoragePanelView({
   cleaningId: string | null;
   /** Opens settings at a section; the header gear shows only when given. */
   onOpenSettings?: (section: SectionId) => void;
+  /** GET /api/archive's listing; null (an older mothership) hides the whole log-archive section. */
+  archive?: ArchiveListing | null;
+  /** Runs a retention pass — preview (`dry_run`) or apply; absent in the pure view. */
+  onRetention?: (body: RetentionRequest) => Promise<RetentionPlan>;
+  /** Called after an apply, so the container refetches the archive. */
+  onArchiveChanged?: () => void;
 }): ReactElement {
   const pr = prReclaimable(summary);
   const noChanges = summary.reclaimable.filter((row) => row.pr_url == null);
@@ -129,6 +240,17 @@ export function StoragePanelView({
           </span>
         </div>
       ))}
+      {archive && (
+        <div className="border-t border-border px-3.5 py-2">
+          <div className="flex flex-wrap items-center gap-x-3 font-mono text-[11px] text-faint">
+            <span className="text-[10.5px] tracking-[0.12em]">LOG ARCHIVE</span>
+            <span title={`archived colony logs under ${archive.root}`}>
+              {archive.count} {archive.count === 1 ? "bundle" : "bundles"} · {diskSize(archive.bytes)}
+            </span>
+          </div>
+          {onRetention && <RetentionForm onRun={onRetention} onApplied={() => onArchiveChanged?.()} />}
+        </div>
+      )}
     </section>
   );
 }
@@ -146,6 +268,31 @@ export function StoragePanel({
   const toast = useToast();
   const [summary, setSummary] = useState<StorageSummary | null>(null);
   const [cleaningId, setCleaningId] = useState<string | null>(null);
+  const [archive, setArchive] = useState<ArchiveListing | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // One fetch: the archive only moves when a colony is deleted or retention is applied, and
+    // the apply refetches below. An older mothership has no /api/archive: the section stays hidden.
+    api
+      .archive()
+      .then((loaded) => {
+        if (!cancelled) setArchive(loaded);
+      })
+      .catch(() => {
+        if (!cancelled) setArchive(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  /** Runs a retention pass; an apply refetches the listing so the section's counts keep up. */
+  const runRetention = async (body: RetentionRequest) => {
+    const plan = await api.archiveRetention(body);
+    if (!body.dry_run) setArchive(await api.archive());
+    return plan;
+  };
 
   useEffect(() => {
     // A pushed /api/stream frame overrides the fetch (issue #446); when the stream drops its
@@ -194,6 +341,9 @@ export function StoragePanel({
       onCleanup={(id) => void cleanup(id)}
       cleaningId={cleaningId}
       onOpenSettings={onOpenSettings}
+      archive={archive}
+      onRetention={(body) => runRetention(body)}
+      onArchiveChanged={() => void api.archive().then(setArchive).catch(() => {})}
     />
   );
 }

@@ -409,6 +409,54 @@ export interface StorageSummary {
   orphans: Array<{ path: string; bytes: number; action: string }>;
 }
 
+/**
+ * One archived colony's logs under `<data_dir>/archive` (issue #496). The backend's sidecar record
+ * carries every key on every entry — absent reads as `null`, never a missing field — and sends
+ * several more (`org`, `pr_url`, `cost_usd`, `model_usage`, `model_tier`, `agent`, `created_at`,
+ * `updated_at`, `mothership`, `fingerprint`) that nothing here reads.
+ */
+export interface ArchiveEntry {
+  session: string;
+  repo: string;
+  /** null for a colony started on a repository without an issue. */
+  issue: number | null;
+  title: string;
+  status: string;
+  bundle: string;
+  bytes: number;
+  archived_at: string;
+  revision: number;
+}
+
+/** GET /api/archive (issue #496): the whole log archive, bundles included. */
+export interface ArchiveListing {
+  root: string;
+  count: number;
+  bytes: number;
+  entries: ArchiveEntry[];
+}
+
+/** POST /api/archive/retention (issue #496): preview a cleanup pass (`dry_run: true`) or apply one. */
+export interface RetentionRequest {
+  keep_days: number | null;
+  max_gb: number | null;
+  /** Bundles that are the only copy are never removed unless this is set. */
+  allow_single_copy: boolean;
+  dry_run: boolean;
+  /** On apply, the previewed bundle list; the server answers 409 when the archive no longer matches. */
+  expect: string[] | null;
+}
+
+/** POST /api/archive/retention's answer (issue #496): what the pass takes, or would take. */
+export interface RetentionPlan {
+  dry_run: boolean;
+  remove: Array<{ bundle: string; session: string; bytes: number; archived_at: string }>;
+  count: number;
+  bytes: number;
+  /** Bundles held back because they are the only copy and `allow_single_copy` was false. */
+  kept_single_copy: number;
+}
+
 /** GET /api/status `model_providers`: each configured model provider's cumulative requests and the health rule's verdict on it (§6.5) — the one rule the providers screen, the status poll and the notify module all share. */
 export interface ModelProviderStatus {
   id: string;

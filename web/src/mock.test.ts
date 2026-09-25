@@ -149,3 +149,47 @@ describe("mock stopSession (issue #361)", () => {
     expect(queued).toMatchObject({ result: "stopped", status: "stopped" });
   });
 });
+
+describe("mock log archive (issue #496)", () => {
+  it("archives a deleted colony's logs, and purges the bundle only when asked", async () => {
+    const api = createMockApi();
+    expect(await api.archive()).toMatchObject({ count: 2 });
+    await api.deleteSession("fail4321");
+    const kept = await api.archive();
+    expect(kept.count).toBe(3);
+    expect(kept.entries.find((e) => e.session === "fail4321")).toMatchObject({ repo: "acme/design-system", revision: 1 });
+    // Purging takes every bundle of that colony, seeded ones included.
+    const reply = (await api.deleteSession("old98765", { purgeLogs: true })) as { purged_bundles: number };
+    expect(reply.purged_bundles).toBe(1);
+    expect((await api.archive()).entries.map((e) => e.session)).toEqual(["merge5678", "fail4321"]);
+  });
+
+  it("previews and applies retention, holding the only copy back unless it may go", async () => {
+    const api = createMockApi();
+    // No rule, no plan: retention only ever does what an explicit rule asks for.
+    const none = { keep_days: null, max_gb: null, allow_single_copy: false, dry_run: true, expect: null };
+    expect(await api.archiveRetention(none)).toMatchObject({ remove: [], count: 0, bytes: 0, kept_single_copy: 0 });
+    // The cap picks the oldest bundle (5M of 7.5M against a 5,000,000-byte cap). With the only
+    // copy held back the preview removes nothing and counts the bundle in `kept_single_copy`,
+    // and applying that empty plan is a no-op.
+    const body = { keep_days: null, max_gb: 0.005, allow_single_copy: false };
+    const preview = await api.archiveRetention({ ...body, dry_run: true, expect: null });
+    expect(preview).toMatchObject({ dry_run: true, count: 0, bytes: 0, kept_single_copy: 1 });
+    expect(preview.remove).toEqual([]);
+    const applied = await api.archiveRetention({ ...body, dry_run: false, expect: preview.remove.map((r) => r.bundle) });
+    expect(applied).toMatchObject({ remove: [], count: 0, kept_single_copy: 1 });
+    expect((await api.archive()).count).toBe(2);
+
+    // With single-copy deletes allowed, the same rule removes the bundle for real.
+    const purged = await api.archiveRetention({ ...body, allow_single_copy: true, dry_run: false, expect: ["old98765-rev1.tar.zst"] });
+    expect(purged).toMatchObject({ count: 1, bytes: 5_242_880, kept_single_copy: 0 });
+    expect(purged.remove.map((r) => r.bundle)).toEqual(["old98765-rev1.tar.zst"]);
+    expect((await api.archive()).entries.map((e) => e.session)).toEqual(["merge5678"]);
+  });
+
+  it("answers 409 when the archive no longer matches the previewed bundle list", async () => {
+    const api = createMockApi();
+    const stale = { keep_days: null, max_gb: 0.0001, allow_single_copy: true, dry_run: false, expect: ["gone.tar.zst"] };
+    await expect(api.archiveRetention(stale)).rejects.toMatchObject({ status: 409 });
+  });
+});

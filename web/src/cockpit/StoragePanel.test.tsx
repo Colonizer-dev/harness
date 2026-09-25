@@ -1,11 +1,12 @@
 // The storage panel (issue #220): categories with the microsandbox home row marked as holding the
 // kept image cache, the reclaimable total counted from PR-opened colonies only, and the
-// admission-paused notice. Rendered to static markup: the test environment has no DOM.
+// admission-paused notice. Plus the log-archive section (issue #496): size, and a retention form
+// whose Apply is gated on a preview. Rendered to static markup: the test environment has no DOM.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { prReclaimable, StoragePanelView } from "./StoragePanel";
-import type { StorageSummary } from "../types";
+import { prReclaimable, retentionSummary, StoragePanelView } from "./StoragePanel";
+import type { ArchiveListing, StorageSummary } from "../types";
 
 const SUMMARY: StorageSummary = {
   enabled: true,
@@ -31,6 +32,22 @@ const SUMMARY: StorageSummary = {
 
 const markup = (summary: StorageSummary = SUMMARY) =>
   renderToStaticMarkup(<StoragePanelView summary={summary} onOpenColony={() => {}} onCleanup={() => {}} cleaningId={null} />);
+
+const ARCHIVE: ArchiveListing = {
+  root: "/var/lib/colonizer/archive",
+  count: 2,
+  bytes: 5_242_880 + 2_621_440,
+  entries: [
+    { session: "old98765", repo: "acme/webshop", issue: 61, title: "Checkout fails for guest users", status: "pr_opened", bundle: "old98765-rev1.tar.zst", bytes: 5_242_880, archived_at: "2026-09-19T10:00:00Z", revision: 1 },
+    { session: "merge5678", repo: "acme/design-system", issue: 18, title: "Dark mode palette drift", status: "merged", bundle: "merge5678-rev2.tar.zst", bytes: 2_621_440, archived_at: "2026-09-21T12:00:00Z", revision: 2 },
+  ],
+};
+
+const archiveMarkup = () =>
+  renderToStaticMarkup(
+    <StoragePanelView summary={SUMMARY} onOpenColony={() => {}} onCleanup={() => {}} cleaningId={null} archive={ARCHIVE} onRetention={async () => ({ dry_run: true, remove: [], count: 0, bytes: 0, kept_single_copy: 0 })} onArchiveChanged={() => {}} />,
+  );
+
 describe("StoragePanel", () => {
   it("renders usage by category and free space against the warn and floor thresholds", () => {
     const out = markup();
@@ -77,5 +94,27 @@ describe("StoragePanel", () => {
       <StoragePanelView summary={SUMMARY} onOpenColony={() => {}} onCleanup={() => {}} cleaningId={null} onOpenSettings={() => {}} />,
     );
     expect(out).toContain('aria-label="Storage settings"');
+  });
+
+  it("shows the log archive's bundle count and size, with Apply gated behind a preview", () => {
+    const out = archiveMarkup();
+    expect(out).toContain("LOG ARCHIVE");
+    expect(out).toContain("2 bundles · 7.5M");
+    expect(out).toContain("Automatic cleanup");
+    expect(out).toContain("Allow deleting the only copy");
+    expect(out).toContain("Preview");
+    // No preview yet, so the danger button cannot fire: the only disabled control is Apply.
+    expect(out).toContain("disabled");
+    // An older mothership without /api/archive hides the whole section.
+    expect(markup()).not.toContain("LOG ARCHIVE");
+  });
+
+  it("words a preview as what it would remove, and a single-copy hold as nothing going anywhere", () => {
+    const plan = (count: number, bytes: number, kept: number) => ({ dry_run: true, remove: [], count, bytes, kept_single_copy: kept });
+    expect(retentionSummary(plan(0, 0, 0))).toBe("This would remove 0 bundles, 0B");
+    expect(retentionSummary(plan(1, 2048, 0))).toBe("This would remove 1 bundle, 2K");
+    expect(retentionSummary(plan(2, 3 * 1024 ** 2, 0))).toBe("This would remove 2 bundles, 3M");
+    expect(retentionSummary(plan(0, 0, 1))).toBe(`Nothing would be removed: 1 bundle is the only copy (tick "Allow deleting the only copy")`);
+    expect(retentionSummary(plan(0, 0, 2))).toBe(`Nothing would be removed: 2 bundles are the only copy (tick "Allow deleting the only copy")`);
   });
 });

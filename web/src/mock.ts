@@ -4,6 +4,8 @@ import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import type {
   ActivityEntry,
+  ArchiveEntry,
+  RetentionPlan,
   PackagesPublished,
   PackagesDependencies,
   SupplyChain,
@@ -1235,6 +1237,12 @@ export function createMockApi(): Api {
   const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
   const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
   const mockChats = new Map<string, { meta: ChatMeta; messages: ChatMessage[] }>();
+  // The log archive (GET /api/archive, issue #496): two seeded bundles. Deletes append to it and
+  // retention passes take from it, so the Storage panel's Log archive section moves like the real one.
+  const archiveEntries: ArchiveEntry[] = [
+    { session: "old98765", repo: "acme/webshop", issue: 61, title: "Checkout fails for guest users", status: "pr_opened", bundle: "old98765-rev1.tar.zst", bytes: 5_242_880, archived_at: ago(1560), revision: 1 },
+    { session: "merge5678", repo: "acme/design-system", issue: 18, title: "Dark mode palette drift", status: "merged", bundle: "merge5678-rev2.tar.zst", bytes: 2_621_440, archived_at: ago(238), revision: 2 },
+  ];
   const mockId = () => Math.random().toString(16).slice(2, 10);
   // Chat images: object URLs by a made-up sha, standing in for the mothership's store.
   const mockImages = new Map<string, { url: string; ref: ChatImageRef }>();
@@ -2501,13 +2509,66 @@ export function createMockApi(): Api {
       s.log("microVM stopped and removed; the worktree was kept");
       return { ...clone(s.session), result: "stopped" };
     },
-    deleteSession: async (id) => {
+    deleteSession: async (id, opts) => {
       const s = find(id);
       if (isLive(s.session.status) || s.session.status === "publishing") throw new ApiError("stop the colony first", 409);
       s.halt();
       sessions.delete(id);
       colonyActivity("colony.delete", s.session);
-      return { deleted: id, leftover: null };
+      // The logs are archived first (issue #496); `purge_logs` also takes that archived bundle.
+      const prior = archiveEntries.filter((e) => e.session === id);
+      for (let i = archiveEntries.length - 1; i >= 0; i--) if (archiveEntries[i].session === id) archiveEntries.splice(i, 1);
+      if (opts?.purgeLogs) return { deleted: id, leftover: null, archived: null, purged_bundles: prior.length, purge_error: null };
+      const revision = (prior.at(-1)?.revision ?? 0) + 1;
+      archiveEntries.push({ session: id, repo: s.session.repo, issue: s.session.issue, title: s.session.issue_title, status: s.session.status, bundle: `${id}-rev${revision}.tar.zst`, bytes: 4_194_304, archived_at: now(), revision });
+      return { deleted: id, leftover: null, archived: `${id}-rev${revision}.tar.zst`, purged_bundles: 0, purge_error: null };
+    },
+    archive: () =>
+      later(() => ({
+        root: "/var/lib/colonizer/archive",
+        count: archiveEntries.length,
+        bytes: archiveEntries.reduce((total, e) => total + e.bytes, 0),
+        entries: clone(archiveEntries),
+      })),
+    // Mirrors the server's plan_retention (issue #496): both rules run over the bundles oldest
+    // first — archived before `keep_days` days ago, or still over the `max_gb` cap — and unless
+    // `allow_single_copy` says the one local copy may go, `remove` stays empty and every bundle
+    // the rules would have taken is counted in `kept_single_copy` instead. An apply needs the
+    // preview's own bundle list as `expect` (400 without it) and answers 409 when it no longer
+    // matches what the plan picks.
+    archiveRetention: async (body): Promise<RetentionPlan> => {
+      await sleep(200);
+      // Negative or non-finite limits are a bad request, not a plan that silently keeps everything.
+      const sane = (v: number | null) => v == null || (Number.isFinite(v) && v >= 0);
+      if (!sane(body.keep_days) || !sane(body.max_gb)) throw new ApiError("keep_days and max_gb must be finite and not negative", 400);
+      const cutoff = body.keep_days != null ? Date.now() - body.keep_days * 86_400_000 : null;
+      const cap = body.max_gb != null ? body.max_gb * 1e9 : null;
+      let total = archiveEntries.reduce((t, e) => t + e.bytes, 0);
+      const picked = [...archiveEntries]
+        .sort((a, b) => Date.parse(a.archived_at) - Date.parse(b.archived_at))
+        .filter((e) => {
+          const take = (cutoff != null && Date.parse(e.archived_at) < cutoff) || (cap != null && total > cap);
+          if (take) total -= e.bytes;
+          return take;
+        });
+      const planned = picked.map((e) => ({ bundle: e.bundle, session: e.session, bytes: e.bytes, archived_at: e.archived_at }));
+      const remove: RetentionPlan["remove"] = body.allow_single_copy ? planned : [];
+      const plan: RetentionPlan = {
+        dry_run: body.dry_run,
+        remove,
+        count: remove.length,
+        bytes: remove.reduce((t, r) => t + r.bytes, 0),
+        kept_single_copy: body.allow_single_copy ? 0 : planned.length,
+      };
+      if (body.dry_run) return plan;
+      const expect = body.expect;
+      if (expect == null) throw new ApiError("applying retention needs expect: the bundle list the preview returned", 400);
+      if (expect.length !== remove.length || remove.some((r, i) => r.bundle !== expect[i])) {
+        throw new ApiError("the archive changed since the preview; re-run the dry run and apply its own expect", 409);
+      }
+      const gone = new Set(remove.map((r) => r.bundle));
+      for (let i = archiveEntries.length - 1; i >= 0; i--) if (gone.has(archiveEntries[i].bundle)) archiveEntries.splice(i, 1);
+      return plan;
     },
     cleanupSession: async (id) => {
       const s = find(id);

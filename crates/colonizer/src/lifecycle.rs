@@ -9,7 +9,7 @@
 //! passing one ends a colony exactly the way the max session length does.
 
 use crate::{
-    ApiResult, App, Shared, client_error, github, orgs, providers,
+    ApiResult, App, Shared, archive, client_error, github, orgs, providers,
     sandbox::{self},
     spend,
     util::{
@@ -20,10 +20,11 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashSet, path::PathBuf, time::Duration};
 
@@ -923,11 +924,51 @@ fn deletable(status: SessionStatus) -> bool {
     !status.is_live() && status != SessionStatus::Publishing
 }
 
+/// The `DELETE /api/sessions/{id}` query. `purge_logs` is the only way a colony's archived logs
+/// go with it: by default the delete leaves every bundle in the archive.
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteQuery {
+    #[serde(default)]
+    pub purge_logs: bool,
+}
+
+/// The logs outlive the colony (issue #496): archive them before anything is forgotten. With
+/// `purge_logs` a failed archive only prints — the operator asked for the logs to be gone —
+/// otherwise its error stops the delete with the colony exactly as it was.
+async fn archive_first(app: &Shared, s: &Session, purge_logs: bool) -> anyhow::Result<Option<String>> {
+    match archive::archive_session(app, s).await {
+        Ok(rel) => Ok(rel),
+        Err(e) if purge_logs => {
+            eprintln!("archive: could not archive {}'s logs before the purge: {e:#}", s.id);
+            Ok(None)
+        }
+        Err(e) => Err(e.context("could not archive the colony's logs; the colony is kept")),
+    }
+}
+
 /// Forgets a colony: its worktree and local branch (unless already cleaned up), its chat and harness logs, and its
 /// record. A pull request it opened, and any branch it pushed, stay on GitHub. Live and publishing colonies must be
-/// stopped first.
-pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+/// stopped first. The session directory is archived first (issue #496), so a failed archive leaves the colony
+/// untouched; `purge_logs=true` purges the bundles instead of keeping them.
+pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<DeleteQuery>) -> ApiResult<Value> {
+    // Vetted and read before anything happens: the archive below runs while the record, the
+    // session directory and every teardown it might need are all still in place, so a failed
+    // archive has nothing to restore.
+    let s = {
+        let sessions = app.sessions.read().await;
+        let s = sessions
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+        if !deletable(s.status) {
+            return Err(client_error(StatusCode::CONFLICT, "stop the colony first"));
+        }
+        s.clone()
+    };
+    let archived = archive_first(&app, &s, q.purge_logs).await?;
     // Out of the list before any file is touched, so neither the queue nor Resume can start it meanwhile.
+    // The checks run again under the write guard: the archive above took a moment, and in it the
+    // colony may have been started (refuse) or deleted (nothing left to forget).
     let (at, s) = {
         let mut sessions = app.sessions.write().await;
         let at = sessions
@@ -990,13 +1031,22 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // more. Safe even if a guard were still held somewhere: the `Arc` keeps that mutex alive for as
     // long as its holder needs it.
     app.session_locks.lock().await.remove(&id);
+    // The bundles go with the colony if the operator asked for it (purge_logs); a bundle that
+    // could not be removed is reported, not swallowed — the colony itself is already gone.
+    let (purged_bundles, purge_error) = if q.purge_logs {
+        archive::purge_bundles(&app, &id).await
+    } else {
+        (0, None)
+    };
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => Some(format!("{}: {e}", dir.display())),
     };
-    Ok(Json(json!({"deleted": id, "leftover": leftover})))
+    Ok(Json(json!(
+        {"deleted": id, "leftover": leftover, "archived": archived, "purged_bundles": purged_bundles, "purge_error": purge_error}
+    )))
 }
 
 #[cfg(test)]
@@ -1026,12 +1076,97 @@ mod tests {
         // `sandbox::remove` swallows that, with no mesh or local port there is no agentd
         // call either) and the deletion must still succeed.
         app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
-        let out = delete(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        let out = delete(State(app.clone()), Path("abc".to_string()), Query(DeleteQuery::default()))
+            .await
+            .unwrap();
         assert_eq!(out.0["deleted"], json!("abc"), "the deletion reports the colony");
         assert!(
             app.session("abc").await.is_none(),
             "the record is gone, so the id is never reused"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_colony_archives_its_logs_and_keeps_the_bundle() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        tokio::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":1}\n")
+            .await
+            .unwrap();
+        // Already terminal, so the update below fires no archive: the one this test asserts on is
+        // the delete's own synchronous archive.
+        app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
+        let out = delete(State(app.clone()), Path("abc".to_string()), Query(DeleteQuery::default()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(out["purged_bundles"], json!(0), "the default delete purges nothing");
+        assert_eq!(out["purge_error"], json!(null), "and reports no purge trouble");
+        let bundle = root
+            .join("data/archive")
+            .join(out["archived"].as_str().expect("the delete names the bundle"));
+        assert!(bundle.is_file(), "the bundle stays by default");
+        assert!(crate::archive::sidecar_of(&bundle).is_file(), "with its sidecar");
+        assert!(app.session("abc").await.is_none(), "the colony is forgotten");
+        assert!(!app.session_dir("abc").exists(), "the session directory is gone");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn deleting_with_purge_logs_removes_the_bundles_with_the_colony() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        tokio::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":1}\n")
+            .await
+            .unwrap();
+        // The colony ended on its own earlier, so a bundle already exists before the delete.
+        let earlier = crate::archive::archive_session(&app, &app.session("abc").await.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
+        let out = delete(
+            State(app.clone()),
+            Path("abc".to_string()),
+            Query(DeleteQuery { purge_logs: true }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            out["archived"],
+            json!(null),
+            "nothing changed, so the delete added no revision"
+        );
+        assert_eq!(out["purged_bundles"], json!(1), "the earlier bundle is purged");
+        assert_eq!(
+            out["purge_error"],
+            json!(null),
+            "and the purge removed everything it aimed at"
+        );
+        let path = root.join("data/archive").join(&earlier);
+        assert!(!path.exists(), "the bundle is gone");
+        assert!(!crate::archive::sidecar_of(&path).exists(), "the sidecar with it");
+        assert!(!app.session_dir("abc").exists(), "the session directory still goes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_archive_keeps_the_colony_and_refuses_the_delete() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        tokio::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":1}\n")
+            .await
+            .unwrap();
+        // A plain file where the archive root belongs: no bundle can be written underneath it.
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/archive"), b"not a directory").unwrap();
+        app.update_session("abc", |s| s.cleaned_up = true).await.unwrap();
+        let err = delete(State(app.clone()), Path("abc".to_string()), Query(DeleteQuery::default()))
+            .await
+            .unwrap_err()
+            .1;
+        assert!(err.to_string().contains("the colony is kept"), "{err:#}");
+        assert!(app.session("abc").await.is_some(), "the record stays");
+        assert!(app.session_dir("abc").is_dir(), "and the session directory with it");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1266,7 +1401,7 @@ mod tests {
         let _guard = faults::inject("sessions.json", Op::Write, || {
             std::io::Error::from(std::io::ErrorKind::StorageFull)
         });
-        let result = delete(State(app.clone()), Path("abc".to_string())).await;
+        let result = delete(State(app.clone()), Path("abc".to_string()), Query(DeleteQuery::default())).await;
         assert!(result.unwrap_err().1.to_string().contains("the colony is kept"));
         assert!(app.session("abc").await.is_some(), "the colony goes back in the list");
         assert!(app.storage_alert.read().await.is_some());

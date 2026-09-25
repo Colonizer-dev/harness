@@ -863,6 +863,14 @@ impl App {
         // (cleanup, the app slot, a restart re-marking a stopped colony) records nothing.
         crate::activity::record_transition(self, status_before, &session).await;
         self.persist_and_broadcast(&session).await;
+        if returned {
+            // The run is over (issue #496): snapshot the logs into the local archive. Spawned, and
+            // deaf to failure — a slow or broken archive must never delay or fail a colony that
+            // just finished, so the spawned task's whole error path is a printout.
+            let data_dir = self.cfg.data_dir.clone();
+            let mothership = crate::runtime::host_id(self);
+            crate::archive::spawn_on_end(data_dir, session.clone(), mothership);
+        }
         Some((session, result))
     }
 
