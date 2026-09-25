@@ -14,16 +14,19 @@ commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/
 
 ## How the harness passes network flags
 
-- **Boot only.** `crates/colonizer/src/sandbox.rs:62-67` passes one `--net` with the profiles joined
-  by `,`, and one `--net-rule` per rule. They go only to `msb run --detach --replace`
-  (`crates/colonizer/src/sandbox.rs:43`), called from `crates/colonizer/src/sessions.rs:1981` and
-  `crates/colonizer/src/execution.rs:79`. The other `msb` calls (`rm`, `ls`, `image list`, `pull`,
-  `--version`) take no network flags (`crates/colonizer/src/sandbox.rs:78-134`,
-  `crates/colonizer/src/main.rs:540-541`).
+- **Boot only.** `crates/colonizer/src/sandbox.rs:68-76` passes one `--net` with the profiles joined
+  by `,` (open mode), `--net-default-egress deny` when the mode names no profile, and one
+  `--net-rule` per rule. They go only to the two `msb run` invocations — detached with `--replace`
+  (`crates/colonizer/src/sandbox.rs:49`), called from `crates/colonizer/src/boot.rs:1018`, and the
+  attached one-shot (`crates/colonizer/src/sandbox.rs:96`), called from
+  `crates/colonizer/src/verify.rs:186`. The other `msb` calls (`rm`, `ls`, `image list`, `pull`,
+  `--version`) take no network flags (`crates/colonizer/src/sandbox.rs:87` and `:142-196`,
+  `crates/colonizer/src/main.rs:754`).
 - **No other policy flags.** The harness passes no `--dns-nameserver`,
   `--no-dns-rebind-protection`, pool or `--deployment-profile` flag. Besides `--net` and
-  `--net-rule`, the flags that change networking are the `-p` publish in risk 5 and the Claude
-  credential's `--secret` (`crates/colonizer/src/sandbox.rs:56-70`).
+  `--net-rule`, the flags that change networking are the `-p` publish in risk 5, the Claude
+  credential's `--secret`, and, in allowlist mode, `--net-default-egress deny`
+  (`crates/colonizer/src/sandbox.rs:62-79`).
 - **Single-tenant by default.** Without `--deployment-profile` the CLI leaves the default
   ([`common.rs:1342-1344`][cli-dp]), which is `SingleTenant` ([`domain.rs:247-254`][dp-default]).
   The multi-tenant floor ([`network.rs:185-186`][dp-enforce], [`network.rs:294-301`][dp-floor])
@@ -34,14 +37,15 @@ commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/
   [`sandbox/mod.rs:163`][dp-restart]). That file is `~/.microsandbox/config.json`, unless
   `MSB_CONFIG_PATH` or `MSB_HOME` points elsewhere ([`config/mod.rs:863-871`][config-path],
   [`utils/lib/lib.rs:169-176`][msb-home]). The harness does not isolate it: the only variable it
-  sets on `msb` is the secret's (`crates/colonizer/src/sandbox.rs:60`). If the file says
+  sets on `msb` is the secret's (`crates/colonizer/src/sandbox.rs:66`). If the file says
   `multi-tenant`, the floor is `from_profiles([Public])`, checked alongside the colony's policy
   ([`poll.rs:395-399`][poll-floor]). That blocks the scoped Host allows, so the gateway and
   Headscale become unreachable, and published ports are dropped ([`network.rs:523-583`][dp-ports]).
   The result is stricter: colonies break rather than gain reach.
 - **Out of scope.** The Claude credential's `--secret`, passed when the agent needs Claude
-  (`crates/colonizer/src/sessions.rs:1845-1860`), is not covered here. The egress policy is built
-  from `--net` and `--net-rule` alone ([`common.rs:866-923`][cli-parse]).
+  (`crates/colonizer/src/boot.rs:880-884`), is not covered here. The egress policy is built from
+  `--net`, `--net-rule` and, in allowlist mode, `--net-default-egress` alone
+  ([`common.rs:848-967`][cli-netpolicy]).
 - **TLS interception.** A `--secret` also turns on TLS interception
   ([`common.rs:2369-2380`][cli-secret], [`builder.rs:870-887`][secret-tls]), by default on TCP 443
   with UDP to that port dropped ([`domain.rs:2464-2479`][tls-defaults],
@@ -49,21 +53,25 @@ commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/
 
 ## Which colonies get which profile
 
-Every colony runs with the `public` profile and nothing more. Host loopback is reached through
-explicit, port-scoped `--net-rule` allows, never the broad `host` profile. Handing a colony the
-`host` profile would open **every** host-loopback port to the untrusted agent — including the
-cockpit control API on `127.0.0.1:7878` — so the harness no longer does
-([#375](https://github.com/Colonizer-dev/harness/issues/375)); it opens only the two ports a colony
-is meant to reach.
+In the default `open` egress mode every colony runs with the `public` profile and nothing more.
+Host loopback is reached through explicit, port-scoped `--net-rule` allows, never the broad `host`
+profile. Handing a colony the `host` profile would open **every** host-loopback port to the
+untrusted agent — including the cockpit control API on `127.0.0.1:7878` — so the harness no longer
+does ([#375](https://github.com/Colonizer-dev/harness/issues/375)); it opens only the two ports a
+colony is meant to reach. Allowlist mode ([#303](https://github.com/Colonizer-dev/harness/issues/303),
+see [Egress policy](#egress-policy-303) below) names no profile at all.
 
 - **Mesh on** is `modules.mesh_enabled()` and the vendored `headscale`, `tailscale` and `tailscaled`
   binaries present. It adds an `allow@host:tcp:<control>` rule for the headscale control port and
-  the WireGuard rules (`crates/colonizer/src/sessions.rs`).
+  the WireGuard rules (`crates/colonizer/src/boot.rs`).
 - **Any provider** adds an `allow@host:tcp:<gateway>` rule for the provider gateway port. There is
   one route per provider in `providers.json`, whether or not the colony uses it
   (`crates/colonizer/src/providers.rs`).
 
-| Mesh | Providers configured | `--net` | `--net-rule` |
+The table is the harness-owned part of the rules; every boot then adds the DNS allow and the
+always-blocked deny set of the [egress policy](#egress-policy-303) behind them.
+
+| Mesh | Providers configured | `--net` | `--net-rule` (harness-owned) |
 | :--- | :--- | :--- | :--- |
 | On | Any | `public` | `allow@host:tcp:<control>`, one WireGuard rule per host IPv4, `allow@host:tcp:<gateway>` |
 | Off | One or more | `public` | `allow@host:tcp:<gateway>` |
@@ -94,7 +102,7 @@ listens on (`crates/colonizer/src/mesh.rs:188-189`).
 - **Order.** Explicit rules go before the profile rules ([`common.rs:920-922`][cli-order]). Profile
   rules only allow, so these rules open that UDP port even on private-range host addresses, which
   `public` leaves to the default deny.
-- **Read once.** The list is taken at each boot (`crates/colonizer/src/sessions.rs:1889`) and fixed
+- **Read once.** The list is taken at each boot (`crates/colonizer/src/boot.rs:931`) and fixed
   for the life of the microVM (see [Runtime changes](#runtime-changes)).
 
 ## How microsandbox enforces policy
@@ -217,7 +225,9 @@ Rules cannot change while a colony runs.
 - **Read once.** The policy is cloned at start ([`network.rs:326`][policy-read]) and held in an
   immutable `Arc` by the poll loop ([`poll.rs:263`][poll-arc]).
 - **No modify path.** `SandboxModificationPatch` has no network field ([`modify.rs:26-79`][modify]).
-- **So** a change needs a recreate. The harness recreates on every boot with `--replace`.
+- **So** a change needs a recreate. The harness recreates on every boot with `--replace`. The
+  egress policy rides this: a settings change reaches a colony at its next boot or on stop plus
+  Resume, which re-resolves global and org settings. No live allow/block/reset API is offered.
 
 Composable profiles arrived in v0.6.7 ([`2026-07-24.mdx:9-18`][changelog]). The upstream changelog
 has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`][changelog-last]).
@@ -227,16 +237,104 @@ has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`
 A colony secret (`POST /api/secrets/colony`, see `protocol.md`) names the hosts its value is for,
 and boots as msb `--secret ENV@hosts`: msb swaps the placeholder for the value only on TLS to those
 hosts. The hosts must be public DNS names, and the `public` profile already reaches the Public
-group, so no extra `--net-rule` is added for them. Private, loopback and link-local destinations
+group, so in the default `open` egress mode no extra `--net-rule` is added for them (allowlist mode
+adds an explicit `allow@<host>:tcp:443`, see [Egress policy](#egress-policy-303) below). Private, loopback and link-local destinations
 stay behind the default deny, which is why the API refuses `localhost`, IP literals and internal
 names such as `*.internal` or `*.local` rather than accepting a host the colony could never reach.
 
+## Egress policy (#303)
+
+The fence above now carries a configurable policy on top
+([#303](https://github.com/Colonizer-dev/harness/issues/303)), built in
+`crates/colonizer/src/egress.rs`. There are two classes of traffic in a colony — the agent's own
+model traffic (the provider gateway, the TLS-edge secret hosts) and everything else the VM does:
+package managers, curls, the agent's GitHub calls. Both share one fence, and that is the honest
+state of this slice: the agent and every tool in the guest run as root, so there is no in-guest
+separation that could scope the policy to one class. Enforcement lives entirely in msb's
+userspace network stack on the host; the policy below applies to the whole VM — package managers
+included — and nothing in the guest can see, evade or tell it apart from any other traffic.
+Per-process separation is what a later in-guest hardening slice would add; until then
+allowlist mode means "this VM may reach", not "the agent may reach".
+
+### What is always blocked
+
+Every boot compiles a fixed deny set ahead of every configured rule (`egress.rs` `ALWAYS_BLOCKED`):
+
+| Rules | Close |
+| :--- | :--- |
+| `deny@meta` | `169.254.169.254`, cloud metadata |
+| `deny@private` | RFC 1918, CGNAT `100.64.0.0/10`, ULA `fc00::/7` ([`destination.rs:79-98`][private]) |
+| `deny@loopback` | `127.0.0.0/8`, `::1` |
+| `deny@link-local` | `169.254.0.0/16`, `fe80::/10` |
+| `deny@multicast` | `224.0.0.0/4`, `ff00::/8` |
+| `deny@host` | the sandbox's own gateway IPs, every port but the harness's allows |
+| `deny@169.254.169.254` | restates `meta`, so the record reads whole |
+| `deny@0.0.0.0/8`, `100.64.0.0/10`, `192.0.0.0/24`, `198.18.0.0/15`, `240.0.0.0/4`, `[fc00::/7]`, `[fec0::/10]`, `[64:ff9b::/96]`, `[64:ff9b:1::/48]`, `[2002::/16]` | the classifier gaps of [Open risks](#open-risks) item 2 — addresses `destination.rs` puts in Public today — plus restatements of `private` parts, so a classifier change cannot quietly reopen them |
+
+msb evaluates rules first-match-wins per direction ([`types.rs:338-352`][egress-eval]). The
+compiled order is fixed (`egress::compile`): one `allow@dns`, the harness's port-scoped
+infrastructure allows, this deny set, the operator's blocks, the operator's allows. `allow@dns`
+comes first because a DNS query is itself evaluated against Host-group rules
+([`types.rs:589-626`][dns-eval]), so a bare `deny@host` behind it would otherwise take every
+lookup down with the rest. Only the harness's own rules precede the deny set, configured allows
+compile last, and msb's policy cannot be changed on a running sandbox (see
+[Runtime changes](#runtime-changes)) — so no configuration, at either level or in a hand-edited
+file, can reopen the set. A deterministic fuzz in `egress.rs` compiles hundreds of random policies
+against that invariant.
+
+### What is allowed by construction
+
+- The WireGuard direct path (UDP) and the Headscale control port (TCP) when the mesh is on, and
+  the provider gateway port (TCP) when routes exist — as above.
+- Gateway port 53 (`allow@dns`): msb's own forwarder still answers, and the guest's tailscale runs
+  with `--accept-dns=false` precisely so secret injection keeps using it.
+- In allowlist mode, the TLS-edge secret hosts on TCP 443 — a colony with an injected credential
+  that could not reach its host would only look fenced. In open mode the `public` profile already
+  covers them.
+
+### Modes and settings
+
+The sandbox module gains three settings, validated at save time: `egress` (`open` or `allowlist`,
+default `open`), `egress_allow` and `egress_block` — comma-separated `host[:port]` entries. A host
+is an FQDN (lowercase, at least two labels; a leading `*.` compiles to a suffix rule), an IPv4, a
+bracketed IPv6, or a CIDR of either (bracketed for IPv6). `:port` is TCP 1-65535; `:0` or no port
+means every port. Single-label names are refused: in msb's grammar those words are destination
+groups, not hostnames. An org may pin its own `mode` and add to both lists in its settings
+(`orgs.json`, `egress`), never remove from them — resolution (`egress::resolve`) takes the org's
+mode when it set one and unions the lists, and drops entries a hand-edited file let in that do not
+parse: an invalid entry can only shrink a colony's reach, never widen it.
+
+| Mode | Flags | Behaviour |
+| :--- | :--- | :--- |
+| `open` (default) | `--net public` | The profile fence above, with the deny set behind the harness's allows |
+| `allowlist` | `--net-default-egress deny`, no `--net` | No profile allow at all; egress falls to the default deny unless a rule above or an allow-list entry allows it |
+
+`--net none` looks like the allowlist encoding but is not one: `NetworkPolicy::none()` denies
+ingress too ([`types.rs:272-279`][policy-none]), and the mesh-off published port needs ingress.
+`--net-default-egress deny` with no `--net` lands as `{ default_egress: deny, default_ingress:
+allow, rules: <the --net-rule tokens> }` with no profile rules
+([`common.rs:848-967`][cli-netpolicy]).
+
+Each boot records what it resolved — mode, allow, block, sources, always_blocked, rules,
+profiles, `applied_at` — at `<session dir>/egress.json`, and `GET /api/sessions/{id}/egress`
+serves it (404 for a colony that last booted before this existed), so the fleet view can answer
+what a colony could reach without reading its boot log.
+
+### Runtime changes under the policy
+
+Unchanged by this slice: msb's policy is fixed per sandbox (see [Runtime changes](#runtime-changes)),
+and no live allow/block/reset API is offered. A policy change reaches a colony when it next boots —
+every boot runs `--replace` — or on stop plus Resume, which re-resolves global and org settings.
+Because enforcement lives in msb on the host and not in the mesh, applying a policy does not depend
+on the mesh being up: a wedged mesh (#167) delays the agent, not the fence.
+
 ## Host-loopback listeners
 
-A colony's profile is `public` alone (`crates/colonizer/src/sessions.rs:1862`). Besides the
+A colony's profile is `public` alone (`colony_network` in `crates/colonizer/src/boot.rs`), or no
+profile at all in allowlist mode. Besides the
 profile's port-53 DNS rule, which the forwarder answers ([`types.rs:827-835`][allow-dns]), its only
 Host-group allows are the Headscale control port when the mesh is on
-(`crates/colonizer/src/sessions.rs:1889-1890`) and the gateway port when providers are configured
+(`crates/colonizer/src/boot.rs:178`) and the gateway port when providers are configured
 (`crates/colonizer/src/sessions.rs:1907-1916`). A `host` rule names the Host group
 ([`net_rule.rs:563-574`][rule-host]), so it covers the gateway's IPv4 and IPv6, and TCP to either is
 dialled to host loopback ([`poll.rs:817-835`][tcp-host]). Every other Host port falls to the default
@@ -251,7 +349,7 @@ under `crates/colonizer/src/` unless given in full.
 | 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:247`, `mesh.rs:291`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |
 | 41742 | `127.0.0.1`, control port + 2 (`mesh.rs:248-249`, `mesh.rs:292`) | Headscale gRPC | `grpc_allow_insecure: false` and no TLS configured; not verified | Default deny since #375 |
 | 41744 | `127.0.0.1`, mesh `socks_port` (`mesh.rs:190-191`, `modules.rs:178`) | Harness `tailscaled` SOCKS5, which the harness uses to dial colonies (`mesh.rs:418-422`) | None (tailscale v1.102.4 [`proxy.go:98-101`][ts-socks-server], [`socks5.go:158-172`][ts-socks-auth]) | Default deny since #375 |
-| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:68-70`, `sessions.rs:1898-1901`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`sessions.rs:1479`, `crates/colonizer-agentd/src/main.rs:176-188`) | Default deny since #375 |
+| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:77-79`, `boot.rs:941`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`sessions.rs:1680`, `crates/colonizer-agentd/src/main.rs:176-188`) | Default deny since #375 |
 | Any | The operator's, such as the `local` provider preset's `127.0.0.1:8080` (`web/src/components/SettingsDialog.tsx:1971`) | Anything else on host loopback | Its own | Default deny since #375; the gateway still proxies to a configured provider |
 
 Still open, all **(inferred)** and untested:
@@ -278,16 +376,23 @@ Still open, all **(inferred)** and untested:
    those two ports are reachable and the default deny closes the rest. The profile itself is
    unchanged upstream; the risk applies to any caller that still passes `host`. The harness's
    security review is in [audit.md](audit.md).
-2. **Classifier gaps (inferred).** These fall through to Public and so are allowed under `public`
-   ([`destination.rs:40-130`][classify-all]):
-   - IPv4: `255.255.255.255` and the rest of `240/4`, `0.0.0.0/8` other than `0.0.0.0`, `198.18/15`,
-     `192.0.0/24`, and the documentation ranges.
-   - IPv6: NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, 6to4 `2002::/16`, site-local `fec0::/10`.
+2. **Classifier gaps — closed for colonies by #303, (inferred) upstream.** These fall through to
+   Public under `public` ([`destination.rs:40-130`][classify-all]): IPv4 `255.255.255.255` and the
+   rest of `240/4`, `0.0.0.0/8` other than `0.0.0.0`, `198.18/15`, `192.0.0/24`, and the
+   documentation ranges; IPv6 NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, 6to4 `2002::/16`,
+   site-local `fec0::/10`. Every one but the documentation ranges is now named in the
+   [always-blocked set](#egress-policy-303), which precedes the profile rules, so a colony cannot
+   reach them in either mode. What remains:
+   - **Documentation ranges** (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
+     `2001:db8::/32`) are still Public and unblocked; they are not routable on the internet, so
+     the practical reach is a translator or proxy that answers them.
    - **NAT64.** microsandbox dials these as ordinary public addresses ([`poll.rs:833`][tcp-direct]).
      On a host network with a NAT64 translator, an address under one of these prefixes can embed a
      private, link-local or metadata IPv4 address. A translator must drop the well-known prefix
      `64:ff9b::/96` with a non-global IPv4 address inside ([RFC 6052 §3.1][rfc6052]). That rule
-     does not bind the local-use `64:ff9b:1::/48` ([RFC 8215 §5][rfc8215]). Untested.
+     does not bind the local-use `64:ff9b:1::/48` ([RFC 8215 §5][rfc8215]). Untested. The deny
+     rules now drop the prefixes themselves; whether a host's translator honours RFC 6052 is still
+     the host network's to say.
 3. **The host's own addresses (inferred).** A host interface address outside the private and
    link-local ranges, IPv4 or IPv6, is Public. A colony with `public` can reach any host service
    bound to that address or to all interfaces. Untested.
@@ -296,8 +401,8 @@ Still open, all **(inferred)** and untested:
 5. **Ingress defaults to allow** ([`types.rs:326-330`][profile-defaults]). Ingress policy applies
    to published ports ([`publisher.rs:569`][ingress-tcp], [`publisher.rs:614`][ingress-udp]), and
    the harness adds no ingress rules. It publishes one port, on host `127.0.0.1`, only when the
-   mesh is off (`crates/colonizer/src/sandbox.rs:68-70`,
-   `crates/colonizer/src/sessions.rs:1898-1901`). Since
+   mesh is off (`crates/colonizer/src/sandbox.rs:77-79`,
+   `crates/colonizer/src/boot.rs:941`). Since
    [#375](https://github.com/Colonizer-dev/harness/issues/375) other colonies no longer reach that
    port through host loopback, and, as before, direct guest-to-guest traffic is denied, because
    other sandboxes' addresses fall in `172.16/12` or `fd42:6d73:62::/48`, both Private
@@ -310,9 +415,9 @@ Still open, all **(inferred)** and untested:
 [tag]: https://github.com/superradcompany/microsandbox/tree/fa3e43902e9bc49e1d85cc0a7298e13fe2374026
 [cli-flag]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L342-L358
 [cli-pools]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L377-L385
-[cli-parse]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L866-L923
 [cli-profiles]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L871-L917
 [cli-order]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L920-L922
+[cli-netpolicy]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L848-L967
 [cli-dp]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L1342-L1344
 [dp-default]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/packages/microsandbox-types/rust/lib/domain.rs#L247-L254
 [dp-enforce]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/network.rs#L185-L186
@@ -333,6 +438,9 @@ Still open, all **(inferred)** and untested:
 [profile-groups]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L316-L323
 [profile-defaults]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L326-L330
 [dns-query]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L600-L626
+[egress-eval]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L338-L352
+[dns-eval]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L589-L626
+[policy-none]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L272-L279
 [egress-walk]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L448-L491
 [ingress]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/policy/types.rs#L545-L562
 [ingress-tcp]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/ports/publisher.rs#L569

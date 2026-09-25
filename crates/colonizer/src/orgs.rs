@@ -80,6 +80,20 @@ pub struct NotifyOverrides {
     pub webhook_url: Option<String>,
 }
 
+/// Egress overrides for an org's colonies (#303). Every field optional: `None` inherits the global
+/// sandbox module setting. The lists add to the global ones — an org can widen its allow list or
+/// name more blocks, but never remove a global block, because resolution unions both levels.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct EgressOverrides {
+    /// `open` or `allowlist`; a blank or `None` inherits the global `egress` mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
+    #[serde(default)]
+    pub block: Option<Vec<String>>,
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -108,6 +122,10 @@ pub struct OrgSettings {
     /// choose. `None` inherits the sandbox module's `preset`.
     #[serde(default)]
     pub stack: Option<String>,
+    /// The egress policy this org's colonies boot with (#303): mode and allow/block entries on top
+    /// of the global sandbox module's, which always apply too. `None` inherits it whole.
+    #[serde(default)]
+    pub egress: Option<EgressOverrides>,
     #[serde(default)]
     pub memory: Option<MemoryOverrides>,
     #[serde(default)]
@@ -624,6 +642,22 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
     {
         return Err(format!("stack must be one of {}", crate::presets::ids().join(", ")));
     }
+    // A blank mode is inherit, like the stack; entries must each parse, with the parser's own
+    // message, so a fence that would silently not hold is never saved.
+    if let Some(egress) = &settings.egress {
+        if let Some(mode) = egress.mode.as_deref().filter(|m| !m.trim().is_empty())
+            && let Err(problem) = crate::egress::EgressMode::parse(mode)
+        {
+            return Err(problem);
+        }
+        for (kind, list) in [("allow", &egress.allow), ("block", &egress.block)] {
+            for entry in list.iter().flatten() {
+                if let Err(problem) = crate::egress::validate_entry(entry) {
+                    return Err(format!("egress {kind} entry {problem}"));
+                }
+            }
+        }
+    }
     if let Some(watchdog) = &settings.watchdog {
         if watchdog.stall_minutes.is_some_and(|n| !(1..=1440).contains(&n)) {
             return Err("stall minutes must be between 1 and 1440".into());
@@ -752,6 +786,20 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("stack") {
         incoming.stack = saved.stack.clone();
+    }
+    if !named("egress") {
+        incoming.egress = saved.egress.clone();
+    } else if let (Some(saved_egress), Some(egress)) = (saved.egress.as_ref(), incoming.egress.as_mut()) {
+        // And inside it, a sub-field the client's build predates keeps its saved value.
+        if unnamed_sub("egress", "mode") {
+            egress.mode = saved_egress.mode.clone();
+        }
+        if unnamed_sub("egress", "allow") {
+            egress.allow = saved_egress.allow.clone();
+        }
+        if unnamed_sub("egress", "block") {
+            egress.block = saved_egress.block.clone();
+        }
     }
     if !named("memory") {
         incoming.memory = saved.memory.clone();

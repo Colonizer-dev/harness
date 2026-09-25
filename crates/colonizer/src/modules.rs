@@ -174,6 +174,12 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
                 "repo_max_parallel": {"type": "integer", "title": "Parallel sessions per repository", "minimum": 1, "maximum": 32, "default": 3,
                     "description": "Live colonies one repository may run at once, on top of the overall limit above and any org's own. An org can set its own figure in its settings."},
+                "egress": {"type": "string", "title": "Egress policy", "enum": ["open", "allowlist"], "default": "open",
+                    "description": "What a colony's microVM may reach. Open is today's fence: any public destination, with network-internal addresses, cloud metadata and msb's classifier gaps always denied on top. Allowlist denies all egress except what the harness itself needs (model gateway, TLS-edge secret hosts on 443, mesh control, DNS) plus the allow list below. Either way the always-blocked set cannot be reopened, and a change reaches a colony when it next boots — msb's policy is fixed per sandbox, so a running colony is not rewritten; stop it and press Resume. An org can pin its own mode in its settings."},
+                "egress_allow": {"type": "string", "title": "Egress allow list", "default": "", "format": "egress-entries",
+                    "description": "Comma-separated host[:port] entries a colony may reach on top of what the harness allows by construction: api.anthropic.com:443, 10.0.0.0/8, [2001:db8::/32]. A host is a name (lowercase, at least two labels; *.example.com covers a whole domain), an IPv4, a bracketed IPv6, or a CIDR; the port is TCP and 1-65535, with :0 or no port meaning every port. Entries compile after the always-blocked denies, so nothing here can reopen a blocked destination. An org's list adds to this one."},
+                "egress_block": {"type": "string", "title": "Egress block list", "default": "", "format": "egress-entries",
+                    "description": "Comma-separated host[:port] entries a colony is denied, on top of the always-blocked set, in the same form as the allow list. Blocks win over allows: both are the operator's word, and the deny is the cautious reading. An org's list adds to this one."},
                 "hold_timeout_minutes": {"type": "integer", "title": "Held colony timeout (minutes)", "minimum": 1, "maximum": 1440, "default": 30,
                     "description": "How long a colony waiting on a human (an autopilot hold) keeps its microVM slot before the queue parks it to free the slot: the microVM is removed and the worktree kept, so the colony resumes where it left off. Within the timeout a held colony still counts against the parallel limits."},
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
@@ -523,6 +529,14 @@ fn validate_settings(
                 "setting `{key}` is not a disk size like 512M or 16G (0 means unlimited)"
             ));
         }
+        // Egress lists are refused the same way, with the parser's own message: an entry a boot
+        // would have to drop should never pass a save unnoticed.
+        if spec["format"].as_str() == Some("egress-entries")
+            && let Some(s) = value.as_str()
+            && let Err(problem) = crate::egress::validate_entries(s)
+        {
+            return Err(format!("setting `{key}`: {problem}"));
+        }
         out.insert(key.clone(), value.clone());
     }
     Ok(out)
@@ -812,6 +826,38 @@ mod tests {
                 "{bad:?} must be refused while the operator is looking"
             );
         }
+    }
+
+    #[test]
+    fn the_sandbox_egress_lists_are_entry_lists_validated_at_save_time() {
+        let schema = providers("sandbox", &[]).remove(0).schema;
+        assert_eq!(
+            schema["properties"]["egress"]["default"],
+            json!("open"),
+            "an install that never hears of egress boots as before"
+        );
+        let mut input = Map::new();
+        input.insert("egress".into(), json!("fenced"));
+        assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        input.insert("egress".into(), json!("open"));
+        input.insert(
+            "egress_allow".into(),
+            json!("api.anthropic.com:443, 10.0.0.0/8, *.example.com"),
+        );
+        assert_eq!(
+            validate_settings("sandbox", &schema, &input, &Map::new())
+                .unwrap()
+                .get("egress_allow"),
+            input.get("egress_allow")
+        );
+        // A list a boot would have to drop is refused while the operator is looking, with the
+        // parser's own word for why.
+        input.insert("egress_allow".into(), json!("api.anthropic.com:443, host"));
+        let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+        assert!(
+            err.starts_with("setting `egress_allow`: `host` is not a host or host:port"),
+            "{err}"
+        );
     }
 
     #[test]
