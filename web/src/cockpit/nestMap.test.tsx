@@ -5,12 +5,28 @@ import type { Api } from "../api";
 import { ApiContext } from "../context";
 import { DEMO_MAP } from "../mock";
 import type { RepoMap } from "../types";
-import { SURFACE_Y, normalizeBox } from "./nest";
+import { SURFACE_Y } from "./nest";
 import { NestMapView, colonyPlaces, mapRepos } from "./NestMapView";
-import { antRoute, boundaryBox, componentForPath, componentsForFiles, entryComponent, layoutMap, routeBetween, tunnelPaths } from "./nestMap";
+import { DENSE_MAP } from "./mapFixtures";
+import {
+  LABEL_MAX_W,
+  antRoute,
+  boundaryBox,
+  clampView,
+  componentForPath,
+  componentsForFiles,
+  entryComponent,
+  fitView,
+  labelCollisions,
+  layoutMap,
+  routeBetween,
+  titleCollisions,
+  tunnelPaths,
+  zoomAt,
+} from "./nestMap";
 import { session } from "./testFixtures";
 
-const box = normalizeBox(1000, 640);
+const box = { width: 1000, height: 640 };
 
 describe("componentForPath", () => {
   const comps = DEMO_MAP.components;
@@ -50,8 +66,8 @@ describe("layoutMap", () => {
     for (const c of layout.chambers) {
       expect(c.y - c.r).toBeGreaterThan(SURFACE_Y);
       expect(c.x - c.r).toBeGreaterThanOrEqual(0);
-      expect(c.x + c.r).toBeLessThanOrEqual(box.width);
-      expect(c.y + c.r).toBeLessThanOrEqual(box.height);
+      expect(c.x + c.r).toBeLessThanOrEqual(layout.width);
+      expect(c.y + c.r).toBeLessThanOrEqual(layout.height);
     }
     const at = (id: string) => layout.byId.get(id)!;
     expect(at("web").x).toBeLessThan(at("api").x);
@@ -75,6 +91,75 @@ describe("layoutMap", () => {
     const w = layout.byId.get("webhooks")!;
     expect(route.startsWith(`M${layout.mouth.x} ${layout.mouth.y}`)).toBe(true);
     expect(route.endsWith(`${w.x} ${w.y}`)).toBe(true);
+  });
+});
+
+describe("layoutMap on a dense map", () => {
+  // The screenshot's shape: twenty components, four boundaries (one nested), one squeezed row.
+  const sizes = [
+    { width: 360, height: 480 },
+    { width: 1024, height: 560 },
+    { width: 1700, height: 790 },
+    { width: 1700, height: 420 },
+  ];
+
+  it.each(sizes)("keeps every chamber and name apart at $width×$height", (view) => {
+    const layout = layoutMap(DENSE_MAP, view);
+    expect(labelCollisions(layout)).toEqual([]);
+    expect(layout.chambers.filter((c) => c.compact)).toEqual([]);
+    for (const c of layout.chambers) expect(c.label.w).toBeLessThanOrEqual(LABEL_MAX_W);
+  });
+
+  it.each(sizes)("gives every mound a title clear of other titles, chambers and names at $width×$height", (view) => {
+    const layout = layoutMap(DENSE_MAP, view);
+    expect(layout.mounds.map((m) => m.label)).toEqual(DENSE_MAP.boundaries.map((b) => b.label));
+    expect(titleCollisions(layout)).toEqual([]);
+    for (const m of layout.mounds) {
+      expect(m.box.y).toBeGreaterThan(SURFACE_Y);
+      expect(m.title!.x).toBeGreaterThanOrEqual(m.box.x);
+      expect(m.title!.x + m.title!.w).toBeLessThanOrEqual(m.box.x + m.box.w);
+    }
+  });
+
+  it.each(sizes)("keeps everything on the plot, which is at least the viewport, at $width×$height", (view) => {
+    const layout = layoutMap(DENSE_MAP, view);
+    expect(layout.width).toBeGreaterThanOrEqual(view.width);
+    expect(layout.height).toBeGreaterThanOrEqual(view.height);
+    for (const r of [...layout.chambers.map((c) => c.label), ...layout.mounds.map((m) => m.box)]) {
+      expect(r.x).toBeGreaterThanOrEqual(0);
+      expect(r.x + r.w).toBeLessThanOrEqual(layout.width);
+      expect(r.y + r.h).toBeLessThanOrEqual(layout.height);
+    }
+  });
+
+  it("uses a wide screen's width instead of a narrow cluster", () => {
+    const layout = layoutMap(DENSE_MAP, { width: 1700, height: 790 });
+    const xs = layout.chambers.map((c) => c.x);
+    expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThan(1700 * 0.6);
+    expect(fitView(layout, { width: 1700, height: 790 }).k).toBeGreaterThan(0.8);
+  });
+
+  it("spreads a map a phone cannot fit onto a larger plot, zoomed out to fit", () => {
+    const view = { width: 360, height: 480 };
+    const layout = layoutMap(DENSE_MAP, view);
+    const fit = fitView(layout, view);
+    expect(layout.width).toBeGreaterThan(view.width);
+    expect(layout.width * fit.k).toBeLessThanOrEqual(view.width + 0.5);
+    expect(layout.height * fit.k).toBeLessThanOrEqual(view.height + 0.5);
+  });
+
+  it("zooms about a point and never lets the plot leave the viewport", () => {
+    const view = { width: 360, height: 480 };
+    const layout = layoutMap(DENSE_MAP, view);
+    const fit = fitView(layout, view);
+    const inside = zoomAt(fit, 3, 100, 200, layout, view);
+    expect(inside.k).toBeCloseTo(fit.k * 3);
+    // The plot point under (100, 200) stays under it.
+    expect((100 - inside.x) / inside.k).toBeCloseTo((100 - fit.x) / fit.k);
+    const flung = clampView({ ...inside, x: 5000, y: -99999 }, layout, view);
+    expect(flung.x).toBe(0);
+    expect(flung.y).toBe(view.height - layout.height * flung.k);
+    expect(clampView({ ...fit, k: 50 }, layout, view).k).toBe(2.5);
   });
 });
 
