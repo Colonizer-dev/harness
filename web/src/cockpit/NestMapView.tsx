@@ -26,6 +26,7 @@ import {
   fitView,
   layoutMap,
   mouthPath,
+  normalizeMap,
   tunnelPaths,
   zoomAt,
   type MapView,
@@ -133,10 +134,49 @@ export function NestMapView({
       setViewport((cur) => (cur.width === next.width && cur.height === next.height ? cur : next));
     };
     measure();
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
+
+  // The plot takes the rest of the screen below the bar and the repository card (never less than
+  // MIN_PLOT_H): measured against the scrolling pane it sits in, so "Needs you" below is a scroll away.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [fillHeight, setFillHeight] = useState(560);
+  const [full, setFull] = useState(false);
+  useLayoutEffect(() => {
+    const el = plotRef.current;
+    const root = rootRef.current;
+    if (!el || !root || typeof window === "undefined") return;
+    const scroller = scrollParent(root);
+    const measure = () => {
+      if (!el.isConnected) return;
+      const top = el.getBoundingClientRect().top;
+      const next = scroller
+        ? plotHeightFor(top - scroller.getBoundingClientRect().top + scroller.scrollTop, scroller.clientHeight)
+        : plotHeightFor(top + window.scrollY, window.innerHeight);
+      if (next != null) setFillHeight((cur) => (cur === next ? cur : next));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(root);
+    if (scroller) observer?.observe(scroller);
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
+  }, []);
+  // Fullscreen: the map over the whole window; Esc (or the button) brings it back.
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) setFull(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [full]);
 
   // The map for the chosen repository; re-read while a mapping colony is drawing it.
   const mappingStatus = data?.repo === repo ? (data.mapping?.status ?? null) : null;
@@ -212,7 +252,7 @@ export function NestMapView({
   };
 
   const stored_ = data && data.repo === repo ? data.map : null;
-  const map = stored_?.map ?? null;
+  const map = useMemo(() => (stored_?.map ? normalizeMap(stored_.map) : null), [stored_]);
   const layout = useMemo(() => (map ? layoutMap(map, viewport) : null), [map, viewport]);
   // The plot: the map's own size when there is one, else just the viewport.
   const box: NestBox = layout ? { width: layout.width, height: layout.height } : viewport;
@@ -315,7 +355,7 @@ export function NestMapView({
   const openChamber = open && layout ? layout.byId.get(open) : null;
 
   return (
-    <div className="relative flex min-h-0 flex-col">
+    <div ref={rootRef} className="relative flex min-h-0 flex-col">
       {/* The map's own bar: which repository, what drew it, and the way to draw it again. */}
       <div className="relative z-[5] flex flex-wrap items-center gap-x-4 gap-y-2 px-6 pb-2 pt-3 text-[13px]">
         {repos.length > 0 && <RepoPicker repos={repos} value={repo} onChange={pickRepo} />}
@@ -355,15 +395,15 @@ export function NestMapView({
       )}
       {rawOpen && stored_ && <RawMapDialog value={stored_} onClose={() => setRawOpen(false)} />}
 
-      <div className="relative flex min-h-0 flex-1">
+      <div className={full ? "fixed inset-0 z-[90] flex bg-bg" : "relative flex min-h-0 flex-1"}>
       <div
         ref={plotRef}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
-        className="map-plot relative h-[clamp(420px,72vh,1000px)] min-w-0 flex-1 overflow-hidden"
-        style={{ touchAction: zoomedIn ? "none" : "pan-y", cursor: layout ? "grab" : undefined }}
+        className="map-plot relative min-w-0 flex-1 overflow-hidden"
+        style={{ height: full ? "100%" : fillHeight, touchAction: zoomedIn ? "none" : "pan-y", cursor: layout ? "grab" : undefined }}
       >
         {/* The plot, panned and zoomed: everything on it moves together, ants and tunnels included. */}
         <div
@@ -603,6 +643,15 @@ export function NestMapView({
             <button type="button" onClick={() => setUserView(null)} disabled={!userView} className={`${ZOOM_BUTTON} w-auto px-2.5 text-[12px]`}>
               Fit
             </button>
+            <button
+              type="button"
+              aria-pressed={full}
+              title={full ? "Exit full screen (Esc)" : "Full screen"}
+              onClick={() => setFull((f) => !f)}
+              className={`${ZOOM_BUTTON} w-auto px-2.5 text-[12px]`}
+            >
+              {full ? "Exit full screen" : "Full screen"}
+            </button>
           </div>
         )}
       </div>
@@ -830,6 +879,27 @@ function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; 
       <pre className="scroll-thin m-0 max-h-[70vh] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed text-muted">{text}</pre>
     </dialog>
   );
+}
+
+/** The plot's floor: below this a map is not worth drawing in place (it can still go full screen). */
+export const MIN_PLOT_H = 420;
+
+/**
+ * The plot's height: the rest of the visible pane below the plot's top (`offset`, in the pane's
+ * content), at least MIN_PLOT_H. `null` for a reading that makes no sense (hidden, not laid out).
+ */
+export function plotHeightFor(offset: number, paneHeight: number): number | null {
+  if (!Number.isFinite(offset) || !Number.isFinite(paneHeight) || paneHeight <= 0) return null;
+  return Math.max(MIN_PLOT_H, Math.round(paneHeight - offset));
+}
+
+/** The nearest ancestor that scrolls vertically, if any. */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const o = getComputedStyle(p).overflowY;
+    if (o === "auto" || o === "scroll" || o === "overlay") return p;
+  }
+  return null;
 }
 
 /** A map ant's bubble: what its colony does in this chamber, named by the file it is on. */

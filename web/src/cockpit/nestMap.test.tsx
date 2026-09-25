@@ -6,7 +6,7 @@ import { ApiContext } from "../context";
 import { DEMO_MAP } from "../mock";
 import type { RepoMap } from "../types";
 import { SURFACE_Y } from "./nest";
-import { NestMapView, colonyPlaces, mapRepos } from "./NestMapView";
+import { MIN_PLOT_H, NestMapView, colonyPlaces, mapRepos, plotHeightFor } from "./NestMapView";
 import { DENSE_MAP } from "./mapFixtures";
 import {
   LABEL_MAX_W,
@@ -19,6 +19,7 @@ import {
   fitView,
   labelCollisions,
   layoutMap,
+  normalizeMap,
   routeBetween,
   titleCollisions,
   tunnelPaths,
@@ -163,6 +164,62 @@ describe("layoutMap on a dense map", () => {
   });
 });
 
+describe("filling the viewport", () => {
+  it.each([
+    { width: 1700, height: 900 },
+    { width: 2400, height: 1300 },
+    { width: 1280, height: 1100 },
+  ])("stretches a map with room to spare to the edges of $width×$height, at full size", (view) => {
+    for (const m of [DEMO_MAP, DENSE_MAP]) {
+      const layout = layoutMap(m, view);
+      const fit = fitView(layout, view);
+      const xs = layout.chambers.flatMap((c) => [c.x - c.r, c.label.x, c.label.x + c.label.w, c.x + c.r]);
+      const ys = layout.chambers.flatMap((c) => [c.y - c.r, c.label.y + c.label.h]);
+      // The map meets the viewport's edges (bar a margin) on both axes, at the zoom it is shown at.
+      expect((Math.max(...xs) - Math.min(...xs)) * fit.k).toBeGreaterThan(view.width * 0.8);
+      expect((Math.max(...ys) - Math.min(...ys)) * fit.k).toBeGreaterThan((view.height - SURFACE_Y) * 0.6);
+      expect(labelCollisions(layout)).toEqual([]);
+      if (m === DEMO_MAP) expect(fit.k).toBe(1);
+    }
+  });
+
+  it("takes the rest of the pane below the plot's top, with a floor", () => {
+    expect(plotHeightFor(300, 1100)).toBe(800);
+    expect(plotHeightFor(900, 1100)).toBe(MIN_PLOT_H);
+    expect(plotHeightFor(Number.NaN, 1100)).toBeNull();
+    expect(plotHeightFor(100, 0)).toBeNull();
+  });
+});
+
+describe("maps that could break the view", () => {
+  it("lays out for a sensible size when the plot measures 0×0", () => {
+    const layout = layoutMap(DENSE_MAP, { width: 0, height: 0 });
+    expect(layout.width).toBeGreaterThan(0);
+    for (const c of layout.chambers) expect(Number.isFinite(c.x) && Number.isFinite(c.y)).toBe(true);
+    const fit = fitView(layout, { width: 0, height: 0 });
+    expect(Number.isFinite(fit.k) && fit.k > 0).toBe(true);
+    const z = zoomAt(fit, 2, 0, 0, layout, { width: 0, height: 0 });
+    expect(Number.isFinite(z.k) && Number.isFinite(z.x) && Number.isFinite(z.y)).toBe(true);
+  });
+
+  it("draws an empty map and a half-written one without throwing", () => {
+    expect(layoutMap({ title: "x", components: [], connections: [], boundaries: [] }, box).chambers).toEqual([]);
+    const junk = {
+      title: "x",
+      components: [{ id: "a", label: "A" }, { id: "b", pos: [Number.NaN, 3], size: null }, null],
+      boundaries: [{ label: "g" }],
+    } as unknown as Parameters<typeof normalizeMap>[0];
+    const map = normalizeMap(junk);
+    expect(map.components.map((c) => c.id)).toEqual(["a", "b"]);
+    expect(map.components[1].label).toBe("b");
+    const layout = layoutMap(map, box);
+    expect(layout.chambers).toHaveLength(2);
+    for (const c of layout.chambers) expect(Number.isFinite(c.x) && Number.isFinite(c.y)).toBe(true);
+    expect(tunnelPaths(map, layout)).toEqual([]);
+    expect(componentForPath("src/x.ts", map.components)).toBeNull();
+  });
+});
+
 describe("colony placement", () => {
   const live = session({ id: "a", repo: "acme/webshop", status: "running" });
   const idle = session({ id: "b", repo: "acme/webshop", status: "running" });
@@ -204,6 +261,21 @@ describe("NestMapView", () => {
         <NestMapView sessions={colonies} selectedId={null} onSelect={() => {}} onOpen={() => {}} initialMap={initialMap} initialTouched={touched} />
       </ApiContext.Provider>,
     );
+
+  it("renders with no repository and no map", () => {
+    const html = renderToStaticMarkup(
+      <ApiContext.Provider value={{} as Api}>
+        <NestMapView sessions={[]} selectedId={null} onSelect={() => {}} onOpen={() => {}} />
+      </ApiContext.Provider>,
+    );
+    expect(html).toContain("No colonies in this workspace yet");
+  });
+
+  it("renders a stored map that is missing its lists", () => {
+    const broken = { title: "acme/webshop" } as unknown as typeof DEMO_MAP;
+    const html = render({ repo: "acme/webshop", map: { repo: "acme/webshop", revision: null, generated_at: "2026-09-24T00:00:00Z", session: "m0", map: broken }, mapping: null });
+    expect(html).toContain("map-plot");
+  });
 
   it("offers to draw a repository that has no map", () => {
     const html = render({ repo: "acme/webshop", map: null, mapping: null });

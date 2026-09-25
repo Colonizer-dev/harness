@@ -4,6 +4,33 @@
 import type { ArchMap, ArchComponent } from "../types";
 import { SURFACE_Y, type NestBox } from "./nest";
 
+/**
+ * A stored map made safe to draw: a hand-edited or half-written map can miss a list, a position, a
+ * size, a name or a component's sources, and the map view must not throw on it. Idempotent.
+ */
+export function normalizeMap(map: ArchMap): ArchMap {
+  const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) ? v : d);
+  const list = <T,>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
+  const components = list(map?.components)
+    .filter((c) => c && c.id != null)
+    .map((c) => ({
+      ...c,
+      id: String(c.id),
+      type: String(c.type ?? ""),
+      label: String(c.label ?? c.id),
+      pos: [num(c.pos?.[0], 0), num(c.pos?.[1], 0)] as [number, number],
+      size: [Math.max(1, num(c.size?.[0], 160)), Math.max(1, num(c.size?.[1], 64))] as [number, number],
+      sources: list(c.sources).filter((s) => s && typeof s.path === "string"),
+    }));
+  return {
+    ...map,
+    title: String(map?.title ?? ""),
+    components,
+    connections: list(map?.connections).filter((c) => c && c.from != null && c.to != null),
+    boundaries: list(map?.boundaries).map((b) => ({ ...b, label: String(b?.label ?? ""), wraps: list(b?.wraps) })),
+  };
+}
+
 /** A box on the plot, in plot (world) pixels. */
 export interface Rect {
   x: number;
@@ -188,30 +215,60 @@ function place(map: ArchMap, view: NestBox, side: LabelSide): MapLayout {
   const availH = Math.max(1, view.height - TOP - PAD - extH - (map.boundaries.length ? 2 * moundRoom : 0));
   const sx0 = spanX > 0 ? availW / spanX : 1;
   const sy0 = spanY > 0 ? availH / spanY : 1;
-  const { sx, sy, stuck } = spread(nodes, side, sx0, sy0, spanX > 0 ? MAX_WORLD / spanX : 1, spanY > 0 ? MAX_WORLD / spanY : 1);
+  const spreadOut = spread(nodes, side, sx0, sy0, spanX > 0 ? MAX_WORLD / spanX : 1, spanY > 0 ? MAX_WORLD / spanY : 1);
+  const { stuck } = spreadOut;
 
-  const chambers: MapChamber[] = nodes.map((n, i) => {
-    const x = (n.ux - minUx) * sx;
-    const y = (n.uy - minUy) * sy;
-    const label =
-      side === "below"
-        ? { x: x - n.lw / 2, y: y + n.r + LABEL_OFFSET, w: n.lw, h: n.lh }
-        : { x: x + n.r + LABEL_OFFSET + 2, y: y - n.lh / 2, w: n.lw, h: n.lh };
-    return { id: n.c.id, x, y, r: n.r, component: n.c, label, compact: stuck.has(i) };
-  });
-  const byId = new Map(chambers.map((c) => [c.id, c]));
-  const mounds: MapMound[] = [];
-  map.boundaries.forEach((b, i) => {
-    const box = moundBox(byId, b.wraps, 16 + depth[i] * 16, b.label ? TITLE_H + 6 : 0);
-    if (box) mounds.push({ label: b.label, box, title: null });
-  });
+  const build = (sx: number, sy: number) => {
+    const chambers: MapChamber[] = nodes.map((n, i) => {
+      const x = (n.ux - minUx) * sx;
+      const y = (n.uy - minUy) * sy;
+      const label =
+        side === "below"
+          ? { x: x - n.lw / 2, y: y + n.r + LABEL_OFFSET, w: n.lw, h: n.lh }
+          : { x: x + n.r + LABEL_OFFSET + 2, y: y - n.lh / 2, w: n.lw, h: n.lh };
+      return { id: n.c.id, x, y, r: n.r, component: n.c, label, compact: stuck.has(i) };
+    });
+    const byId = new Map(chambers.map((c) => [c.id, c]));
+    const mounds: MapMound[] = [];
+    map.boundaries.forEach((b, i) => {
+      const box = moundBox(byId, b.wraps, 16 + depth[i] * 16, b.label ? TITLE_H + 6 : 0);
+      if (box) mounds.push({ label: b.label, box, title: null });
+    });
+    const boxes = [...chambers.flatMap((c) => [chamberRect(c), c.label]), ...mounds.map((m) => m.box)];
+    const minX = Math.min(...boxes.map((r) => r.x));
+    const minY = Math.min(...boxes.map((r) => r.y));
+    const contentW = Math.max(...boxes.map((r) => r.x + r.w)) - minX;
+    const contentH = Math.max(...boxes.map((r) => r.y + r.h)) - minY;
+    return { chambers, byId, mounds, minX, minY, contentW, contentH };
+  };
+
+  // Fill the whole viewport — at the zoom the map will be shown at — on both axes: an axis with room
+  // to spare is stretched (which only ever parts chambers further) until the map meets the edges.
+  let { sx, sy } = spreadOut;
+  let built = build(sx, sy);
+  for (let pass = 0; pass < 3; pass++) {
+    const w = built.contentW + PAD * 2;
+    const h = TOP + built.contentH + PAD;
+    const k = Math.min(1, view.width / w, view.height / h);
+    const targetW = view.width / k;
+    const targetH = view.height / k;
+    let grew = false;
+    if (spanX > 0 && w < targetW - 1) {
+      const fixed = built.contentW - spanX * sx;
+      const next = (targetW - PAD * 2 - fixed) / spanX;
+      if (next > sx * 1.001) (sx = Math.min(next, MAX_WORLD / spanX)), (grew = true);
+    }
+    if (spanY > 0 && h < targetH - 1) {
+      const fixed = built.contentH - spanY * sy;
+      const next = (targetH - TOP - PAD - fixed) / spanY;
+      if (next > sy * 1.001) (sy = Math.min(next, MAX_WORLD / spanY)), (grew = true);
+    }
+    if (!grew) break;
+    built = build(sx, sy);
+  }
+  const { chambers, byId, mounds, minX, minY, contentW, contentH } = built;
 
   // Shift everything so the highest mound sits under the corridor, and centre a map narrower than the viewport.
-  const boxes = [...chambers.flatMap((c) => [chamberRect(c), c.label]), ...mounds.map((m) => m.box)];
-  const minX = Math.min(...boxes.map((r) => r.x));
-  const minY = Math.min(...boxes.map((r) => r.y));
-  const contentW = Math.max(...boxes.map((r) => r.x + r.w)) - minX;
-  const contentH = Math.max(...boxes.map((r) => r.y + r.h)) - minY;
   const width = Math.round(Math.max(view.width, contentW + PAD * 2));
   const height = Math.round(Math.max(view.height, TOP + contentH + PAD));
   const ox = (width - contentW) / 2 - minX;
@@ -272,7 +329,10 @@ function placeTitles(mounds: MapMound[], chambers: MapChamber[]): void {
  * other — so a dense map gets a larger plot (panned and zoomed to fit) rather than overlapping text.
  * Names go under the holes or beside them, whichever needs less zooming out to fit.
  */
-export function layoutMap(map: ArchMap, view: NestBox): MapLayout {
+export function layoutMap(map: ArchMap, viewIn: NestBox): MapLayout {
+  // A plot not laid out yet (hidden, or measured before mount) reads 0×0: lay out for a sensible size instead.
+  const view = { width: sane(viewIn.width, 960), height: sane(viewIn.height, 560) };
+  map = normalizeMap(map);
   if (!map.components.length) {
     return { chambers: [], byId: new Map(), mounds: [], labelSide: "below", width: view.width, height: view.height, mouth: { x: Math.round(view.width / 2), y: SURFACE_Y + 26 } };
   }
@@ -321,9 +381,14 @@ export const SUBLABEL_MIN_ZOOM = 0.72;
 /** Below this zoom names are left off too (hover or tap a chamber for its name). */
 export const LABEL_MIN_ZOOM = 0.38;
 
+function sane(n: number, fallback: number): number {
+  return Number.isFinite(n) && n >= 1 ? n : fallback;
+}
+
 /** The whole plot in the viewport, never enlarged, centred across and from the top. */
-export function fitView(plot: { width: number; height: number }, view: NestBox): MapView {
-  const k = Math.min(1, view.width / plot.width, view.height / plot.height);
+export function fitView(plot: { width: number; height: number }, viewIn: NestBox): MapView {
+  const view = { width: sane(viewIn.width, 1), height: sane(viewIn.height, 1) };
+  const k = Math.max(0.02, Math.min(1, view.width / sane(plot.width, 1), view.height / sane(plot.height, 1)));
   return { k, x: (view.width - plot.width * k) / 2, y: 0 };
 }
 
