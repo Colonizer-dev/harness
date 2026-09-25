@@ -357,7 +357,22 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let colonies = app.sessions.read().await.clone();
     let touched = github::touched_files(app, &colonies, &s).await;
     let siblings = github::siblings_of(&colonies, &s, &touched);
-    let mut prompt = github::build_prompt(&s, issue.as_ref(), &base, resume, &siblings, stacked_on.as_deref());
+    // The colony's instructions carry an external-input marking when a scoped API token launched it
+    // (issue #508): the record keeps the token's id, the prompt names it, and a revoked token falls
+    // back to its id so the marking never disappears.
+    let external_token = match s.launched_by_token.as_deref() {
+        None => None,
+        Some(id) => Some(app.api_tokens.name_of(id).await.unwrap_or_else(|| id.to_string())),
+    };
+    let mut prompt = github::build_prompt(
+        &s,
+        issue.as_ref(),
+        &base,
+        resume,
+        &siblings,
+        stacked_on.as_deref(),
+        external_token.as_deref(),
+    );
     // Colony secrets in scope: named in the prompt (never their values) and handed to msb below,
     // which substitutes each one only on TLS to its hosts.
     let colony_secrets = crate::colony_secrets::for_colony(&app.cfg.config_dir, &s.repo);

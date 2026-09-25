@@ -30,7 +30,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse as _, Response},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -276,6 +276,12 @@ pub struct Session {
     /// person started. The event origin resolver (`events.rs`) reads the machine launchers back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The id of the scoped API token that launched this colony (issue #508, api_tokens.rs), when
+    /// one did: the concurrency cap and daily budget count a token's own colonies by it, and the
+    /// boot resolves the id back to the token's name to mark the instructions as external input.
+    /// `None` for anything the owner started. The token itself is never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_by_token: Option<String>,
     pub worktree: String,
     pub git_admin_dir: Option<String>,
     pub sandbox: String,
@@ -473,6 +479,7 @@ impl Default for Session {
             stack: false,
             stack_fork: None,
             origin: None,
+            launched_by_token: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),
@@ -1238,6 +1245,17 @@ fn try_claim_session(
     Ok((session, queued, waiting))
 }
 
+/// What the admission lock returned for a launch: the duplicate claim's outcome, or — issue #508 —
+/// a scoped token's caps refusing the launch. The pre-check at the top of `create` reads under a
+/// read lock, so two launches of one token could both pass its caps before either inserted; the
+/// re-check runs inside `with_slot`'s write guard, where counting and inserting are one atomic
+/// step, closing that window the way the duplicate re-check does. The claim is boxed: a colony
+/// record is large, and a cap refusal carries only a message.
+enum Admission {
+    Claimed(Box<Result<(Session, bool, usize), Session>>),
+    Capped(String),
+}
+
 /// Whether colonies may file validated findings as issues. On unless switched off in Settings.
 pub(crate) fn findings_enabled(app: &App, modules: &ModulesConfig) -> bool {
     let schema = schema_for("publish", &modules.publish.provider, &app.agents);
@@ -1306,7 +1324,11 @@ pub(crate) fn verify_default(agents: &[AgentModule], modules: &ModulesConfig) ->
 }
 
 #[allow(clippy::result_large_err)]
-pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> ApiResult<Session> {
+pub async fn create(
+    State(app): State<Shared>,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+    Json(req): Json<NewSession>,
+) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
     if !valid_repo(&repo) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
@@ -1314,6 +1336,24 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // A switched-off workspace refuses new work but nothing else: colonies it already has stay
     // listed, queueable and resumable, and its settings survive for the day it is switched back on.
     let owner = repo.split('/').next().unwrap_or_default();
+    // A scoped launch token (issue #508) launches only inside its org/repo limits, and only under
+    // its concurrency cap and daily budget — checked before anything else, so a launch the token
+    // may not make never gets as far as a worktree. The scope gate itself ran already, in
+    // `authorize` (`host_guard`).
+    let scoped = scoped.map(|axum::Extension(tok)| tok);
+    if let Some(token) = &scoped
+        && !token.covers(owner, &repo)
+    {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            &format!("this API token's org/repo limits do not include {repo}"),
+        ));
+    }
+    if let Some(token) = &scoped
+        && let Some(reason) = crate::api_tokens::launch_cap_error(token, &app.sessions.read().await, Utc::now())
+    {
+        return Err(client_error(StatusCode::TOO_MANY_REQUESTS, &reason));
+    }
     if !orgs::org_enabled(&app.org_settings(owner)) {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -1510,6 +1550,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         stack: req.stack,
         stack_fork: None,
         origin: req.origin.clone(),
+        launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
         worktree: app
             .cfg
             .data_dir
@@ -1584,7 +1625,8 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
     // cannot both take it. Counted before the push, so this colony is never waiting behind itself.
     // The duplicate-issue check is re-checked here too: the fast-path pre-check above reads under a
     // read lock, so two launches can both pass it before either inserts — the loser is refused with
-    // the same 409 inside the lock, where check and insert are one atomic step.
+    // the same 409 inside the lock, where check and insert are one atomic step. A scoped token's
+    // caps are re-checked beside it for the same reason (`Admission`).
     let claimed = with_slot(
         &app.sessions,
         owner,
@@ -1593,7 +1635,12 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         org_limit,
         repo_limit,
         |sessions, room| {
-            try_claim_session(
+            if let Some(token) = &scoped
+                && let Some(reason) = crate::api_tokens::launch_cap_error(token, sessions, now)
+            {
+                return Admission::Capped(reason);
+            }
+            Admission::Claimed(Box::new(try_claim_session(
                 sessions,
                 room,
                 session,
@@ -1605,18 +1652,25 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
                 // launch never asked to queue.
                 req.queue_behind_holder,
                 wait_for_parent,
-            )
+            )))
         },
     )
     .await;
     let (session, queued, waiting) = match claimed {
-        Ok(admitted) => admitted,
-        Err(held) => {
-            // The colony directories created above belong to a colony that never was; take them back
-            // out, best effort, before refusing.
+        Admission::Claimed(claimed) => match *claimed {
+            Ok(admitted) => admitted,
+            Err(held) => {
+                // The colony directories created above belong to a colony that never was; take them
+                // back out, best effort, before refusing.
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                let issue = req.issue.unwrap_or_default();
+                return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
+            }
+        },
+        Admission::Capped(reason) => {
+            // As above, the directories belong to a colony that never was.
             let _ = tokio::fs::remove_dir_all(&dir).await;
-            let issue = req.issue.unwrap_or_default();
-            return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
+            return Err(client_error(StatusCode::TOO_MANY_REQUESTS, &reason));
         }
     };
     if let Err(e) = app.persist_sessions().await {
@@ -1826,10 +1880,20 @@ pub(crate) async fn agentd_ws(app: &App, s: &Session, path: &str) -> Result<WebS
 // HTTP handlers
 // ---------------------------------------------------------------------------
 
-pub async fn list(State(app): State<Shared>) -> Json<Vec<Session>> {
+pub async fn list(
+    State(app): State<Shared>,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+) -> Json<Vec<Session>> {
     let sessions = app.sessions.read().await.clone();
     let mut out = Vec::with_capacity(sessions.len());
     for session in sessions.into_iter().rev() {
+        // A scoped token's org/repo limits are also the list filter (issue #508): a colony outside
+        // them is not in the answer at all, the same hiding a single-colony read gets.
+        if let Some(token) = &scoped
+            && !token.covers(&session.org, &session.repo)
+        {
+            continue;
+        }
         out.push(with_activity(&app, session).await);
     }
     Json(out)
@@ -1843,10 +1907,179 @@ pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult
     Ok(Json(diagnosis::for_session(&app, with_activity(&app, session).await).await))
 }
 
+/// `GET /api/sessions/{id}/question` (issue #508): the question the colony's agent is waiting on,
+/// if it is waiting on one — the same state the cockpit's choice cards read off the events socket,
+/// so an external client sees exactly what a browser sees. `question_id` is what an answer names,
+/// `questions` are the agent's own question bodies with their options, and `risk` is the question's
+/// class, which bounds what answering it may unleash. A colony that is not asking reads **204** with
+/// no body — an empty inbox, not an error — while an unknown id stays a 404.
+pub async fn question(State(app): State<Shared>, Path(id): Path<String>) -> Result<Response, crate::AppError> {
+    app.session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let rt = app.runtime(&id).await;
+    let Some((question_id, questions, risk)) = rt.open_question().await else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    Ok(Json(json!({
+        "question_id": question_id,
+        "risk": risk.as_str(),
+        "questions": questions,
+    }))
+    .into_response())
+}
+
+/// `POST /api/sessions/{id}/answer` (issue #508): the HTTP twin of the events socket's `answer`
+/// command — same body the cockpit sends over the wire, the same shared path (`submit_answer`), the
+/// same activity line. An answer from a scoped token carries the external-input marker (`forward`),
+/// so the agent reads it as a description from outside, not as the operator's voice. Answers a
+/// 409/404, never a silent drop: an HTTP caller cannot see the transcript, so a refusal must say
+/// itself.
+pub async fn answer(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    via: Option<axum::Extension<crate::auth::Via>>,
+    Json(command): Json<Value>,
+) -> Result<StatusCode, crate::AppError> {
+    let via = via.map(|axum::Extension(via)| via);
+    let Some(parsed) = AnswerCommand::parse(&command) else {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "expected {\"question_id\": str, \"answers\": {option: choice}, \"response\": str?} matching the open question",
+        ));
+    };
+    // The name, when the answerer is a scoped token: it marks the free-text note the agent reads.
+    let external_name = match &via {
+        Some(crate::auth::Via::Token(name)) => Some(name.clone()),
+        _ => None,
+    };
+    let external = external_name.as_deref();
+    let rt = app.runtime(&id).await;
+    match submit_answer(&app, &id, &rt, parsed, via, external, true).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(AnswerError::NoSession) => Err(client_error(StatusCode::NOT_FOUND, "no such session")),
+        Err(AnswerError::NotAccepting(status)) => Err(client_error(
+            StatusCode::CONFLICT,
+            &format!("the colony is {} and cannot take an answer; resume it first", status.as_str()),
+        )),
+        Err(AnswerError::NoQuestion) => Err(client_error(StatusCode::CONFLICT, "no question is pending for this colony")),
+        Err(AnswerError::Stale) => Err(client_error(
+            StatusCode::CONFLICT,
+            "the colony is asking a different question now; re-read GET /api/sessions/{id}/question and answer that one",
+        )),
+    }
+}
+
+/// A scoped API token's free text, prefixed with the external-input marker (issue #508): the agent
+/// reads it as a description of the task from outside, never as the operator's voice. Shared by
+/// the answer paths' `response` note and the socket's `user_message`. An empty note leaves the
+/// marker alone, so the agent still sees who acted.
+fn external_text(name: &str, text: &str) -> String {
+    if text.trim().is_empty() {
+        format!("[external input from API token \"{name}\"]")
+    } else {
+        format!("[external input from API token \"{name}\"] {text}")
+    }
+}
+
+/// An answer as the API takes it: the question it answers, one choice per question label, and the
+/// free-text note the agent reads alongside. Exactly the socket command's fields (`client_command`),
+/// parsed once so both paths validate identically.
+struct AnswerCommand {
+    question_id: String,
+    answers: Value,
+    response: Value,
+}
+
+impl AnswerCommand {
+    /// `None` when the body is not shaped like an answer at all — a missing id, or answers that are
+    /// not an object of option labels. Whether the labels actually match the open question is the
+    /// runner's to find out, here as over the wire.
+    fn parse(command: &Value) -> Option<AnswerCommand> {
+        Some(AnswerCommand {
+            question_id: command["question_id"].as_str()?.to_string(),
+            answers: command["answers"].as_object()?.clone().into(),
+            response: command.get("response").cloned().unwrap_or(Value::Null),
+        })
+    }
+
+    /// The command as the runner receives it. `external` — the name of a scoped API token —
+    /// prefixes the free-text note so the agent knows the answer came from outside the cockpit
+    /// (issue #508): instructions from an external token are a description of the task, not the
+    /// operator's voice. The marker goes into `response` only, never into `answers`, whose labels
+    /// must match the question's options exactly.
+    fn forward(self, external: Option<&str>) -> Value {
+        let response = match external {
+            Some(name) => Value::String(external_text(name, self.response.as_str().unwrap_or_default())),
+            None => self.response,
+        };
+        json!({
+            "type": "answer",
+            "question_id": self.question_id,
+            "answers": self.answers,
+            "response": response,
+        })
+    }
+}
+
+/// Why an HTTP answer was refused. Each refusal names itself in the handler above: a colony that
+/// is not there is a 404; one that cannot take an answer, is not asking, or is asking something
+/// else is a 409 — a conflict with the colony's state that re-reading the question resolves.
+enum AnswerError {
+    NoSession,
+    NotAccepting(SessionStatus),
+    NoQuestion,
+    Stale,
+}
+
+/// The one answer path (issue #508): the events socket's `answer` command and
+/// `POST /api/sessions/{id}/answer` both forward through here, so both check the colony the same
+/// way and write the same activity line. `require_pending` is the HTTP endpoint's extra guard —
+/// over the wire the runner owns the question's lifecycle and refuses an answer whose question has
+/// closed, so the socket path does not pre-check; over HTTP a stale id is a 409, because an HTTP
+/// caller cannot otherwise tell "delivered" from "answered nothing".
+async fn submit_answer(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    answer: AnswerCommand,
+    via: Option<crate::auth::Via>,
+    external: Option<&str>,
+    require_pending: bool,
+) -> Result<(), AnswerError> {
+    let s = app.session(id).await.ok_or(AnswerError::NoSession)?;
+    if !accepts_commands(s.status) {
+        return Err(AnswerError::NotAccepting(s.status));
+    }
+    if require_pending {
+        let open = rt.open_question().await;
+        let open_matches = open.as_ref().is_some_and(|(open_id, _, _)| open_id == &answer.question_id);
+        if !open_matches {
+            return Err(if open.is_some() {
+                AnswerError::Stale
+            } else {
+                AnswerError::NoQuestion
+            });
+        }
+    }
+    let _ = rt.commands.send(answer.forward(external));
+    crate::activity::record_answer(app, &s, via).await;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct SinceQuery {
     since: Option<u64>,
     epoch: Option<u64>,
+}
+
+/// Who is on a colony's events socket, and what their token allows (issue #508): the `Via` the
+/// activity line names and the scoped token whose scope gates driving commands. Both `None` for
+/// the owner — the browser or a request holding the install token.
+#[derive(Clone, Default)]
+struct SocketActor {
+    via: Option<crate::auth::Via>,
+    scoped: Option<crate::api_tokens::ScopedToken>,
 }
 
 pub async fn events_ws(
@@ -1854,6 +2087,7 @@ pub async fn events_ws(
     Path(id): Path<String>,
     Query(query): Query<SinceQuery>,
     via: Option<axum::Extension<crate::auth::Via>>,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
     app.session(&id)
@@ -1861,7 +2095,9 @@ pub async fn events_ws(
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let rt = app.runtime(&id).await;
     let via = via.map(|axum::Extension(via)| via);
-    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, via, socket)))
+    let scoped = scoped.map(|axum::Extension(scoped)| scoped);
+    let actor = SocketActor { via, scoped };
+    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, actor, socket)))
 }
 
 /// One replayable line of events.jsonl: the decoded line and its seq, or `None` to skip it.
@@ -1879,7 +2115,7 @@ async fn events_socket(
     rt: Arc<Runtime>,
     since: u64,
     client_epoch: Option<u64>,
-    via: Option<crate::auth::Via>,
+    actor: SocketActor,
     socket: WebSocket,
 ) {
     // Before this socket subscribes and the log ring is drained, so its alert lands in the
@@ -1995,7 +2231,9 @@ async fn events_socket(
                 return;
             },
             message = rx.next() => match message {
-                Some(Ok(Message::Text(body))) => client_command(&app, &id, &rt, via, body.as_str()).await,
+                Some(Ok(Message::Text(body))) => {
+                    client_command(&app, &id, &rt, actor.via.clone(), actor.scoped.clone(), body.as_str()).await
+                }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                 Some(Ok(_)) => {}
             },
@@ -2011,10 +2249,34 @@ fn accepts_commands(status: SessionStatus) -> bool {
     status.is_live()
 }
 
-async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, via: Option<crate::auth::Via>, body: &str) {
+async fn client_command(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    via: Option<crate::auth::Via>,
+    scoped: Option<crate::api_tokens::ScopedToken>,
+    body: &str,
+) {
     let Ok(command) = serde_json::from_str::<Value>(body) else {
         return;
     };
+    // Every command this socket takes drives the colony: a `read`-scoped token may watch the
+    // transcript but not act on it (issue #508). Refused with a warn on the transcript rather than
+    // dropped, so a misconfigured client sees why nothing happens.
+    if let Some(token) = &scoped
+        && token.scope < crate::api_tokens::Scope::Operate
+    {
+        app.session_log(
+            id,
+            "warn",
+            format!(
+                "this API token's scope ({}) can watch this colony but not drive it; answering, interrupting or messaging needs an operate or launch token",
+                token.scope.as_str()
+            ),
+        )
+        .await;
+        return;
+    }
     let Some(s) = app.session(id).await else { return };
     if !accepts_commands(s.status) {
         // Dropping it silently left the browser showing an answer on its way to an
@@ -2030,24 +2292,46 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, via: Option<c
             if text.is_empty() || text.len() > 100_000 {
                 return;
             }
+            // A scoped token's message is external input like its answers (issue #508): the
+            // marker tells the agent who is talking, in the operator's voice or not.
+            let text = match &scoped {
+                Some(token) => external_text(&token.name, text),
+                None => text.to_string(),
+            };
             json!({"type": "user_message", "id": format!("u-{}", short_id()), "text": text})
         }
         Some("answer") => {
-            let (Some(question_id), true) = (command["question_id"].as_str(), command["answers"].is_object()) else {
+            // The socket path pre-checks nothing about the question: the runner owns the
+            // lifecycle and refuses a stale answer itself (see `submit_answer`).
+            let Some(parsed) = AnswerCommand::parse(&command) else {
                 return;
             };
-            json!({
-                "type": "answer",
-                "question_id": question_id,
-                "answers": command["answers"],
-                "response": command.get("response").cloned().unwrap_or(Value::Null),
-            })
+            let external_name = match &via {
+                Some(crate::auth::Via::Token(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let external = external_name.as_deref();
+            let _ = submit_answer(app, id, rt, parsed, via, external, false).await;
+            return;
         }
         Some("interrupt") => {
             rt.interrupted.store(true, Ordering::SeqCst);
             json!({"type": "interrupt"})
         }
         Some("set_model") => {
+            // Switching the model is not in the issue's operate list (issue #508): a token may
+            // drive the colony's work but not change what it runs on. Warned on the transcript,
+            // not dropped, so the client sees why nothing happened.
+            if scoped.is_some() {
+                app.session_log(
+                    id,
+                    "warn",
+                    "switching a colony's model stays with the maintainer; an API token, whatever its scope, cannot change it"
+                        .to_string(),
+                )
+                .await;
+                return;
+            }
             let Some(model) = set_model_id(command["model"].as_str().unwrap_or_default()) else {
                 return;
             };
@@ -2055,11 +2339,7 @@ async fn client_command(app: &Shared, id: &str, rt: &Arc<Runtime>, via: Option<c
         }
         _ => return,
     };
-    let answered = forward["type"] == "answer";
     let _ = rt.commands.send(forward);
-    if answered {
-        crate::activity::record_answer(app, &s, via).await;
-    }
 }
 
 /// The model a `set_model` switches the colony to, trimmed, or `None` to drop the command.
@@ -2168,6 +2448,145 @@ pub(crate) mod tests {
         for status in [Publishing, PrOpened, Merged, Closed, NoChanges, Stopped, Failed, Queued] {
             assert!(!accepts_commands(status), "{status:?} must not accept an answer");
         }
+    }
+
+    /// Issue #508: a `read`-scoped token may watch a colony's events socket but not drive it —
+    /// its commands are refused with a warn on the transcript, never forwarded. An `operate`
+    /// token's answer goes down to the agent with its free-text note marked as external input,
+    /// its structured answers untouched, and the activity line names the token, never the secret.
+    #[tokio::test]
+    async fn a_read_scoped_token_watches_the_socket_but_cannot_drive_it() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        *rt.open_question.lock().await = Some(("q1".into(), Vec::new(), QuestionRisk::ReadOnly));
+        let mut rx = rt.commands_rx.lock().await.take().unwrap();
+        let scoped = |scope| crate::api_tokens::ScopedToken {
+            id: "tok_test".into(),
+            name: "watcher".into(),
+            scope,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        };
+        let answer = r#"{"type":"answer","question_id":"q1","answers":{"a":"b"},"response":"go"}"#;
+        client_command(
+            &app,
+            "abc",
+            &rt,
+            Some(crate::auth::Via::Token("watcher".into())),
+            Some(scoped(crate::api_tokens::Scope::Read)),
+            answer,
+        )
+        .await;
+        assert!(rx.try_recv().is_err(), "nothing was forwarded to the agent");
+        {
+            let logs = rt.logs.lock().await;
+            let last = logs.back().unwrap();
+            assert_eq!(last["level"], "warn", "{last}");
+            assert!(
+                last["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("can watch this colony but not drive it"),
+                "{last}"
+            );
+        }
+        client_command(
+            &app,
+            "abc",
+            &rt,
+            Some(crate::auth::Via::Token("watcher".into())),
+            Some(scoped(crate::api_tokens::Scope::Operate)),
+            answer,
+        )
+        .await;
+        let forwarded = rx.try_recv().unwrap();
+        assert_eq!(forwarded["type"], "answer");
+        assert_eq!(forwarded["question_id"], "q1");
+        assert_eq!(forwarded["answers"], json!({"a": "b"}), "the answer labels are untouched");
+        assert_eq!(
+            forwarded["response"].as_str().unwrap(),
+            "[external input from API token \"watcher\"] go",
+            "the free-text note is marked as external input"
+        );
+        // The token's free-text message is external input too, marked like its answers; the
+        // owner's message on the same socket is not.
+        client_command(
+            &app,
+            "abc",
+            &rt,
+            Some(crate::auth::Via::Token("watcher".into())),
+            Some(scoped(crate::api_tokens::Scope::Operate)),
+            r#"{"type":"user_message","text":"rerun the failing suite"}"#,
+        )
+        .await;
+        let forwarded = rx.try_recv().unwrap();
+        assert_eq!(forwarded["type"], "user_message");
+        assert_eq!(
+            forwarded["text"].as_str().unwrap(),
+            "[external input from API token \"watcher\"] rerun the failing suite",
+            "the message is marked as external input"
+        );
+        client_command(&app, "abc", &rt, None, None, r#"{"type":"user_message","text":"carry on"}"#).await;
+        let forwarded = rx.try_recv().unwrap();
+        assert_eq!(forwarded["text"], "carry on", "the owner's message carries no marking");
+        // Switching the model is not in the issue's operate list (issue #508): any scoped token is
+        // refused with a warn on the transcript, never forwarded.
+        client_command(
+            &app,
+            "abc",
+            &rt,
+            Some(crate::auth::Via::Token("watcher".into())),
+            Some(scoped(crate::api_tokens::Scope::Launch)),
+            r#"{"type":"set_model","model":"opus"}"#,
+        )
+        .await;
+        assert!(rx.try_recv().is_err(), "set_model from a scoped token is not forwarded");
+        {
+            let logs = rt.logs.lock().await;
+            let last = logs.back().unwrap();
+            assert_eq!(last["level"], "warn", "{last}");
+            assert!(
+                last["message"].as_str().unwrap().contains("model"),
+                "the warn says what was refused: {last}"
+            );
+        }
+        let log = std::fs::read_to_string(app.cfg.data_dir.join(crate::activity::FILE)).unwrap();
+        assert!(log.contains("token:watcher"), "the actor is the token: {log}");
+        assert!(!log.contains("col_"), "no secret value reaches the log: {log}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #508: the question route separates an empty inbox from an unknown colony — a colony
+    /// that is not asking reads 204 with no body (nothing to answer, not an error), an unknown id
+    /// stays a 404, and an open question reads as the body `colonizer ask` and the cockpit parse.
+    #[tokio::test]
+    async fn the_question_route_answers_nothing_pending_with_a_204() {
+        use axum::body::to_bytes;
+
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+
+        // Nothing pending: 204, no body.
+        let response = question(State(app.clone()), Path("abc".into())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // An open question reads as the JSON body, carrying the id an answer names.
+        let rt = app.runtime("abc").await;
+        *rt.open_question.lock().await = Some((
+            "q1".into(),
+            vec![json!({"question": "Push now?", "options": []})],
+            QuestionRisk::WorkspaceWrite,
+        ));
+        let response = question(State(app.clone()), Path("abc".into())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["question_id"], "q1");
+
+        // An unknown colony stays a 404.
+        let error = question(State(app), Path("zzz".into())).await.unwrap_err();
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     use super::*;
@@ -2412,6 +2831,7 @@ pub(crate) mod tests {
             stack: false,
             stack_fork: None,
             origin: None,
+            launched_by_token: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),
@@ -2604,7 +3024,7 @@ pub(crate) mod tests {
 
         // No `serialize` at all: the default stays off, so the newcomer never even scans for an
         // overlap and starts unheld.
-        let created = create(State(app.clone()), overlap_request("acme/app", None))
+        let created = create(State(app.clone()), None, overlap_request("acme/app", None))
             .await
             .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
         assert_eq!(
@@ -2613,13 +3033,13 @@ pub(crate) mod tests {
         );
 
         // `serialize: false` reads the same as absent.
-        let created = create(State(app.clone()), overlap_request("acme/app", Some(false)))
+        let created = create(State(app.clone()), None, overlap_request("acme/app", Some(false)))
             .await
             .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
         assert_eq!(created.queued_behind, None, "an explicit false is still off");
 
         // `serialize: true`: the same live, touched-file colony now holds the newcomer behind it.
-        let created = create(State(app.clone()), overlap_request("acme/app", Some(true)))
+        let created = create(State(app.clone()), None, overlap_request("acme/app", Some(true)))
             .await
             .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
         assert_eq!(
@@ -3476,6 +3896,7 @@ pub(crate) mod tests {
         let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
         let err = create(
             State(app.clone()),
+            None,
             Json(NewSession {
                 repo: "acme/app".into(),
                 issue: None,
@@ -3513,7 +3934,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn colonies_of_a_switched_off_org_stay_listed_and_resume() {
         let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
-        let listed = list(State(app.clone())).await.0;
+        let listed = list(State(app.clone()), None).await.0;
         let kept = listed.iter().find(|s| s.id == "kept").unwrap();
         assert_eq!(kept.org, "acme", "the colony is still in the list");
         // The real resume path, not just its gate: the org's switch does not make `resume` refuse
@@ -3561,6 +3982,7 @@ pub(crate) mod tests {
 
         let created = create(
             State(app.clone()),
+            None,
             Json(NewSession {
                 repo: "acme/app".into(),
                 issue: None,
@@ -3656,9 +4078,13 @@ pub(crate) mod tests {
         parent.repo = "acme/app".into();
         app.sessions.write().await.push(parent);
 
-        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), true))
-            .await
-            .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
+        let created = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/app", Some("parent".into()), true),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
         assert_eq!(
             created.parent.as_deref(),
             Some("parent"),
@@ -3691,9 +4117,13 @@ pub(crate) mod tests {
         let app = app_that_can_create(&root);
         parent_on(&app, SessionStatus::PrOpened).await;
 
-        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), false))
-            .await
-            .unwrap_or_else(|e| panic!("create refused a queued colony: {:#}", e.1));
+        let created = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/app", Some("parent".into()), false),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create refused a queued colony: {:#}", e.1));
         assert_eq!(created.parent.as_deref(), Some("parent"));
         assert!(!created.stack, "queueing, not stacking, is the default");
         assert_eq!(
@@ -3710,9 +4140,13 @@ pub(crate) mod tests {
         let app = app_that_can_create(&root);
         parent_on(&app, SessionStatus::PrOpened).await;
 
-        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), true))
-            .await
-            .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
+        let created = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/app", Some("parent".into()), true),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create refused a stacked colony: {:#}", e.1));
         assert_eq!(created.parent.as_deref(), Some("parent"));
         assert!(created.stack);
         assert_eq!(
@@ -3729,9 +4163,13 @@ pub(crate) mod tests {
         let app = app_that_can_create(&root);
         parent_on(&app, SessionStatus::Merged).await;
 
-        let created = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), false))
-            .await
-            .unwrap_or_else(|e| panic!("create refused a queued colony: {:#}", e.1));
+        let created = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/app", Some("parent".into()), false),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create refused a queued colony: {:#}", e.1));
         assert_eq!(
             created.status,
             SessionStatus::Starting,
@@ -3746,9 +4184,13 @@ pub(crate) mod tests {
         let app = app_that_can_create(&root);
         parent_on(&app, SessionStatus::Closed).await;
 
-        let err = create(State(app.clone()), stack_request("acme/app", Some("parent".into()), false))
-            .await
-            .unwrap_err();
+        let err = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/app", Some("parent".into()), false),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT);
         let message = err.1.to_string();
         assert!(message.contains("parent"), "{message}");
@@ -3769,7 +4211,7 @@ pub(crate) mod tests {
         dead.repo = "acme/app".into();
         app.sessions.write().await.push(dead);
 
-        let err = create(State(app.clone()), stack_request("acme/app", Some("dead".into()), true))
+        let err = create(State(app.clone()), None, stack_request("acme/app", Some("dead".into()), true))
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT, "a refusal, like the duplicate-issue one");
@@ -3786,9 +4228,13 @@ pub(crate) mod tests {
     async fn stacking_on_a_colony_that_does_not_exist_is_refused_as_a_404_naming_it() {
         let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
         let app = app_that_can_create(&root);
-        let err = create(State(app.clone()), stack_request("acme/app", Some("ghost".into()), true))
-            .await
-            .unwrap_err();
+        let err = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/app", Some("ghost".into()), true),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.0,
             StatusCode::NOT_FOUND,
@@ -3804,7 +4250,7 @@ pub(crate) mod tests {
     async fn an_after_of_nothing_but_whitespace_is_refused_not_read_as_absent() {
         let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
         let app = app_that_can_create(&root);
-        let err = create(State(app.clone()), stack_request("acme/app", Some("   ".into()), true))
+        let err = create(State(app.clone()), None, stack_request("acme/app", Some("   ".into()), true))
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST, "the request names nothing stackable");
@@ -3826,9 +4272,13 @@ pub(crate) mod tests {
         parent.repo = "acme/app".into();
         app.sessions.write().await.push(parent);
 
-        let err = create(State(app.clone()), stack_request("acme/other", Some("parent".into()), true))
-            .await
-            .unwrap_err();
+        let err = create(
+            State(app.clone()),
+            None,
+            stack_request("acme/other", Some("parent".into()), true),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT, "a refusal at create, like the other stack ones");
         let message = err.1.to_string();
         assert!(message.contains("acme/app"), "the parent's repository is named: {message}");

@@ -340,6 +340,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
     );
     let created = crate::sessions::create(
         State(app.clone()),
+        None,
         Json(NewSession {
             repo: hunter.repo.clone(),
             issue: None,

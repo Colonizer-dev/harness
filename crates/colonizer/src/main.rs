@@ -8,6 +8,7 @@
 //! provider keys are added by the mothership's provider gateway.
 
 mod activity;
+mod api_tokens;
 mod archive;
 mod auth;
 mod authority;
@@ -20,6 +21,7 @@ mod chat_images;
 mod claims;
 mod claude_accounts;
 mod claude_login;
+mod cli;
 mod code;
 mod colony_secrets;
 mod config;
@@ -45,6 +47,7 @@ mod lifecycle;
 mod login_item;
 mod loops;
 mod maps;
+mod mcp;
 mod mem0;
 mod memory;
 mod mesh;
@@ -165,6 +168,10 @@ pub struct App {
     pub cfg: Settings,
     /// The per-install cockpit API token (`<config_dir>/api-token`), checked by `host_guard`.
     pub api_token: String,
+    /// Scoped API tokens handed to CLIs and automations (issue #508, api_tokens.rs), saved to
+    /// `<config_dir>/api-tokens.json`; `host_guard` checks a Bearer against them when it is not
+    /// the owner token.
+    pub api_tokens: api_tokens::Registry,
     pub modules: RwLock<ModulesConfig>,
     pub agents: Vec<AgentModule>,
     /// Agent manifests that are present but unusable, one line each naming the file and the fault;
@@ -967,6 +974,22 @@ async fn host_guard(State(app): State<Shared>, mut req: Request, next: Next) -> 
             .insert(if bearer_ok { auth::Via::Api } else { auth::Via::Cockpit });
         return next.run(req).await;
     }
+    // A scoped API token (`col_…`, issue #508) authenticates by Bearer header only — a browser
+    // never holds one, so the cookie stays owner-only. `authorize` decides the route from the
+    // token's scope and org/repo limits (403 off the allowlist, 404 outside its colonies); what
+    // it allows, the request carries onward as authenticated, with the token attached for the
+    // handlers that must know who is acting (launch checks, the list filter, the prompt marking).
+    if let Some(token) = auth::bearer_token(req.headers())
+        && let Some(scoped) = app.api_tokens.authenticate(&token).await
+    {
+        if let Err(deny) = api_tokens::authorize(&app, &scoped, req.method(), req.uri().path()).await {
+            return deny.into_response();
+        }
+        req.extensions_mut().insert(auth::Authenticated(true));
+        req.extensions_mut().insert(auth::Via::Token(scoped.name.clone()));
+        req.extensions_mut().insert(scoped);
+        return next.run(req).await;
+    }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
     let path = req.uri().path().to_string();
     if path == "/api" || path.starts_with("/api/") {
@@ -1199,140 +1222,11 @@ fn copy_corrupt_aside(path: &FsPath) -> Result<PathBuf> {
     Ok(saved)
 }
 
-const USAGE: &str = "colonizer — turn a task into a pull request; see https://colonizer.dev/docs
-
-usage: colonizer
-       colonizer version | update | open
-       colonizer login-item enable|disable|status
-       colonizer telemetry show|on|off
-
-  (no arguments)  start the mothership and serve the web UI (default 127.0.0.1:7878)
-  version         print what this build is, and whether it is a release (also --version, -V)
-  update [--force]  install the newest release against a running mothership and restart into it (refuses a development build, or one newer than the latest release, unless --force)
-  open            print the cockpit sign-in link and open it in a browser
-  login-item enable|disable|status  start the mothership at login (macOS LaunchAgent, Linux systemd user unit); disable never stops a running one
-  telemetry show  print the exact anonymous usage batch that would be sent
-  telemetry on    record yes to anonymous usage reporting (no network, no daemon needed)
-  telemetry off   record no to anonymous usage reporting
-  --help, -h      print this help
-
-Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
-COLONIZER_HOME and the rest are in docs/install.md.";
-
-/// What the binary was asked to do. Starting the mothership is the default; every other command
-/// runs without one, except `update`, which is a client of a mothership that is already running.
-///
-/// An argument nobody planned for is an error with the usage text, not a silently started server:
-/// a typo like `colonizer updat` should say so rather than take over the port for an afternoon.
-enum Args {
-    Serve,
-    Version,
-    Update { force: bool },
-    Open,
-    LoginItem(String),
-    TelemetryShow,
-    TelemetrySet(bool),
-}
-
-impl Args {
-    /// `Ok(None)` means the command was fully handled (`--help`).
-    fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
-        let mut iter = argv.into_iter();
-        let Some(arg) = iter.next() else {
-            return Ok(Some(Self::Serve));
-        };
-        let command = match arg.as_str() {
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return Ok(None);
-            }
-            "version" | "--version" | "-V" => Self::Version,
-            "update" => match iter.next().as_deref() {
-                None => Self::Update { force: false },
-                Some("--force") => Self::Update { force: true },
-                Some(other) => return Err(format!("unknown argument: {other}")),
-            },
-            "open" => Self::Open,
-            "login-item" => {
-                let action = iter
-                    .next()
-                    .ok_or_else(|| "login-item needs a command: enable, disable or status".to_string())?;
-                match action.as_str() {
-                    "enable" | "disable" | "status" => Self::LoginItem(action),
-                    other => return Err(format!("unknown login-item command: {other}")),
-                }
-            }
-            "telemetry" => {
-                let sub = iter
-                    .next()
-                    .ok_or_else(|| "telemetry needs a command: show, on or off".to_string())?;
-                match sub.as_str() {
-                    "show" => Self::TelemetryShow,
-                    "on" => Self::TelemetrySet(true),
-                    "off" => Self::TelemetrySet(false),
-                    other => return Err(format!("unknown telemetry command: {other}")),
-                }
-            }
-            _ => return Err(format!("unknown argument: {arg}")),
-        };
-        if let Some(extra) = iter.next() {
-            return Err(format!("unknown argument: {extra}"));
-        }
-        Ok(Some(command))
-    }
-
-    async fn run(self) -> Result<()> {
-        match self {
-            Self::Serve => serve().await,
-            // The stamped build, not CARGO_PKG_VERSION: the crate version says nothing about
-            // which commit an install came from.
-            Self::Version => {
-                println!("{}", version::build().line());
-                Ok(())
-            }
-            Self::Update { force } => update::command(force).await,
-            Self::LoginItem(action) => {
-                let cfg = Settings::from_env()?;
-                login_item::command(&action, &cfg.data_dir)
-            }
-            // Reprints the sign-in link (startup prints it too) and opens it the same way.
-            Self::Open => {
-                let cfg = Settings::from_env()?;
-                let token = auth::load_or_create(&cfg.config_dir)?;
-                let url = auth::login_url(&cfg.bind, &token);
-                println!("{url}");
-                auth::open_browser(&url);
-                Ok(())
-            }
-            Self::TelemetryShow => {
-                let cfg = Settings::from_env()?;
-                usage::cli_show(&cfg.config_dir)
-            }
-            Self::TelemetrySet(enabled) => {
-                let cfg = Settings::from_env()?;
-                usage::cli_set(&cfg.config_dir, enabled)
-            }
-        }
-    }
-}
-
+/// The definitions and the runners live in `cli` (the MCP server in `mcp`); this stays a parse and
+/// a dispatch. An argument nobody planned for is clap's usage error, not a silently started server.
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args = match Args::parse(std::env::args().skip(1).collect()) {
-        Ok(Some(args)) => args,
-        Ok(None) => return ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("colonizer: {e}\n\n{USAGE}");
-            return ExitCode::from(2);
-        }
-    };
-    match args.run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("colonizer: {e:#}");
-            ExitCode::FAILURE
-        }
-    }
+    ExitCode::from(cli::run(cli::parse()).await as u8)
 }
 
 /// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
@@ -1439,6 +1333,7 @@ async fn serve() -> Result<()> {
         usage: usage::Usage::new(&cfg.config_dir),
         stream: stream::Hub::new(),
         activity: activity::ActivityLog::new(),
+        api_tokens: api_tokens::Registry::load(&cfg.config_dir),
         api_token,
         cfg,
     });
@@ -1572,6 +1467,8 @@ async fn serve() -> Result<()> {
         )
         .route("/api/sessions", get(sessions::list).post(sessions::create))
         .route("/api/sessions/{id}", get(sessions::get).delete(lifecycle::delete))
+        .route("/api/sessions/{id}/question", get(sessions::question))
+        .route("/api/sessions/{id}/answer", post(sessions::answer))
         .route("/api/sessions/{id}/resume", post(lifecycle::resume))
         .route("/api/sessions/{id}/publish", post(publish::publish))
         .route("/api/sessions/{id}/behind", get(stale::behind))
@@ -1608,6 +1505,11 @@ async fn serve() -> Result<()> {
         .route("/api/burn-down", get(burn_down::status))
         .route("/api/burn-down/stop", post(burn_down::stop))
         .route("/api/activity", get(activity::list))
+        // Scoped API tokens (issue #508): the owner mints and revokes them; `self` is the one
+        // route a scoped token may read, and `host_guard` decides the rest from the token's scope.
+        .route("/api/tokens", get(api_tokens::list).post(api_tokens::create))
+        .route("/api/tokens/self", get(api_tokens::self_view))
+        .route("/api/tokens/{id}", delete(api_tokens::revoke))
         // After every route: records what a person changed through the API (activity.rs). A
         // route layer, so it sees the matched route, and inside `host_guard`, so only
         // authenticated requests reach it.
@@ -1836,6 +1738,7 @@ pub(crate) mod tests {
             telemetry: telemetry::Telemetry::new(&root.join("config")).unwrap(),
             stream: stream::Hub::new(),
             activity: activity::ActivityLog::new(),
+            api_tokens: api_tokens::Registry::load(&root.join("config")),
         })
     }
 
@@ -1843,29 +1746,6 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("colonizer-load-{}", util::short_id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
         dir
-    }
-
-    #[test]
-    fn update_takes_an_optional_force_flag_and_nothing_else() {
-        let parse = |args: &[&str]| Args::parse(args.iter().map(ToString::to_string).collect());
-        assert!(matches!(parse(&["update"]), Ok(Some(Args::Update { force: false }))));
-        assert!(matches!(parse(&["login-item", "enable"]), Ok(Some(Args::LoginItem(a))) if a == "enable"));
-        assert!(matches!(parse(&["login-item", "status"]), Ok(Some(Args::LoginItem(a))) if a == "status"));
-        assert!(parse(&["login-item"]).is_err());
-        assert!(parse(&["login-item", "start"]).is_err());
-        assert!(parse(&["login-item", "enable", "extra"]).is_err());
-        assert!(matches!(
-            parse(&["update", "--force"]),
-            Ok(Some(Args::Update { force: true }))
-        ));
-        // An argument nobody planned for is an error, including trailing ones.
-        for args in [
-            &["update", "extra"][..],
-            &["update", "--bogus"][..],
-            &["update", "--force", "extra"][..],
-        ] {
-            assert!(parse(args).is_err(), "{args:?} should error");
-        }
     }
 
     /// A session list with exactly the fields the format requires; everything else defaults.

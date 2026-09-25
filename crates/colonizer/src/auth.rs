@@ -24,12 +24,15 @@ pub const UNAUTHORIZED_BODY: &str = "missing or invalid API token; run `colonize
 pub struct Authenticated(pub bool);
 
 /// How an authenticated request reached the API, for the activity log's `via`: the browser's
-/// cookie (the cockpit) or an `Authorization: Bearer` token (the CLI or a script). Set by
-/// `host_guard` next to [`Authenticated`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// cookie (the cockpit), an `Authorization: Bearer` token (the CLI or a script), or a scoped API
+/// token (issue #508) carrying its name — `token:<name>` in the log. Set by `host_guard` next to
+/// [`Authenticated`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Via {
     Cockpit,
     Api,
+    /// A scoped API token, named for the log. Never carries the token itself.
+    Token(String),
 }
 
 /// The token file: `<config_dir>/api-token`, next to the other saved secrets.

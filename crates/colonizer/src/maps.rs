@@ -498,7 +498,7 @@ pub async fn create(State(app): State<Shared>, Path((owner, name)): Path<(String
     });
     let new_session: sessions::NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    let Json(session) = sessions::create(State(app.clone()), Json(new_session)).await?;
+    let Json(session) = sessions::create(State(app.clone()), None, Json(new_session)).await?;
     Ok(Json(json!({"repo": repo, "mapping": mapping_json(&session)})))
 }
 

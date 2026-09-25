@@ -284,6 +284,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/chat/{id}/issue` | `{repo, title (one line, ≤ 256), body (≤ 60 KB)}`: files a GitHub issue with the Mothership's `gh`; answers `{url}`. The cockpit confirms with the operator first |
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set; a remote conflict (below) is a **409** either way |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
+| `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
+| `POST /api/sessions/{id}/answer` | `{question_id, answers, response?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above) |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, ts?, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3), before any of this runs |
@@ -304,6 +306,37 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/redteam/runs/{id}/report` | The linked merged report (`synthesis.report`) as a JSON array of parsed defect objects, in file order (most severe first). **404** when no report is linked or the file is gone |
 | `GET /api/burn-down` · `POST /api/burn-down/stop` | Burn-down mode (§6.2c): the measured window and launch plan, and a stop that persistently switches the module off and halts every colony it launched |
 | `GET /api/activity` | The activity log (§6.9): colony outcomes recorded at the transition and what a person changed through the API, newest first, paged with `before`/`limit` and filtered by `kind`, `actor`, `org`, `repo` and `q`. **400** naming an unknown kind or actor, or a `limit` outside 1–500 |
+| `GET /api/tokens` · `POST /api/tokens` · `DELETE /api/tokens/{id}` | Scoped API tokens (below), owner only: the metadata list, a mint, and a revoke. `POST` takes `{name, scope, orgs?, repos?, max_concurrent?, budget_usd_per_day?}` (**400** naming what is wrong) and answers `{token, …meta}` — the `col_…` plaintext comes back exactly once; the registry (`<config_dir>/api-tokens.json`) keeps only its SHA-256 |
+| `GET /api/tokens/self` | Who is asking: `{owner: false, name, scope, orgs, repos}` for a scoped token, `{owner: true, scope: "owner", orgs: [], repos: []}` for the install token or the browser cookie |
+
+### Scoped API tokens
+
+A scoped token is a named, least-privilege key for a CLI or automation, so it never holds the
+per-install owner token. It authenticates as `Authorization: Bearer` only — the browser cookie
+stays owner-only — and carries an ordered scope, `read` < `operate` < `launch`; optional org and
+repo limits (empty lists mean no limit, both must match); and optional launch caps
+(`max_concurrent`: the most of its colonies not yet terminal, `budget_usd_per_day`: the most model
+spend its colonies may run up per UTC day).
+
+- `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
+  limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, the events WebSocket, the
+  `GET /api/maps/…` reads, and `GET /api/tokens/self`.
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|stop|resume`. Over the
+  events WebSocket its commands work; a `read` token's commands are refused with a warn on the
+  transcript, and no scope may switch a colony's model — that stays with the owner.
+- `launch` adds starting colonies: `POST /api/sessions`. Loops stay owner-only: a loop spawns
+  colonies on a schedule, out of reach of a token's caps, budget and marking, so `/api/loops*` is
+  in no scope.
+
+Anything else is **403** naming the token's scope and the route; a colony- or map-scoped route for
+a repository outside the token's org/repo limits is **404**, the same answer an unknown id gets, so
+the token can learn nothing beyond what it was granted. A launch past the concurrency cap or the
+daily budget is **429** with the reason; a launch naming a repository outside the limits is
+**403**. A colony launched by a token records its id in `launched_by_token` (never the secret); its
+instructions are marked in the prompt as external input from the token, and its answers and
+messages over the API carry a short external-input marker, so the agent reads them as a
+description of the task — not the maintainer's voice. The activity log records the actor as
+`token:<name>`.
 | Settings / Claude login endpoints | Unchanged from v0 (`/api/settings/*`, `/api/claude-login*`) |
 | `GET /api/telemetry` · `PUT /api/telemetry` | The live map: its status and the exact next heartbeat; `{enabled}` switches it (see below) |
 
@@ -2329,8 +2362,9 @@ request they opened, and only a fixed few fields of it.
 
 - `seq` climbs by one per line across restarts and rotation; it is the paging cursor.
 - `actor` is `you` (whoever holds the API token — the cockpit is single-user, so there is no
-  finer identity) or `colony`. `via` says how `you` came in: `cockpit` (the browser's cookie) or
-  `api` (an `Authorization: Bearer` token: the CLI or a script).
+  finer identity) or `colony`. `via` says how `you` came in: `cockpit` (the browser's cookie),
+  `api` (an `Authorization: Bearer` token: the CLI or a script), or `token:<name>` (a scoped API
+  token, named — never its secret).
 - `kind` is closed: `outcome.{pr_opened,merged,closed,no_changes,stopped,failed,question}`,
   `colony.{launch,stop,resume,delete,publish,catch_up,cleanup,retain,answer}`,
   `chat.{colony,issue}` (`chat.colony` is a launch whose request carried `origin: "chat"`),
