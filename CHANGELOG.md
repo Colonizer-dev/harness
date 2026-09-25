@@ -220,6 +220,21 @@ setting) is called out under **Take care** rather than left for you to find.
   older than `keep_days`, then oldest-first until `max_gb`), and an apply that refuses to remove anything unless
   `expect` repeats exactly the preview's list — and nothing at all while a bundle is the only copy, unless the
   request explicitly allows it. First slice of #496. ([#496])
+- **A token budget per colony.** A new `budget_tokens` sandbox setting caps the tokens one colony
+  routes through the gateway, counted for every routed response whether or not the provider prices it —
+  a prepaid token or coding plan prices nothing, so its colonies cost $0 and the USD budget can never
+  trip; this is what holds them. Enforced exactly like `budget_usd`: past the budget the colony is
+  stopped with its worktree kept, its next routed request is refused with `403`, and raising the budget
+  and pressing Resume continues. It is global, with no per-org override; `0`, the default, means
+  unlimited. ([#199])
+- **A quota probe per provider.** A provider can now carry `quota: {url, pointer}` — a `GET` and an
+  RFC 6901 JSON pointer into its answer — fetched with the provider's own credential whenever
+  `GET /api/providers/{id}/health` runs, so the cockpit shows what is left in a prepaid token plan. The
+  probe rides along on the reachability check and never changes its verdict; its URL must sit on the
+  base URL's origin — scheme, host and port, because the credential is sent there — and its pointer
+  must start with `/`. Saving with `quota` omitted keeps the stored
+  probe, an empty URL clears it, and with no probe the `quota` field stays out of the health answer.
+  ([#199])
 
 ### Fixed
 
@@ -881,6 +896,7 @@ Macs. ([#74])
 [#302]: https://github.com/Colonizer-dev/harness/issues/302
 [#301]: https://github.com/Colonizer-dev/harness/issues/301
 [#296]: https://github.com/Colonizer-dev/harness/issues/296
+[#199]: https://github.com/Colonizer-dev/harness/issues/199
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

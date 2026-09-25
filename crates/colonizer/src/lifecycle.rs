@@ -333,6 +333,13 @@ fn over_budget(total_usd: f64, budget_usd: f64) -> bool {
     budget_usd > 0.0 && total_usd > budget_usd
 }
 
+/// Whether `used` tokens is past a colony's token budget — the same opt-in as [`over_budget`], in
+/// tokens: a prepaid plan whose pricing is empty costs nothing in dollars, so its tokens are all a
+/// budget can hold it to. A budget of `0` means no budget at all.
+fn over_token_budget(used: u64, budget: u64) -> bool {
+    budget > 0 && used > budget
+}
+
 /// The one way the host stops a colony on its own decision — a past spend budget, a past host-disk quota.
 /// The stop is claimed under `update_session`'s write lock, so of all the observers that see "over" only
 /// the first tears the microVM down and an already stopped colony is never torn down again; `due` is the
@@ -396,10 +403,10 @@ async fn stop_colony_with(
 
 /// The budget check and its consequence, in one place, called wherever a colony's spend can change: after
 /// the gateway records routed usage, when Claude's own cost arrives at turn end, and before the gateway
-/// serves a request. A colony past its budget — the org's own if it set one, else the sandbox module's
-/// default — is refused *and* stopped like the max-duration path stops one: microVM removed, status
-/// `stopped`, a clear error, the worktree kept so it can be resumed once the budget is raised. Returns
-/// whether the colony is over its budget.
+/// serves a request. A colony past its budget — the dollar budget, the org's own if it set one, else the
+/// sandbox module's default, or the sandbox module's token budget — is refused *and* stopped like the
+/// max-duration path stops one: microVM removed, status `stopped`, a clear error, the worktree kept so
+/// it can be resumed once the budget is raised. Returns whether the colony is over its budget.
 pub async fn enforce_budget(app: &Shared, id: &str) -> bool {
     let Some(s) = app.session(id).await else { return false };
     let org = app.org_settings(&s.org);
@@ -409,27 +416,54 @@ pub async fn enforce_budget(app: &Shared, id: &str) -> bool {
     // and a modules writer arriving in between turns that inversion into a deadlock.
     let modules = app.modules.read().await.clone();
     let budget = orgs::budget_usd(&modules, &org);
-    if !over_budget(s.total_cost_usd(), budget) {
+    let token_budget = orgs::budget_tokens(&modules);
+    let over_spend = over_budget(s.total_cost_usd(), budget);
+    let over_tokens = over_token_budget(s.routed_tokens.unwrap_or_default(), token_budget);
+    if !over_spend && !over_tokens {
         return false;
     }
     let (spent, source) = (s.total_cost_usd(), orgs::budget_source(&org));
+    // The token budget is mothership-wide only (no org override, like the dollar budget's own global
+    // default), so it names the sandbox setting as its source.
+    let (error, warn) = if over_spend {
+        (
+            format!(
+                "passed its spend budget of ${budget:.2} ({source}) at ${spent:.2} of model spend; the worktree is kept, so raise the budget and press Resume to continue"
+            ),
+            format!(
+                "passed its spend budget of ${budget:.2} ({source}) at ${spent:.2}; stopping the colony, which can be resumed once the budget is raised"
+            ),
+        )
+    } else {
+        let routed = s.routed_tokens.unwrap_or_default();
+        (
+            format!(
+                "passed its token budget of {token_budget} (the sandbox setting) at {routed} routed tokens; the worktree is kept, so raise the budget and press Resume to continue"
+            ),
+            format!(
+                "passed its token budget of {token_budget} (the sandbox setting) at {routed}; stopping the colony, which can be resumed once the budget is raised"
+            ),
+        )
+    };
     stop_colony(
         app,
         &s,
-        |x| over_budget(x.total_cost_usd(), budget),
-        format!("passed its spend budget of ${budget:.2} ({source}) at ${spent:.2} of model spend; the worktree is kept, so raise the budget and press Resume to continue"),
-        format!("passed its spend budget of ${budget:.2} ({source}) at ${spent:.2}; stopping the colony, which can be resumed once the budget is raised"),
+        |x| over_budget(x.total_cost_usd(), budget) || over_token_budget(x.routed_tokens.unwrap_or_default(), token_budget),
+        error,
+        warn,
     )
     .await;
     true
 }
 
-/// Adds one gateway response's spend to the colony and re-checks its budget. A response with nothing
-/// priced in it (a provider without pricing) changes nothing: its tokens still reach the session through
-/// the runner's per-model usage.
+/// Adds one gateway response's spend and token count to the colony and re-checks its budget. The tokens
+/// are counted whether or not the provider prices them — a provider without pricing costs nothing, so
+/// its dollars never move and its tokens are all a token budget sees — while only a priced response
+/// also adds spend. (A response's tokens reach the session through the runner's per-model usage too,
+/// which `model_usage` keeps separately and nothing sums with this.)
 /// `landed` runs inside the same sessions write lock that adds the cost — the gateway hands its
 /// in-flight estimate back there, so budget checks (which read both under the read lock) never see
-/// the cost twice or not at all. A cost that is not recorded drops `landed` unrun.
+/// the cost twice or not at all. A response with neither cost nor tokens drops `landed` unrun.
 pub async fn record_routed_usage(
     app: &Shared,
     colony: &str,
@@ -438,12 +472,17 @@ pub async fn record_routed_usage(
     landed: impl FnOnce() + Send,
 ) {
     let cost = provider.cost_usd(usage);
-    if cost <= 0.0 {
+    // The tokens a bill counts: Anthropic folds thinking into output already, so it is not added again.
+    let tokens = usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens;
+    if cost <= 0.0 && tokens == 0 {
         return;
     }
     let Some((session, _)) = app
         .update_session(colony, |x| {
-            x.routed_cost_usd = Some(x.routed_cost_usd.unwrap_or_default() + cost);
+            x.routed_tokens = Some(x.routed_tokens.unwrap_or_default() + tokens);
+            if cost > 0.0 {
+                x.routed_cost_usd = Some(x.routed_cost_usd.unwrap_or_default() + cost);
+            }
             landed();
         })
         .await
@@ -451,8 +490,11 @@ pub async fn record_routed_usage(
         return;
     };
     // Told to the append-only journal now, while the colony still exists to name its org: the
-    // routed dollar has to survive the cleanup or delete that will forget it.
-    spend::record_routed(app, &session, cost).await;
+    // routed dollar has to survive the cleanup or delete that will forget it. An unpriced response
+    // has no dollar to journal.
+    if cost > 0.0 {
+        spend::record_routed(app, &session, cost).await;
+    }
     enforce_budget(app, colony).await;
 }
 
@@ -1209,6 +1251,76 @@ mod tests {
         assert!(over_budget(5.01, 5.0), "the first cent past the budget is over it");
         assert!(!over_budget(1_000.0, 0.0), "0 means no budget at all");
         assert!(!over_budget(1_000.0, -5.0), "a negative budget is no budget either");
+    }
+
+    #[test]
+    fn a_token_budget_of_zero_is_unlimited_and_only_a_positive_one_can_be_passed() {
+        assert!(!over_token_budget(999, 1_000), "under the budget");
+        assert!(!over_token_budget(1_000, 1_000), "exactly at the budget is still within it");
+        assert!(over_token_budget(1_001, 1_000), "the first token past the budget is over it");
+        assert!(!over_token_budget(u64::MAX, 0), "0 means no budget at all");
+    }
+
+    /// A provider with no pricing, the prepaid-token-plan shape: every routed response costs $0.
+    fn unpriced_provider() -> providers::Provider {
+        providers::Provider {
+            id: "prepaid".into(),
+            name: "prepaid".into(),
+            base_url: "http://127.0.0.1:9".into(),
+            auth: "none".into(),
+            wire: providers::Wire::Anthropic,
+            models: vec![],
+            preset: "custom".into(),
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: None,
+            pricing: None,
+            model_map: Default::default(),
+            disabled_tools: Vec::new(),
+            quota: None,
+            normalize_cache_ttl: false,
+            trusted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unpriced_response_still_counts_its_tokens_and_passing_the_token_budget_stops_the_colony() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("budget_tokens".into(), json!(1_500));
+        let provider = unpriced_provider();
+        let usage = |tokens: u64| providers::Usage {
+            input_tokens: tokens,
+            output_tokens: tokens,
+            cache_read_tokens: tokens,
+            cache_write_tokens: tokens,
+            thinking_tokens: tokens,
+        };
+        // Priced at nothing: dollars stay at zero while the tokens pile up, thinking folded into
+        // output and not counted twice. 4 kinds x 100 tokens = 400, still under the budget.
+        record_routed_usage(&app, "abc", &provider, usage(100), || {}).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.routed_tokens, Some(400));
+        assert_eq!(s.routed_cost_usd, None, "an unpriced provider moves no money");
+        assert_eq!(s.status, SessionStatus::Running, "under the token budget the colony runs on");
+        // The response that crosses the budget stops the colony the way an overspend does.
+        record_routed_usage(&app, "abc", &provider, usage(400), || {}).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.routed_tokens, Some(2_000));
+        assert_eq!(s.routed_cost_usd, None);
+        assert_eq!(s.status, SessionStatus::Stopped, "past the token budget, the colony stops");
+        let error = s.error.unwrap();
+        assert!(
+            error.contains("passed its token budget of 1500 (the sandbox setting) at 2000 routed tokens"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

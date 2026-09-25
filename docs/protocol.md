@@ -399,7 +399,7 @@ missing values mean the `default`.
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
   "merged_at": null, "pr_opened_at": null, "ci_state": "success|failure|pending|no_checks",
   "changed_paths": ["apps/pwa/src/main.ts"], "summary": "Fix the login redirect loop on expired sessions",
-  "cost_usd": 0.42, "routed_cost_usd": null, "host_disk_bytes": null, "cleaned_up": false,
+  "cost_usd": 0.42, "routed_cost_usd": null, "routed_tokens": null, "host_disk_bytes": null, "cleaned_up": false,
   "boot_cpus": 4, "boot_memory": "8g",
   "boot_timing": {"total_ms": 12345, "phases": [{"name": "issue", "ms": 240}, {"name": "git", "ms": 810}]},
   "created_at": "…", "updated_at": "…"
@@ -496,9 +496,12 @@ rather than starting a new one — or being left where no resume could reach it,
 worktree a stopped colony can never be resumed.
 
 `routed_cost_usd` is what the provider gateway has recorded for responses it routed (§6.5), on top of
-`cost_usd`, which is only what Claude itself reports, when a turn ends. `host_disk_bytes` is what the
+`cost_usd`, which is only what Claude itself reports, when a turn ends. `routed_tokens` is what it has
+counted the same responses at in tokens, whether or not it priced them; the sandbox module's
+`budget_tokens` — global, no per-org override — answers to it, and passing it stops the colony exactly
+as an overspend does. `host_disk_bytes` is what the
 colony leaves on the host (its worktree plus its session directory) as last measured, every few
-minutes, quota or not — `null` only until the first measurement. Both are estimates. A colony's budget answers to `cost_usd + routed_cost_usd` and its
+minutes, quota or not — `null` only until the first measurement. Both are estimates. A colony's dollar budget answers to `cost_usd + routed_cost_usd` and its
 host-disk quota to `host_disk_bytes`; past either, the mothership stops the colony: `status` `stopped`,
 the reason in `error`, and the worktree kept, so raising the limit (or, for the quota, cleaning up) and
 pressing Resume continues it.
@@ -1882,8 +1885,11 @@ untranslated request, so it is unaffected.
   these errors carries `x-colonizer-fallback`.
 
 **Spend accounting.** Every response the gateway serves is counted, priced with the provider's `pricing`,
-and added to the colony's `routed_cost_usd`. The budget is re-checked after each addition and before a
-request is served; Claude's own `cost_usd` landing at a turn end re-checks it too. The two wires are
+and added to the colony's `routed_cost_usd`; its tokens are counted too, whether or not the response was
+priced, and added to the colony's `routed_tokens`. The budget is re-checked after each addition and before a
+request is served; Claude's own `cost_usd` landing at a turn end re-checks it too. The sandbox module's
+`budget_tokens` holds a colony to its routed tokens the same way (global, no per-org override), and passing
+it stops the colony like an overspend. The two wires are
 counted differently but on one scale, Anthropic's token names:
 
 - `wire: anthropic`: the body is tapped while it forwards; the bytes the colony receives are never
@@ -1899,17 +1905,22 @@ without it (or with all five at `0`) still counts its tokens, which reach `model
 contributes nothing to `routed_cost_usd`. `PUT /api/providers/{id}` with `pricing` omitted keeps the saved
 rates, like the key; an all-`0` object clears them in effect. Claude traffic does not pass through the gateway at all:
 microsandbox injects the credential straight to `api.anthropic.com`, so Claude's spend is only seen when
-a turn ends, as the runner's `cost_usd`. A colony's budget answers to the two added together, and both
+a turn ends, as the runner's `cost_usd`. A colony's dollar budget answers to the two added together, and both
 are estimates.
 
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
 `fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes,
-because a fallback request goes to the API as is). Leaving `max_concurrent` unset really does mean unlimited: the
+because a fallback request goes to the API as is). `quota` is where to read what is left in a prepaid token
+plan: `{url, pointer}` — a `GET` the health check makes with the provider's own credential, and a non-empty
+RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
+host and port, since the credential is sent there) and is refused at save time anywhere
+else. `PUT /api/providers/{id}` with `quota` omitted keeps the saved probe, like `pricing`; an empty `url`
+clears it. Leaving `max_concurrent` unset really does mean unlimited: the
 provider gets asked for as many requests at once as are made of it. With `delegate = enforce` — the delegation
 default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
 of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
-`GET /api/providers` also returns `pricing`, `in_flight`, `queued`, `usage`, `health` and `used_by`.
+`GET /api/providers` also returns `pricing`, `quota`, `in_flight`, `queued`, `usage`, `health` and `used_by`.
 
 **Integration notes (Meta Model API).** Adding the `meta` preset as a first-class `wire: anthropic`
 provider surfaced a few quirks worth carrying into the next such integration. `base_url` for an
@@ -2027,7 +2038,11 @@ state, so slots release and resume works today) and `attention.reason`
 
 The probe is informational, not a routing gate. An Anthropic-wire endpoint need not serve `/v1/models`,
 so a 404 from one comes back as `reachable: true` with the real `status`, empty `models` and
-`"note": "no model list"`; `note` is `null` in every other case.
+`"note": "no model list"`; `note` is `null` in every other case. A provider with a `quota` probe
+configured (see **Provider fields**) gets `quota: {remaining, error}` on the same answer — the probe
+URL is fetched with the provider's credential alongside the models check, and whatever goes wrong with
+it (`remaining: null`, the reason in `error`) never changes `reachable`: reading a plan balance is not
+a health check. No probe configured, no `quota` field.
 
 At colony start the mothership probes every used provider: each unreachable one logs a warning, or
 refuses the launch when the route has no fallback model.

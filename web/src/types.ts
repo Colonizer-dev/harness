@@ -563,6 +563,16 @@ export interface ProviderPricing {
   thinking_per_mtok?: number;
 }
 
+/**
+ * Where to read what is left in a prepaid token plan (issue #199). The probe is fetched with the
+ * provider's own credential, so the URL must sit on the base URL's origin — scheme, host and port.
+ */
+export interface ProviderQuotaProbe {
+  url: string;
+  /** Non-empty RFC 6901 JSON pointer naming the remaining-token number in the answer, like `/data/remaining`. */
+  pointer: string;
+}
+
 export interface ModelProvider extends ProviderLimits {
   id: string;
   name: string;
@@ -574,6 +584,8 @@ export interface ModelProvider extends ProviderLimits {
   preset: ProviderPreset;
   /** null = unpriced: routed tokens are counted but their spend counts as $0. */
   pricing?: ProviderPricing | null;
+  /** null = no probe: the first sign of an exhausted plan stays the colonies failing over. */
+  quota?: ProviderQuotaProbe | null;
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -664,6 +676,8 @@ export interface SaveProviderRequest {
   api_key?: string;
   /** Omitted keeps the saved rates, like the key; an all-`0` object clears them in effect. */
   pricing?: ProviderPricing;
+  /** Omitted keeps the saved probe; an empty `url` removes it. The credential is sent to this URL. */
+  quota?: ProviderQuotaProbe;
   /** For each limit, null uses the default. */
   timeout_secs?: number | null;
   max_concurrent?: number | null;
@@ -783,6 +797,8 @@ export interface ProviderHealth {
   error: string | null;
   /** Set when the probe answered in a way that is still healthy — an anthropic-wire endpoint that serves no /v1/models ("no model list"). */
   note: string | null;
+  /** The plan balance the provider's quota probe read; absent when the provider has no probe configured. */
+  quota?: { remaining: number | null; error: string | null } | null;
   checked_at: string;
 }
 

@@ -1248,7 +1248,7 @@ async fn proxy(
         return api_error(
             StatusCode::FORBIDDEN,
             "permission_error",
-            format!("colonizer gateway: colony {colony} passed its spend budget and was stopped; raise the budget and resume it"),
+            format!("colonizer gateway: colony {colony} passed its budget and was stopped; raise the budget and resume it"),
             None,
         );
     }
@@ -1546,7 +1546,8 @@ async fn anthropic_error(
     };
     drop(guards);
     // Errors carry no usage, but the recorder ran on them when they streamed past — keep it fed.
-    // The recorder takes the reservation, so even this zero-cost record releases it only once landed.
+    // A record with neither cost nor tokens never lands: `record_routed_usage` early-returns and
+    // the unrun closure drops the reservation, releasing it via `Reserved::drop`.
     usage_recorder(app, colony, provider, reservation)(Usage::default());
     let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
     let kind = body["error"]["type"].as_str().unwrap_or("api_error");
@@ -1819,8 +1820,20 @@ pub async fn forget_probe(app: &App, id: &str) {
         .retain(|key, _| !key.starts_with(&prefix));
 }
 
-/// Probes `GET {base_url}/v1/models` with the provider's credential.
+/// Probes `GET {base_url}/v1/models` with the provider's credential — plus, when the provider has a
+/// quota probe ([`Provider.quota`]), the quota URL, sent at the same time so one slow endpoint does
+/// not stretch the check. The quota answer rides along under `quota` and never changes the
+/// reachability verdict: reading a plan balance is not a health check (issue #199).
 pub async fn probe(app: &App, provider: &Provider) -> Value {
+    let (mut health, quota) = tokio::join!(models_probe(app, provider), quota_probe(app, provider));
+    if let Some(quota) = quota {
+        health["quota"] = quota;
+    }
+    health
+}
+
+/// The reachability half of [`probe`].
+async fn models_probe(app: &App, provider: &Provider) -> Value {
     let started = Instant::now();
     let mut request = app
         .gateway
@@ -1865,6 +1878,56 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
     }
 }
 
+/// The quota half of [`probe`]: `GET`s the configured URL with the same credential and timeout, and
+/// reads the pointer out of the answer. `None` when the provider has no probe, which leaves the
+/// `quota` field out of the health JSON entirely.
+async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
+    let quota = provider.quota.as_ref()?;
+    let mut request = app.gateway.client.get(&quota.url).timeout(HEALTH_TIMEOUT);
+    if let Some((name, value)) = credential_header(app, provider) {
+        request = request.header(name, value);
+    }
+    let (error, remaining) = match request.send().await {
+        Ok(response) => {
+            let status = response.status();
+            let body: Value = response.json().await.unwrap_or(Value::Null);
+            if status.is_success() {
+                (None, quota_remaining(&body, &quota.pointer))
+            } else {
+                (Some(format!("quota endpoint answered HTTP {}", status.as_u16())), None)
+            }
+        }
+        Err(e) => {
+            let error = if e.is_timeout() {
+                format!("no response within {} s", HEALTH_TIMEOUT.as_secs())
+            } else if e.is_connect() {
+                "connection failed".to_string()
+            } else {
+                e.without_url().to_string()
+            };
+            (Some(error), None)
+        }
+    };
+    // A success with nothing readable at the pointer is the usual typo, so it gets its own words.
+    let error = error.or_else(|| remaining.is_none().then(|| format!("no number at {}", quota.pointer)));
+    Some(json!({"remaining": remaining, "error": error}))
+}
+
+/// The number a quota pointer points at: a JSON number, or a numeric string — some plans quote the
+/// count. `None` when the pointer misses or lands on anything else, which the caller reports as an
+/// error rather than as a balance.
+fn quota_remaining(body: &Value, pointer: &str) -> Option<Value> {
+    let value = body.pointer(pointer)?;
+    let count = value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())?;
+    // A plan's remaining is a whole count, so it stays one in JSON: `12000.0` would read like an
+    // estimate instead of a balance.
+    Some(if count.fract() == 0.0 {
+        json!(count as i64)
+    } else {
+        json!(count)
+    })
+}
+
 pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     let provider = app
         .providers()
@@ -1880,6 +1943,7 @@ pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::QuotaProbe;
 
     #[test]
     fn upstream_urls_keep_the_base_path_and_reject_traversal() {
@@ -2989,6 +3053,7 @@ mod tests {
         assert_eq!(health["error"], Value::Null);
         assert_eq!(health["models"], json!([]));
         assert_eq!(health["note"], "no model list");
+        assert!(health.get("quota").is_none(), "no probe configured, no quota field");
     }
 
     /// Only the anthropic-wire 404 is softened: a refused key, or a 404 from an OpenAI-wire
@@ -3001,6 +3066,78 @@ mod tests {
         let openai = probe_answering(crate::providers::Wire::Openai, StatusCode::NOT_FOUND).await;
         assert_eq!(openai["status"], 404);
         assert_eq!(openai.get("note"), Some(&Value::Null));
+    }
+
+    /// The number a quota pointer reads: a JSON number or a numeric string — some plans quote the
+    /// count — and nothing else.
+    #[test]
+    fn quota_remaining_reads_numbers_and_numeric_strings() {
+        let body = json!({"data": {"remaining": 12_345_678}, "quoted": "42000", "note": {"x": 1}});
+        assert_eq!(quota_remaining(&body, "/data/remaining"), Some(json!(12_345_678)));
+        assert_eq!(quota_remaining(&body, "/quoted"), Some(json!(42_000)), "a numeric string");
+        assert_eq!(quota_remaining(&json!({"left": 1.5}), "/left"), Some(json!(1.5)));
+        assert_eq!(quota_remaining(&body, "/missing"), None, "a pointer that misses");
+        assert_eq!(quota_remaining(&body, "/note"), None, "an object is not a number");
+        assert_eq!(
+            quota_remaining(&body, "/data"),
+            None,
+            "a nested object is not a number either"
+        );
+    }
+
+    /// A provider with a quota probe gets the plan balance in its health answer, on the same probe
+    /// that says reachable. The quota half never changes the verdict, whatever goes wrong with it.
+    #[tokio::test]
+    async fn a_quota_probe_rides_along_on_the_health_answer_without_changing_it() {
+        let router = Router::new()
+            .route("/v1/models", axum::routing::get(|| async { StatusCode::OK }))
+            .route(
+                "/plan",
+                axum::routing::get(|| async { axum::Json(json!({"data": {"remaining": 12_345_678}})) }),
+            )
+            .route("/broken", axum::routing::get(|| async { StatusCode::NOT_FOUND }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let base_url = format!("http://{addr}");
+        let root = cache_root();
+        let app = crate::tests::test_app(&root);
+        let quota_at = |path: &str, pointer: &str| {
+            Some(QuotaProbe {
+                url: format!("{base_url}{path}"),
+                pointer: pointer.into(),
+            })
+        };
+        // A prepaid plan usually renames Claude's models to its own (#295's model_map); the probe
+        // reads the plan balance all the same, since neither half of it sends a model.
+        let healthy = probe(
+            &app,
+            &Provider {
+                base_url: base_url.clone(),
+                quota: quota_at("/plan", "/data/remaining"),
+                model_map: BTreeMap::from([("claude-sonnet-5".to_string(), "deepseek-v4-pro".to_string())]),
+                ..provider("x", None)
+            },
+        )
+        .await;
+        assert_eq!(healthy["reachable"], true);
+        assert_eq!(healthy["quota"], json!({"remaining": 12_345_678, "error": null}));
+
+        let refused = probe(
+            &app,
+            &Provider {
+                quota: quota_at("/broken", "/nope"),
+                base_url,
+                ..provider("x", None)
+            },
+        )
+        .await;
+        assert_eq!(refused["reachable"], true, "a failed quota read is not a failed probe");
+        assert_eq!(
+            refused["quota"],
+            json!({"remaining": null, "error": "quota endpoint answered HTTP 404"})
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A gateway whose usage file lives in a fresh temp directory.
@@ -3025,6 +3162,7 @@ mod tests {
             pricing: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
+            quota: None,
             normalize_cache_ttl: false,
             trusted: false,
         }

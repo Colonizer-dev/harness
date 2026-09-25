@@ -715,6 +715,7 @@ mod tests {
             error: None,
             cost_usd: Some(0.42),
             routed_cost_usd: None,
+            routed_tokens: None,
             host_disk_bytes: None,
             model_usage: None,
             model_tier: None,
@@ -905,6 +906,7 @@ mod tests {
             pricing: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
+            quota: None,
             normalize_cache_ttl: false,
             trusted: false,
         }];

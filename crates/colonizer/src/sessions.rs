@@ -406,6 +406,11 @@ pub struct Session {
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
+    /// Tokens the gateway routed to providers, counted whether or not the provider priced them — a
+    /// prepaid token plan prices nothing, so its dollars never move above but its tokens still spend
+    /// the plan. Kept on the session like `routed_cost_usd`; not the same numbers as `model_usage`,
+    /// which the runner reports per model at turn end, and never summed with it.
+    pub routed_tokens: Option<u64>,
     /// What the colony leaves on the host — its worktree plus its session directory — as last measured by
     /// the host-disk check, which runs only when a host-disk quota applies to the colony. Not the
     /// microVM's root disk, which is a separate limit (microsandbox's `--root-disk`).
@@ -503,6 +508,7 @@ impl Default for Session {
             allowed_providers: None,
             sensitivity: None,
             routed_cost_usd: None,
+            routed_tokens: None,
             host_disk_bytes: None,
             cleaned_up: false,
             keep_worktree: false,
@@ -1556,6 +1562,7 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewSession>) -> A
         allowed_providers: None,
         sensitivity: None,
         routed_cost_usd: None,
+        routed_tokens: None,
         host_disk_bytes: None,
         cleaned_up: false,
         keep_worktree: false,
@@ -2442,6 +2449,7 @@ pub(crate) mod tests {
             allowed_providers: None,
             sensitivity: None,
             routed_cost_usd: None,
+            routed_tokens: None,
             host_disk_bytes: None,
             cleaned_up: false,
             keep_worktree: false,

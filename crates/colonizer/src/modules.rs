@@ -284,7 +284,9 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "hold_timeout_minutes": {"type": "integer", "title": "Held colony timeout (minutes)", "minimum": 1, "maximum": 1440, "default": 30,
                     "description": "How long a colony waiting on a human (an autopilot hold) keeps its microVM slot before the queue parks it to free the slot: the microVM is removed and the worktree kept, so the colony resumes where it left off. Within the timeout a held colony still counts against the parallel limits."},
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
-                    "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
+                    "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it — a provider without pricing, such as a prepaid token plan, costs nothing here, so hold it to the token budget below instead. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
+                "budget_tokens": {"type": "integer", "title": "Token budget per colony", "minimum": 0, "default": 0,
+                    "description": "Tokens one colony may route through the gateway in total, counted whether or not the provider prices them. For prepaid token or coding plans, whose pricing is empty, every routed request costs $0 and the USD budget above can never trip — this budget is what holds them. 0, the default, means unlimited. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept, the same way the USD budget stops one; raise the budget and press Resume to continue."},
                 "host_disk": {"type": "string", "title": "Host disk per colony", "default": "0", "format": "disk-size",
                     "description": "How much disk one colony may leave on the host: its worktree, where everything built inside the colony lands, plus its session files and logs. The microVM's own root disk is the Root disk setting above and is not counted here. 0, the default, means unlimited: there is no size that suits every deployment. Measured every few minutes. When a colony passes the quota it is stopped on the host and its worktree is kept; clean up or raise the quota and press Resume to continue."},
                 "warn_free_disk": {"type": "string", "title": "Warn below free disk", "default": "10G", "format": "disk-size",
@@ -918,9 +920,18 @@ mod tests {
             json!(0),
             "no budget unless the operator names one"
         );
+        assert_eq!(
+            schema["properties"]["budget_tokens"]["default"],
+            json!(0),
+            "no token budget unless the operator names one"
+        );
         let mut input = Map::new();
         input.insert("budget_usd".into(), json!(-1));
         assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        input.remove("budget_usd");
+        input.insert("budget_tokens".into(), json!(-1));
+        assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        input.remove("budget_tokens");
         input.insert("budget_usd".into(), json!(12.5));
         assert_eq!(
             validate_settings("sandbox", &schema, &input, &Map::new())
