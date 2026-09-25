@@ -230,6 +230,31 @@ export interface HarnessStatus {
   quota?: StatusQuota | null;
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
+  /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
+  ledger?: LedgerStatus | null;
+}
+
+/** GET /api/status `ledger` (issue #311): the anti-spam ledger's running tallies. */
+export interface LedgerStatus {
+  /** Per class (e.g. `question`, `provider_degraded`, `judge`): how many candidates were delivered, held for the digest, or dropped. */
+  counters: Record<string, { delivered: number; digested: number; dropped: number }>;
+  /** Candidates held since the last digest line went out, by class. */
+  pending_digest: Record<string, number>;
+  /** When the last digest line was delivered; null until the first one. */
+  last_digest: string | null;
+  /** 1 when a corrupt `ledger.json` was quarantined aside at startup, else 0. */
+  quarantined: number;
+  limits: { notify: LedgerLimits; judge: LedgerLimits };
+}
+
+/** The rules one ledger claimant lives under; see `LedgerStatus`. */
+export interface LedgerLimits {
+  quiet_hours: { start: number; end: number } | null;
+  per_hour: number;
+  per_day: number;
+  topic_cooldown_minutes: number;
+  dedup_window_hours: number;
+  topic_daily_cap: number;
 }
 
 /** GET /api/status `runtime` (issue #129): what kind of machine the mothership runs on, and what it can reach. The mothership re-probes all of it; the frontend only reads. */

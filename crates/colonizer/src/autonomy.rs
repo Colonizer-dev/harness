@@ -19,6 +19,7 @@
 use crate::{
     App, Shared,
     config::{ModulesConfig, setting, setting_str, setting_u64},
+    ledger,
     modules::schema_for,
     protocol::{Origin, QuestionRisk},
     providers::{Provider, Wire, api_model, split_url},
@@ -588,14 +589,47 @@ pub async fn run(app: Shared) {
                 }
                 continue;
             }
+            // The judge is one claimant on the mothership's outbound attention, so it asks the
+            // shared ledger before it answers (issue #311). A held or dropped verdict skips the
+            // answer this tick — counted once for the question, so the thirty-second tick does not
+            // inflate the tallies — and only a real answer spends the delivery it was granted.
+            let candidate = ledger::Candidate {
+                kind: ledger::Kind::Judge,
+                topic: format!("judge:{}", s.id),
+                class: "judge".to_string(),
+                fact: Some(format!("judge:{}:{}", s.id, question_id)),
+                colony: Some(s.id.clone()),
+                priority: false,
+            };
+            let now = Utc::now();
+            match app.ledger.check(&candidate, now) {
+                ledger::Verdict::Deliver => {}
+                held => {
+                    // Counted once per question, not once per tick: the ledger itself remembers the
+                    // fact — entries prune after 48 h, so the lookup stays bounded and a restart
+                    // does not count the question twice.
+                    if !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default()) {
+                        app.ledger.record(&candidate, &held, now).await;
+                    }
+                    continue;
+                }
+            }
             let task = crate::memory::task_query(&s.issue_title, None, &s.instructions);
             match judge_one(&app, &s.id, &judge, &task, &question_id, &questions).await {
                 Ok(line) => {
+                    app.ledger.record(&candidate, &ledger::Verdict::Deliver, Utc::now()).await;
                     app.session_log_as(Origin::Autonomy, &s.id, "info", line).await;
                     app.update_session(&s.id, |x| x.attention = None).await;
                     rt.activity.lock().await.judge_failures = 0;
                 }
                 Err(failure) => {
+                    // No answer went out, but the attempt is counted: dropped, once per question (a
+                    // retried tick finds the fact and stays quiet), spending nobody's quota.
+                    if !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default()) {
+                        app.ledger
+                            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
+                            .await;
+                    }
                     let failures = {
                         let mut activity = rt.activity.lock().await;
                         activity.judge_failures += 1;

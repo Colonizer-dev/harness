@@ -36,6 +36,7 @@ mod headroom;
 mod hunters;
 mod img_proxy;
 mod jev;
+mod ledger;
 mod lifecycle;
 mod login_item;
 mod loops;
@@ -164,6 +165,9 @@ pub struct App {
     pub agent_problems: Vec<String>,
     pub sessions: RwLock<Vec<Session>>,
     pub redteam: redteam::RedTeamStore,
+    /// The shared anti-spam ledger (`<data_dir>/ledger.json`): notify and the autonomy judge count
+    /// every outbound proactive action against it, so the operator's attention is one bounded rate.
+    pub ledger: ledger::LedgerStore,
     /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
     pub loops: loops::LoopStore,
     session_persist: Mutex<()>,
@@ -863,6 +867,8 @@ async fn status(
             "providers": quota.providers,
             "kind": quota.kind,
         }),
+        // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
+        "ledger": app.ledger.snapshot(),
         "modules": {
             "source": modules.source.provider,
             "sandbox": modules.sandbox.provider,
@@ -1387,6 +1393,7 @@ async fn serve() -> Result<()> {
         agent_problems,
         sessions: RwLock::new(sessions),
         redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
+        ledger: ledger::LedgerStore::load(&cfg.data_dir),
         loops: loops::LoopStore::new(&cfg.config_dir),
         session_persist: Mutex::new(()),
         config_write: Mutex::new(()),
@@ -1771,6 +1778,7 @@ pub(crate) mod tests {
             agent_problems: Vec::new(),
             sessions: RwLock::new(Vec::new()),
             redteam: redteam::RedTeamStore::new(&root.join("data"), &root.join("config")),
+            ledger: ledger::LedgerStore::load(&root.join("data")),
             loops: loops::LoopStore::new(&root.join("config")),
             session_persist: Mutex::new(()),
             config_write: Mutex::new(()),
