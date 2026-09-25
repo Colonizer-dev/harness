@@ -580,6 +580,14 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
     options.debugFile = env.COLONIZER_JEV_COMPACTION_LOG || join(tmpdir(), 'colonizer-jev-compaction.log');
   }
   if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
+  // Harness-level tool switch (module.json `disabled_tools`): the session's own disallow list, on top
+  // of whatever the provider strips per connection. The SDK removes these tools from the model's
+  // context entirely, so the setting holds whatever endpoint serves the model.
+  const disabledTools = (env.COLONIZER_DISABLED_TOOLS || '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (disabledTools.length) options.disallowedTools = disabledTools;
   if (env.COLONIZER_EFFORT) {
     if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
     else warnings.push(`ignoring COLONIZER_EFFORT=${env.COLONIZER_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);

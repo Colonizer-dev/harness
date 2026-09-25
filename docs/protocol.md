@@ -472,7 +472,8 @@ boots `<image>@sha256:<digest>` with the digest compiled in from `crates/coloniz
 and stays in the local cache,
 pre-warmed from Settings (`POST /api/sandbox/pull`). The `providers` probes are served from a 60 s
 host-side cache keyed on provider id plus endpoint, which the manual health check writes through —
-the unreachable warning still logs on every boot, from the cached value when that is what was used.
+the unreachable warning still logs on every boot, from the cached value when that is what was used,
+while a route with no fallback model is refused, on a fresh probe.
 Everything else repeats per boot on purpose: a new boot lays down a fresh worktree, `mesh-join`
 waits on a node whose single-use pre-auth key was minted for this boot (a VM that did not exist
 until `vm-boot` has no identity to reuse, and it runs its own tailscaled), and `agentd` runs inside
@@ -1486,7 +1487,7 @@ pull requests small; they will adopt the red-team runs of
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/providers` | `[{id, name, base_url, auth, wire: "anthropic"\|"openai", has_key, models: [string], preset: "deepseek"\|"openai"\|"local"\|"custom"}]` |
-| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?}`: `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it |
+| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, model_map?, disabled_tools?}`: `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 
@@ -2010,8 +2011,11 @@ The probe is informational, not a routing gate. An Anthropic-wire endpoint need 
 so a 404 from one comes back as `reachable: true` with the real `status`, empty `models` and
 `"note": "no model list"`; `note` is `null` in every other case.
 
-At colony start the mothership probes every used provider and logs a warning for each unreachable one
-(the colony still starts; fallback covers it when configured).
+At colony start the mothership probes every used provider: each unreachable one logs a warning, or
+refuses the launch when the route has no fallback model.
+
+Which agent backend a connection can serve, `model_map`, and the two levels of `disabled_tools`, are in
+[docs/providers.md](providers.md).
 
 ### 6.6 Findings
 

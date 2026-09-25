@@ -7,7 +7,7 @@ use crate::{
     ApiResult, App, Shared, client_error,
     gateway_audit::{GatewayAudit, GatewayFailure},
     openai, orgs, provider_quota,
-    providers::{Provider, ProviderQuirks, Usage, Wire, strip_oauth_betas, valid_model},
+    providers::{Provider, ProviderQuirks, Usage, Wire, apply_connection_policy, strip_oauth_betas, valid_model},
     util::read_trimmed,
 };
 use axum::{
@@ -1306,8 +1306,13 @@ async fn proxy(
             };
             // Preemptive, not a retry: the provider's quirks say which fields its dialect rejects, so a
             // request carrying them is rewritten once, up front, and the rewrite is logged with the field
-            // named. Anything without quirks skips this entirely and stays byte-identical.
+            // named. Anything without quirks skips this entirely and stays byte-identical. The connection
+            // policy (model_map, disabled tools) runs first, for the same reason and with the same
+            // byte-identical escape hatch (#295).
             let mut body = body;
+            if let Some(policy) = apply_connection_policy(&body, &provider) {
+                body = Bytes::from(policy);
+            }
             if let Some((normalized, note)) = normalize_anthropic_body(&body, provider.quirks()) {
                 eprintln!("gateway: provider \"{id}\": normalized request body preemptively ({note})");
                 body = normalized;
@@ -1328,6 +1333,9 @@ async fn proxy(
                     None,
                 );
             };
+            // The connection policy applies to the Anthropic-shaped body the runner sent, before the
+            // translator reads `model` and `tools` out of it (#295).
+            let body = apply_connection_policy(&body, &provider).map(Bytes::from).unwrap_or(body);
             let (body, info) = match openai::translate_request(&body) {
                 Ok(translated) => translated,
                 Err(message) => {
@@ -1764,10 +1772,12 @@ pub fn probe_cache_key(provider: &Provider) -> String {
 }
 
 /// The boot-time probe with a short read-through cache ([`PROVIDER_PROBE_TTL`]). Both reachable
-/// and unreachable answers are cached — the probe only feeds a warning — and the caller still logs
-/// that warning on every boot, from the cached value when that is what was used. The lock is not
-/// held across the probe, so one slow (or dead) provider does not hold up the others sharing this
-/// map; concurrent boots racing a cold entry may each probe once, which the TTL then coalesces.
+/// and unreachable answers are cached, and the boot still logs its unreachable warning on every
+/// boot, from the cached value when that is what was used. The one call the cache does not make is
+/// the boot refusal: with no `fallback_model` the boot re-probes fresh before refusing, so an
+/// endpoint that came back within the TTL is not refused on a stale unreachable answer. The lock is
+/// not held across the probe, so one slow (or dead) provider does not hold up the others sharing
+/// this map; concurrent boots racing a cold entry may each probe once, which the TTL then coalesces.
 pub async fn probe_cached(app: &App, provider: &Provider) -> Value {
     let key = probe_cache_key(provider);
     {
@@ -2966,6 +2976,8 @@ mod tests {
             context_tokens: None,
             fallback_model: fallback_model.map(str::to_string),
             pricing: None,
+            model_map: BTreeMap::new(),
+            disabled_tools: Vec::new(),
             normalize_cache_ttl: false,
             trusted: false,
         }

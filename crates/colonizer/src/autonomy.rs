@@ -897,6 +897,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_map: Default::default(),
+            disabled_tools: Vec::new(),
             normalize_cache_ttl: false,
             trusted: false,
         }
