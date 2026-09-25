@@ -178,6 +178,19 @@ setting) is called out under **Take care** rather than left for you to find.
   and the colony's own credential headers are never forwarded upstream. `colony-report` counts each
   colony's gateway requests and failures, Settings shows a provider's last failure code beside its
   failure rate, and the provider-degraded notification carries it. ([#302])
+- **In-guest hardening for the agent.** The colony's agent runs as root in its microVM, and three
+  layers now bound what that root can do before its first instruction: `boot.sh` locks the guest's
+  kernel interfaces down (`dmesg_restrict=1`, `kptr_restrict=2`, `hidepid` on `/proc`, the readable
+  `/proc` files masked with `/dev/null`, an empty read-only tmpfs over debugfs, tracefs, BPF,
+  firmware and the ACPI/SCSI/ALSA corners, `/proc/sys` and `/sys` remounted read-only); agentd
+  makes itself non-dumpable with core dumps off, so the agent can neither see nor read the
+  daemon's `/proc` entries; and the runner child — the agent and everything it spawns — is exec'd
+  with 21 capabilities dropped (mount, ptrace, `SYS_ADMIN`, BPF, kernel modules out;
+  package-manager caps in), core dumps off, `no_new_privs`, and a seccomp denylist that turns
+  io_uring, userfaultfd, mount, namespaces, ptrace, kexec and friends into ordinary `EPERM` tool
+  failures instead of kills. Landlock path pinning waits for a libkrunfw built with it — measured
+  2026-09-25, `landlock_create_ruleset` returns `ENOSYS` on the pinned stack's Linux 6.12.99. See
+  the In-guest hardening section of [docs/architecture.md](docs/architecture.md). ([#301])
 
 ### Fixed
 
@@ -216,6 +229,15 @@ setting) is called out under **Take care** rather than left for you to find.
 ### Changed
 
 - **Long cockpit lists page ten at a time.** The workspace dashboard's Packages tables (Published, Dependencies, Supply chain) and the colony lists on the overview and the workspace dashboard now show ten rows per page with a pager ("11–20 of 54"), a search box and filters that fit the data: status, ecosystem, repository and unreleased changes on Published; repository on Dependencies; search, ecosystem and repository on Supply chain; a failed bucket in the overview's status menu; and status, repository and agent on a workspace's colonies. Changing the search or a filter goes back to page one, and the tab counts still show totals. The Code page gets a Grid | List toggle, where List is one compact row per repository, and the browser remembers the choice.
+
+### Take care
+
+- **Colony agents can no longer ptrace, unshare or mount**, and `/proc/sys` and `/sys` are
+  read-only in the guest: the runner child's seccomp denylist answers those with `EPERM` and the
+  boot script remounts the kernel filesystems before the agent runs. A workload that relied on one
+  of them now fails with an ordinary tool error instead of succeeding. Check a workload against
+  the profile with `colonizer-agentd --seccomp-profile` and
+  `scripts/seccomp-evidence.sh -- <workload>`. ([#301])
 
 ## [v0.1.9] - 2026-09-24
 
@@ -816,6 +838,7 @@ Macs. ([#74])
 [#311]: https://github.com/Colonizer-dev/harness/issues/311
 [#300]: https://github.com/Colonizer-dev/harness/issues/300
 [#302]: https://github.com/Colonizer-dev/harness/issues/302
+[#301]: https://github.com/Colonizer-dev/harness/issues/301
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

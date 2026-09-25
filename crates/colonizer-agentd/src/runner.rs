@@ -3,6 +3,7 @@
 
 use crate::{
     config::SessionConfig,
+    harden,
     store::{EventStore, log_event, status_event},
 };
 use serde_json::{Value, json};
@@ -89,6 +90,13 @@ pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The runner child runs the agent's untrusted code, so it is spawned hardened (harden.rs): the
+    // capability bounding set trimmed, no core dumps, no_new_privs, and a seccomp denylist whose
+    // denials surface as ordinary EPERM tool failures. Fail closed: a failed hardening fails the
+    // spawn, through the same error path as any other spawn failure below.
+    let hardening = harden::Hardening::prepare();
+    store.append(log_event("info", format!("hardening: {}", hardening.describe())));
+    unsafe { command.pre_exec(hardening.guard()) };
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
