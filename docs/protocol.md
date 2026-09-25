@@ -137,6 +137,8 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
  "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}}}  // model_usage optional
 {"type":"log","level":"info|warn|error","message":"…"}
 {"type":"model_changed","model":"claude-sonnet-5","previous":"claude-opus-5-5"}
+{"type":"jev_ladder","applied":true,"pre_tokens":12000,"post_tokens":8000,"trigger":"auto","decisions":[
+  {"tool_call_id":"toolu_…","tool":"Bash","action":"keep|drop_result|drop_call","keep_call":0.98,"keep_result":0.87}]}  // Jev compaction's per-chunk decisions, shadow telemetry the harness grades into `jev_ladder.jsonl` (below); `applied:false` marks a fallback pass, which is not measured
 ```
 
 Every event above, with its exact fields, is also machine-readable: `docs/agent-events.schema.json`
@@ -748,6 +750,19 @@ the machine for TypeSafe (`api.typesafe.ai`) at each compaction: an exception to
 the machine". TypeSafe bills that traffic directly; it doesn't pass through the Colonizer gateway,
 so it's invisible to `model_usage` and colony cost. There is no per-org override for agent settings,
 so it can't be switched on per org. Read TypeSafe's data terms before using it on private repos.
+
+**Jev visibility ladder.** Each applied compaction pass is also measured (#475): the runner reports
+every chunk's keep/drop decision with Jev's own relevance scores on a `jev_ladder` event (§2), and
+the harness logs one `decision` row per chunk to `<data>/jev_ladder.jsonl`. When the agent later
+re-issues a tool call equivalent to one a decision was about — same tool, same canonical input —
+the harness logs a `reread` row naming the original, once per decision: the evidence that the chunk
+was actually needed again. Together the two rows give the keep/drop decisions a precision and
+recall against that ground truth, logged in the colony's harness log as it accumulates. The
+measurement is shadow-only: nothing in it changes what compaction keeps or drops, and the ledger
+lives in the data dir, kept across colonies like `routing.jsonl`, because the point is a later
+bench-wide report. Known limitation: a pass the plugin computed but did not apply
+(`applied: false`, the fallback path) is not measured — nothing was removed from the transcript,
+so there is nothing for a later call to be a reread of.
 
 ### Pre-flight scan
 
