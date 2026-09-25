@@ -3,6 +3,7 @@
 //! Contract: docs/protocol.md §1–§3.
 
 mod config;
+mod harden;
 mod pty;
 mod runner;
 mod store;
@@ -21,7 +22,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{path::PathBuf, process::ExitCode, sync::Arc};
+use std::{os::unix::process::CommandExt, path::PathBuf, process::ExitCode, sync::Arc};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{
@@ -34,16 +35,20 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage: colonizer-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
+                       [--seccomp-profile] [--exec-hardened -- CMD [ARGS...]]
 
   --config PATH      session config            (default /colonizer/session.json)
   --token-file PATH  bearer token for the API  (default /colonizer/token)
   --state-dir DIR    event log directory       (default /var/lib/colonizer)
+  --seccomp-profile  print the runner hardening profile as JSON and exit
+  --exec-hardened    harden this process like a runner child, then exec CMD (after --)
   --version          print the version";
 
 struct Args {
     config: PathBuf,
     token_file: PathBuf,
     state_dir: PathBuf,
+    exec: Vec<String>,
 }
 
 impl Args {
@@ -53,6 +58,7 @@ impl Args {
             config: "/colonizer/session.json".into(),
             token_file: "/colonizer/token".into(),
             state_dir: "/var/lib/colonizer".into(),
+            exec: Vec::new(),
         };
         let mut iter = argv.into_iter();
         while let Some(arg) = iter.next() {
@@ -72,6 +78,21 @@ impl Args {
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     return Ok(None);
+                }
+                "--seccomp-profile" => {
+                    println!("{}", harden::profile_json());
+                    return Ok(None);
+                }
+                // Everything after the flag (or a bare `--`) is the hardened child's argv, not ours.
+                "--exec-hardened" | "--" => {
+                    args.exec = iter.collect();
+                    if args.exec.first().map(String::as_str) == Some("--") {
+                        args.exec.remove(0);
+                    }
+                    if args.exec.is_empty() {
+                        return Err(format!("{flag} needs a command after `--`"));
+                    }
+                    break;
                 }
                 "--config" | "--token-file" | "--state-dir" => {
                     let value = match inline {
@@ -112,6 +133,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<(), BoxError> {
+    // `--exec-hardened -- CMD` turns this process into a hardened runner stand-in: the manual KVM
+    // matrix and re-verification run the same profile a colony's runner child gets, no VM needed.
+    if !args.exec.is_empty() {
+        return exec_hardened(&args.exec);
+    }
+    // Self-hygiene before anything is spawned (harden.rs): non-dumpable, no core dumps, so a
+    // capability-less runner cannot read the daemon's memory or environ out of /proc.
+    if let Err(e) = harden::self_guard() {
+        eprintln!("colonizer-agentd {VERSION}: warning: cannot harden the daemon itself: {e}");
+    }
     let raw = std::fs::read(&args.config).map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
     let config: SessionConfig = serde_json::from_slice(&raw).map_err(|e| format!("invalid {}: {e}", args.config.display()))?;
     let token = std::fs::read_to_string(&args.token_file)
@@ -163,6 +194,16 @@ async fn run(args: Args) -> Result<(), BoxError> {
         }
     }
     Ok(())
+}
+
+/// Applies the runner-child hardening to this process and execs CMD in it (never returns on
+/// success; the exec failure is the only way control comes back).
+fn exec_hardened(argv: &[String]) -> Result<(), BoxError> {
+    let summary = harden::apply_self().map_err(|e| format!("cannot harden for --exec-hardened: {e}"))?;
+    eprintln!("colonizer-agentd {VERSION}: hardening: {summary}");
+    let (program, args) = argv.split_first().ok_or("--exec-hardened needs a command after `--`")?;
+    let error = std::process::Command::new(program).args(args).exec();
+    Err(format!("cannot exec `{program}`: {error}").into())
 }
 
 #[derive(Clone)]

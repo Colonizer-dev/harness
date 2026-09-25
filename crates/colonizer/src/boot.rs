@@ -1164,6 +1164,25 @@ while read -r kind rel || [ -n "${rel:-}" ]; do
       ;;
   esac
 done <"$policy"
+
+# Kernel-interface hygiene, after tailscale (it may need sysctls) and before the agent runs;
+# the agent's seccomp filter denies unshare/setns, so these masks cannot be undone. Every step
+# is best-effort: a missing path is skipped, a failed mount logs one line and boot continues.
+echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null || echo "colonizer: kernel.dmesg_restrict stays open" >&2
+echo 2 > /proc/sys/kernel/kptr_restrict 2>/dev/null || echo "colonizer: kernel.kptr_restrict stays open" >&2
+mount -o remount,hidepid=invisible /proc 2>/dev/null \
+  || mount -o remount,hidepid=2 /proc 2>/dev/null \
+  || echo "colonizer: /proc stays world-readable" >&2
+for f in kcore kallsyms keys timer_list sched_debug sysrq-trigger cmdline latency_stats modules config.gz kpageflags kpagecount kpagecgroup; do
+  [ -e "/proc/$f" ] && { mount --bind /dev/null "/proc/$f" 2>/dev/null || echo "colonizer: could not mask /proc/$f" >&2; }
+done
+for d in /sys/kernel/debug /sys/kernel/tracing /sys/kernel/security /sys/fs/bpf /sys/firmware /proc/acpi /proc/scsi /proc/asound; do
+  [ -d "$d" ] && { mount -t tmpfs -o ro,size=0 colonizer-mask "$d" 2>/dev/null || echo "colonizer: could not mask $d" >&2; }
+done
+mount --bind /proc/sys /proc/sys 2>/dev/null \
+  && mount -o remount,bind,ro /proc/sys 2>/dev/null \
+  || echo "colonizer: /proc/sys stays writable" >&2
+mount -o remount,ro /sys 2>/dev/null || echo "colonizer: /sys stays writable" >&2
 exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --state-dir /var/lib/colonizer
 "#;
 
@@ -1414,6 +1433,34 @@ mod tests {
             guard < BOOT_SCRIPT.find("while read").unwrap(),
             "the missing-list check precedes the loop"
         );
+    }
+
+    /// Kernel-interface hardening runs after tailscale setup (which may need sysctls) and before
+    /// agentd is exec'd — the agent's seccomp filter denies unshare, so masks set here stick.
+    #[test]
+    fn boot_script_hardens_kernel_interfaces_before_the_agent_runs() {
+        let mesh = BOOT_SCRIPT
+            .find(r#"|| echo "colonizer: joining the mesh failed" >&2"#)
+            .expect("the script joins the mesh");
+        let hardening = BOOT_SCRIPT.find("dmesg_restrict").expect("the hardening step is present");
+        let exec = BOOT_SCRIPT
+            .find("exec /opt/colonizer/bin/colonizer-agentd")
+            .expect("the script execs agentd");
+        assert!(
+            mesh < hardening && hardening < exec,
+            "hardening sits between tailscale setup ({mesh}) and the exec of agentd ({exec}), got {hardening}"
+        );
+        for marker in [
+            "hidepid=invisible",                                // stronger hidepid, ...
+            "hidepid=2",                                        // ... with the older-kernel fallback
+            "for f in kcore kallsyms",                          // the masked files, bind-over loop
+            r#"[ -e "/proc/$f" ] && { mount --bind /dev/null"#, // existing files only
+            "/sys/fs/bpf",                                      // sensitive dirs masked ro
+            "remount,bind,ro /proc/sys",                        // sysctls read-only, after the writes
+            "remount,ro /sys",
+        ] {
+            assert!(BOOT_SCRIPT.contains(marker), "hardening must contain {marker:?}");
+        }
     }
 
     /// The Jev compaction switch mounts the payload only with the staged files and a key to go with them.

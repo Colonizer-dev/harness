@@ -406,9 +406,68 @@ than the "scanning" placeholder, which now appears only for a scope never scanne
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
 - Network: what a colony's microsandbox profiles allow and deny is in
   [sandbox-network.md](sandbox-network.md).
+- In the guest the agent runs as root, but hardened: see [In-guest hardening](#in-guest-hardening).
 
 The external audit of v0.1.3 checked these boundaries against the code; its findings and the
 release checkpoints are in [audit.md](audit.md).
+
+## In-guest hardening
+
+The microVM is the boundary; this is the layer inside it, for the case the wall presumes: the agent
+is root in the guest, and root can still reach kernel interfaces, another process's memory and the
+human's terminal. Hardening narrows what root can do; it does not replace the VM wall (issue #301).
+
+Guest kernel baseline, measured 2026-09-25 on the pinned stack (microsandbox 0.6.18 per
+`vendor/vendor.lock`, libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
+(`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
+libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
+`capability,selinux` — so Landlock pinning waits for a libkrunfw with `CONFIG_SECURITY_LANDLOCK=y`
+and landlock in its LSM list, a tracked follow-up. The guest also boots `nomodule`, with no
+debugfs, tracefs or sysrq.
+
+**Layer 1 — boot.sh** (`crates/colonizer/src/boot.rs`), as root before agentd is exec'd:
+`dmesg_restrict=1`, `kptr_restrict=2`; `/proc` remounted `hidepid=invisible` (fallback `hidepid=2`);
+`/dev/null` bound over the readable kernel files (`kcore`, `kallsyms`, `keys`, `timer_list`,
+`sched_debug`, `sysrq-trigger`, `cmdline`, `latency_stats`, `modules`, `config.gz`, `kpageflags`,
+`kpagecount`, `kpagecgroup`); an empty read-only tmpfs over `/sys/kernel/{debug,tracing,security}`,
+`/sys/fs/bpf`, `/sys/firmware`, `/proc/{acpi,scsi,asound}`; then `/proc/sys` and `/sys` read-only.
+Best-effort: a failed step logs one line and boot continues. Applies to everything in the guest,
+the human's terminal included, and sticks because Layer 3 denies `unshare`/`setns`.
+
+**Layer 2 — agentd itself** (`harden::self_guard`): non-dumpable, `RLIMIT_CORE` 0/0 — with the
+agent's missing `CAP_SYS_PTRACE` and hidepid from Layer 1, it can neither see nor read agentd's
+`/proc` entries.
+
+**Layer 3 — the agent process** (runner and every descendant), applied by agentd in `pre_exec`
+before exec, fail-closed — a step that fails fails the spawn:
+
+- Capability bounding set: 21 caps dropped — `SYS_ADMIN`, `SYS_PTRACE`, `SYS_RESOURCE`,
+  `SYS_MODULE`, `BPF`, `PERFMON`, `NET_ADMIN`, `SYSLOG`, `MKNOD`, audit, MAC and the rest —
+  while `CHOWN`/`DAC_OVERRIDE`/`SETUID`/`SETGID`/`NET_RAW` stay for package managers.
+- `RLIMIT_CORE` 0/0, unraisable without `CAP_SYS_RESOURCE`; `no_new_privs`.
+- A seccomp denylist (51 rules, default allow) turning the dangerous surface — io_uring,
+  userfaultfd, BPF, perf, mount and the fsopen family, namespaces (`unshare`, `setns`, `clone`
+  with a namespace flag), ptrace and `process_vm_*`, kernel modules, kexec, keys, reboot, swap,
+  syslog, fanotify — into `EPERM`, so a denial is an ordinary tool failure, not a kill. `clone3`
+  returns `ENOSYS` so libc falls back to plain `clone`; `prctl(PR_SET_DUMPABLE)` and the
+  `TIOCSTI`/`TIOCLINUX` terminal-injection ioctls are arg-gated. `SECCOMP_FILTER_FLAG_LOG` puts
+  denials in the kernel log where one exists. The terminal PTY is deliberately not filtered.
+- agentd logs `hardening: seccomp denylist 51 rules fnv64=<fingerprint>, caps dropped 21, core
+  dumps off` to the event store before the first spawn, so a colony's log shows what guarded it.
+
+What it does not do: the agent stays root — DAC still gives it every file in the guest, the
+read-only `/colonizer` mounts' contents included. No Landlock yet; denials make no agentd events
+yet (`EPERM` in the tool, a kernel-log line); network is [sandbox-network.md](sandbox-network.md).
+
+Verification and re-verification: `cargo test -p colonizer-agentd` runs a behavioural probe that
+spawns a hardened child and asserts the `EPERM` classes — no KVM needed.
+`colonizer-agentd --seccomp-profile` prints the profile and its fingerprint (x86_64:
+`eb59b1ba4184ce70`); `colonizer-agentd --exec-hardened -- sh` in a colony terminal reproduces the
+agent's view for the manual matrix (`unshare -U`, io_uring, `mount`, `cat /proc/kallsyms`, strace
+of agentd), and `scripts/seccomp-evidence.sh -- <workload>` straces a workload and lists any
+denylisted syscall it made. Re-run on a `vendor/claude-code.lock` bump, an `images.lock` digest
+change, a microsandbox/libkrunfw bump (`vendor/vendor.lock`), or a runner change under
+`modules/agents/*`.
 
 ## Testing
 
