@@ -16,6 +16,12 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Added
 
+- **A read-only `repo-explorer` subagent.** A new first-party agent alongside Explore, always
+  available regardless of `subagent_effort`: before grepping, it checks the Skill tool for a shipped
+  retrieval skill (starting with graft's code map) and prefers it, falling back to find/grep like
+  Explore when none applies. First slice of #474 — pinning ast-grep, ast-outline and fff as skills of
+  their own, and a bench comparison of read/search token share with and without them, are follow-up
+  work. ([#474])
 - **Wait behind the holder.** A launch on an issue another colony already holds can now queue for
   the issue instead of being refused or duplicating it: `queue_behind_holder` on `POST /api/sessions`
   admits the colony as a `claim_wait` successor (`queued_behind` naming the holder), the oldest
@@ -738,6 +744,7 @@ Macs. ([#74])
 [#326]: https://github.com/Colonizer-dev/harness/issues/326
 [#328]: https://github.com/Colonizer-dev/harness/issues/328
 [#472]: https://github.com/Colonizer-dev/harness/issues/472
+[#474]: https://github.com/Colonizer-dev/harness/issues/474
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
