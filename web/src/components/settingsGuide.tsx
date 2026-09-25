@@ -390,6 +390,15 @@ const GUIDES: Record<string, Guide> = {
       { icon: "ant", label: "Colonies" },
     ],
   },
+  screen: {
+    icon: "shield",
+    blurb: "Screens what a colony is about to publish for hidden code points.",
+    flow: [
+      { icon: "ant", label: "Colony" },
+      { icon: "branch", label: "Diff" },
+      { icon: "shield", label: "Screen" },
+    ],
+  },
   voice: {
     icon: "mic",
     blurb: "Turns what you say into text in the composer.",

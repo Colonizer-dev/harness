@@ -598,6 +598,20 @@ export function parseOrigins(value) {
   return origins;
 }
 
+/** One screening host event as a line per finding: where, which class, how severe, what decoded. */
+function screeningLines(e) {
+  const findings = Array.isArray(e.findings) ? e.findings : [];
+  const head = `screening: ${e.outcome ?? 'clean'} (${e.mode ?? 'off'})`;
+  if (findings.length === 0) return [head];
+  return [
+    `${head} — ${findings.length} finding${findings.length === 1 ? '' : 's'}`,
+    ...findings.map((f) => {
+      const decoded = f.decoded ? ` — decoded ${JSON.stringify(f.decoded)}` : '';
+      return `  ${f.location ?? '?'} — ${f.class ?? '?'} (${f.severity ?? 'medium'})${decoded}`;
+    }),
+  ];
+}
+
 /** One colony, one line per step, with the time since it started and gaps worth noticing. */
 export function formatTranscript({ session = {}, events = [], logs = [], origins = null }) {
   const all = [
@@ -691,6 +705,9 @@ export function formatTranscript({ session = {}, events = [], logs = [], origins
         break;
       case 'memory_proposal':
         lines.push(`${at}${tag}◇ memory proposal (${e.scope}): ${excerpt(e.title, 160)}`);
+        break;
+      case 'screening':
+        for (const line of screeningLines(e)) lines.push(`${at}${tag}${line}`);
         break;
     }
   }

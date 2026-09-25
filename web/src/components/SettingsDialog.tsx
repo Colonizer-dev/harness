@@ -88,6 +88,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   watchdog: { title: "Watchdog", description: "Notices stalled colonies and nudges them" },
   autonomy: { title: "Autonomy", description: "Who answers a colony's questions when you are not there" },
   burn_down: { title: "Burn-down", description: "Spend the weekly token plan down to a reserve before it resets" },
+  screen: { title: "Prompt screening", description: "Screen the diff and PR body for hidden code points before publishing" },
   voice: { title: "Voice", description: "Speech-to-text for the composer's microphone" },
 };
 

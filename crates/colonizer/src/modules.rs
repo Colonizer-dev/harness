@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     "source",
     "sandbox",
     "mesh",
@@ -27,6 +27,7 @@ pub const KINDS: [&str; 12] = [
     "notify",
     "burn_down",
     "voice",
+    "screen",
 ];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
@@ -312,6 +313,18 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             .into_iter()
             .map(|(id, name, description, schema)| p(id, name, description, schema))
             .collect(),
+        "screen" => vec![p(
+            "promptdecode",
+            "Prompt screening",
+            "Screens the diff and the pull request body for hidden code points before anything is published: a local, deterministic decoder (tag characters, bidi controls, variation selectors) that sends nothing anywhere — see promptdeco.de",
+            json!({"type":"object","properties":{
+                "publish": {
+                    "type": "string", "title": "On findings",
+                    "description": "'warn' publishes and lists the findings at the foot of the pull request; 'block' holds the publish — no push, no pull request — until the branch is fixed or you lower this to 'warn'.",
+                    "enum": ["off", "warn", "block"], "default": "warn"
+                }
+            }}),
+        )],
         _ => Vec::new(),
     }
 }

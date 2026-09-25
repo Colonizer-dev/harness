@@ -195,6 +195,10 @@ pub struct ModulesConfig {
     /// to a service is something to connect, not a default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<ModuleChoice>,
+    /// Prompt-injection screening at publish time. Absent reads as off, like `notify`: holding a
+    /// colony's publish is a decision, not a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<ModuleChoice>,
 }
 
 fn default_memory() -> ModuleChoice {
@@ -223,6 +227,8 @@ impl Default for ModulesConfig {
             // Off until it is configured: burning a plan is a decision, not a default.
             burn_down: None,
             voice: None,
+            // Off until it is configured: holding publishes on findings is a decision, not a default.
+            screen: None,
         }
     }
 }
@@ -289,6 +295,7 @@ impl ModulesConfig {
             "notify" => self.notify.as_ref(),
             "burn_down" => self.burn_down.as_ref(),
             "voice" => self.voice.as_ref(),
+            "screen" => self.screen.as_ref(),
             _ => None,
         }
     }
@@ -309,6 +316,7 @@ impl ModulesConfig {
             "notify" => Some(self.notify.get_or_insert_with(|| ModuleChoice::new("default"))),
             "burn_down" => Some(self.burn_down.get_or_insert_with(|| ModuleChoice::new("default"))),
             "voice" => Some(self.voice.get_or_insert_with(|| ModuleChoice::new(crate::voice::BROWSER))),
+            "screen" => Some(self.screen.get_or_insert_with(|| ModuleChoice::new("promptdecode"))),
             _ => None,
         }
     }

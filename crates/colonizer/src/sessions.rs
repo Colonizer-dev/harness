@@ -609,7 +609,7 @@ impl Runtime {
         // The reconnect cursor is agentd's, not the file's: only lines the runner wrote count, each
         // at its own seq (a line `handle_agent_event` renumbered because it collided with a host
         // chain event keeps its true seq in `a_seq`). Host chain events are cut out by their type —
-        // the five this build emits and the protocol reserves — so a restart mid-life asks agentd to
+        // the seven this build emits and the protocol reserves — so a restart mid-life asks agentd to
         // replay exactly the events it has missed, and cannot skip the ones that never landed.
         //
         // The same pass restores the open question. It is otherwise set only while live events are
@@ -748,6 +748,9 @@ impl SessionLogger {
     }
     pub async fn error(&self, message: impl Into<String>) {
         self.app.session_log(&self.id, "error", message.into()).await
+    }
+    pub async fn warn(&self, message: impl Into<String>) {
+        self.app.session_log(&self.id, "warn", message.into()).await
     }
 }
 

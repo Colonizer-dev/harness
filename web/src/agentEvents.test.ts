@@ -35,9 +35,10 @@ const WEB_TYPES = {
   verification: true,
 } satisfies Record<AgentEventBody["type"], true>;
 
-// Host events the mothership appends to events.jsonl itself (§6.3 Autopilot, §6.6): the runner never
-// emits them, so the runner-event schema does not list them, but they arrive on the same stream.
-const HOST_TYPES = new Set(["verification"]);
+// Host events the mothership appends to events.jsonl itself (§6.3 Autopilot, §6.6, publish-time
+// screening): the runner never emits them, so the runner-event schema does not list them, but they
+// arrive on the same stream. Unknown ones are ignored; the screening gate also logs harness lines.
+const HOST_TYPES = new Set(["verification", "screening"]);
 
 describe("agent event types", () => {
   it("cover every event the schema defines, and nothing else", () => {
