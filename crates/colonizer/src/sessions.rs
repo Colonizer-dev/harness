@@ -562,6 +562,10 @@ pub struct Runtime {
     /// Serialises completion-claim verifications (verify.rs): a second claim that lands mid-run
     /// queues behind it and then verifies the newer state, never concurrent with it.
     pub(crate) verify_lock: Mutex<()>,
+    /// Path-policy violations already warned about, so a publish retry — which re-stages the same
+    /// tree — does not repeat every line (issue #300). In memory on purpose: a restart warning
+    /// again is a minor repeat, a leak-free set is the point.
+    pub(crate) path_policy_warned: Mutex<HashSet<String>>,
     pub(crate) events_path: PathBuf,
     pub(crate) logs_path: PathBuf,
     pub activity: Mutex<Activity>,
@@ -702,6 +706,7 @@ impl Runtime {
             file_lock: Mutex::new(()),
             findings_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
+            path_policy_warned: Mutex::new(HashSet::new()),
             events_path,
             logs_path,
             activity: Mutex::new({
@@ -713,6 +718,13 @@ impl Runtime {
             }),
             load_error: Mutex::new((!read_errors.is_empty()).then_some(read_errors.join("; "))),
         }
+    }
+
+    /// Records a path-policy warning and says whether it is new, so the colony log carries each
+    /// violation once however many publish attempts re-stage the same tree.
+    pub(crate) async fn warn_path_policy_once(&self, message: &str) -> bool {
+        let mut seen = self.path_policy_warned.lock().await;
+        seen.insert(message.to_string())
     }
 
     pub(crate) fn broadcast(&self, seq: Option<u64>, json: String) {

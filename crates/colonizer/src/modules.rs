@@ -290,7 +290,13 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "warn_free_disk": {"type": "string", "title": "Warn below free disk", "default": "10G", "format": "disk-size",
                     "description": "The cockpit warns when the volume holding the data dir has less free space than this. 0 turns the warning off."},
                 "min_free_disk": {"type": "string", "title": "Pause the queue below free disk", "default": "5G", "format": "disk-size",
-                    "description": "Queued colonies are not started while free space on the data dir's volume is below this; the pause itself deletes nothing and never stops running colonies, and admission resumes by itself when space returns. Below the floor the reclaim sweep (unless off with COLONIZER_RECLAIM=0) also reclaims finished colonies whose work is already pushed without waiting for the retention window; unpushed work is never deleted. 0 turns the floor off."}
+                    "description": "Queued colonies are not started while free space on the data dir's volume is below this; the pause itself deletes nothing and never stops running colonies, and admission resumes by itself when space returns. Below the floor the reclaim sweep (unless off with COLONIZER_RECLAIM=0) also reclaims finished colonies whose work is already pushed without waiting for the retention window; unpushed work is never deleted. 0 turns the floor off."},
+                "mask_paths": {"type": "array", "items": {"type": "string"}, "title": "Also mask", "default": [], "format": "mask-path-list",
+                    "description": "Extra worktree-relative paths a colony never sees, on top of the built-in masked files (.env, .envrc, .npmrc, .netrc, .git-credentials, .pypirc). One path per entry, e.g. secrets/credentials.json; a trailing / means the whole directory, and matching is at any depth, so .env also covers vendor/lib/.env. Enforced in the guest before the agent starts: the colony gets an empty file or directory instead."},
+                "protect_paths": {"type": "array", "items": {"type": "string"}, "title": "Also protect", "default": [], "format": "path-list",
+                    "description": "Extra worktree-relative paths a colony may read but never write, on top of the built-in protected paths (.git/config, .git/hooks/, .gitmodules, .claude/, .codex/, .mcp.json, .devcontainer/, .vscode/, .idea/). One path per entry; a trailing / means the whole directory, and matching is at any depth. Enforced in the guest before the agent starts: the colony gets the path read-only."},
+                "unmask_paths": {"type": "array", "items": {"type": "string"}, "title": "Unmask (opt out)", "default": [], "format": "path-list",
+                    "description": "Paths a colony may see again: each entry is removed from both the masked and the protected sets, built-ins included — an explicit opt-out for repositories that genuinely ship one of them. Every opt-out is logged on the colony at boot."}
             }}),
         )],
         "mesh" => vec![
@@ -595,6 +601,7 @@ fn validate_settings(
             Some("integer") => value.is_i64() || value.is_u64(),
             Some("number") => value.is_number(),
             Some("boolean") => value.is_boolean(),
+            Some("array") => value.is_array() && value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
             _ => true,
         };
         if !ok {
@@ -637,6 +644,28 @@ fn validate_settings(
             && let Err(problem) = crate::egress::validate_entries(s)
         {
             return Err(format!("setting `{key}`: {problem}"));
+        }
+        // A path list is checked entry by entry with the same gate the boot resolves through
+        // (path_policy): a path the colony could not honour — absolute, traversal, the worktree
+        // root, or a masked reach into `.git` — is refused here, at save time, never discovered
+        // from a boot log afterwards.
+        if matches!(spec["format"].as_str(), Some("path-list") | Some("mask-path-list"))
+            && let Some(items) = value.as_array()
+        {
+            for item in items {
+                let Some(s) = item.as_str() else { continue };
+                let checked = if spec["format"].as_str() == Some("mask-path-list") {
+                    crate::path_policy::validate_masked(s)
+                } else {
+                    crate::path_policy::validate_path(s)
+                };
+                if let Err(e) = checked {
+                    return Err(format!("setting `{key}` has an unusable path {s:?}: {e}"));
+                }
+                if s.len() > 500 {
+                    return Err(format!("setting `{key}` has a path over 500 characters"));
+                }
+            }
         }
         out.insert(key.clone(), value.clone());
     }
@@ -961,6 +990,52 @@ mod tests {
             err.starts_with("setting `egress_allow`: `host` is not a host or host:port"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn the_sandbox_path_lists_take_strings_and_refuse_unusable_paths_at_save_time() {
+        let schema = providers("sandbox", &[]).remove(0).schema;
+        for key in ["mask_paths", "protect_paths", "unmask_paths"] {
+            assert_eq!(schema["properties"][key]["type"], "array", "{key} is an array setting");
+            assert_eq!(schema["properties"][key]["default"], json!([]));
+        }
+        let mut input = Map::new();
+        input.insert("mask_paths".into(), json!(["secrets/credentials.json", "vendor/keys/"]));
+        input.insert("protect_paths".into(), json!(["tools/run.sh", ".airplane/"]));
+        input.insert("unmask_paths".into(), json!([".envrc"]));
+        let out = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap();
+        assert_eq!(out.get("mask_paths"), input.get("mask_paths"));
+        assert_eq!(out.get("protect_paths"), input.get("protect_paths"));
+
+        // A non-array, or an array of non-strings, is the wrong type for the setting.
+        for bad in [json!("secrets/credentials.json"), json!(["ok", 4])] {
+            input.insert("mask_paths".into(), bad);
+            assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        }
+        // And the entries themselves are checked with the boot's own gate: absolute paths,
+        // traversal, the worktree root and — for the masked list only — the git dir.
+        let refused = [
+            ("mask_paths", "/etc/passwd"),
+            ("mask_paths", "../outside"),
+            ("mask_paths", "."),
+            ("mask_paths", ".git/config"),
+            ("protect_paths", "../../outside"),
+            ("unmask_paths", "with,comma"),
+        ];
+        for (key, path) in refused {
+            let mut one = Map::new();
+            one.insert(key.to_string(), json!([path]));
+            let err = validate_settings("sandbox", &schema, &one, &Map::new()).unwrap_err();
+            assert!(
+                err.starts_with(&format!("setting `{key}` has an unusable path")),
+                "{path:?}: {err}"
+            );
+        }
+        // Protecting the git dir is allowed: the read-only mount already covers it, but the
+        // operator may underline it.
+        let mut protect_git = Map::new();
+        protect_git.insert("protect_paths".into(), json!([".git/config"]));
+        assert!(validate_settings("sandbox", &schema, &protect_git, &Map::new()).is_ok());
     }
 
     #[test]

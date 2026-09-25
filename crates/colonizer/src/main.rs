@@ -50,6 +50,7 @@ mod notify;
 mod openai;
 mod orgs;
 mod packages;
+mod path_policy;
 mod plugins;
 mod presets;
 mod protocol;

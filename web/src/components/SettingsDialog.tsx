@@ -2379,6 +2379,24 @@ function SettingField({
   const info = fieldInfo(field);
   const text = value === undefined || value === null ? "" : String(value);
 
+  if (field.type === "array") {
+    // A string array edits as one comma-separated line and is saved back as an array on blur:
+    // parsing every keystroke would eat the separators a person is still typing. Each entry is
+    // checked again at save time by the mothership (path policy: modules.rs `validate_settings`).
+    const entries = Array.isArray(value) ? value.map(String) : [];
+    return (
+      <Row id={id} label={label} info={info}>
+        <input
+          id={id}
+          type="text"
+          defaultValue={entries.join(", ")}
+          onBlur={(e) => onChange(e.target.value.split(",").map((entry) => entry.trim()).filter(Boolean))}
+          className={cx(inputClass, "font-mono text-[13px]")}
+        />
+      </Row>
+    );
+  }
+
   if (field.type === "boolean") {
     return (
       <Row id={id} label={label} info={info} inline>
