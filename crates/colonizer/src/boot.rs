@@ -5,6 +5,7 @@
 use crate::{
     App, CLAUDE_API_HOST, Shared,
     config::{ModulesConfig, setting, setting_str, setting_u64},
+    egress,
     events::start_link,
     github,
     lifecycle::teardown_vm,
@@ -153,30 +154,55 @@ async fn default_base(app: &Shared, repo: &str, log: &SessionLogger, started_at:
     }
 }
 
-/// The network fence a colony boots with: the `public` profile alone — never the broad `host`
-/// profile, which allows every host-loopback port and would let the untrusted colony agent drive
-/// the cockpit API (127.0.0.1:7878) or any other loopback service (#375) — plus exactly the host
-/// ports the colony needs: when the mesh is on, the WireGuard direct-path rules (passed in
-/// already-awaited because `direct_path_rules` is async and shells out) and the headscale control
-/// port; when any model route exists, the provider gateway port. Explicit `--net-rule` entries
-/// are matched before the profile rules, so these allows stand and the default deny closes the
-/// rest.
+/// The network fence a colony boots with, resolved from the egress policy (#303): the harness's
+/// own port-scoped infrastructure allows — never the broad `host` profile, which allows every
+/// host-loopback port and would let the untrusted colony agent drive the cockpit API
+/// (127.0.0.1:7878) or any other loopback service (#375) — plus what the operator's policy adds,
+/// plus the non-overridable deny set, all compiled by `egress::compile` in msb's evaluation
+/// order. The infrastructure allows: when the mesh is on, the WireGuard direct-path rules (passed
+/// in already-awaited because `direct_path_rules` is async and shells out) and the headscale
+/// control port; when any model route exists, the provider gateway port; and in allowlist mode,
+/// the TLS-edge secret hosts on 443, which the `public` profile would otherwise have covered and
+/// whose traffic must work by construction. Answers the profiles, the rules, and the record a
+/// boot files at `<session dir>/egress.json`.
 pub(crate) fn colony_network(
     mesh: Option<(Vec<String>, u16)>,
     routes: &providers::ColonyRoutes,
     gateway: std::net::SocketAddr,
-) -> (Vec<String>, Vec<String>) {
-    let mut rules = mesh
+    resolved: &egress::Resolved,
+    tls_hosts: &[String],
+) -> (Vec<String>, Vec<String>, egress::Record) {
+    let mut infra = mesh
         .map(|(direct_path, control)| {
-            let mut rules = direct_path;
-            rules.push(format!("allow@host:tcp:{control}"));
-            rules
+            let mut infra = direct_path;
+            infra.push(format!("allow@host:tcp:{control}"));
+            infra
         })
         .unwrap_or_default();
     if !routes.routes.is_empty() {
-        rules.push(format!("allow@host:tcp:{}", gateway.port()));
+        infra.push(format!("allow@host:tcp:{}", gateway.port()));
     }
-    (vec!["public".to_string()], rules)
+    if resolved.policy.mode == egress::EgressMode::Allowlist {
+        // One rule per host even when two secrets name the same one: duplicates are harmless to
+        // msb but would make the record read as two fences.
+        let mut seen: Vec<String> = Vec::new();
+        for host in tls_hosts {
+            if !seen.contains(host) {
+                seen.push(host.clone());
+                infra.push(format!("allow@{host}:tcp:443"));
+            }
+        }
+    }
+    let compiled = egress::compile(&resolved.policy, &infra);
+    let record = egress::record(resolved, &compiled, github::unix_now());
+    (compiled.profiles, compiled.rules, record)
+}
+
+/// The hosts msb swaps secrets for on TLS: the credential and colony secrets a boot hands over.
+/// In allowlist mode these are allowed by construction on 443 — a colony with an injected secret
+/// that cannot reach its host would be a boot that only looks fenced.
+fn tls_edge_hosts(secrets: &[sandbox::Secret]) -> Vec<String> {
+    secrets.iter().flat_map(|secret| secret.hosts.iter().cloned()).collect()
 }
 
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
@@ -915,7 +941,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
-    let (net_profiles, net_rules) = colony_network(mesh_net, &routing, app.cfg.gateway_bind);
+    let resolved_egress = crate::egress::resolve(&modules, &org_settings);
+    let tls_hosts = tls_edge_hosts(&secrets);
+    let (net_profiles, net_rules, egress_record) =
+        colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);
+    // The record is the fleet-view query surface (`GET /api/sessions/{id}/egress`): what the
+    // colony could reach, and under whose word, for as long as the session dir survives.
+    std::fs::write(dir.join("egress.json"), serde_json::to_vec_pretty(&egress_record)?)?;
 
     // The chosen stack fills in image and machine size — detected from the
     // repository when the configured preset was `auto`, otherwise the one the
@@ -933,6 +965,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         mounts,
         env,
         secrets,
+        // Allowlist mode names no profile: the deny comes from the flag, not from `--net`.
+        net_deny_egress: net_profiles.is_empty(),
         net_profiles,
         net_rules,
         publish,
@@ -1094,7 +1128,11 @@ mod tests {
             } else {
                 &providers::ColonyRoutes::default()
             };
-            let (profiles, rules) = colony_network(mesh.clone(), routes, gateway);
+            // The default policy is Open with no operator entries: today's fence, plus the
+            // always-blocked deny set every colony carries (#303).
+            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default());
+            let (profiles, rules, record) =
+                colony_network(mesh.clone(), routes, gateway, &resolved, &["api.anthropic.com".into()]);
             // `public` alone, never the broad `host` profile (#375) — in every combination, so a
             // future change cannot quietly hand the colony every host-loopback port again.
             assert_eq!(
@@ -1106,17 +1144,28 @@ mod tests {
                 !profiles.iter().any(|p| p == "host"),
                 "mesh_on={mesh_on} has_routes={has_routes}"
             );
-            let mut expected = mesh
-                .clone()
-                .map(|(mut direct_path, control)| {
-                    direct_path.push(format!("allow@host:tcp:{control}"));
-                    direct_path
-                })
-                .unwrap_or_default();
+            // DNS first (the deny set behind it must not take the forwarder down), then the
+            // infrastructure allows — direct path, control port, gateway port — and only then the
+            // deny set, with nothing of ours after it in an Open mode that configures nothing.
+            let mut expected = vec!["allow@dns".to_string()];
+            if let Some((direct_path, _)) = &mesh {
+                expected.extend(direct_path.clone());
+            }
+            if mesh_on {
+                expected.push(format!("allow@host:tcp:{control}"));
+            }
             if has_routes {
                 expected.push(format!("allow@host:tcp:{}", gateway.port()));
             }
+            expected.extend(egress::ALWAYS_BLOCKED.iter().map(|t| format!("deny@{t}")));
+            // Open mode: the TLS-edge hosts ride the `public` profile, so no 443 allow of ours.
             assert_eq!(rules, expected, "mesh_on={mesh_on} has_routes={has_routes}");
+            assert!(
+                rules.iter().all(|rule| rule != "allow@api.anthropic.com:tcp:443"),
+                "open mode needs no TLS-edge allow: {rules:?}"
+            );
+            assert_eq!(record.profiles, profiles);
+            assert_eq!(record.rules, rules);
             // And of the host rules, nothing but the control and gateway ports, TCP only.
             let host_allows = [
                 format!("allow@host:tcp:{control}"),
@@ -1128,6 +1177,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Allowlist mode (#303) keeps the same infrastructure allows, adds the TLS-edge secret hosts
+    /// on 443, and drops the `public` profile — the deny set follows, and nothing configured can
+    /// precede it (that ordering is `egress.rs`'s own fuzz; here it is the boot's side of the deal).
+    #[test]
+    fn an_allowlist_colony_keeps_only_harness_ports_the_tls_edge_and_dns() {
+        let gateway: std::net::SocketAddr = "127.0.0.1:52000".parse().unwrap();
+        let resolved = crate::egress::Resolved {
+            policy: crate::egress::EgressPolicy {
+                mode: crate::egress::EgressMode::Allowlist,
+                ..Default::default()
+            },
+            sources: crate::egress::Sources {
+                mode: "global".into(),
+                ..Default::default()
+            },
+        };
+        let (profiles, rules, record) = colony_network(
+            Some((vec!["allow@192.168.1.4:udp:41743".into()], 41740)),
+            &providers::ColonyRoutes::default(),
+            gateway,
+            &resolved,
+            &["api.anthropic.com".into(), "api.anthropic.com".into()],
+        );
+        assert!(profiles.is_empty(), "no profile allow in allowlist mode: {profiles:?}");
+        assert_eq!(record.mode, crate::egress::EgressMode::Allowlist);
+        // Deduplicated TLS edge, DNS first, harness ports (no gateway allow: no routes), then the
+        // deny set.
+        assert_eq!(rules[0], "allow@dns");
+        assert_eq!(rules[1], "allow@192.168.1.4:udp:41743");
+        assert_eq!(rules[2], "allow@host:tcp:41740");
+        assert_eq!(rules[3], "allow@api.anthropic.com:tcp:443");
+        assert!(rules[4].starts_with("deny@"), "the deny set follows the allows: {rules:?}");
     }
 
     #[test]

@@ -24,6 +24,7 @@ mod colony_secrets;
 mod config;
 mod deps;
 mod diagnosis;
+mod egress;
 mod events;
 mod exec_bits;
 mod execution;
@@ -1572,6 +1573,7 @@ async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/events", get(sessions::events_ws))
         .route("/api/sessions/{id}/terminal", get(sessions::terminal_ws))
         .route("/api/sessions/{id}/findings", get(findings::list))
+        .route("/api/sessions/{id}/egress", get(egress::show))
         .route("/api/findings", get(findings::list_all))
         .route("/api/loops", get(loops::list).post(loops::create))
         .route("/api/loops/{id}", put(loops::update).delete(loops::delete))

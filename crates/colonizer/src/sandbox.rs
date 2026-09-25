@@ -33,6 +33,11 @@ pub struct BootSpec {
     pub secrets: Vec<Secret>,
     pub net_profiles: Vec<String>,
     pub net_rules: Vec<String>,
+    /// Allowlist mode (#303): pass no `--net` (no profile allow at all) and set
+    /// `--net-default-egress deny`, which lands in msb as a default-deny egress policy whose only
+    /// rules are `net_rules`. Ingress keeps the profile baseline (allow), so the mesh-off
+    /// published port keeps working — `--net none` would deny it too.
+    pub net_deny_egress: bool,
     /// `(host_port, guest_port)` published on 127.0.0.1.
     pub publish: Option<(u16, u16)>,
     pub command: Vec<String>,
@@ -62,6 +67,9 @@ pub async fn boot(msb: &str, spec: &BootSpec) -> Result<()> {
     }
     if !spec.net_profiles.is_empty() {
         cmd.arg("--net").arg(spec.net_profiles.join(","));
+    }
+    if spec.net_deny_egress {
+        cmd.args(["--net-default-egress", "deny"]);
     }
     for rule in &spec.net_rules {
         cmd.arg("--net-rule").arg(rule);
@@ -106,6 +114,9 @@ pub async fn run_once(msb: &str, spec: &BootSpec) -> Result<i32> {
     }
     if !spec.net_profiles.is_empty() {
         cmd.arg("--net").arg(spec.net_profiles.join(","));
+    }
+    if spec.net_deny_egress {
+        cmd.args(["--net-default-egress", "deny"]);
     }
     for rule in &spec.net_rules {
         cmd.arg("--net-rule").arg(rule);

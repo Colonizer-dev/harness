@@ -183,6 +183,7 @@ mod tests {
             secrets: Vec::new(),
             net_profiles: Vec::new(),
             net_rules: Vec::new(),
+            net_deny_egress: false,
             publish: None,
             command: vec!["true".to_string()],
         }
