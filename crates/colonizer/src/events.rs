@@ -317,6 +317,14 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
     }
 
+    // Jev visibility ladder, stage 1 (#475): every tool call is both the evidence a pending decision
+    // waits for (a re-issue of an earlier call) and the next original a later decision may name.
+    // tool_call is a forwarded-only type — it never reaches the match below — so this reads it off
+    // the raw line, the way `resolve_origin` does.
+    if event["type"] == "tool_call" {
+        crate::jev_ladder::note_tool_call(app, id, rt, &event).await;
+    }
+
     match deserialised.unwrap_or(AgentEvent::Other) {
         AgentEvent::Status { state, detail } => {
             let next = match state {
@@ -403,6 +411,11 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
         AgentEvent::LoopStop { reason } => {
             crate::loops::on_stop(app, id, &reason).await;
+        }
+        // Shadow measurement (#475): the pass's decisions are logged to the jev_ladder ledger and
+        // arm the reread watch, and nothing else changes. Pure telemetry — never read as acted on.
+        AgentEvent::JevLadder { applied, decisions, .. } => {
+            crate::jev_ladder::on_ladder(app, id, rt, applied, &decisions).await;
         }
         AgentEvent::TurnEnd {
             is_error,

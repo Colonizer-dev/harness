@@ -547,6 +547,11 @@ pub struct Runtime {
     /// origin). In memory only: after a mothership restart the set is empty, so a judge answer still
     /// in flight reads as the person's — a mislabelled line, never a wrong decision.
     pub(crate) judged_questions: Mutex<HashSet<String>>,
+    /// Jev visibility-ladder watch state (#475, jev_ladder.rs): what each recent tool call looked
+    /// like, and which pending decisions still await their reread. In memory only, like
+    /// `judged_questions`: after a mothership restart the watchlist is empty, so rereads that would
+    /// have landed after it are simply not counted — a lost measurement, never a wrong one.
+    pub(crate) jev_ladder: Mutex<crate::jev_ladder::Watch>,
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
@@ -699,6 +704,7 @@ impl Runtime {
                     .map(|(id, questions, _, risk)| (id.clone(), questions.clone(), *risk)),
             ),
             judged_questions: Mutex::new(HashSet::new()),
+            jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
@@ -789,6 +795,14 @@ impl App {
     /// colonies instead of disappearing with each one.
     pub(crate) fn routing_file(&self) -> PathBuf {
         self.cfg.data_dir.join("routing.jsonl")
+    }
+
+    /// Every Jev visibility-ladder measurement row (#475), one JSON line each: the compaction pass's
+    /// per-chunk decisions and the rereads that grade them. Kept in the data dir rather than a
+    /// session's directory, like the routing ledger: the measurement has to outlive cleanup and stay
+    /// queryable across sessions and colonies, for stage 2's bench-wide precision/recall report.
+    pub(crate) fn jev_ladder_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("jev_ladder.jsonl")
     }
 
     pub fn session_dir(&self, id: &str) -> PathBuf {

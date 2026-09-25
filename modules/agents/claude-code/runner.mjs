@@ -145,6 +145,35 @@ export function latestJevVerdict(text) {
 }
 
 /**
+ * Jev's per-pair keep/drop decisions, parsed from debug-log text. Each pass logs one contiguous
+ * `decisions:` group, chunked at 4096 characters with continuation lines prefixed `decisions (i/n): `
+ * — one prefix family, stripped here — and there is one pass per debounced read window, so like
+ * latestJevVerdict only the last group in the window counts. A token is
+ * `t{n}:{tool}:{action}/call={c}/result={r}`, where t{n} indexes the transcript's
+ * tool-use/tool-result pairs 1-based and pinned recent pairs get no token at all, so `n` has gaps.
+ */
+export function parseJevDecisions(text) {
+  let group = [];
+  let contiguous = false;
+  for (const line of String(text ?? '').split('\n')) {
+    const match = line.match(/decisions(?: \(\d+\/\d+\))?:\s*(.*)/);
+    if (match) {
+      if (!contiguous) group = [];
+      contiguous = true;
+      group.push(...match[1].split(/\s+/).filter(Boolean));
+    } else {
+      contiguous = false;
+    }
+  }
+  const decisions = [];
+  for (const token of group) {
+    const d = token.match(/^t(\d+):([^:/]+):(keep|drop_result|drop_call)\/call=([\d.]+)\/result=([\d.]+)$/);
+    if (d) decisions.push({ n: Number(d[1]), tool: d[2], action: d[3], keepCall: Number(d[4]), keepResult: Number(d[5]) });
+  }
+  return decisions;
+}
+
+/**
  * caveman's ruleset for the system prompt. The plugin switches itself on with SessionStart and
  * UserPromptSubmit hooks that inject this text and track a per-session level; in a colony the level is a
  * setting and the text goes straight into the prompt. What a colony writes for people other than the
@@ -631,6 +660,11 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   let streamMessageId = null;
   let jevDebugOffset = 0; // bytes of the debug log already scanned for a Jev verdict
   let currentModel = null; // the orchestrator model last announced in a model_changed
+  // Jev visibility ladder bookkeeping: a decision token indexes tool-use/tool-result pairs by the
+  // order their calls were made, so track calls still awaiting a result and the resolved pairs a
+  // compaction pass can then remove from (an applied drop_call) or score again.
+  const jevPendingCalls = new Map(); // tool_call_id -> { tool, result } until the result arrives
+  let jevLivePairs = []; // pairs present in the transcript, in call order: { tool_call_id, tool }
 
   /**
    * Who produced a message. The SDK sets `parent_tool_use_id` to the Task call that started the
@@ -777,6 +811,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
         }
         if (block.name === ASK_TOOL) askIds.add(block.id);
         else {
+          jevPendingCalls.set(block.id, { tool: block.name, result: false });
           emit(
             withAgent(
               {
@@ -816,6 +851,17 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
         output,
       );
       emit(event);
+      const pendingCall = jevPendingCalls.get(block.tool_use_id);
+      if (pendingCall) {
+        pendingCall.result = true;
+        // Results can arrive out of call order; completing one moves every resolved call, so the
+        // live pairs stay in the order their calls were made.
+        for (const [id, call] of jevPendingCalls) {
+          if (!call.result) continue;
+          jevLivePairs.push({ tool_call_id: id, tool: call.tool });
+          jevPendingCalls.delete(id);
+        }
+      }
     }
   };
 
@@ -904,8 +950,31 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
                 if (fd !== undefined) try { closeSync(fd); } catch {}
               }
               const meta = msg.compact_metadata ?? {};
-              const verdict = latestJevVerdict(added) ?? 'fast-jev-compaction left no verdict';
-              emit({ type: 'log', level: 'info', message: `Compaction (${meta.trigger}, ${meta.pre_tokens} → ${meta.post_tokens ?? '?'} tokens): ${verdict}` });
+              const verdict = latestJevVerdict(added);
+              emit({ type: 'log', level: 'info', message: `Compaction (${meta.trigger}, ${meta.pre_tokens} → ${meta.post_tokens ?? '?'} tokens): ${verdict ?? 'fast-jev-compaction left no verdict'}` });
+              // The visibility ladder's measurement (issue #475): map the decisions back onto the
+              // pairs they were about, so later runs can score what Jev kept against what the agent
+              // actually needed. A fallback pass applied nothing, so its decisions are shadow data
+              // and no pair leaves the list.
+              const decisions = parseJevDecisions(added);
+              if (decisions.length) {
+                // No verdict line at all is as unconfirmed as a fallback one: only a verdict that
+                // positively isn't the fallback may drop pairs from the live list.
+                const applied = verdict !== null && !/^fallback to built-in summary/i.test(verdict);
+                const pairs = jevLivePairs.filter((pair) => pair.tool_call_id && pair.tool);
+                const ladder = [];
+                for (const d of decisions) {
+                  const pair = pairs[d.n - 1];
+                  // Pinned pairs never get a token, so n has gaps; an out-of-range n (shouldn't
+                  // happen) names no pair we track and is skipped.
+                  if (pair) ladder.push({ tool_call_id: pair.tool_call_id, tool: pair.tool, action: d.action, keep_call: d.keepCall, keep_result: d.keepResult });
+                }
+                emit({ type: 'jev_ladder', applied, pre_tokens: meta.pre_tokens, post_tokens: meta.post_tokens, trigger: meta.trigger, decisions: ladder });
+                if (applied) {
+                  const dropped = new Set(ladder.filter((d) => d.action === 'drop_call').map((d) => d.tool_call_id));
+                  jevLivePairs = jevLivePairs.filter((pair) => !dropped.has(pair.tool_call_id));
+                }
+              }
             }
             break;
         }

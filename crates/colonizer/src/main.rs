@@ -38,6 +38,7 @@ mod headroom;
 mod hunters;
 mod img_proxy;
 mod jev;
+mod jev_ladder;
 mod ledger;
 mod lifecycle;
 mod login_item;

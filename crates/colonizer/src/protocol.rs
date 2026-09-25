@@ -1,5 +1,5 @@
 //! The agent event contract as a Rust type. `docs/protocol.md` §2 keeps the prose and
-//! `docs/agent-events.schema.json` the machine-readable schema for all fourteen event types; this
+//! `docs/agent-events.schema.json` the machine-readable schema for all fifteen event types; this
 //! enum is the slice of that contract the harness itself acts on (#73 item 4), and the committed
 //! fixture `modules/agents/claude-code/test/fixtures/events.jsonl` proves the runner's real output
 //! deserialises into it.
@@ -146,6 +146,53 @@ impl Origin {
     }
 }
 
+/// What Jev compaction decided to do with one tool-call chunk (#475), on the `jev_ladder` event's
+/// `decisions` array. Closed vocabulary with the usual forward-compatibility escape: an action a
+/// newer plugin knows still parses, as [`JevAction::Unknown`], so one unknown chunk can never be a
+/// broken event — the other decisions in the pass still land in the ledger.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JevAction {
+    /// The chunk stayed in the transcript whole.
+    Keep,
+    /// The chunk's result was removed; the tool call itself stayed.
+    DropResult,
+    /// The tool call and its result were removed together.
+    DropCall,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl JevAction {
+    /// The wire spelling, for the ledger row's `action` field.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::DropResult => "drop_result",
+            Self::DropCall => "drop_call",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One entry of a `jev_ladder` event's `decisions` (docs/agent-events.schema.json): the chunk, what
+/// the pass did to it, and the plugin's own relevance scores for the call and its result. The scores
+/// are optional on the read side the way every contract field is: a body without one is a chunk the
+/// plugin did not score, which the ledger records as unscored rather than scored zero.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub(crate) struct JevDecision {
+    pub(crate) tool_call_id: String,
+    #[serde(default)]
+    pub(crate) tool: String,
+    #[serde(default)]
+    pub(crate) action: JevAction,
+    #[serde(default)]
+    pub(crate) keep_call: Option<f64>,
+    #[serde(default)]
+    pub(crate) keep_result: Option<f64>,
+}
+
 /// A runner event the harness acts on, tagged on its `type` field exactly as the runner writes it.
 /// Fields the harness only forwards — a question's `questions`, the subagent's `agent` ref, a
 /// finding's prose — are still modelled so the type is the whole contract for these events, not
@@ -219,6 +266,25 @@ pub(crate) enum AgentEvent {
         #[serde(default)]
         reason: String,
     },
+    /// Jev compaction reported one pass's per-chunk decisions with the plugin's own relevance scores
+    /// (#475). Pure telemetry: the dispatch logs them to the shadow `jev_ladder.jsonl` ledger and
+    /// arms the reread watch, and nothing else — [`AgentEvent::is_acted_on`] answers `false` for the
+    /// type, so a malformed body is never announced as contract drift. `applied: false` marks a pass
+    /// the plugin computed but did not apply (the fallback path): defaulting the field to false means
+    /// a body that does not carry it is read as the case that must persist nothing.
+    JevLadder {
+        #[serde(default)]
+        applied: bool,
+        #[serde(default)]
+        pre_tokens: Option<u64>,
+        #[serde(default)]
+        post_tokens: Option<u64>,
+        /// What started the pass ("auto" when the context filled); open-ended on purpose.
+        #[serde(default)]
+        trigger: Option<String>,
+        #[serde(default)]
+        decisions: Vec<JevDecision>,
+    },
     /// Everything the harness only forwards, and any type a newer runner adds (§2: unknown types
     /// must be ignored). A known body with broken fields lands here too: it was forwarded, it just
     /// triggers no side effects.
@@ -227,13 +293,25 @@ pub(crate) enum AgentEvent {
 }
 
 impl AgentEvent {
+    /// The wire tag of the [`AgentEvent::JevLadder`] telemetry event, named once so this helper and
+    /// its test agree on the one informational-but-parsed exception.
+    pub(crate) const JEV_LADDER: &str = "jev_ladder";
+
     /// Whether a wire `type` tag names one of the variants above, i.e. a type this build acts on.
     /// The enum is that set's single source — no second list of tags to keep in step with the
     /// variants: a body carrying only the tag deserialises to a variant when the tag is known (to
     /// the variant itself when all its fields are optional, otherwise to an error over the fields
     /// still required) and to [`AgentEvent::Other`] only when it names no variant. So a variant
     /// added later is picked up here without touching this helper.
+    ///
+    /// The one exception is [`AgentEvent::JevLadder`]: the dispatch reads it, but it is telemetry
+    /// with no side effect beyond a shadow ledger, so it must never read as acted on — and it is
+    /// named by tag here because the parse-based path below cannot tell a malformed `jev_ladder`
+    /// body from a malformed acted-on one, and telemetry stays quiet either way.
     pub(crate) fn is_acted_on(tag: &str) -> bool {
+        if tag == Self::JEV_LADDER {
+            return false;
+        }
         !matches!(serde_json::from_value::<Self>(json!({"type": tag})), Ok(Self::Other))
     }
 }
@@ -358,7 +436,9 @@ mod tests {
 
     /// The acted-on set is read off the enum, so the forwarded-only types and anything a newer
     /// runner adds are not acted on — even though the browser forwards every one of them — and a
-    /// variant added later is acted on without a second tag list being edited.
+    /// variant added later is acted on without a second tag list being edited. The one exception is
+    /// `jev_ladder` (#475): a variant the dispatch reads, but pure telemetry, so it keeps company
+    /// with the forwarded-only types here.
     #[test]
     fn the_acted_on_set_is_read_off_the_enum_not_a_second_tag_list() {
         for tag in [
@@ -382,10 +462,64 @@ mod tests {
             "tool_call",
             "tool_result",
             "model_changed",
+            "jev_ladder",
             "brand_new",
         ] {
-            assert!(!AgentEvent::is_acted_on(tag), "{tag} is forwarded only, or not known at all");
+            assert!(
+                !AgentEvent::is_acted_on(tag),
+                "{tag} is forwarded only, telemetry, or not known at all"
+            );
         }
+    }
+
+    /// The #475 telemetry event: the contract's example body deserialises field for field, an
+    /// unknown action is the unknown action rather than a broken event, and the type reads as
+    /// informational even when its body is broken — so the dispatcher can never announce contract
+    /// drift over a telemetry line.
+    #[test]
+    fn a_jev_ladder_event_parses_field_for_field_but_never_reads_as_acted_on() {
+        let event = serde_json::from_str::<AgentEvent>(
+            r#"{"type":"jev_ladder","applied":true,"pre_tokens":12000,"post_tokens":8000,"trigger":"auto",
+                "decisions":[{"tool_call_id":"toolu_abc123","tool":"Bash","action":"keep","keep_call":0.98,"keep_result":0.87},
+                             {"tool_call_id":"toolu_def456","tool":"Read","action":"drop_call","keep_call":0.12,"keep_result":0.05}]}"#,
+        )
+        .unwrap();
+        match event {
+            AgentEvent::JevLadder {
+                applied,
+                pre_tokens,
+                post_tokens,
+                trigger,
+                decisions,
+            } => {
+                assert!(applied);
+                assert_eq!((pre_tokens, post_tokens), (Some(12000), Some(8000)));
+                assert_eq!(trigger.as_deref(), Some("auto"));
+                assert_eq!(decisions.len(), 2);
+                assert_eq!(decisions[0].tool_call_id, "toolu_abc123");
+                assert_eq!(decisions[0].action, JevAction::Keep);
+                assert_eq!((decisions[0].keep_call, decisions[0].keep_result), (Some(0.98), Some(0.87)));
+                assert_eq!(decisions[1].action, JevAction::DropCall);
+                assert_eq!(decisions[1].keep_result, Some(0.05));
+            }
+            other => panic!("the contract's example body is a jev_ladder, got {other:?}"),
+        }
+        // An action a newer plugin knows is that decision reading as unknown, never a failed parse.
+        let futuristic = serde_json::from_str::<AgentEvent>(
+            r#"{"type":"jev_ladder","applied":true,"decisions":[{"tool_call_id":"t","action":"rehydrate"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(futuristic, AgentEvent::JevLadder { decisions, .. } if decisions.len() == 1 && decisions[0].action == JevAction::Unknown)
+        );
+        // Informational whichever way the body is: well-formed (the parse lands on the variant) or
+        // broken (the parse fails, and the tag alone decides the acted-on question).
+        assert!(!AgentEvent::is_acted_on(AgentEvent::JEV_LADDER));
+        assert!(
+            serde_json::from_str::<AgentEvent>(r#"{"type":"jev_ladder","applied":"yes"}"#).is_err()
+                && !AgentEvent::is_acted_on(AgentEvent::JEV_LADDER),
+            "a broken telemetry body stays quiet"
+        );
     }
 
     /// A `status` whose state this build does not know is still a `Status`: the watchdog must keep

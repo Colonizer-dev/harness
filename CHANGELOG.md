@@ -472,6 +472,15 @@ setting) is called out under **Take care** rather than left for you to find.
   calls by Jev score at compaction instead of the lossy summary, tuned by
   `jev_keep_threshold`/`jev_preserve_recent`. Needs the staged plugin and a
   `JEV_API_KEY`; history goes to TypeSafe, billed directly, invisible to colony cost. ([#226])
+- **Jev visibility ladder, first slice: measurement.** Each applied Jev compaction
+  pass now reports its per-chunk keep/drop decisions with the plugin's own
+  relevance scores to the harness, which logs them to a data-dir-wide
+  `jev_ladder.jsonl` and watches for the agent re-issuing an equivalent tool call
+  later in the session, logging each match once as a `reread`. Shadow measurement
+  only: nothing changes what compaction keeps or drops, and fallback passes that
+  were computed but not applied are not measured. Precision and recall against
+  the reread ground truth are computed and tested; the bench-wide report is
+  follow-up work. ([#475])
 - **Switch a running colony's model.** A `set_model` command changes the model
   for the colony's next turns in the same session, conversation and microVM,
   until it is stopped. ([#240])
@@ -855,6 +864,7 @@ Macs. ([#74])
 [#472]: https://github.com/Colonizer-dev/harness/issues/472
 [#474]: https://github.com/Colonizer-dev/harness/issues/474
 [#200]: https://github.com/Colonizer-dev/harness/issues/200
+[#475]: https://github.com/Colonizer-dev/harness/issues/475
 [#311]: https://github.com/Colonizer-dev/harness/issues/311
 [#300]: https://github.com/Colonizer-dev/harness/issues/300
 [#302]: https://github.com/Colonizer-dev/harness/issues/302

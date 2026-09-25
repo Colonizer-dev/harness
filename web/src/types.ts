@@ -1055,6 +1055,24 @@ export type AgentEventBody =
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
   | { type: "finding"; title: string; body: string; evidence: string }
   /**
+   * Jev compaction's per-chunk decisions for one pass (#475), shadow telemetry the harness grades
+   * into its data-dir-wide `jev_ladder.jsonl`; the web types it but renders nothing.
+   */
+  | {
+      type: "jev_ladder";
+      applied: boolean;
+      pre_tokens?: number;
+      post_tokens?: number;
+      trigger?: string;
+      decisions: Array<{
+        tool_call_id: string;
+        tool: string;
+        action: "keep" | "drop_result" | "drop_call";
+        keep_call?: number;
+        keep_result?: number;
+      }>;
+    }
+  /**
    * The mothership's independent verdict on a completion claim (§6.3, Autopilot): tests re-run in a
    * fresh checkout and the git state read directly, never the agent's own account. Host-generated,
    * like the finding-chain events, so the runner-event schema does not list it.
