@@ -746,6 +746,7 @@ mod tests {
             entry: vec!["runner.mjs".into()],
             needs_claude: true,
             schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
+            egress: None,
         }
     }
 

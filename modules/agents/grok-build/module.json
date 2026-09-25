@@ -31,6 +31,12 @@
       ]
     }
   ],
+  "egress": {
+    "api": ["api.x.ai"],
+    "auth": [],
+    "telemetry": [],
+    "extra": []
+  },
   "settings": {
     "type": "object",
     "properties": {

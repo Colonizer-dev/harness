@@ -30,6 +30,12 @@
       ]
     }
   ],
+  "egress": {
+    "api": ["api.openai.com"],
+    "auth": [],
+    "telemetry": [],
+    "extra": []
+  },
   "settings": {
     "type": "object",
     "properties": {

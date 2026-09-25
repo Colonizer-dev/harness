@@ -40,6 +40,91 @@ pub struct AgentModule {
     pub entry: Vec<String>,
     pub needs_claude: bool,
     pub schema: Value,
+    /// The manifest's `egress` declaration; third-party modules may omit the section.
+    pub egress: Option<Egress>,
+}
+
+/// The fixed network hosts an agent module's runner needs, declared under `egress` in `module.json`
+/// as four optional arrays of bare hostnames (a leading `*.` wildcard allowed): the vendor's API,
+/// login and telemetry hosts, and everything else fixed. The #304 allowlist is this plus the task's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Egress {
+    pub api: Vec<String>,
+    pub auth: Vec<String>,
+    pub telemetry: Vec<String>,
+    pub extra: Vec<String>,
+}
+
+impl Egress {
+    /// Every declared host, deduped, in declaration order.
+    pub fn hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
+        for host in self.api.iter().chain(&self.auth).chain(&self.telemetry).chain(&self.extra) {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+            }
+        }
+        hosts
+    }
+
+    /// Whether a request host is declared, exactly or under a `*.suffix` wildcard (subdomains only).
+    pub fn covers(&self, host: &str) -> bool {
+        self.hosts().iter().any(|declared| match declared.strip_prefix("*.") {
+            Some(suffix) => host.strip_suffix(suffix).is_some_and(|prefix| prefix.ends_with('.')),
+            None => declared == host,
+        })
+    }
+}
+
+/// Parses the optional `egress` section: only the four known categories, bare hostnames only, so a
+/// typo is a manifest problem rather than a silently narrower allowlist later.
+fn parse_egress(manifest: &Value) -> Result<Option<Egress>, String> {
+    let Some(section) = manifest.get("egress") else {
+        return Ok(None);
+    };
+    let Some(map) = section.as_object() else {
+        return Err("egress must be an object of host categories (api, auth, telemetry, extra)".into());
+    };
+    for key in map.keys() {
+        if !matches!(key.as_str(), "api" | "auth" | "telemetry" | "extra") {
+            return Err(format!(
+                "egress: unknown category \"{key}\"; known: api, auth, telemetry, extra"
+            ));
+        }
+    }
+    let list = |key: &str| -> Result<Vec<String>, String> {
+        let Some(value) = map.get(key) else { return Ok(Vec::new()) };
+        let items = value
+            .as_array()
+            .ok_or(format!("egress.{key} must be an array of hostnames"))?;
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| match item.as_str() {
+                Some(host) if is_bare_hostname(host) => Ok(host.to_string()),
+                _ => Err(format!("egress.{key}[{i}]: {item} is not a bare hostname")),
+            })
+            .collect()
+    };
+    let (api, auth, telemetry, extra) = (list("api")?, list("auth")?, list("telemetry")?, list("extra")?);
+    Ok(Some(Egress {
+        api,
+        auth,
+        telemetry,
+        extra,
+    }))
+}
+
+/// A bare hostname: labels of letters, digits and hyphens, none empty or hyphen-led; no scheme,
+/// port or path, and exactly one leading `*.` wildcard allowed.
+fn is_bare_hostname(host: &str) -> bool {
+    host.strip_prefix("*.").unwrap_or(host).split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
 }
 
 impl AgentModule {
@@ -100,6 +185,21 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         .ok_or("\"entry\" must be a non-empty array of strings")?;
     let secrets = manifest["secrets"].to_string();
     let binaries = manifest["requires"]["binaries"].to_string();
+    let egress = parse_egress(&manifest)?;
+    // A declared egress omitting a host its secrets are for would have the allowlist (#304) break
+    // the requests those secrets authenticate; with no section, nothing is held to this.
+    if let Some(egress) = &egress {
+        let mut hosts = manifest["secrets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|secret| secret["hosts"].as_array())
+            .flatten()
+            .filter_map(Value::as_str);
+        if let Some(host) = hosts.find(|host| !egress.covers(host)) {
+            return Err(format!("secrets host \"{host}\" is not in the egress declaration"));
+        }
+    }
     Ok(AgentModule {
         id: id.to_string(),
         name: manifest["name"].as_str().unwrap_or_default().to_string(),
@@ -108,6 +208,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
         schema: normalize_schema(&manifest["settings"]),
         dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
+        egress,
     })
 }
 
@@ -566,6 +667,7 @@ mod tests {
             entry: vec!["node".into(), "runner.mjs".into()],
             needs_claude: true,
             schema: Value::Null,
+            egress: None,
         };
         let command = module.vm_command();
         assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
@@ -657,6 +759,7 @@ mod tests {
             entry: vec!["node".into()],
             needs_claude: true,
             schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
+            egress: None,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
         // A skillset needs a manifest to pass validation (plugins::validate).
@@ -988,5 +1091,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn egress_parsing_accepts_an_absent_section_and_names_what_it_refuses() {
+        assert_eq!(parse_egress(&json!({})).unwrap(), None);
+        // A repeated host keeps one union entry; a wildcard covers subdomains only.
+        let section = json!({"api": ["api.anthropic.com", "api.anthropic.com"], "telemetry": ["*.sentry.io"]});
+        let egress = parse_egress(&json!({"egress": section}))
+            .unwrap()
+            .expect("a valid section parses");
+        assert_eq!(egress.hosts(), ["api.anthropic.com", "*.sentry.io"]);
+        assert!(egress.covers("o447895.sentry.io") && !egress.covers("sentry.io"));
+        for (section, expected) in [
+            (
+                json!({"api": ["https://x"]}),
+                r#"egress.api[0]: "https://x" is not a bare hostname"#,
+            ),
+            (
+                json!({"api": [], "foo": []}),
+                r#"egress: unknown category "foo"; known: api, auth, telemetry, extra"#,
+            ),
+            (json!({"api": "x"}), "egress.api must be an array of hostnames"),
+        ] {
+            assert_eq!(parse_egress(&json!({"egress": section})).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn every_shipped_agent_module_declares_an_egress_that_covers_its_secret_hosts() {
+        // CI enforcement (#304): a shipped module without the declaration is a named failure, and
+        // one whose secrets reach hosts it does not declare is refused by read_agent itself.
+        let agents = FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/agents");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&agents).unwrap().flatten() {
+            let dir = entry.path();
+            if !dir.join("module.json").is_file() {
+                continue;
+            }
+            let id = dir.file_name().unwrap().to_string_lossy();
+            let egress = read_agent(&dir.join("module.json"))
+                .unwrap_or_else(|e| panic!("modules/agents/{id}/module.json: {e}"))
+                .egress
+                .unwrap_or_else(|| panic!("modules/agents/{id}/module.json: missing egress declaration"));
+            assert!(egress.api.iter().all(|host| egress.covers(host)) && !egress.hosts().iter().any(String::is_empty));
+            checked += 1;
+        }
+        assert!(checked >= 6, "expected the six shipped agent modules, walked {checked}");
     }
 }

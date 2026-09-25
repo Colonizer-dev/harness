@@ -15,6 +15,12 @@
     "image": "glibc + node >= 20 + Python 3.11 with hermes-agent v2026.9.24: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv and pip install -e . (a plain pip install from git refuses by design), leaving the `hermes` binary on PATH"
   },
   "secrets": [],
+  "egress": {
+    "api": [],
+    "auth": [],
+    "telemetry": [],
+    "extra": []
+  },
   "settings": {
     "type": "object",
     "properties": {

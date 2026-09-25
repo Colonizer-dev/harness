@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
@@ -535,7 +536,29 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
       ],
     });
   }
-  if (preToolUse.length) options.hooks = { PreToolUse: preToolUse };
+  if (preToolUse.length) options.hooks = { ...options.hooks, PreToolUse: preToolUse };
+  // The denial layer's delivery path (denials.mjs): PostToolUseFailure sees the error text of a
+  // failed tool call, and additionalContext binds the hint to that very call mid-turn. It returns
+  // no decision and touches no tool result, so it can only advise — never grant.
+  const denialClassesHinted = new Set(); // one hint per denial class per session
+  options.hooks = {
+    ...options.hooks,
+    PostToolUseFailure: [
+      {
+        hooks: [
+          async (input) => {
+            const denial = classifyDenial(input.error);
+            if (!denial || denialClassesHinted.has(denial.class)) return { continue: true };
+            denialClassesHinted.add(denial.class);
+            return {
+              continue: true,
+              hookSpecificOutput: { hookEventName: 'PostToolUseFailure', additionalContext: denialGuidance([denial.class]) },
+            };
+          },
+        ],
+      },
+    ],
+  };
   if (pluginDirs.length) {
     options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
   }
@@ -769,17 +792,22 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
     const parent = msg.parent_tool_use_id ?? null;
     for (const block of content) {
       if (block?.type !== 'tool_result' || askIds.has(block.tool_use_id)) continue;
-      emit(
+      const output = toolResultText(block.content);
+      // The denial layer only ever adds a `denial` field to errored results; is_error and the
+      // output are exactly as they would be without it (denials.mjs).
+      const event = annotateDenial(
         withAgent(
           {
             type: 'tool_result',
             tool_call_id: block.tool_use_id,
-            output: toolResultText(block.content),
+            output,
             is_error: Boolean(block.is_error),
           },
           parent,
         ),
+        output,
       );
+      emit(event);
     }
   };
 

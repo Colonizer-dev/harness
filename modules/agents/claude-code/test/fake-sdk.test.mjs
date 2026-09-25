@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import { z } from 'zod';
 
+import { DENIAL_HINTS } from '../denials.mjs';
 import { createFindingsServer } from '../findings.mjs';
 import { createMemoryServer } from '../memory.mjs';
 import {
@@ -119,6 +120,17 @@ async function* issueTurn(options, calls) {
   // The colony's own tools emit protocol events too: a shared-memory proposal (§6.2) and a finding (§6.6).
   await calls.tools.propose.handler({ scope: 'repo', title: 'Redirect with > to create files', content: 'The colony image ships a plain shell; `>` creates the file without a heredoc.', tags: ['workspace'] });
   await calls.tools.file.handler({ title: 'hello.txt is written outside /harness/out', body: 'The turn writes `hello.txt` into the worktree root, where it would land in the pull request.', evidence: 'This turn: the Bash call above runs `echo hi > hello.txt` and the file appears in the worktree.' });
+  // An errored tool result carries the denial layer's annotation (denials.mjs) without is_error or
+  // the output being touched.
+  yield assistant('msg_3', [{ type: 'tool_use', id: 'toolu_fetch', name: 'Bash', input: { command: 'git fetch origin' } }]);
+  yield user([
+    {
+      type: 'tool_result',
+      tool_use_id: 'toolu_fetch',
+      content: [{ type: 'text', text: "fatal: unable to access 'https://github.com/anthropics/colonizer/': Could not resolve host" }],
+      is_error: true,
+    },
+  ]);
   // modelUsage is per model: `cost_usd` sums the Claude models only, `model_usage` reports the rest as tokens.
   yield {
     type: 'result',
@@ -194,13 +206,18 @@ test('maps a turn with a question to protocol events', async () => {
   // AskUserQuestion never leaks as a regular tool call or result.
   assert.deepEqual(ofType('tool_call'), [
     { type: 'tool_call', message_id: 'msg_2', tool_call_id: 'toolu_bash', name: 'Bash', input: { command: 'echo hi > hello.txt' } },
+    { type: 'tool_call', message_id: 'msg_3', tool_call_id: 'toolu_fetch', name: 'Bash', input: { command: 'git fetch origin' } },
   ]);
   const results = ofType('tool_result');
-  assert.equal(results.length, 1);
+  assert.equal(results.length, 2);
   assert.equal(results[0].tool_call_id, 'toolu_bash');
   assert.equal(results[0].is_error, false);
   assert.ok(results[0].output.length <= MAX_TOOL_OUTPUT);
   assert.match(results[0].output, /truncated 5000 characters\]$/);
+  // An errored result is annotated with the denial layer's guidance, and nothing else about it moves.
+  assert.equal(results[1].tool_call_id, 'toolu_fetch');
+  assert.equal(results[1].is_error, true);
+  assert.deepEqual(results[1].denial, { class: 'egress', hint: DENIAL_HINTS.egress });
 
   assert.deepEqual(ofType('turn_end'), [
     {
@@ -556,12 +573,13 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
     assert.ok(append.includes('Check for a skill before any response.\n</EXTREMELY_IMPORTANT>'), 'the skill text, trailing blank lines trimmed');
     assert.ok(append.endsWith(SUPERPOWERS_COLONIZER_NOTE), 'the note about the two skills that are not staged');
     assert.equal(append.split('<EXTREMELY_IMPORTANT>').length, 2, 'once, however many plugins load');
-    // Loading it is still just a plugin entry; nothing registers a hook for it.
+    // Loading it is still just a plugin entry; nothing registers a hook for it. (Only the
+    // denial layer's PostToolUseFailure hook is always present.)
     assert.deepEqual(options.plugins, [
       { type: 'local', path: ecc },
       { type: 'local', path: superpowers },
     ]);
-    assert.equal(options.hooks, undefined);
+    assert.equal(options.hooks.PreToolUse, undefined);
 
     assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
   } finally {
@@ -657,7 +675,7 @@ test('rtk rewrites Bash commands through `rtk rewrite` and leaves every other ou
     assert.equal(await rtkRewrite('git status', join(root, 'missing-rtk')), null, 'rtk not installed');
     assert.equal(await rtkRewrite('slow', rtk), null, 'a slow rtk never holds a command back');
 
-    assert.equal(buildOptions({}).options.hooks, undefined, 'off by default');
+    assert.equal(buildOptions({}).options.hooks.PreToolUse, undefined, 'off by default');
     const { options } = buildOptions({ COLONIZER_RTK: 'true', COLONIZER_RTK_BIN: rtk, PATH: '/usr/bin' });
     assert.equal(options.env.PATH, `${root}:/usr/bin`, 'rewritten commands call rtk, so it is on the PATH');
     const [entry] = options.hooks.PreToolUse;
