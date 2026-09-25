@@ -58,7 +58,7 @@ jobs:
         with:
           node-version: 24
 
-      # npm audit reads the lockfile; nothing needs installing first. All three npm projects
+      # npm audit reads the lockfile; nothing needs installing first. All four npm projects
       # commit their lockfile and declare a version, so each audit runs over exactly the tree
       # that was reviewed.
       - name: Audit web
@@ -69,6 +69,9 @@ jobs:
 
       - name: Audit the telemetry service
         run: cd services/telemetry && npm audit --audit-level=high
+
+      - name: Audit the relay service
+        run: cd services/relay && npm audit --audit-level=high
 
   sbom:
     runs-on: ubuntu-latest
@@ -119,6 +122,12 @@ jobs:
       # npm's bundled-dependency bug has nothing here to work around.
       - name: SBOM for the telemetry service
         run: cd services/telemetry && npm sbom --sbom-format cyclonedx --package-lock-only > ../../sbom/telemetry.cdx.json
+
+      # The relay is shaped like telemetry: its only dependency is the wrangler pinned for the manual
+      # deploy (services/relay/README.md) and never imported by the code, so the lockfile-only
+      # recipe records the whole tree, and web's install-first workaround has nothing to work around.
+      - name: SBOM for the relay service
+        run: cd services/relay && npm sbom --sbom-format cyclonedx --package-lock-only > ../../sbom/relay.cdx.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

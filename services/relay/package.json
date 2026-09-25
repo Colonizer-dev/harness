@@ -1,0 +1,13 @@
+{
+  "name": "colonizer-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The relay on my.colonizer.dev: a per-install subdomain and tunnel for each mothership, plus owner sign-in through GitHub (issues #532 and #534)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "4.135.0"
+  }
+}
