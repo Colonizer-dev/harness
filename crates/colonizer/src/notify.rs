@@ -11,6 +11,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     gateway::{ProviderUsage, UsageHealth, health},
+    ledger,
     orgs::{OrgSettings, effective_notify},
     protocol::Origin,
     providers::Provider,
@@ -588,6 +589,24 @@ pub async fn run(app: Shared) {
         for event in &provider_events {
             announce_provider(&app, client.as_ref(), event, &settings, &mut reasons).await;
         }
+        // The digest (issue #311): what the soft layers held, one line an hour at most, no identities,
+        // down the same channels as any announcement — and the counts it carried are subtracted only
+        // once a channel actually took it, so candidates held while it was in flight stay due.
+        if let Some((summary, held)) = app.ledger.digest_due(Utc::now()) {
+            let at = Utc::now();
+            let payload = json!({
+                "event": "digest",
+                "at": at.to_rfc3339(),
+                "text": summary,
+                // The same six-key shape every webhook payload carries, with nothing to name here.
+                "colony": None::<Value>,
+                "pr_url": None::<Value>,
+                "provider": None::<Value>,
+            });
+            if deliver(&app, client.as_ref(), &summary, &payload, None, &settings, &mut reasons).await {
+                app.ledger.commit_digest(&held, at).await;
+            }
+        }
     }
 }
 
@@ -598,7 +617,29 @@ struct Reasons {
     webhook: Option<String>,
 }
 
-/// Announces one colony event down whichever channels are on.
+/// The underlying-fact key a notify event claims, so one observation told once is not told again by
+/// another claimant: the reason is part of an attention fact (a stall and an out-of-nudges are two
+/// different things), a question fact names the open question, and the pure edge events claim
+/// nothing — the edge detector already fires each of them exactly once, and the topic's cooldown
+/// still bounds flaps. A key, never text.
+fn fact_key(event: Event, session: &str, open_question: Option<&str>) -> Option<String> {
+    match event {
+        Event::Attention(reason) => Some(format!("attention:{reason}:{session}")),
+        Event::Question => open_question.map(|id| format!("question:{session}:{id}")),
+        Event::Failed | Event::PullRequest | Event::NeedsRebase | Event::ProviderDegraded => None,
+    }
+}
+
+/// The colony's open question id, if it still has one — the notify loop reads it only to make a
+/// question's fact key precise, and a colony with no runtime to ask claims nothing.
+async fn open_question_id(app: &App, session: &str) -> Option<String> {
+    let runtime = app.runtimes.lock().await.get(session).cloned()?;
+    runtime.open_question.lock().await.as_ref().map(|(id, _, _)| id.clone())
+}
+
+/// Announces one colony event down whichever channels are on — first asking the shared anti-spam
+/// ledger (issue #311). A question blocks its colony, so it is a priority candidate: the soft layers
+/// (quiet hours, cooldown, the hourly quota) give way for it, the hard ones do not.
 async fn announce(
     app: &App,
     client: Option<&reqwest::Client>,
@@ -607,12 +648,36 @@ async fn announce(
     settings: &NotifySettings,
     reasons: &mut Reasons,
 ) {
+    let open_question = open_question_id(app, &session.id).await;
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic: format!("{}:{}", event.name(), session.id),
+        class: event.name().to_string(),
+        fact: fact_key(event, &session.id, open_question.as_deref()),
+        colony: Some(session.id.clone()),
+        priority: matches!(event, Event::Question),
+    };
+    let verdict = app.ledger.check(&candidate, Utc::now());
+    if verdict != ledger::Verdict::Deliver {
+        // Held or dropped: counted either way — what was held lands in the hour's digest line, what
+        // was dropped stands in the tallies the status poll reports. Never silent.
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+        return;
+    }
     let text = event.text(&session.repo, session.issue);
     let payload = payload(event, Utc::now(), session);
-    deliver(app, client, &text, &payload, Some(session), settings, reasons).await;
+    if deliver(app, client, &text, &payload, Some(session), settings, reasons).await {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+    } else {
+        // No channel took it: counted as dropped, spending nobody's quota — a send that reached
+        // nothing was not a delivery.
+        app.ledger
+            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
+            .await;
+    }
 }
 
-/// Announces one provider event down the same channels as [`announce`], with the same dedup. A
+/// Announces one provider event down the same channels as [`announce`], against the same ledger. A
 /// provider has no colony, so there is no colony log to record a failed channel in and the line goes
 /// to stderr instead.
 async fn announce_provider(
@@ -622,16 +687,39 @@ async fn announce_provider(
     settings: &NotifySettings,
     reasons: &mut Reasons,
 ) {
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic: format!("provider:{}", event.provider.id),
+        class: Event::ProviderDegraded.name().to_string(),
+        // Nothing to claim: the crossing edge fires once, and the cooldown holds a re-crossing
+        // inside ten minutes instead of losing it.
+        fact: None,
+        colony: None,
+        priority: false,
+    };
+    let verdict = app.ledger.check(&candidate, Utc::now());
+    if verdict != ledger::Verdict::Deliver {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+        return;
+    }
     let name = &event.provider.name;
     let text = Event::provider_text(name, event.health.failure_pct);
     let payload = provider_payload(&event.provider.id, name, event.usage.requests, &event.health, Utc::now());
-    deliver(app, client, &text, &payload, None, settings, reasons).await;
+    if deliver(app, client, &text, &payload, None, settings, reasons).await {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+    } else {
+        app.ledger
+            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
+            .await;
+    }
 }
 
 /// The channels themselves: the desktop popup, and the signed webhook POST. Nothing here is fatal: a
 /// channel that cannot be reached is a line in a log, and the next event tries again. `session` is
 /// the colony the event is about — provider events have none, and their channel failures land on
-/// stderr instead of that colony's log.
+/// stderr instead of that colony's log. Answers whether anything actually went out — at least one
+/// channel that was on succeeded — so the caller's ledger record only spends a quota on a real
+/// delivery.
 async fn deliver(
     app: &App,
     client: Option<&reqwest::Client>,
@@ -640,13 +728,16 @@ async fn deliver(
     session: Option<&Session>,
     settings: &NotifySettings,
     reasons: &mut Reasons,
-) {
+) -> bool {
+    let mut sent = false;
     if settings.desktop {
         match desktop_tool(&DesktopEnv::this_host()) {
             Ok(tool) => {
                 reasons.desktop = None;
                 if let Some(what) = notify_desktop(tool, text).await {
                     report_failure(app, session, format!("notify: the desktop notification failed ({what})")).await;
+                } else {
+                    sent = true;
                 }
             }
             Err(reason) if reasons.desktop != Some(reason) => {
@@ -656,9 +747,9 @@ async fn deliver(
             Err(_) => {}
         }
     }
-    let Some(client) = client else { return };
+    let Some(client) = client else { return sent };
     if settings.webhook_url.is_empty() {
-        return;
+        return sent;
     }
     if !webhook_valid(&settings.webhook_url) {
         if reasons.webhook.as_deref() != Some(settings.webhook_url.as_str()) {
@@ -668,11 +759,11 @@ async fn deliver(
             );
             reasons.webhook = Some(settings.webhook_url.clone());
         }
-        return;
+        return sent;
     }
     reasons.webhook = None;
     let Ok(body) = serde_json::to_string(payload) else {
-        return;
+        return sent;
     };
     // Read where it is used, so saving or removing the secret takes effect without a restart.
     let signing = secret(app);
@@ -685,7 +776,10 @@ async fn deliver(
     .await
     {
         report_failure(app, session, format!("notify: the webhook failed ({e:#})")).await;
+    } else {
+        sent = true;
     }
+    sent
 }
 
 /// Where a failed channel's line goes: into the colony's log when the event is about a colony, so it
@@ -1273,5 +1367,59 @@ mod tests {
         };
         assert!(flag("desktop"), "an explicit setting wins");
         assert!(flag("on_failed"), "a missing setting falls back to the schema default");
+    }
+
+    /// A notify candidate as `announce` builds one, for the fact-key rules.
+    fn notify_candidate(event: Event, session: &str, open_question: Option<&str>) -> ledger::Candidate {
+        ledger::Candidate {
+            kind: ledger::Kind::Notify,
+            topic: format!("{}:{session}", event.name()),
+            class: event.name().to_string(),
+            fact: fact_key(event, session, open_question),
+            colony: Some(session.to_string()),
+            priority: matches!(event, Event::Question),
+        }
+    }
+
+    #[test]
+    fn a_stall_and_an_out_of_nudges_are_two_facts_so_both_announce_within_the_hour() {
+        let limits = ledger::Limits::for_kind(ledger::Kind::Notify);
+        let t0 = DateTime::from_timestamp(1_789_000_000, 0).unwrap();
+        let stalled = notify_candidate(Event::Attention("stalled"), "abc123", None);
+        let nudged = notify_candidate(Event::Attention("nudges_exhausted"), "abc123", None);
+        assert_ne!(stalled.fact, nudged.fact, "two reasons are two facts, even for one colony");
+        let mut st = ledger::LedgerState::default();
+        assert_eq!(ledger::check(&st, &limits, &stalled, t0), ledger::Verdict::Deliver);
+        ledger::record(&mut st, &stalled, &ledger::Verdict::Deliver, t0);
+        // The class-only key would have dropped this as a duplicate of the stall; past the topic
+        // cooldown, the second reason announces too — nothing was consumed by the first edge.
+        assert_eq!(
+            ledger::check(&st, &limits, &nudged, t0 + chrono::Duration::minutes(15)),
+            ledger::Verdict::Deliver
+        );
+    }
+
+    #[test]
+    fn the_fact_key_names_the_question_or_nothing_and_never_the_class_alone() {
+        assert_eq!(
+            fact_key(Event::Question, "abc123", Some("q7")).as_deref(),
+            Some("question:abc123:q7")
+        );
+        assert_eq!(
+            fact_key(Event::Question, "abc123", None),
+            None,
+            "no question to name claims nothing"
+        );
+        assert_eq!(
+            fact_key(Event::Attention("stalled"), "abc123", None).as_deref(),
+            Some("attention:stalled:abc123")
+        );
+        for event in [Event::Failed, Event::PullRequest, Event::NeedsRebase, Event::ProviderDegraded] {
+            assert_eq!(
+                fact_key(event, "abc123", Some("q7")),
+                None,
+                "{event:?} claims nothing: the edge fires once"
+            );
+        }
     }
 }

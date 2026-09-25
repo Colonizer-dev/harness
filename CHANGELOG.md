@@ -113,6 +113,15 @@ setting) is called out under **Take care** rather than left for you to find.
   strictest class is recorded on the colony. The gateway refuses a `restricted` colony any provider
   not marked `trusted` in providers.json: configured is not vetted, and cheap is not private.
   Other classes change nothing yet; a vetted tier and org-level policy are still to come. ([#472])
+- **A shared anti-spam ledger for the mothership's proactive messages.** Every outbound proactive
+  action — a notify announcement, an autonomous judge answer — is now counted in one ledger
+  (`<data_dir>/ledger.json`) before it leaves: duplicate facts within a window are dropped, a
+  question that blocks its colony bypasses the soft layers but never the hard ones (quiet hours are
+  configured, not yet on by default; a per-topic daily cap and per-kind hourly and daily quotas
+  always are), and what the soft layers hold is summarised once an hour as one line ("Colonizer: 5
+  held announcements — provider_degraded ×2, question ×3") with counts by class only, no colony ids
+  or question text. The tallies ride the authenticated `/api/status` as `ledger`. The watchdog's
+  nudges join the ledger in a later slice. ([#311])
 
 ### Fixed
 
@@ -745,6 +754,7 @@ Macs. ([#74])
 [#328]: https://github.com/Colonizer-dev/harness/issues/328
 [#472]: https://github.com/Colonizer-dev/harness/issues/472
 [#474]: https://github.com/Colonizer-dev/harness/issues/474
+[#311]: https://github.com/Colonizer-dev/harness/issues/311
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
