@@ -193,3 +193,37 @@ describe("mock log archive (issue #496)", () => {
     await expect(api.archiveRetention(stale)).rejects.toMatchObject({ status: 409 });
   });
 });
+
+describe("mock push subscriptions (issue #516)", () => {
+  const good = (over: Partial<Parameters<ReturnType<typeof createMockApi>["subscribePush"]>[0]> = {}) => ({
+    label: "Test · Browser",
+    endpoint: "https://fcm.googleapis.com/fcm/send/c.1:2",
+    keys: { p256dh: "k", auth: "a" },
+    ...over,
+  });
+
+  it("serves the seed device and enrols a new one with its endpoint host, newest first", async () => {
+    const api = createMockApi();
+    expect(await api.pushSubscriptions()).toEqual([expect.objectContaining({ id: "push_iphone01", label: "iPhone · Safari", endpoint_host: "fcm.googleapis.com" })]);
+    const row = await api.subscribePush(good());
+    expect(row).toMatchObject({ label: "Test · Browser", endpoint_host: "fcm.googleapis.com" });
+    const listed = await api.pushSubscriptions();
+    expect(listed[0]?.id).toBe(row.id); // newest first
+    expect(listed).toHaveLength(2);
+  });
+
+  it("answers 400 like the server for an incomplete subscription", async () => {
+    const api = createMockApi();
+    await expect(api.subscribePush(good({ keys: { p256dh: "k", auth: "" } }))).rejects.toThrow("p256dh and auth");
+    await expect(api.subscribePush(good({ label: "  " }))).rejects.toThrow("label");
+    await expect(api.subscribePush(good({ endpoint: "not a url" }))).rejects.toThrow("endpoint");
+  });
+
+  it("revoking removes exactly that device and leaves the rest", async () => {
+    const api = createMockApi();
+    const added = await api.subscribePush(good());
+    await api.deletePushSubscription("push_iphone01");
+    const listed = await api.pushSubscriptions();
+    expect(listed.map((row) => row.id)).toEqual([added.id]);
+  });
+});

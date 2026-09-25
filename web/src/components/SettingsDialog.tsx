@@ -14,6 +14,7 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
+import { deviceLabel, pushSupported, subscribeThisDevice, unsubscribeThisDevice } from "../push";
 import { Avatar } from "./Avatar";
 import type {
   HarnessStatus,
@@ -27,6 +28,7 @@ import type {
   OrgInfo,
   Session,
   ProviderAuth,
+  PushSubscriptionSummary,
   ProviderHealth,
   ProviderLimits,
   ProviderPreset,
@@ -1575,6 +1577,11 @@ function DesktopPane({ back }: { back?: () => void }) {
 // notifications.ts), not through the Api, so there is nothing here to save.
 // ---------------------------------------------------------------------------
 
+/** An enrolled device's date, as the list shows it: "Sep 23". */
+function pushDate(unixSeconds: number): string {
+  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function NotificationsPane({
   prefs,
   onChanged,
@@ -1587,6 +1594,45 @@ function NotificationsPane({
   // The browser's answer as of the pane opening, or as of the last ask from the switch below.
   const [permission, setPermission] = useState<NotificationPermissionState>(() => notificationSupport());
   const [asked, setAsked] = useState(false);
+
+  // Web push (issue #516): the devices the mothership will wake, and this browser's place among
+  // them. The subscribe asks the browser's permission right here in the click, like the switch
+  // above; a refusal or a failed enrolment is said aloud rather than leaving the row silent.
+  const api = useApi();
+  const toast = useToast();
+  const pushable = pushSupported();
+  const [subs, setSubs] = useState<PushSubscriptionSummary[] | null>(null);
+  const [subscribing, setSubscribing] = useState(false);
+
+  useEffect(() => {
+    if (!pushable) return;
+    let cancelled = false;
+    api
+      .pushSubscriptions()
+      .then((rows) => !cancelled && setSubs(rows))
+      .catch(() => !cancelled && setSubs([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [api, pushable]);
+
+  const enrolThisDevice = () => {
+    if (subscribing) return;
+    setSubscribing(true);
+    void subscribeThisDevice(api, deviceLabel(navigator.userAgent))
+      .then((row) => {
+        setSubs((rows) => [...(rows ?? []).filter((other) => other.id !== row.id), row]);
+        toast(`Push is on for ${row.label}.`, "success");
+      })
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => setSubscribing(false));
+  };
+
+  const revokeDevice = (row: PushSubscriptionSummary) => {
+    // Optimistic, like the rest of the dialog's removes; the row comes back on the next visit if the revoke failed.
+    setSubs((rows) => (rows ?? []).filter((other) => other.id !== row.id));
+    void unsubscribeThisDevice(api, row.id, row.endpoint_host).catch(() => toast("Couldn't revoke that device.", "error"));
+  };
 
   // Functional update: the permission answer below arrives after the dialog has kept taking
   // toggles, and a write from this render's `prefs` would silently revert them.
@@ -1677,6 +1723,53 @@ function NotificationsPane({
             The permission prompt was dismissed without an answer. Switch it on again to ask once more.
           </p>
         )}
+
+        <div>
+          <h4 className="mb-1 text-[12.5px] font-semibold">Push to this device</h4>
+          <p className="mb-1 text-[12.5px] text-muted">
+            Web push reaches this browser with Colonizer closed — a phone that never has the tab open. A notification tap opens the colony it
+            names. The same short-and-dull rules apply as above.
+          </p>
+          <Row
+            id="notifications-push"
+            label="Push to this device"
+            info={
+              <p>
+                Subscribes this browser through the mothership's push key and lists it below. Revoking a row stops that device's pushes; the
+                browser's own registration is dropped too when it is the one revoked.
+              </p>
+            }
+            inline
+          >
+            <Button variant="secondary" disabled={!pushable || subscribing} onClick={enrolThisDevice}>
+              {subscribing && <Spinner />}
+              {subscribing ? "Subscribing…" : "Subscribe"}
+            </Button>
+          </Row>
+          {!pushable && (
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+              This browser cannot join web push. On iPhone and iPad it needs iOS 16.4 or newer with Colonizer added to the Home Screen;
+              everywhere else it needs a secure origin and a browser with push support.
+            </p>
+          )}
+          {subs !== null && subs.length > 0 && (
+            <div className="mt-1 overflow-hidden rounded-xl border border-border">
+              {subs.map((row) => (
+                <div key={row.id} className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-medium">{row.label}</div>
+                    <div className="truncate font-mono text-[11px] text-faint">
+                      {row.endpoint_host} · enrolled {pushDate(row.created_at)}
+                    </div>
+                  </div>
+                  <Button variant="danger" size="sm" onClick={() => revokeDevice(row)}>
+                    Revoke
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div>
           <h4 className="mb-1 text-[12.5px] font-semibold">Which events interrupt</h4>

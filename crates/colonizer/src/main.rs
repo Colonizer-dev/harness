@@ -60,6 +60,7 @@ mod protocol;
 mod provider_quota;
 mod providers;
 mod publish;
+mod push;
 mod queue;
 mod rebase;
 mod reclaim;
@@ -1499,6 +1500,12 @@ async fn serve() -> Result<()> {
         .route("/api/memory/mem0", get(memory::mem0_status).put(memory::put_mem0_key))
         .route("/api/memory/mem0/check", post(memory::check_mem0))
         .route("/api/notify/secret", get(notify::secret_status).put(notify::put_secret))
+        .route("/api/push/key", get(push::public_key))
+        .route(
+            "/api/push/subscriptions",
+            get(push::list_subscriptions).post(push::add_subscription),
+        )
+        .route("/api/push/subscriptions/{id}", delete(push::delete_subscription))
         .route("/api/voice", get(voice::status))
         .route("/api/voice/key", put(voice::put_key))
         // A clip is larger than axum's 2 MB default body limit; the handler checks the cap itself too.

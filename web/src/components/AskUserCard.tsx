@@ -183,7 +183,8 @@ function QuestionSection({
 
         <label
           className={cx(
-            "group flex cursor-pointer gap-3 relative rounded-xl border p-3 transition-colors has-[input:focus-visible]:ring-2 has-[input:focus-visible]:ring-[var(--accent-ring)]",
+            // min-h keeps the tap target at the option cards' 56px on a phone (issue #516).
+            "group flex min-h-14 cursor-pointer gap-3 relative rounded-xl border p-3 transition-colors has-[input:focus-visible]:ring-2 has-[input:focus-visible]:ring-[var(--accent-ring)]",
             draft.otherOn ? "border-accent bg-accent-soft/50" : "border-dashed border-border-strong hover:bg-panel-2",
           )}
         >

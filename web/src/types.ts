@@ -1644,6 +1644,27 @@ export interface LoginItemStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Web push (issue #516): the mothership pushes to phones via GET/POST/DELETE /api/push
+// ---------------------------------------------------------------------------
+
+/** One enrolled device, as GET /api/push/subscriptions answers and POST returns. */
+export interface PushSubscriptionSummary {
+  id: string;
+  label: string;
+  /** Unix seconds. */
+  created_at: number;
+  /** The push service's host (e.g. fcm.googleapis.com); the full endpoint never reaches the list. */
+  endpoint_host: string;
+}
+
+/** POST /api/push/subscriptions: the browser's `PushSubscription.toJSON()` plus a device label. */
+export interface PushSubscribeBody {
+  label: string;
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+// ---------------------------------------------------------------------------
 // Chat: a direct conversation with a model, no colony (GET/POST /api/chat, docs/protocol.md)
 // ---------------------------------------------------------------------------
 

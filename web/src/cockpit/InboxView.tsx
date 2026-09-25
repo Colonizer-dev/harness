@@ -63,7 +63,7 @@ export function InboxView({
           <button
             type="button"
             onClick={onOpenNotificationSettings}
-            className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text"
+            className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text max-sm:py-2.5"
           >
             notification settings ›
           </button>
@@ -94,7 +94,7 @@ export function InboxView({
                 <button
                   type="button"
                   onClick={() => onOpenColony(session.id)}
-                  className="ml-auto cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 font-sans text-[13px] font-medium text-bg hover:opacity-85"
+                  className="ml-auto cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 font-sans text-[13px] font-medium text-bg hover:opacity-85 max-sm:min-h-11 max-sm:px-4"
                 >
                   Answer
                 </button>
@@ -110,7 +110,7 @@ export function InboxView({
         <div className="mt-2.5 flex items-center gap-2.5">
           <h2 className="m-0 text-[14px] font-medium">Notifications</h2>
           <div className="flex-1" />
-          <button type="button" onClick={markAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
+          <button type="button" onClick={markAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text max-sm:py-2.5">
             mark all read
           </button>
         </div>

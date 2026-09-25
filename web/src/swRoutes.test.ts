@@ -4,10 +4,18 @@ import manifestSource from "../public/manifest.webmanifest?raw";
 import workerSource from "../public/sw.js?raw";
 
 // The service worker's routing script, run the way importScripts runs it: against a `self`.
-const context: { self: { colonizerRoute?: (url: URL, method: string, mode: string, origin: string) => string } } = { self: {} };
+const context: {
+  self: {
+    colonizerRoute?: (url: URL, method: string, mode: string, origin: string) => string;
+    colonizerSafeUrl?: (url: unknown) => string;
+    colonizerPushPayload?: (raw: unknown) => { title: string; body: string; url: string; tag: string };
+  };
+} = { self: {} };
 new Function("self", routesSource)(context.self);
 const route = (path: string, method = "GET", mode = "cors", origin = "http://127.0.0.1:7878") =>
   context.self.colonizerRoute!(new URL(path, "http://127.0.0.1:7878"), method, mode, origin);
+const safeUrl = (url: unknown) => context.self.colonizerSafeUrl!(url);
+const payload = (raw: unknown) => context.self.colonizerPushPayload!(raw);
 
 describe("service worker routing", () => {
   it("never touches the API, writes, the sign-in link or other origins", () => {
@@ -60,7 +68,49 @@ describe("service worker caching of read-only views", () => {
   });
 
   it("names a new cache version, so the activate step drops the old caches", () => {
-    expect(workerSource).toMatch(/const VERSION = "v2"/);
+    expect(workerSource).toMatch(/const VERSION = "v3"/);
+  });
+});
+
+describe("push notifications", () => {
+  it("only a same-origin relative path may be opened, else the cockpit root", () => {
+    expect(safeUrl("/?colony=demo1234")).toBe("/?colony=demo1234");
+    expect(safeUrl("/")).toBe("/");
+    expect(safeUrl("//evil.test/x")).toBe("/");
+    expect(safeUrl("/\\evil.test")).toBe("/");
+    expect(safeUrl("https://evil.test/")).toBe("/");
+    expect(safeUrl("colony")).toBe("/");
+    expect(safeUrl(undefined)).toBe("/");
+    expect(safeUrl(null)).toBe("/");
+  });
+
+  it("shows the mothership's payload as it arrived, with its deep link kept", () => {
+    expect(payload(JSON.stringify({ title: "acme/webshop #42", body: "needs an answer", url: "/?colony=demo1234", tag: "colonizer:demo1234" }))).toEqual({
+      title: "acme/webshop #42",
+      body: "needs an answer",
+      url: "/?colony=demo1234",
+      tag: "colonizer:demo1234",
+    });
+  });
+
+  it("never throws on a malformed, empty or absent payload — a generic notification instead", () => {
+    const generic = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" };
+    expect(payload("")).toEqual(generic);
+    expect(payload("not json{")).toEqual(generic);
+    expect(payload(null)).toEqual(generic);
+    expect(payload(undefined)).toEqual(generic);
+    expect(payload("[1,2]")).toEqual(generic);
+    expect(payload(JSON.stringify({ title: "  ", body: 42, url: "https://evil.test/" }))).toEqual({ title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" });
+    // A payload with only a title still degrades field by field, and its url is sanitized.
+    expect(payload(JSON.stringify({ title: "acme/webshop #42", url: "//evil.test" }))).toEqual({ title: "acme/webshop #42", body: "A colony needs you.", url: "/", tag: "" });
+  });
+
+  it("the worker shows and opens notifications, and always waits on them", () => {
+    expect(workerSource).toMatch(/addEventListener\("push"/);
+    expect(workerSource).toMatch(/addEventListener\("notificationclick"/);
+    expect(workerSource).toMatch(/showNotification\(/);
+    expect(workerSource).toMatch(/colonizer:open/);
+    expect(workerSource).toMatch(/clients\.openWindow\(/);
   });
 });
 

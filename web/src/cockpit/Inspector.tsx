@@ -275,7 +275,7 @@ export function Inspector({
   if (!target) {
     return (
       <aside
-        className="cockpit nest-inspector flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-bg"
+        className="cockpit nest-inspector flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-bg max-sm:w-full max-sm:border-l-0"
         style={{ animation: "ck-slide 0.28s cubic-bezier(.2,.7,.2,1) both" }}
         aria-label="nothing selected"
       >
@@ -377,7 +377,7 @@ export function Inspector({
 
   return (
     <aside
-      className="cockpit nest-inspector flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-bg"
+      className="cockpit nest-inspector flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-bg max-sm:w-full max-sm:border-l-0"
       style={{ animation: "ck-slide 0.28s cubic-bezier(.2,.7,.2,1) both" }}
       aria-label={mothership ? "mothership" : session ? "colony" : "unknown target"}
     >
