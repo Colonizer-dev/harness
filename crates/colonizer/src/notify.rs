@@ -1,6 +1,6 @@
 //! The notify module: when a colony needs an answer, stalls, fails or opens a pull request, or a
-//! model provider starts failing, say so on the desktop the mothership runs on and, if a URL is set,
-//! at a webhook.
+//! model provider starts failing, say so on the desktop the mothership runs on, if a URL is set, at
+//! a webhook, and at every phone or desktop subscribed to Web Push.
 //!
 //! Two choices shape it. Events are detected by diffing the session list — and the providers' usage
 //! tallies — in a poll loop, never by hooking the call sites — a notification must not be able to
@@ -15,6 +15,7 @@ use crate::{
     orgs::{OrgSettings, effective_notify},
     protocol::Origin,
     providers::Provider,
+    push,
     sessions::{Session, SessionStatus},
     util::{delete_secret, env_nonempty, read_secret, truncate, write_secret},
 };
@@ -720,12 +721,12 @@ async fn announce_provider(
     }
 }
 
-/// The channels themselves: the desktop popup, and the signed webhook POST. Nothing here is fatal: a
-/// channel that cannot be reached is a line in a log, and the next event tries again. `session` is
-/// the colony the event is about — provider events have none, and their channel failures land on
-/// stderr instead of that colony's log. Answers whether anything actually went out — at least one
-/// channel that was on succeeded — so the caller's ledger record only spends a quota on a real
-/// delivery.
+/// The channels themselves: the desktop popup, the signed webhook POST, and Web Push. Nothing here
+/// is fatal: a channel that cannot be reached is a line in a log, and the next event tries again.
+/// `session` is the colony the event is about — provider events have none, and their channel
+/// failures land on stderr instead of that colony's log. Answers whether anything actually went
+/// out — at least one channel that was on succeeded — so the caller's ledger record only spends a
+/// quota on a real delivery.
 async fn deliver(
     app: &App,
     client: Option<&reqwest::Client>,
@@ -754,8 +755,37 @@ async fn deliver(
         }
     }
     let Some(client) = client else { return sent };
+    if post_webhook(app, client, payload, session, settings, reasons).await {
+        sent = true;
+    }
+    // Push has no settings of its own: a subscription is the opt-in (issue #516). The payload
+    // carries the same event name and the same one line the other channels do.
+    if push::deliver(
+        app,
+        client,
+        payload["event"].as_str().unwrap_or("notify"),
+        text,
+        session.map(|s| s.id.as_str()),
+    )
+    .await
+    {
+        sent = true;
+    }
+    sent
+}
+
+/// The webhook channel: one signed POST of the payload, when a URL is set. `false` means nothing
+/// went out — no URL, a bad one, or a receiver that answered with an error.
+async fn post_webhook(
+    app: &App,
+    client: &reqwest::Client,
+    payload: &Value,
+    session: Option<&Session>,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) -> bool {
     if settings.webhook_url.is_empty() {
-        return sent;
+        return false;
     }
     if !webhook_valid(&settings.webhook_url) {
         if reasons.webhook.as_deref() != Some(settings.webhook_url.as_str()) {
@@ -765,15 +795,15 @@ async fn deliver(
             );
             reasons.webhook = Some(settings.webhook_url.clone());
         }
-        return sent;
+        return false;
     }
     reasons.webhook = None;
     let Ok(body) = serde_json::to_string(payload) else {
-        return sent;
+        return false;
     };
     // Read where it is used, so saving or removing the secret takes effect without a restart.
     let signing = secret(app);
-    if let Err(e) = post(
+    match post(
         client,
         &settings.webhook_url,
         signing.as_ref().map(|(value, _)| value.as_str()),
@@ -781,11 +811,12 @@ async fn deliver(
     )
     .await
     {
-        report_failure(app, session, format!("notify: the webhook failed ({e:#})")).await;
-    } else {
-        sent = true;
+        Ok(()) => true,
+        Err(e) => {
+            report_failure(app, session, format!("notify: the webhook failed ({e:#})")).await;
+            false
+        }
     }
-    sent
 }
 
 /// Where a failed channel's line goes: into the colony's log when the event is about a colony, so it

@@ -12,6 +12,7 @@ import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "../components/ui";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
+import { colonyFromUrl } from "../push";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -22,6 +23,7 @@ import { Header } from "./Header";
 import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
+import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
@@ -157,6 +159,9 @@ export function Cockpit({
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
   const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
+  // A colony a push deep link asked for (issue #516): `?colony=<id>` from boot, or a
+  // `colonizer:open` message from the service worker, opened once the session list has it.
+  const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href));
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -338,6 +343,37 @@ export function Cockpit({
     },
     [sessions, onOpenColony, onSelectSession],
   );
+
+  // Deep links (issue #516): the service worker tells a running cockpit which colony a tapped
+  // notification named. The message is the worker's alone to send, so the origin check is on the
+  // event and the shape of the payload, and an url without a colony id is simply ignored.
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data as { type?: string; url?: unknown } | null;
+      if (data?.type !== "colonizer:open" || typeof data.url !== "string") return;
+      const id = colonyFromUrl(data.url);
+      if (id) setDeeplink(id);
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, []);
+
+  // Landing with `?colony=<id>` (or after the message above): wait for the poll that carries the
+  // colony, open it through the ordinary path — org filter and all — then strip the param so a
+  // reload or a shared url does not pin the cockpit to that colony forever.
+  useEffect(() => {
+    if (!deeplink) return;
+    if (!sessions.some((s) => s.id === deeplink)) return;
+    openColonyById(deeplink);
+    setDeeplink(null);
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("colony")) {
+      url.searchParams.delete("colony");
+      window.history.replaceState(null, "", url);
+    }
+  }, [deeplink, sessions, openColonyById]);
 
   const act = useCallback(
     async (id: string, action: "stop" | "resume", run: (id: string) => Promise<Session>) => {
@@ -566,7 +602,9 @@ export function Cockpit({
           onOpenNotificationSettings: () => onOpenSettings("notifications"),
         }}
       />
-      <div className="relative z-[1] flex min-h-0 min-w-0">
+      {/* The mobile tab bar (below `sm`) covers the foot of the screen, so the content it overlays
+          is shortened by the same height plus the device's safe-area inset. */}
+      <div className="relative z-[1] flex min-h-0 min-w-0 max-sm:pb-[calc(3.75rem+env(safe-area-inset-bottom))]">
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           {/* The session-limit banner sits above every view, outside each view's own scroll. */}
           {quotaBanner ? (
@@ -651,6 +689,7 @@ export function Cockpit({
         )}
       </div>
       </div>
+      <MobileTabBar view={view} onNavigate={navigate} inboxCount={needAnywhere} />
     </div>
   );
 }

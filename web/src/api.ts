@@ -78,6 +78,8 @@ import type {
   UsageStatus,
   VoiceStatus,
   LoginItemStatus,
+  PushSubscriptionSummary,
+  PushSubscribeBody,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -205,6 +207,14 @@ export interface Api {
   loginItem(): Promise<LoginItemStatus>;
   /** POST /api/login-item: start the mothership at login, or stop doing so (never stops a running one). */
   setLoginItem(enabled: boolean): Promise<LoginItemStatus>;
+  /** GET /api/push/key: the VAPID public key the browser subscribes with (issue #516). */
+  pushKey(): Promise<{ public_key: string }>;
+  /** GET /api/push/subscriptions: every device the mothership pushes to. */
+  pushSubscriptions(): Promise<PushSubscriptionSummary[]>;
+  /** POST /api/push/subscriptions: enrols this browser's subscription under a label; 400 on invalid input. */
+  subscribePush(body: PushSubscribeBody): Promise<PushSubscriptionSummary>;
+  /** DELETE /api/push/subscriptions/{id}: revokes one device. */
+  deletePushSubscription(id: string): Promise<void>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** GET /api/repos/{owner}/{repo}/packages: monorepo detection. */
@@ -527,6 +537,10 @@ export const httpApi: Api = {
   setUsage: (enabled) => put("/api/telemetry/usage", { enabled }),
   loginItem: () => request("/api/login-item"),
   setLoginItem: (enabled) => post("/api/login-item", { enabled }),
+  pushKey: () => request("/api/push/key"),
+  pushSubscriptions: () => request("/api/push/subscriptions"),
+  subscribePush: (body) => post("/api/push/subscriptions", body),
+  deletePushSubscription: (id) => del(`/api/push/subscriptions/${enc(id)}`),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

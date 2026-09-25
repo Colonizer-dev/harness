@@ -156,7 +156,8 @@ function BrandMark(): ReactElement {
   );
 }
 
-function Glyph({ name, size = 20 }: { name: string; size?: number }): ReactElement {
+/** One of the rail's own glyphs by name. Shared with the mobile tab bar, which hides this rail. */
+export function Glyph({ name, size = 20 }: { name: string; size?: number }): ReactElement {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
       {GLYPH[name]}
@@ -269,7 +270,9 @@ export function NavRail(props: {
     <nav
       aria-label="cockpit"
       data-expanded={expanded}
-      className={`v3-rail relative z-20 flex h-full min-h-0 shrink-0 flex-col gap-1 border-r border-border px-3 py-4 transition-[width] duration-200 ease-out ${expanded ? "w-[232px]" : "w-16"}`}
+      // Below Tailwind's `sm` breakpoint the rail is hidden and MobileTabBar takes over (issue #516);
+      // from `sm` up this rail is exactly what it has always been.
+      className={`v3-rail relative z-20 hidden h-full min-h-0 shrink-0 flex-col gap-1 border-r border-border px-3 py-4 transition-[width] duration-200 ease-out sm:flex ${expanded ? "w-[232px]" : "w-16"}`}
     >
       {/* Brand and the minimise toggle. Expanded: the mark and name open the overview, and the
           panel button beside them folds the sidebar away. Collapsed: the mark turns into the

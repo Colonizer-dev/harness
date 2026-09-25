@@ -64,6 +64,7 @@ import type {
   UpdateStatus,
   UsageStatus,
   LoginItemStatus,
+  PushSubscriptionSummary,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1232,6 +1233,12 @@ export const DEMO_MAP: ArchMap = {
 
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
+  // Web push (issue #516): one device is already enrolled, so Settings has a row to show and
+  // revoke, and the VAPID key has the shape of a real base64url uncompressed P-256 point.
+  const MOCK_PUSH_KEY = "BB5fVboJOnLBVPursGoy1AZA5DXhRqSdoaBnAGjI8NeR1PuBgnN3Vx6rbF5pvoxqTOhaLHQwxrRLmZgA2pHcg0k";
+  const pushSubs: PushSubscriptionSummary[] = [
+    { id: "push_iphone01", label: "iPhone · Safari", created_at: Math.floor(Date.now() / 1000) - 86_400 * 2, endpoint_host: "fcm.googleapis.com" },
+  ];
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
   const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
@@ -2400,6 +2407,31 @@ export function createMockApi(): Api {
         mockLoginItem = enabled;
         return { platform: "macos", installed: enabled, enabled, pid: enabled ? 4242 : null, definition: "~/Library/LaunchAgents/dev.colonizer.mothership.plist", binary: "~/.local/bin/colonizer", log: "~/.local/share/colonizer/mothership.out", note: null } as LoginItemStatus;
       }),
+    pushKey: () => later(() => ({ public_key: MOCK_PUSH_KEY })),
+    pushSubscriptions: () => later(() => [...pushSubs].sort((a, b) => b.created_at - a.created_at)),
+    subscribePush: async (body) => {
+      await sleep(300);
+      // The server answers 400 with a message for anything short of a full subscription plus a
+      // label; the endpoint host is all the list ever shows of it.
+      const endpoint = (() => {
+        try {
+          return new URL(body?.endpoint ?? "").host;
+        } catch {
+          return null;
+        }
+      })();
+      if (!body || !endpoint || !body.keys?.p256dh || !body.keys?.auth || !body.label?.trim()) {
+        throw new ApiError("the subscription needs an endpoint, its p256dh and auth keys, and a label", 400);
+      }
+      const row: PushSubscriptionSummary = { id: `push_${mockId()}`, label: body.label.trim(), created_at: Math.floor(Date.now() / 1000), endpoint_host: endpoint };
+      pushSubs.push(row);
+      return clone(row);
+    },
+    deletePushSubscription: async (id) => {
+      await sleep(200);
+      const at = pushSubs.findIndex((row) => row.id === id);
+      if (at >= 0) pushSubs.splice(at, 1);
+    },
     setUsage: async (enabled) => {
       await sleep(250);
       if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);

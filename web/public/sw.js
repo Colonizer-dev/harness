@@ -1,11 +1,12 @@
 // The cockpit's service worker: just enough to make the cockpit an installable app and quick to
 // reopen. It caches Vite's hashed /assets and the proxied avatars, answers a few read-only views
 // from their last answer while it revalidates them, shows an offline page when the mothership is
-// not running, and never touches writes, sign-in or any other /api call (see sw-routes.js).
+// not running, shows the mothership's web pushes and opens the colony they name when tapped, and
+// never touches writes, sign-in or any other /api call (see sw-routes.js).
 importScripts("/sw-routes.js");
 
 // Bumped whenever the routing or the caches change: the activate step drops every other cache.
-const VERSION = "v2";
+const VERSION = "v3";
 const ASSETS = `colonizer-assets-${VERSION}`;
 const SHELL = `colonizer-shell-${VERSION}`;
 const IMAGES = `colonizer-img-${VERSION}`;
@@ -80,4 +81,54 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(fetch(request).catch(() => caches.match("/offline.html")));
   }
   // "network": not handled, so the browser does exactly what it would without a worker.
+});
+
+// --- Web push (issue #516) --------------------------------------------------------------------
+
+/** Shows one push, whatever arrived: a payload the mothership malformed still shows generically. */
+async function showPush(raw) {
+  const payload = self.colonizerPushPayload(raw);
+  await self.registration.showNotification(payload.title, {
+    body: payload.body,
+    tag: payload.tag || undefined,
+    data: { url: payload.url },
+    icon: "/icons/icon-192.png",
+    badge: "/icons/mark.svg",
+    // The in-app sound channel stays the only thing that beeps (notifications.ts).
+    silent: true,
+  });
+}
+
+self.addEventListener("push", (event) => {
+  let raw = "";
+  try {
+    raw = event.data ? event.data.text() : "";
+  } catch {
+    raw = "";
+  }
+  event.waitUntil(showPush(raw).catch(() => undefined));
+});
+
+/** The tapped notification opens the cockpit on the payload's url — already-running if there is one. */
+async function openFromNotification(url) {
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const target = windows.find((client) => {
+    try {
+      return new URL(client.url).origin === self.location.origin;
+    } catch {
+      return false;
+    }
+  });
+  if (target) {
+    await target.focus();
+    target.postMessage({ type: "colonizer:open", url });
+    return;
+  }
+  await self.clients.openWindow(url);
+}
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = self.colonizerSafeUrl(event.notification.data && event.notification.data.url);
+  event.waitUntil(openFromNotification(url).catch(() => undefined));
 });

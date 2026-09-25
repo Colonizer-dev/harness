@@ -16,6 +16,46 @@ self.colonizerSwr = [
   /^\/api\/orgs\/[^/]+\/packages\/(published|dependencies|supply-chain)$/,
 ];
 
+// --- Push notifications -----------------------------------------------------------------------
+//
+// The mothership encrypts one small JSON payload per push: {title, body, url, tag}. These two run
+// inside the worker but are kept here, pure, so the tests can load them exactly like colonizerRoute.
+
+/**
+ * The only urls a notification may open: a same-origin relative path — starting with "/" and not
+ * "//" (a protocol-relative url names another origin) and never "/\" (which some url parsers read
+ * back as "//"). Everything else, absolute urls included, becomes "/". A malformed push payload is
+ * untrusted input, so the notification never gets a url it did not earn.
+ */
+self.colonizerSafeUrl = function colonizerSafeUrl(url) {
+  if (typeof url !== "string") return "/";
+  if (!url.startsWith("/") || url.startsWith("//") || url.startsWith("/\\")) return "/";
+  return url;
+};
+
+/**
+ * The push payload to show. Anything malformed — empty, truncated by the push service, not JSON,
+ * an array — degrades to a generic "Colonizer" notification instead of throwing: a silent drop
+ * would look exactly like a missed colony. Missing fields fall back one at a time.
+ */
+self.colonizerPushPayload = function colonizerPushPayload(raw) {
+  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" };
+  let data = null;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return fallback;
+  const text = (value) => (typeof value === "string" ? value.trim() : "");
+  return {
+    title: text(data.title) || fallback.title,
+    body: text(data.body) || fallback.body,
+    url: self.colonizerSafeUrl(data.url),
+    tag: text(data.tag),
+  };
+};
+
 self.colonizerRoute = function colonizerRoute(url, method, mode, origin) {
   if (method !== "GET") return "network";
   if (url.origin !== origin) return "network";

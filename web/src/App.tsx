@@ -56,7 +56,10 @@ import type {
 
 export function App() {
   const api = useApi();
-  const narrow = useMediaQuery("(max-width: 899px)");
+  // The sidebar-drawer layout survives only for a narrow desktop window. A phone runs the cockpit
+  // (issue #516): below `sm` the cockpit hides its rail and shows the mobile tab bar instead, so
+  // the "done when" flows — inbox, answering, colony chat, the Nest — are its own at 390px.
+  const narrow = useMediaQuery("(min-width: 640px) and (max-width: 899px)");
   const [status, setStatus] = useState<HarnessStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
   // Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); older mothership builds
@@ -694,8 +697,8 @@ export function App() {
           </main>
         </>
       ) : (
-        // The cockpit is a desktop shell — a rail, a nest and a 360px inspector need the width —
-        // so a narrow window keeps the sidebar layout above rather than folding the nest up.
+        // The cockpit everywhere but a narrow desktop window: a rail, a nest and a 360px inspector
+        // from `sm` up (with the tab bar below it), the sidebar drawer between 640 and 899px.
         <div className="flex h-full min-w-0 flex-1 flex-col">
           {orgPrompt}
           <div className="min-h-0 flex-1">

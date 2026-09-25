@@ -499,7 +499,7 @@ export function Composer({
   const placeholder = asking ? "Ask a model anything — no colony, just a conversation…" : !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, pick an issue below, or /loop 1h <task> to repeat it…";
 
   return (
-    <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6">
+    <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6 max-sm:bottom-[calc(4.25rem+env(safe-area-inset-bottom))]">
       <div
         data-open={open}
         data-listening={voice.listening}

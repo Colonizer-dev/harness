@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+# Web Push (push.rs): base64url for VAPID JWTs, push keys and subscription secrets.
+base64 = "0.22"
 axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10"
