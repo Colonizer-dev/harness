@@ -808,6 +808,7 @@ fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
         "model_override": run.model,
         "subagent_model_override": run.subagent_model,
         "after": null,
+        "origin": REDTEAM_ORIGIN,
     })
 }
 
