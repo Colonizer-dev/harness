@@ -80,27 +80,58 @@ export const EXPLORE_DISALLOWED = [
   'NotebookEdit',
 ];
 
+const REPO_EXPLORER_PROMPT = [
+  "You are a repository-exploration specialist for Claude Code, Anthropic's official CLI for Claude. Like Explore, you are READ-ONLY: you locate and explain code, you never modify it.",
+  '',
+  '=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===',
+  'You are STRICTLY PROHIBITED from creating, editing, deleting, moving or copying files, from writing anywhere including /tmp, and from running any command that changes system state.',
+  '',
+  'Before you reach for find or grep, call the Skill tool and check whether this colony ships a retrieval skill suited to the question. For example, a skill named `graft` answers "how does X work", "where is Y defined", "who calls Z" and "what would changing this break" from a code map, with exact file:line -- faster and more precise than text search. Prefer a fitting skill\'s own instructions over raw search.',
+  '',
+  'Fall back to find/grep via Bash, exactly as the Explore agent would, when no shipped skill fits the question, or the one you tried is unavailable in this colony or comes back empty.',
+  '',
+  'Guidelines:',
+  '- Try the fitting skill first; do not grep for something a skill already answers directly.',
+  '- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail).',
+  '- Use Read when you know the specific file path you need.',
+  "- Adapt your search approach based on the thoroughness level the caller specifies.",
+  '- Communicate your final report directly as a regular message -- do NOT attempt to create files.',
+  '',
+  "Complete the caller's exploration request efficiently and report your findings clearly, with file:line references.",
+].join('\n');
+
 /**
- * The built-in agents a colony delegates to, redefined with `effort`. Keyed by agent type, the shape
- * the SDK's `agents` option takes.
- * @param {string} effort one of EFFORT_LEVELS; the caller validates it
+ * The built-in agents a colony delegates to, redefined with `effort`, plus a first-party read-only
+ * `repo-explorer` that ships either way. Keyed by agent type, the shape the SDK's `agents` option
+ * takes.
+ * @param {string} [effort] one of EFFORT_LEVELS; the caller validates it. Omit it to add only
+ *   `repo-explorer`, leaving the two built-ins in place to inherit the orchestrator's effort.
  */
 export function subagentDefinitions(effort) {
+  const withEffort = (def) => (effort ? { ...def, effort } : def);
   return {
-    'general-purpose': {
+    ...(effort
+      ? {
+          'general-purpose': withEffort({
+            description:
+              'General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.',
+            prompt: GENERAL_PURPOSE_PROMPT,
+          }),
+          Explore: withEffort({
+            description:
+              'Fast read-only search agent for locating code. Use it to find files by pattern (eg. "src/components/**/*.tsx"), grep for symbols or keywords (eg. "API endpoints"), or answer "where is X defined / which files reference Y." Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: "quick" for a single targeted lookup, "medium" for moderate exploration, or "very thorough" to search across multiple locations and naming conventions.',
+            prompt: EXPLORE_PROMPT,
+            // The prompt forbids writing; this is what enforces it. At least the built-in's own deny list (the
+            // Artifact tools publish pages), plus Task, Agent's older name; CI checks it against the snapshot.
+            disallowedTools: EXPLORE_DISALLOWED,
+          }),
+        }
+      : {}),
+    'repo-explorer': withEffort({
       description:
-        'General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.',
-      prompt: GENERAL_PURPOSE_PROMPT,
-      effort,
-    },
-    Explore: {
-      description:
-        'Fast read-only search agent for locating code. Use it to find files by pattern (eg. "src/components/**/*.tsx"), grep for symbols or keywords (eg. "API endpoints"), or answer "where is X defined / which files reference Y." Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: "quick" for a single targeted lookup, "medium" for moderate exploration, or "very thorough" to search across multiple locations and naming conventions.',
-      prompt: EXPLORE_PROMPT,
-      // The prompt forbids writing; this is what enforces it. At least the built-in's own deny list (the
-      // Artifact tools publish pages), plus Task, Agent's older name; CI checks it against the snapshot.
+        'Read-only repository-exploration agent for structural questions -- "how does X work", "where is Y defined", "what calls Z", "what would this change break". Checks the Skill tool for a shipped retrieval skill (for example graft\'s code map) and prefers it over raw text search, falling back to find/grep like Explore when none applies. Use Explore instead for a plain literal or filename lookup that needs no code map.',
+      prompt: REPO_EXPLORER_PROMPT,
       disallowedTools: EXPLORE_DISALLOWED,
-      effort,
-    },
+    }),
   };
 }

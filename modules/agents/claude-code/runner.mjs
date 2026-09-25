@@ -561,11 +561,12 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
     if (EFFORT_LEVELS.has(env.COLONIZER_EFFORT)) options.effort = env.COLONIZER_EFFORT;
     else warnings.push(`ignoring COLONIZER_EFFORT=${env.COLONIZER_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
   }
-  // Unset leaves the built-in agents in place, so subagents inherit the orchestrator's effort as before.
-  if (env.COLONIZER_SUBAGENT_EFFORT) {
-    if (EFFORT_LEVELS.has(env.COLONIZER_SUBAGENT_EFFORT)) options.agents = subagentDefinitions(env.COLONIZER_SUBAGENT_EFFORT);
-    else warnings.push(`ignoring COLONIZER_SUBAGENT_EFFORT=${env.COLONIZER_SUBAGENT_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
+  // `repo-explorer` is added every time; general-purpose/Explore are only redefined (to carry an
+  // effort) when COLONIZER_SUBAGENT_EFFORT is set, so unset still leaves those two built-ins in place.
+  if (env.COLONIZER_SUBAGENT_EFFORT && !EFFORT_LEVELS.has(env.COLONIZER_SUBAGENT_EFFORT)) {
+    warnings.push(`ignoring COLONIZER_SUBAGENT_EFFORT=${env.COLONIZER_SUBAGENT_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
   }
+  options.agents = subagentDefinitions(EFFORT_LEVELS.has(env.COLONIZER_SUBAGENT_EFFORT) ? env.COLONIZER_SUBAGENT_EFFORT : undefined);
   return { options, warnings };
 }
 
