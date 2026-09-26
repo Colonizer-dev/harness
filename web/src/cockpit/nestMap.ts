@@ -279,7 +279,82 @@ export function layoutMap(map: ArchMap, view: NestBox): MapLayout {
   const below = place(map, view, "below");
   const right = place(map, view, "right");
   // Beside wins only when it clearly needs less zooming out; under is the nest's usual look.
-  return fitView(right, view).k > fitView(below, view).k * 1.05 ? right : below;
+  const layout = fitView(right, view).k > fitView(below, view).k * 1.05 ? right : below;
+  const entry = entryComponent(map, layout);
+  if (entry) layout.mouth = mouthAbove(layout, layout.byId.get(entry)!);
+  return layout;
+}
+
+/** Half the width of a tunnel as drawn (its wall is 14px), plus a little air. */
+const SHAFT_CLEAR = 10;
+/** How far above the entry chamber's rim the shaft turns in towards it. */
+const SHAFT_TURN = 12;
+/** How far either side of the entry chamber the mouth may move to find a clear way down. */
+const SHAFT_REACH = 240;
+
+/**
+ * The lanes a shaft for a mouth at `x` runs in: down from the surface, across above the entry chamber
+ * (when the mouth sits aside), and down into its top.
+ */
+function shaftRects(x: number, e: MapChamber): Rect[] {
+  const turn = e.y - e.r - SHAFT_TURN;
+  const c = SHAFT_CLEAR;
+  return [
+    { x: x - c, y: SURFACE_Y, w: c * 2, h: turn - SURFACE_Y + c },
+    { x: Math.min(x, e.x) - c, y: turn - c, w: Math.abs(x - e.x) + c * 2, h: c * 2 },
+    { x: e.x - c, y: turn, w: c * 2, h: e.y - turn },
+  ];
+}
+
+/**
+ * What a shaft for a mouth at `x` would cut through: a mound's title or another chamber or its name
+ * costs the most, a mound the entry is not in a little, and a mouth further from the entry a hair.
+ */
+function shaftCost(layout: MapLayout, e: MapChamber, x: number): number {
+  const runs = shaftRects(x, e);
+  const hits = (r: Rect) => runs.some((run) => overlaps(run, r));
+  let cost = Math.abs(x - e.x) / 1000;
+  for (const m of layout.mounds) {
+    if (m.title && hits(m.title)) cost += 100;
+    const inside = m.box.x <= e.x && e.x <= m.box.x + m.box.w && m.box.y <= e.y && e.y <= m.box.y + m.box.h;
+    if (!inside && hits(m.box)) cost += 1;
+  }
+  for (const c of layout.chambers) {
+    if (hits(c.label) || (c.id !== e.id && hits(chamberRect(c)))) cost += 100;
+  }
+  return cost;
+}
+
+/**
+ * Where the mothership's mouth sits on the surface: straight above the entry chamber, so its corridor
+ * is a short shaft down into the nest rather than a diagonal across the map — nudged sideways, never
+ * past the plot's edge, when that way down would cut through a mound's title or another chamber.
+ */
+export function mouthAbove(layout: MapLayout, e: MapChamber): { x: number; y: number } {
+  const lo = 24;
+  const hi = layout.width - 24;
+  let best = { x: Math.max(lo, Math.min(hi, e.x)), cost: Infinity };
+  for (let d = 0; d <= SHAFT_REACH; d += 8) {
+    for (const x of d === 0 ? [e.x] : [e.x - d, e.x + d]) {
+      if (x < lo || x > hi) continue;
+      const cost = shaftCost(layout, e, x);
+      if (cost < best.cost) best = { x, cost };
+    }
+    if (best.cost < 1) break;
+  }
+  return { x: Math.round(best.x), y: SURFACE_Y + 26 };
+}
+
+/** Everything a mouth at `layout.mouth` cuts through on its way to `entry` (for the tests): 0 is clear. */
+export function shaftCrossings(layout: MapLayout, entry: string): string[] {
+  const e = layout.byId.get(entry);
+  if (!e) return [];
+  const runs = shaftRects(layout.mouth.x, e);
+  const hits = (r: Rect) => runs.some((run) => overlaps(run, r));
+  return [
+    ...layout.mounds.filter((m) => m.title && hits(m.title)).map((m) => `title:${m.label}`),
+    ...layout.chambers.filter((c) => hits(c.label) || (c.id !== e.id && hits(chamberRect(c)))).map((c) => `chamber:${c.id}`),
+  ];
 }
 
 /** Every pair of chamber names (or chambers) that overlap: empty for a laid-out map. */
@@ -499,11 +574,29 @@ export function routeBetween(map: ArchMap, from: string, to: string): string[] |
   return null;
 }
 
+/**
+ * The shaft from the mouth down to the entry chamber: straight down (a slight wobble, well inside the
+ * lane mouthAbove kept clear), then a turn in to the top of the chamber when the mouth had to move aside.
+ */
+function shaft(layout: MapLayout, e: MapChamber, seed: number): Dig {
+  const r = rnd(seed);
+  const [x, y0] = [layout.mouth.x, layout.mouth.y];
+  const turn = e.y - e.r - SHAFT_TURN;
+  const segs = Math.max(1, Math.min(5, Math.round((turn - y0) / 90)));
+  const hops: Dig["hops"] = [];
+  for (let q = 1; q <= segs; q++) {
+    const [ya, yb] = [y0 + ((turn - y0) * (q - 1)) / segs, y0 + ((turn - y0) * q) / segs];
+    hops.push({ c: [x + (r(q) - 0.5) * 6, (ya + yb) / 2], e: [x, yb] });
+  }
+  hops.push({ c: [e.x, turn], e: [e.x, e.y - e.r * 0.6] });
+  return { start: [x, y0], hops };
+}
+
 /** The mothership's corridor down to the entry chamber. */
 export function mouthPath(layout: MapLayout, entry: string): string {
   const e = layout.byId.get(entry);
   if (!e) return "";
-  return toD([dig([layout.mouth.x, layout.mouth.y], [e.x, e.y - e.r * 0.6], edgeSeed("mothership", entry))]);
+  return toD([shaft(layout, e, edgeSeed("mothership", entry))]);
 }
 
 /**
@@ -518,7 +611,7 @@ export function antRoute(map: ArchMap, layout: MapLayout, target: string): strin
   const route = entry ? routeBetween(map, entry, target) : null;
   if (!entry || !route) return toD([dig([layout.mouth.x, layout.mouth.y], [t.x, t.y], edgeSeed("mothership", target))]);
   const e = layout.byId.get(entry)!;
-  const parts: Dig[] = [dig([layout.mouth.x, layout.mouth.y], [e.x, e.y - e.r * 0.6], edgeSeed("mothership", entry))];
+  const parts: Dig[] = [shaft(layout, e, edgeSeed("mothership", entry))];
   // From the corridor's end into the entry chamber's centre, then hop chamber to chamber.
   parts.push({ start: [e.x, e.y - e.r * 0.6], hops: [{ c: [e.x, e.y - e.r * 0.3], e: [e.x, e.y] }] });
   for (let i = 1; i < route.length; i++) {

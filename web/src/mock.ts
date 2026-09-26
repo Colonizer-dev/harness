@@ -2,6 +2,7 @@
 import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
+import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
 import type {
   ActivityEntry,
   ArchiveEntry,
@@ -1241,7 +1242,11 @@ export function createMockApi(): Api {
   ];
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
-  const maps = new Map<string, ArchMap>([["acme/webshop", DEMO_MAP]]);
+  // acme/design-system's map has its entry far off the centre (bottom-left), as a real repo's did.
+  const maps = new Map<string, ArchMap>([
+    ["acme/webshop", DEMO_MAP],
+    ["acme/design-system", { ...OFF_CENTRE_ENTRY_MAP, title: "acme/design-system" }],
+  ]);
   const mappings = new Map<string, NonNullable<RepoMap["mapping"]>>();
   const mockChats = new Map<string, { meta: ChatMeta; messages: ChatMessage[] }>();
   // The log archive (GET /api/archive, issue #496): two seeded bundles. Deletes append to it and

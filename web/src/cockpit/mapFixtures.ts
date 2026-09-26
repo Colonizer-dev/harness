@@ -68,3 +68,49 @@ export const DENSE_MAP: ArchMap = {
     { label: "Notifications", wraps: ["push-transport", "push"] },
   ],
 };
+
+// The reported map's shape: the entry ("App User", which nothing points at) sits far from the
+// centre, at the bottom-left, with a boundary's title between it and the middle of the surface — the
+// mothership's corridor used to run from the plot's centre diagonally across that title to reach it.
+const m = (id: string, label: string, sublabel: string, x: number, y: number, w = 150, h = 60) => ({
+  id,
+  type: id === "backend" ? "external" : "backend",
+  label,
+  sublabel,
+  pos: [x, y] as [number, number],
+  size: [w, h] as [number, number],
+  sources: [{ path: `src/${id}/index.ts` }],
+});
+
+export const OFF_CENTRE_ENTRY_MAP: ArchMap = {
+  title: "acme/wallet-app",
+  components: [
+    m("user", "App User", "attendee / vendor", 0, 520),
+    m("boot", "App Bootstrap", "index.js + App.tsx", 200, 520),
+    m("nav", "Navigation", "React Navigation v7", 400, 520),
+    m("auth", "Auth", "passcode / biometric", 600, 40),
+    m("wallet", "Wallet & Home", "balances, transactions", 600, 180),
+    m("hyperswitch", "Hyperswitch", "hosted checkout", 600, 320),
+    m("pay", "Payment", "card checkout flow", 600, 460),
+    m("storage", "Encrypted Storage", "MMKV + Keychain key", 820, 120),
+    m("client", "/v1 API Client", "fetch + token refresh", 820, 400),
+    m("backend", "chi Backend", "NestJS /v1", 1040, 260),
+  ],
+  connections: [
+    { from: "user", to: "boot" },
+    { from: "boot", to: "nav" },
+    { from: "nav", to: "auth" },
+    { from: "nav", to: "wallet" },
+    { from: "nav", to: "pay" },
+    { from: "pay", to: "hyperswitch" },
+    { from: "auth", to: "storage" },
+    { from: "wallet", to: "client" },
+    { from: "pay", to: "client" },
+    { from: "client", to: "backend" },
+  ],
+  boundaries: [
+    { label: "Feature modules (src/features)", wraps: ["auth", "wallet", "hyperswitch", "pay"] },
+    { label: "Payment & auth trust boundary", wraps: ["auth", "hyperswitch", "pay"] },
+    { label: "Shared services (src/shared)", wraps: ["storage", "client"] },
+  ],
+};

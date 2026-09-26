@@ -657,7 +657,8 @@ connections and boundary members that name components, repository-relative sourc
 at least one sourced component, at most 1 MB and 120 components) and stores it at
 `<data>/maps/<owner>/<repo>.json` with the revision, time and colony. The cockpit's nest has a Map mode
 that draws it as the nest: components are chambers at archify's layout, boundaries the mounds they sit
-in, connections tunnels, and each live colony's ants walk from the mothership's mouth along the tunnels
+in, connections tunnels, the mothership's mouth on the surface above the entry chamber (the one nothing
+connects into that starts the most), and each live colony's ants walk from that mouth along the tunnels
 to the chambers whose sources share a directory with the files `GET /api/touched` says it changed.
 
 **Keeping vendored plugins current.** `scripts/update-vendored-plugins.mjs` checks every `plugin` entry in
