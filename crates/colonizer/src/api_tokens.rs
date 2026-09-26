@@ -428,6 +428,19 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
     }
 }
 
+/// The scoped-token rule `classify` applies to a request, spelled for the route-table snapshot
+/// (server.rs's tests): `read`, `session>=operate`, `map`, `launch` or `owner`.
+#[cfg(test)]
+pub(crate) fn describe_need(method: &Method, path: &str) -> String {
+    match classify(method, path) {
+        Need::Bare(scope) => scope.as_str().to_string(),
+        Need::Session { at_least, .. } => format!("session>={}", at_least.as_str()),
+        Need::Map { .. } => "map".to_string(),
+        Need::Launch => "launch".to_string(),
+        Need::Owner => "owner".to_string(),
+    }
+}
+
 /// What `authorize` refuses, as the HTTP response it becomes.
 pub(crate) enum Deny {
     /// The scope does not reach this route: 403, naming the token's scope and the route.

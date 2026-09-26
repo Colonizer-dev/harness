@@ -73,6 +73,8 @@ mod redteam;
 mod remote;
 mod repo_meta;
 mod restack;
+#[cfg(test)]
+mod route_table_tests;
 mod routing;
 mod runtime;
 mod sandbox;
@@ -1247,117 +1249,10 @@ async fn main() -> ExitCode {
     ExitCode::from(cli::run(cli::parse()).await as u8)
 }
 
-/// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
-/// background loops.
-async fn serve() -> Result<()> {
-    let cfg = Settings::from_env()?;
-    // The port first, before anything touches colonies: a second mothership (one started at login
-    // while another runs by hand, or the reverse) must stop here, not after running recovery,
-    // backfills or reaping against the same data directory.
-    let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("{}", login_item::already_running_message(&cfg.bind));
-            // Under launchd/systemd a clean exit keeps the agent from restarting it in a loop.
-            if login_item::started_as_login_item() {
-                std::process::exit(0);
-            }
-            bail!("{} is already in use", cfg.bind);
-        }
-        Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
-    };
-    for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
-        std::fs::create_dir_all(cfg.data_dir.join(dir))?;
-    }
-    let (mut sessions, corrupt) = load_sessions(&cfg.data_dir.join("sessions.json"))?;
-    for s in &mut sessions {
-        if s.org.is_empty() {
-            s.org = s.repo.split('/').next().unwrap_or_default().to_string();
-        }
-    }
-    // Colonies persisted as finished while still carrying an attention flag predate the clearing
-    // every terminal transition now does; drop those stale flags before `recover` runs, so a
-    // stopped colony does not look like it still needs attention.
-    let stale_attention = sessions::clear_stale_attention(&mut sessions);
-    if stale_attention > 0 {
-        println!("sessions: cleared a stale attention flag from {stale_attention} finished colonies");
-    }
-    let (modules, modules_damage) = ModulesConfig::load(&cfg.config_dir.join("modules.json"))?;
-    // Both startup ruin reports show as one alert when both happen: the operator dismisses one
-    // banner, not two about the same bad disk.
-    let load_damage = match (corrupt, modules_damage) {
-        (Some(sessions), Some(modules)) => Some(StorageAlert {
-            message: format!("{}\n{}", sessions.message, modules.message),
-            ..sessions
-        }),
-        (sessions, modules) => sessions.or(modules),
-    };
-    let (agents, agent_problems) = modules::discover_agents(cfg.assets.as_deref());
-
-    // The cockpit API token, minted on first run: every request to the API proves itself with it.
-    let api_token = auth::load_or_create(&cfg.config_dir)?;
-
-    // Saved secrets: the system keychain where it answers, the 0600 files otherwise (secrets.rs).
-    // The probe can wait on a locked keyring, so it runs off the startup path.
-    secrets::install(secrets::Store::new(&cfg.config_dir, secrets::os_backend()));
-    std::thread::spawn(|| {
-        if let Some(store) = secrets::global() {
-            store.probe();
-        }
-    });
-
-    let app = Arc::new(App {
-        modules: RwLock::new(modules),
-        agents,
-        agent_problems,
-        sessions: RwLock::new(sessions),
-        redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
-        ledger: ledger::LedgerStore::load(&cfg.data_dir),
-        loops: loops::LoopStore::new(&cfg.config_dir),
-        session_persist: Mutex::new(()),
-        config_write: Mutex::new(()),
-        config_damage: std::sync::Mutex::new(None),
-        storage_alert: RwLock::new(None),
-        disk_verdict: Mutex::new(Default::default()),
-        load_damage,
-        runtimes: Mutex::new(HashMap::new()),
-        repo_locks: Mutex::new(HashMap::new()),
-        session_locks: Mutex::new(HashMap::new()),
-        mesh: Mutex::new(None),
-        login: Default::default(),
-        memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
-        gateway: gateway::Gateway::new(&cfg.data_dir)?,
-        repo_owners: RwLock::new(BTreeSet::new()),
-        answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
-        http_cache: cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), cache_store::HTTP_MAX_BYTES),
-        img_cache: cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), cache_store::IMG_MAX_BYTES),
-        new_orgs: RwLock::new(BTreeMap::new()),
-        org_descriptions: RwLock::new(BTreeMap::new()),
-        orgs_refreshed: Mutex::new(None),
-        orgs_failed_at: Mutex::new(None),
-        claude_account: Mutex::new(None),
-        github_viewer: Mutex::new(None),
-        claude_bins: Mutex::new(HashMap::new()),
-        runtime_cache: Mutex::new(None),
-        host_cache: Mutex::new(None),
-        provider_probe_cache: Mutex::new(HashMap::new()),
-        fleet_cache: fleet::FleetCache::new(),
-        pull: Mutex::new(Default::default()),
-        headroom: Mutex::new(Default::default()),
-        graft: Mutex::new(Default::default()),
-        telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
-        updates: version::Updates::new(&cfg.config_dir)?,
-        updater: update::Updater::new(),
-        usage: usage::Usage::new(&cfg.config_dir),
-        stream: stream::Hub::new(),
-        activity: activity::ActivityLog::new(),
-        api_tokens: api_tokens::Registry::load(&cfg.config_dir),
-        remote: remote::Remote::new(&cfg.config_dir)?,
-        api_token,
-        cfg,
-    });
-
-    let api = Router::new()
+/// Every API route, before any layer: `router` wraps them in the activity log's route layer and
+/// `host_guard`.
+fn api_routes() -> Router<Shared> {
+    Router::new()
         .route("/api/status", get(status))
         .route("/api/login-item", get(login_item_status).post(login_item_set))
         .route("/api/hosts", get(fleet::list_hosts_handler))
@@ -1535,14 +1430,132 @@ async fn serve() -> Result<()> {
         .route("/api/tokens", get(api_tokens::list).post(api_tokens::create))
         .route("/api/tokens/self", get(api_tokens::self_view))
         .route("/api/tokens/{id}", delete(api_tokens::revoke))
+}
+
+/// The whole cockpit: the API behind the activity log's route layer, the web UI, and `host_guard`
+/// in front of both.
+fn router(app: &Shared) -> Router {
+    api_routes()
         // After every route: records what a person changed through the API (activity.rs). A
         // route layer, so it sees the matched route, and inside `host_guard`, so only
         // authenticated requests reach it.
-        .route_layer(middleware::from_fn_with_state(app.clone(), activity::record_actions));
-    let router = api
+        .route_layer(middleware::from_fn_with_state(app.clone(), activity::record_actions))
         .merge(web_router(app.cfg.assets.as_deref()))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
-        .with_state(app.clone());
+        .with_state(app.clone())
+}
+
+/// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
+/// background loops.
+async fn serve() -> Result<()> {
+    let cfg = Settings::from_env()?;
+    // The port first, before anything touches colonies: a second mothership (one started at login
+    // while another runs by hand, or the reverse) must stop here, not after running recovery,
+    // backfills or reaping against the same data directory.
+    let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("{}", login_item::already_running_message(&cfg.bind));
+            // Under launchd/systemd a clean exit keeps the agent from restarting it in a loop.
+            if login_item::started_as_login_item() {
+                std::process::exit(0);
+            }
+            bail!("{} is already in use", cfg.bind);
+        }
+        Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
+    };
+    for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
+        std::fs::create_dir_all(cfg.data_dir.join(dir))?;
+    }
+    let (mut sessions, corrupt) = load_sessions(&cfg.data_dir.join("sessions.json"))?;
+    for s in &mut sessions {
+        if s.org.is_empty() {
+            s.org = s.repo.split('/').next().unwrap_or_default().to_string();
+        }
+    }
+    // Colonies persisted as finished while still carrying an attention flag predate the clearing
+    // every terminal transition now does; drop those stale flags before `recover` runs, so a
+    // stopped colony does not look like it still needs attention.
+    let stale_attention = sessions::clear_stale_attention(&mut sessions);
+    if stale_attention > 0 {
+        println!("sessions: cleared a stale attention flag from {stale_attention} finished colonies");
+    }
+    let (modules, modules_damage) = ModulesConfig::load(&cfg.config_dir.join("modules.json"))?;
+    // Both startup ruin reports show as one alert when both happen: the operator dismisses one
+    // banner, not two about the same bad disk.
+    let load_damage = match (corrupt, modules_damage) {
+        (Some(sessions), Some(modules)) => Some(StorageAlert {
+            message: format!("{}\n{}", sessions.message, modules.message),
+            ..sessions
+        }),
+        (sessions, modules) => sessions.or(modules),
+    };
+    let (agents, agent_problems) = modules::discover_agents(cfg.assets.as_deref());
+
+    // The cockpit API token, minted on first run: every request to the API proves itself with it.
+    let api_token = auth::load_or_create(&cfg.config_dir)?;
+
+    // Saved secrets: the system keychain where it answers, the 0600 files otherwise (secrets.rs).
+    // The probe can wait on a locked keyring, so it runs off the startup path.
+    secrets::install(secrets::Store::new(&cfg.config_dir, secrets::os_backend()));
+    std::thread::spawn(|| {
+        if let Some(store) = secrets::global() {
+            store.probe();
+        }
+    });
+
+    let app = Arc::new(App {
+        modules: RwLock::new(modules),
+        agents,
+        agent_problems,
+        sessions: RwLock::new(sessions),
+        redteam: redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
+        ledger: ledger::LedgerStore::load(&cfg.data_dir),
+        loops: loops::LoopStore::new(&cfg.config_dir),
+        session_persist: Mutex::new(()),
+        config_write: Mutex::new(()),
+        config_damage: std::sync::Mutex::new(None),
+        storage_alert: RwLock::new(None),
+        disk_verdict: Mutex::new(Default::default()),
+        load_damage,
+        runtimes: Mutex::new(HashMap::new()),
+        repo_locks: Mutex::new(HashMap::new()),
+        session_locks: Mutex::new(HashMap::new()),
+        mesh: Mutex::new(None),
+        login: Default::default(),
+        memory: memory::MemoryStore::new(cfg.data_dir.join("memory")),
+        gateway: gateway::Gateway::new(&cfg.data_dir)?,
+        repo_owners: RwLock::new(BTreeSet::new()),
+        answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
+        http_cache: cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), cache_store::HTTP_MAX_BYTES),
+        img_cache: cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), cache_store::IMG_MAX_BYTES),
+        new_orgs: RwLock::new(BTreeMap::new()),
+        org_descriptions: RwLock::new(BTreeMap::new()),
+        orgs_refreshed: Mutex::new(None),
+        orgs_failed_at: Mutex::new(None),
+        claude_account: Mutex::new(None),
+        github_viewer: Mutex::new(None),
+        claude_bins: Mutex::new(HashMap::new()),
+        runtime_cache: Mutex::new(None),
+        host_cache: Mutex::new(None),
+        provider_probe_cache: Mutex::new(HashMap::new()),
+        fleet_cache: fleet::FleetCache::new(),
+        pull: Mutex::new(Default::default()),
+        headroom: Mutex::new(Default::default()),
+        graft: Mutex::new(Default::default()),
+        telemetry: telemetry::Telemetry::new(&cfg.config_dir)?,
+        updates: version::Updates::new(&cfg.config_dir)?,
+        updater: update::Updater::new(),
+        usage: usage::Usage::new(&cfg.config_dir),
+        stream: stream::Hub::new(),
+        activity: activity::ActivityLog::new(),
+        api_tokens: api_tokens::Registry::load(&cfg.config_dir),
+        remote: remote::Remote::new(&cfg.config_dir)?,
+        api_token,
+        cfg,
+    });
+
+    let router = router(&app);
 
     println!("colonizer listening on http://{}", app.cfg.bind);
     println!("data: {}", app.cfg.data_dir.display());

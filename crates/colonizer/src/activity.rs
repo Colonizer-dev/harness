@@ -606,6 +606,12 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/maps/{owner}/{name}", "map.create", Target::None),
 ];
 
+/// The activity kind a route records, if any, for the route-table snapshot (server.rs's tests).
+#[cfg(test)]
+pub(crate) fn recorded_kind(method: &Method, route: &str) -> Option<&'static str> {
+    rule_for(method, route).map(|r| r.kind)
+}
+
 fn rule_for(method: &Method, route: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.method == method.as_str() && r.route == route)
 }
