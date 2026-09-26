@@ -154,7 +154,7 @@ The relay treats a browser request as a WebSocket when its `upgrade` header cont
 `upgrade` value is stripped as hop-by-hop and the request travels as a plain `req`. (The issue text
 named `/events` and `/ws`, but the cockpit's actual WebSocket routes are `/api/stream`,
 `/api/sessions/{id}/events` and `/api/sessions/{id}/terminal` —
-`crates/colonizer/src/main.rs:1584, 1586–1587`. Path-agnostic forwarding covers whichever exist.)
+`stream::routes` and `sessions::routes` in `crates/colonizer/src`. Path-agnostic forwarding covers whichever exist.)
 
 `ws_open` only flows relay → mothership. The mothership accepts by answering with a `res` of status
 `101` (added to the issue text), which carries no `body` frames — `ws_msg` and `ws_close` follow
@@ -214,12 +214,12 @@ the mothership never sees relay credentials. It adds no client-identifying heade
 
 ### Mothership
 
-Today the cockpit answers to loopback only. `host_guard` (`crates/colonizer/src/main.rs:926–1003`)
+Today the cockpit answers to loopback only. `host_guard` (`crates/colonizer/src/server.rs`)
 rejects any `Host` that is not `localhost`, `127.0.0.1`, `[::1]`, the bind host or in
 `COLONIZER_ALLOWED_HOSTS`, then requires the per-install API token (`crates/colonizer/src/auth.rs`)
 as `Authorization: Bearer` or the `colonizer_token` cookie; cookie-authenticated writes and
 WebSocket upgrades must also carry an `Origin` that matches the `Host` header (#375,
-`main.rs:954–962`). The cookie is `HttpOnly; SameSite=Strict; Path=/`, host-only, and carries no
+`server.rs`). The cookie is `HttpOnly; SameSite=Strict; Path=/`, host-only, and carries no
 `Secure` today (`auth.rs:131–133`).
 
 Tunnelled requests are dispatched in-process into the same axum router, so `host_guard` and the

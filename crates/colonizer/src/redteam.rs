@@ -1552,6 +1552,31 @@ pub async fn run_schedules(app: Shared) {
     }
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    let redteam = app.clone();
+    tokio::spawn(async move { run(redteam).await });
+    let schedules = app.clone();
+    tokio::spawn(async move { run_schedules(schedules).await });
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/redteam/runs", routing::get(list).post(create))
+        .route("/api/redteam/runs/{id}", routing::get(get))
+        .route("/api/redteam/runs/{id}/stop", routing::post(stop))
+        .route("/api/redteam/runs/{id}/synthesize", routing::post(synthesize))
+        .route("/api/redteam/runs/{id}/report", routing::get(report))
+        .route("/api/redteam/schedules", routing::get(list_schedules).post(create_schedule))
+        .route(
+            "/api/redteam/schedules/{id}",
+            routing::put(update_schedule).delete(delete_schedule),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

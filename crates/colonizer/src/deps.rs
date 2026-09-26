@@ -2689,6 +2689,19 @@ pub async fn repo_dependencies(
     )))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/repos/{owner}/{name}/published", routing::get(repo_published))
+        .route("/api/repos/{owner}/{name}/dependencies", routing::get(repo_dependencies))
+        .route("/api/repos/{owner}/{name}/supply-chain", routing::get(repo_supply_chain))
+        .route("/api/orgs/{org}/packages/published", routing::get(org_published))
+        .route("/api/orgs/{org}/packages/dependencies", routing::get(org_dependencies))
+        .route("/api/orgs/{org}/packages/supply-chain", routing::get(org_supply_chain))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

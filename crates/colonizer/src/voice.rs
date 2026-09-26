@@ -506,6 +506,20 @@ pub async fn transcribe(State(app): State<Shared>, headers: HeaderMap, body: Byt
     Ok(Json(json!({"text": transcript, "provider": svc.id})))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/voice", routing::get(status))
+        .route("/api/voice/key", routing::put(put_key))
+        // A clip is larger than axum's 2 MB default body limit; the handler checks the cap itself too.
+        .route(
+            "/api/voice/transcribe",
+            routing::post(transcribe).layer(axum::extract::DefaultBodyLimit::max(MAX_BYTES + 1)),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

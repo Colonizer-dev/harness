@@ -666,6 +666,13 @@ pub fn cli_set(config_dir: &Path, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/telemetry/usage", routing::get(status).put(put))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

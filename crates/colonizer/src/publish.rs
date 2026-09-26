@@ -1035,6 +1035,26 @@ pub(crate) fn publish_candidate_hash(pr_body: &[u8]) -> String {
     crate::authority::bind_candidate(&[pr_body])
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    let pr_watch = app.clone();
+    tokio::spawn(async move { watch_pull_requests(pr_watch).await });
+    // Merged colonies from before `merged_at` existed gain GitHub's time where it still reports
+    // one; best effort, off the serving path.
+    let merged_at_backfill = app.clone();
+    tokio::spawn(async move { backfill_merged_at(merged_at_backfill).await });
+    // Colonies whose pull request predates `changed_paths` gain its file list, for the monorepo
+    // package rows; best effort, off the serving path.
+    tokio::spawn(backfill_changed_paths(app.clone()));
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/sessions/{id}/publish", routing::post(publish))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

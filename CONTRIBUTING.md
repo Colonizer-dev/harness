@@ -23,6 +23,24 @@ CI (`scripts` job) validates the fragments and fails any other pull request that
 written under Unreleased into fragments. A deliberate correction to an already released entry takes
 the `changelog-edit` label.
 
+## Adding a module to the mothership
+
+Every list you touch is alphabetical, one entry per line, so parallel pull requests add their lines
+in different places:
+
+1. `mod <name>;` in `crates/colonizer/src/main.rs`.
+2. Routes: `pub(crate) fn routes() -> axum::Router<crate::Shared>` in your module, and
+   `.merge(crate::<name>::routes())` in `server::api_routes`. Then regenerate the route table with
+   `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` and commit
+   `crates/colonizer/routes.snap`. A new route is owner-only to scoped API tokens until it is
+   listed in `api_tokens::classify`.
+3. State: one field in the "module state" block of `App` and one line in the same block of
+   `App::new` (`app.rs`).
+4. Background work: `pub(crate) fn start_tasks(app: &Shared)` in your module, and
+   `crate::<name>::start_tasks(app);` in `server::start_tasks`.
+
+[docs/architecture.md](docs/architecture.md#adding-a-module) has the details.
+
 ## Checks
 
 ```sh

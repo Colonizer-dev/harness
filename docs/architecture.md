@@ -100,6 +100,60 @@ else — no keys, tokens, or request or response bodies ever reach it — and up
 built from scratch: the colony's own credential headers are dropped at the gateway and only the
 mothership's saved key for the provider is injected.
 
+## How the mothership's code is put together
+
+`crates/colonizer/src/main.rs` holds the command line entry point and the module list, nothing more.
+The rest of the mothership lives in three files and in the modules themselves:
+
+- `app.rs` defines `App`, the state every handler and background task shares as `Shared`, and
+  `App::new`, the one place it is built (tests build it there too). It also holds the loading of
+  `sessions.json` at startup and the `AppError` handlers answer with.
+- `server.rs` holds `serve`, which binds the port, loads the state and builds `App`. It also holds
+  `host_guard`, `api_routes`, which merges every module's routes, `router`, which puts the
+  activity log's route layer and then `host_guard` around them and adds the web UI, and
+  `start_tasks`, which starts every module's background work.
+- Each feature module owns its handlers, its routes (`pub(crate) fn routes()`) and its background
+  work (`pub(crate) fn start_tasks(app: &Shared)`).
+
+### Adding a module
+
+Most colonies' pull requests add something to the mothership, and several are open at once. Every
+list below is alphabetical, one entry per line, so two pull requests that each add a module land on
+different lines instead of both appending to the same spot.
+
+1. **The module.** Create `src/<name>.rs` and add `mod <name>;` in its alphabetical place in
+   `main.rs`.
+2. **Routes.** Give the module its own router, with its layers on the routes that need them (a body
+   limit, say):
+
+   ```rust
+   pub(crate) fn routes() -> axum::Router<crate::Shared> {
+       use axum::routing;
+       axum::Router::new()
+           .route("/api/<name>", routing::get(list).post(create))
+           .route("/api/<name>/{id}", routing::put(update).delete(remove))
+   }
+   ```
+
+   Then add `.merge(crate::<name>::routes())` in its alphabetical place in `server::api_routes`.
+   Every route is behind `host_guard` and the activity log's route layer without doing anything:
+   `router` wraps them all. What a scoped API token may call is decided separately, in
+   `api_tokens::classify`, which is closed by default, so a new route is owner-only until it is
+   listed there. Recording a change in History is a rule in `activity.rs`. Run
+   `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` to regenerate
+   `crates/colonizer/routes.snap`, the route table with each route's auth, token scope and
+   activity kind. Commit it with the change, so the change to the API's surface shows in review.
+3. **State.** If the module keeps state, give it a type of its own with a constructor taking what
+   it needs from `Settings`. Add one field to the "module state" block of `App` and one line to
+   the same block of `App::new`, both alphabetical. Handlers reach it as `app.<name>`.
+4. **Background work.** If it runs in the background (a loop, a watcher, a sweep, a backfill),
+   give it `pub(crate) fn start_tasks(app: &Shared)`, which spawns what it runs. Add
+   `crate::<name>::start_tasks(app);` in its alphabetical place in `server::start_tasks`.
+
+The functions are called `routes` and `start_tasks` in every module. The session modules
+(`sessions`, `lifecycle`, `publish`, `queue`, `events`) glob-import one another, so a name like
+`start` would collide with the local variables inside `tokio::select!`.
+
 ## Shared memory access
 
 Shared memory is read-only from inside a colony. What each part of a colony may do:
@@ -408,7 +462,7 @@ supply-chain scans, lines of code, registry facts — are answered from a cache 
 waits on `gh`, a clone or a registry, and a mothership restart or a GitHub outage does not empty
 the screen.
 
-- **Answer cache** (`AnswerCache` in `main.rs`, disk layer in `cache_store.rs`). Every
+- **Answer cache** (`AnswerCache` in `answer_cache.rs`, disk layer in `cache_store.rs`). Every
   `cached_answer`/`cached_answer_nowait` key keeps its value in memory and, as one JSON file per
   key (`<data>/cache/answers/<sha256 of key>`: `{key, fetched_at, etag, last_modified, sha,
   value}`), on disk. Files are written to a temporary name and renamed, read lazily the first time

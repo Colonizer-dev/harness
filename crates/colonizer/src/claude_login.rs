@@ -630,6 +630,17 @@ fn estimated_expiry(saved: DateTime<Utc>) -> DateTime<Utc> {
     saved + chrono::Duration::days(365)
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/claude-login", routing::get(status))
+        .route("/api/claude-login/start", routing::post(start))
+        .route("/api/claude-login/code", routing::post(submit_code))
+        .route("/api/claude-login/cancel", routing::post(cancel))
+}
+
 #[cfg(test)]
 mod org_identity_tests {
     use super::*;

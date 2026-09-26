@@ -543,6 +543,15 @@ pub(crate) async fn purge_bundles(app: &App, id: &str) -> (u32, Option<String>) 
     (purged, trouble)
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/archive", routing::get(list))
+        .route("/api/archive/retention", routing::post(retention))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

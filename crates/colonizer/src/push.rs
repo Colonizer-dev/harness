@@ -582,6 +582,19 @@ async fn report(app: &App, session: Option<&str>, what: String, level: &str) {
     }
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/push/key", routing::get(public_key))
+        .route(
+            "/api/push/subscriptions",
+            routing::get(list_subscriptions).post(add_subscription),
+        )
+        .route("/api/push/subscriptions/{id}", routing::delete(delete_subscription))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

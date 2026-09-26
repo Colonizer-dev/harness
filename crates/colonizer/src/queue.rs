@@ -783,6 +783,12 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
     }
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    let queue = app.clone();
+    tokio::spawn(async move { run_queue(queue).await });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

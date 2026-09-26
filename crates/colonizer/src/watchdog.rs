@@ -228,6 +228,11 @@ async fn check_all(app: &Shared) {
     }
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    tokio::spawn(run(app.clone()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -327,6 +327,13 @@ async fn serve(app: Shared, socket: WebSocket) {
     }
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/stream", routing::get(handler))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

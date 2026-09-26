@@ -182,6 +182,15 @@ pub async fn create_issue(
     })))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/repos/{owner}/{name}/issues", routing::post(create_issue))
+        .route("/api/colonize/draft", routing::post(draft))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

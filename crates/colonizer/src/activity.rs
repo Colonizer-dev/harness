@@ -387,7 +387,7 @@ enum Target {
     None,
 }
 
-/// One recorded route: method, the route as `main.rs` registers it, the kind its line gets and what
+/// One recorded route: method, the route as its module's `routes()` registers it, the kind its line gets and what
 /// it is about. Routes not listed here are not recorded: reads, and writes that are not a person
 /// changing something (chat messages, drafts, uploads, probes).
 struct Rule {
@@ -605,6 +605,12 @@ const RULES: &[Rule] = &[
     ),
     rule("POST", "/api/maps/{owner}/{name}", "map.create", Target::None),
 ];
+
+/// The activity kind a route records, if any, for the route-table snapshot (server.rs's tests).
+#[cfg(test)]
+pub(crate) fn recorded_kind(method: &Method, route: &str) -> Option<&'static str> {
+    rule_for(method, route).map(|r| r.kind)
+}
 
 fn rule_for(method: &Method, route: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.method == method.as_str() && r.route == route)
@@ -1049,6 +1055,13 @@ pub async fn list(State(app): State<Shared>, Query(query): Query<ListQuery>) -> 
     Ok(Json(page))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/activity", routing::get(list))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,7 +1333,7 @@ mod tests {
                 }),
             )
             .route_layer(axum::middleware::from_fn_with_state(app.clone(), record_actions))
-            .layer(axum::middleware::from_fn_with_state(app.clone(), crate::host_guard))
+            .layer(axum::middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
             .with_state(app.clone())
     }
 

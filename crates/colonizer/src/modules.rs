@@ -696,6 +696,15 @@ fn validate_settings(
     Ok(out)
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/modules", routing::get(list))
+        .route("/api/modules/{kind}", routing::put(update))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

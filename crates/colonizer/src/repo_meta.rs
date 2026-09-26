@@ -137,6 +137,13 @@ pub async fn meta(State(app): State<Shared>, Path((owner, name)): Path<(String, 
     Ok(Json(value))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/repos/{owner}/{name}/meta", routing::get(meta))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

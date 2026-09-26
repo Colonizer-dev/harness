@@ -928,6 +928,15 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     Ok(Json(json!({"org": org, "settings": req.settings})))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/orgs", routing::get(list))
+        .route("/api/orgs/{org}", routing::put(put))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,8 +8,10 @@
 //! Disabling never stops a running mothership, and so never touches a live colony: it removes the
 //! agent so the next login does not start one, and leaves the current process to the operator.
 
-use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use crate::{ApiResult, Shared};
+use anyhow::{Context, Result, anyhow, bail};
+use axum::{Json, extract::State};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -367,6 +369,36 @@ pub fn command(action: &str, data_dir: &Path) -> Result<()> {
         println!("  note:       {note}");
     }
     Ok(())
+}
+
+/// `GET /api/login-item`: whether the mothership starts at login.
+async fn login_item_status(State(app): State<Shared>) -> ApiResult<Status> {
+    let data_dir = app.cfg.data_dir.clone();
+    let status = tokio::task::spawn_blocking(move || status(&data_dir))
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+    Ok(Json(status))
+}
+
+#[derive(Deserialize)]
+struct LoginItemRequest {
+    enabled: bool,
+}
+
+/// `POST /api/login-item {enabled}`: the Settings switch; the same code as `colonizer login-item`.
+async fn login_item_set(State(app): State<Shared>, Json(req): Json<LoginItemRequest>) -> ApiResult<Status> {
+    let data_dir = app.cfg.data_dir.clone();
+    let status = tokio::task::spawn_blocking(move || if req.enabled { enable(&data_dir) } else { disable(&data_dir) })
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+    Ok(Json(status))
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/login-item", routing::get(login_item_status).post(login_item_set))
 }
 
 #[cfg(test)]

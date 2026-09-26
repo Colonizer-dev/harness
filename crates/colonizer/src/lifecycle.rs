@@ -1137,6 +1137,46 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q):
     )))
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    let recovery = app.clone();
+    tokio::spawn(async move {
+        recover(&recovery).await;
+        // Once recovery has settled, an app directory kept by an earlier update
+        // can go, unless a colony that survived it still mounts from there.
+        let live: Vec<std::path::PathBuf> = recovery
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| crate::update::will_reconnect(s.status))
+            .filter_map(|s| s.app_slot.as_deref().map(std::path::PathBuf::from))
+            .collect();
+        for gone in crate::update::sweep_slots(recovery.cfg.assets.as_deref(), &live) {
+            println!("removed the app directory left by an earlier update: {}", gone.display());
+        }
+        // Issue #321: with recovery settled, drop the claims this mothership still carries for
+        // colonies it no longer holds — one that died while the harness was down never released
+        // its own. Spawned: never on the boot path, and a no-op under the kill switch.
+        crate::claims::reconcile_orphaned_claims(recovery).await;
+    });
+    let sandbox_watch = app.clone();
+    tokio::spawn(async move { watch_sandboxes(sandbox_watch).await });
+    let disk_watch = app.clone();
+    tokio::spawn(async move { watch_host_disks(disk_watch).await });
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/sessions/{id}", routing::delete(delete))
+        .route("/api/sessions/{id}/resume", routing::post(resume))
+        .route("/api/sessions/{id}/stop", routing::post(stop))
+        .route("/api/sessions/{id}/cleanup", routing::post(cleanup))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

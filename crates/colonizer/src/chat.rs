@@ -2148,6 +2148,32 @@ async fn run_reply(
     let _ = tx.send(tag(last)).await;
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/chat", routing::get(list).post(create))
+        .route("/api/chat/models", routing::get(models))
+        .route("/api/chat/prefs", routing::get(prefs))
+        .route("/api/chat/prefs/personas/{id}", routing::put(put_persona))
+        .route("/api/chat/prefs/feedback/{message}", routing::put(put_feedback))
+        .route("/api/chat/{id}", routing::get(get).patch(patch).delete(delete))
+        .route(
+            "/api/chat/{id}/messages",
+            routing::post(send).layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT)),
+        )
+        .route(
+            "/api/chat/{id}/compare",
+            routing::post(compare).layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT)),
+        )
+        .route("/api/chat/{id}/pick", routing::post(pick))
+        .route("/api/chat/{id}/fork", routing::post(fork))
+        .route("/api/chat/{id}/title", routing::post(retitle))
+        .route("/api/chat/{id}/export", routing::get(export))
+        .route("/api/chat/{id}/issue", routing::post(file_issue))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

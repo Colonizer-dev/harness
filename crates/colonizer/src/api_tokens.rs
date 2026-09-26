@@ -428,6 +428,19 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
     }
 }
 
+/// The scoped-token rule `classify` applies to a request, spelled for the route-table snapshot
+/// (server.rs's tests): `read`, `session>=operate`, `map`, `launch` or `owner`.
+#[cfg(test)]
+pub(crate) fn describe_need(method: &Method, path: &str) -> String {
+    match classify(method, path) {
+        Need::Bare(scope) => scope.as_str().to_string(),
+        Need::Session { at_least, .. } => format!("session>={}", at_least.as_str()),
+        Need::Map { .. } => "map".to_string(),
+        Need::Launch => "launch".to_string(),
+        Need::Owner => "owner".to_string(),
+    }
+}
+
 /// What `authorize` refuses, as the HTTP response it becomes.
 pub(crate) enum Deny {
     /// The scope does not reach this route: 403, naming the token's scope and the route.
@@ -569,6 +582,18 @@ pub async fn self_view(scoped: Option<axum::Extension<ScopedToken>>) -> Json<Val
         })),
         None => Json(json!({"owner": true, "scope": "owner", "orgs": [], "repos": []})),
     }
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        // Scoped API tokens (issue #508): the owner mints and revokes them; `self` is the one
+        // route a scoped token may read, and `host_guard` decides the rest from the token's scope.
+        .route("/api/tokens", routing::get(list).post(create))
+        .route("/api/tokens/self", routing::get(self_view))
+        .route("/api/tokens/{id}", routing::delete(revoke))
 }
 
 #[cfg(test)]
@@ -917,14 +942,14 @@ mod tests {
     fn guard_router(app: &Shared) -> axum::Router<()> {
         use axum::routing::{get, post};
         Router::new()
-            .route("/api/status", get(crate::status))
+            .route("/api/status", get(crate::status::status))
             .route("/api/sessions", get(crate::sessions::list).post(crate::sessions::create))
             .route("/api/sessions/{id}", get(crate::sessions::get))
             .route("/api/sessions/{id}/question", get(crate::sessions::question))
             .route("/api/sessions/{id}/answer", post(crate::sessions::answer))
             .route("/api/tokens", get(list).post(create))
             .route("/api/tokens/self", get(self_view))
-            .layer(axum::middleware::from_fn_with_state(app.clone(), crate::host_guard))
+            .layer(axum::middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
             .with_state(app.clone())
     }
 

@@ -2413,6 +2413,16 @@ impl LabelFilter {
     }
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/settings/github-token", routing::post(set_token).delete(delete_token))
+        .route("/api/repos", routing::get(list_repos))
+        .route("/api/repos/{owner}/{name}/issues", routing::get(list_issues))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

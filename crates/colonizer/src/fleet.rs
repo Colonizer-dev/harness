@@ -217,6 +217,13 @@ pub async fn list_hosts_handler(State(app): State<Shared>) -> Json<Value> {
     Json(json!({"hosts": list_hosts(&app).await}))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/hosts", routing::get(list_hosts_handler))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

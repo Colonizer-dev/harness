@@ -1181,6 +1181,16 @@ pub async fn models(State(app): State<Shared>) -> Json<Vec<Value>> {
     Json(out)
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/providers", routing::get(list))
+        .route("/api/providers/{id}", routing::put(put).delete(delete))
+        .route("/api/models", routing::get(models))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
