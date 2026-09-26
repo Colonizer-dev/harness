@@ -4,8 +4,8 @@ One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exa
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`update`, `open`,
 `login-item`, `telemetry`), and the rest are clients of a mothership already running somewhere —
-here or across a tailnet (`launch`, `list`, `status`, `logs`, `ask`, `answer`, `stop`, `resume`,
-`pr`, `token`, `mcp`). Settings still come from the environment, never flags — every
+here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
+`resume`, `pr`, `map`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
@@ -64,11 +64,15 @@ colonizer launch owner/repo --issue 42 --no-autopilot  # one issue, holding auto
 colonizer list --org acme --status running             # colonies this token may see, newest first
 colonizer status abc123                                # where it stands, what it costs, what it is doing now
 colonizer logs abc123 -f                               # recent events; -f streams until Ctrl-C
+colonizer diff abc123                                  # everything the colony changed, as a unified diff
+colonizer diff abc123 --stat                           # per-file +/- counts instead of the diff text
 colonizer ask abc123                                   # the question it is waiting on, options numbered
 colonizer answer abc123 1                              # by option number, label, or free text
 colonizer stop abc123                                  # the microVM goes away; the worktree is kept
 colonizer resume abc123                                # back on the kept worktree where it was left
 colonizer pr abc123                                    # the pull request URL and state
+colonizer map owner/repo                               # the repository's architecture map, as a text outline
+colonizer map owner/repo --find login                  # only the components a query matches
 ```
 
 `launch` takes the repository as `owner/repo`, an optional task as the last argument, and
@@ -80,6 +84,20 @@ whole-label match case-insensitively, and anything else goes to the agent as a f
 but a bare number that names no option is refused, never silently read as text, and with several
 questions pending only a number or label of the first is accepted (`colonizer ask <id>` shows the
 rest). An empty `list` or `token list` prints a note to stderr; `--json` prints `[]`.
+
+`diff` prints the colony's whole diff: everything it changed against the merge-base with its
+base branch — committed and uncommitted tracked edits, plus untracked new files. The colony
+need not be live (a stopped colony keeps its worktree), but it must have a worktree: one that
+never booted or was cleaned up is a conflict (exit 5). The raw diff goes to stdout, so it
+pipes; a truncated diff (the API caps it) is noted on stderr. `--stat` prints one
+`+added -removed path` line per file and a total instead.
+
+`map` prints the repository's architecture map — drawn from the cockpit's Map view — as a
+compact text outline: title and revision, the components grouped under their boundaries with
+their source paths, then the connections. A repository with no map yet exits 4 with a note on
+stderr. `--find QUERY` prints only the components matching the query, case-insensitively: a
+substring of a label, id, type or source path, or a file under a component's source directory
+(`src/auth/login.rs` finds the component whose source is `src/auth`).
 
 Tokens — the owner token only (see below):
 
@@ -97,8 +115,10 @@ colonizer token revoke tok_x
 `--json` prints machine-readable JSON instead of the human rendering, where a command has one —
 what the mothership answered, pretty-printed, for `list`, `status`, `ask`, `stop`, `resume` and
 the `token` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
-the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, and `answer`
-echoes the answer body it sent. Scripts should prefer it to parsing the human columns.
+the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
+diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
+stored map document — or, with `--find`, the search result — and `answer` echoes the answer body
+it sent. Scripts should prefer it to parsing the human columns.
 
 ## Exit codes
 
@@ -142,7 +162,7 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 
 | Scope | What it may call |
 | :--- | :--- |
-| `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/question`, the events WebSocket, the `/api/maps/…` reads, and `GET /api/tokens/self` |
+| `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`, the events WebSocket, the `/api/maps/…` reads, and `GET /api/tokens/self` |
 | `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/stop`, `/resume` |
 | `launch` | Start colonies: `POST /api/sessions` |
 
@@ -172,8 +192,7 @@ budget). The enforcement is the same for every client of the API, the CLI includ
 
 ## Not yet
 
-- `diff`, `loop` and `map` subcommands — maps and loops live in the cockpit
-  ([loops.md](loops.md)).
+- A `loop` subcommand — loops live in the cockpit ([loops.md](loops.md)).
 - Following a pull request's checks: `colonizer pr` prints the checks state once, when the
   mothership knows it, but nothing waits on it.
 - Token management in the Settings UI — the CLI (owner token) and the API are the only ways.

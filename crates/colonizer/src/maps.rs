@@ -604,14 +604,10 @@ async fn touched_for(app: &App, s: &Session) -> Option<Vec<String>> {
         .await
         .map(|out| github::porcelain_paths(&out))
         .unwrap_or_default();
-    let base = match s.base.as_deref().filter(|b| !b.is_empty()) {
-        Some(b) => format!("origin/{b}"),
-        None => "origin/HEAD".to_string(),
-    };
     let mut diff = app.git(admin);
     diff.arg("--work-tree")
         .arg(&s.worktree)
-        .args(["diff", "--name-only", "-z", &format!("{base}...HEAD")]);
+        .args(["diff", "--name-only", "-z", &format!("{}...HEAD", base_ref(s))]);
     let committed = exec_within(PROBE_LIMIT, &mut diff)
         .await
         .map(|out| name_only_paths(&out))
@@ -806,24 +802,32 @@ fn new_file_diff(path: &str, text: &str) -> String {
     out
 }
 
+/// The branch a colony's changes are measured against: `origin/<base>`, else `origin/HEAD`.
+fn base_ref(s: &Session) -> String {
+    match s.base.as_deref().filter(|b| !b.is_empty()) {
+        Some(b) => format!("origin/{b}"),
+        None => "origin/HEAD".to_string(),
+    }
+}
+
+/// The commit a colony's work started from: the merge-base of its base branch and HEAD, read
+/// through the admin dir (never the worktree's `.git`, which the VM controls). `None` on any failure.
+async fn merge_base(app: &App, s: &Session) -> Option<String> {
+    let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let mut cmd = app.git(admin);
+    cmd.arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["merge-base", &base_ref(s), "HEAD"]);
+    let from = exec_within(FILE_DIFF_TIME, &mut cmd).await.ok()?.trim().to_string();
+    (!from.is_empty() && from.chars().all(|c| c.is_ascii_hexdigit())).then_some(from)
+}
+
 /// What a colony changed in `path` since it branched: committed and uncommitted edits together
 /// (`git diff <merge-base>` against the work tree), or the whole file for a new untracked one.
 /// `None` when it has not changed the file, or the probe fails or times out.
 async fn file_diff(app: &App, s: &Session, path: &str) -> Option<String> {
     let admin = FsPath::new(s.git_admin_dir.as_deref()?);
-    let base = match s.base.as_deref().filter(|b| !b.is_empty()) {
-        Some(b) => format!("origin/{b}"),
-        None => "origin/HEAD".to_string(),
-    };
-    let mut merge_base = app.git(admin);
-    merge_base
-        .arg("--work-tree")
-        .arg(&s.worktree)
-        .args(["merge-base", &base, "HEAD"]);
-    let from = exec_within(FILE_DIFF_TIME, &mut merge_base).await.ok()?.trim().to_string();
-    if from.is_empty() || !from.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
+    let from = merge_base(app, s).await?;
     let mut diff = app.git(admin);
     diff.arg("--work-tree")
         .arg(&s.worktree)
@@ -850,6 +854,143 @@ async fn file_diff(app: &App, s: &Session, path: &str) -> Option<String> {
     }
     let text = tokio::fs::read_to_string(&full).await.ok()?;
     Some(new_file_diff(path, &text))
+}
+
+/// The untracked (`??`) paths in a `git status --porcelain -z` output. An untracked entry is
+/// never a rename, so there is no second field to skip like [`github::porcelain_paths`] does.
+pub(crate) fn untracked_paths(out: &str) -> Vec<String> {
+    out.split('\0')
+        .filter(|entry| entry.starts_with("?? "))
+        .filter_map(|entry| entry.get(3..))
+        .filter(|path| !path.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// The path of a symmetric `diff --git a/X b/X` header — the seed for sections that carry no
+/// `+++` header of their own (binary files, pure renames).
+fn symmetric_header_path(header: &str) -> Option<&str> {
+    let (a, b) = header.split_once(" b/")?;
+    (a.strip_prefix("a/")? == b).then_some(b)
+}
+
+/// Per-file line counts for a whole-colony diff, read off the unified diff text: the `+`/`-` lines
+/// inside each `diff --git` section's hunks. File headers (`+++`/`---`/`rename to`) count only
+/// before the section's first `@@`; headerless sections fall back to the symmetric header and count
+/// 0/0. A truncated diff's stat covers exactly what is shown. Pure, so it is tested without a colony.
+pub(crate) fn diff_stat(diff: &str) -> Vec<(String, usize, usize)> {
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            files.push((symmetric_header_path(header).unwrap_or_default().to_string(), 0, 0));
+            in_hunk = false;
+            continue;
+        }
+        let Some((path, added, removed)) = files.last_mut() else {
+            continue;
+        };
+        if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk {
+            // Inside a hunk, "+"/"-" are content: a "+++ b/x" line here is an added line.
+            *added += usize::from(line.starts_with('+'));
+            *removed += usize::from(line.starts_with('-'));
+        } else if let Some(rest) = line.strip_prefix("+++ b/") {
+            *path = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("--- a/") {
+            if path.is_empty() {
+                *path = rest.to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("rename to ") {
+            *path = rest.to_string();
+        }
+    }
+    files.retain(|(path, ..)| !path.is_empty());
+    files
+}
+
+/// `GET /api/sessions/{id}/diff`: everything the colony changed against the merge-base with its
+/// base branch — committed and uncommitted tracked edits plus synthesised untracked new files —
+/// as one unified diff with per-file counts, capped at [`FILE_DIFF_LIMIT`]. Needs a worktree, not
+/// a live colony; a stopped one keeps its worktree, a never-booted or cleaned-up one has nothing.
+pub async fn session_diff(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let Some(admin) = s
+        .git_admin_dir
+        .as_deref()
+        .filter(|_| !s.cleaned_up && FsPath::new(&s.worktree).is_dir())
+    else {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this colony has no worktree to diff: it never booted, or it was cleaned up",
+        ));
+    };
+    let admin = FsPath::new(admin);
+    let from = merge_base(&app, &s).await.ok_or_else(|| {
+        client_error(
+            StatusCode::CONFLICT,
+            &format!("could not find where this colony branched from {}", base_ref(&s)),
+        )
+    })?;
+    let mut cmd = app.git(admin);
+    cmd.arg("--work-tree")
+        .arg(&s.worktree)
+        // Files past the cap diff as "Binary files … differ" instead of streaming into memory.
+        .args(["-c", &format!("core.bigFileThreshold={FILE_DIFF_LIMIT}")])
+        .args(["diff", "--no-color", "--no-ext-diff", "--no-textconv", &from]);
+    let mut diff = exec_within(FILE_DIFF_TIME, &mut cmd)
+        .await
+        .map_err(|e| client_error(StatusCode::CONFLICT, &format!("the colony's diff failed: {e:#}")))?;
+    // Untracked files have no diff against the merge-base; each is synthesised as new. The
+    // worktree is colony-written, so nothing outside it may be read: `read_regular_file` opens
+    // with O_NOFOLLOW and reads through that one handle, and the canonicalize check is defence
+    // in depth against a directory component swapped for a symlink.
+    let mut status = app.git(admin);
+    status
+        .arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"]);
+    let untracked = exec_within(FILE_DIFF_TIME, &mut status)
+        .await
+        .map(|out| untracked_paths(&out))
+        .unwrap_or_default();
+    let untracked_cut = untracked.len() > MAX_TOUCHED;
+    let root = tokio::fs::canonicalize(&s.worktree).await.ok();
+    for path in untracked.iter().take(MAX_TOUCHED) {
+        let full = FsPath::new(&s.worktree).join(path);
+        let inside = match (&root, tokio::fs::canonicalize(&full).await) {
+            (Some(root), Ok(real)) => real.starts_with(root),
+            _ => false,
+        };
+        if !inside {
+            continue;
+        }
+        let Ok(text) = github::read_regular_file(&full, FILE_DIFF_LIMIT as u64) else {
+            continue; // a symlink, a FIFO, a binary or an oversized file is no readable diff
+        };
+        diff.push_str(&new_file_diff(path, &text));
+    }
+    let (diff, truncated) = cap_diff(diff, FILE_DIFF_LIMIT);
+    let truncated = truncated || untracked_cut;
+    let files = diff_stat(&diff);
+    let (added, removed) = files.iter().fold((0, 0), |(a, r), (_, fa, fr)| (a + fa, r + fr));
+    Ok(Json(json!({
+        "id": s.id,
+        "repo": s.repo,
+        "base": s.base,
+        "files": files
+            .iter()
+            .map(|(path, added, removed)| json!({"path": path, "added": added, "removed": removed}))
+            .collect::<Vec<_>>(),
+        "added": added,
+        "removed": removed,
+        "diff": diff,
+        "truncated": truncated,
+    })))
 }
 
 #[derive(serde::Deserialize)]
@@ -1008,6 +1149,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/maps/{owner}/{name}/files", routing::get(files))
         .route("/api/maps/{owner}/{name}/file", routing::get(file))
         .route("/api/touched", routing::get(touched))
+        .route("/api/sessions/{id}/diff", routing::get(session_diff))
 }
 
 #[cfg(test)]
@@ -1373,5 +1515,149 @@ mod tests {
         assert!(p.contains("--repo-root /workspace"));
         assert!(p.contains("Do not change anything in /workspace"));
         assert!(p.contains("do not write\n/harness/out/pr.md") || p.contains("do not write /harness/out/pr.md"));
+    }
+
+    #[test]
+    fn the_untracked_paths_come_out_of_the_porcelain_z_output() {
+        assert_eq!(
+            untracked_paths("?? new.rs\0 M edited.rs\0?? dir/inner.rs\0"),
+            ["new.rs", "dir/inner.rs"]
+        );
+        assert!(untracked_paths("").is_empty());
+    }
+
+    #[test]
+    fn the_diff_stat_counts_the_lines_the_diff_shows() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,2 +1,4 @@
+-old
++new
++++ b/not-a-header
+-- nor is this one
+diff --git a/b/gone.rs b/b/gone.rs
+--- a/b/gone.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-x
+diff --git a/c/new.rs b/c/new.rs
+--- /dev/null
++++ b/c/new.rs
+@@ -0,0 +1 @@
++z
+diff --git a/old/name.rs b/new/name.rs
+similarity index 100%
+rename from old/name.rs
+rename to new/name.rs
+diff --git a/img.png b/img.png
+index 111..222 100644
+Binary files a/img.png and b/img.png differ
+";
+        assert_eq!(
+            diff_stat(diff),
+            vec![
+                ("src/a.rs".to_string(), 2, 2),
+                ("b/gone.rs".to_string(), 0, 1),
+                ("c/new.rs".to_string(), 1, 0),
+                ("new/name.rs".to_string(), 0, 0),
+                ("img.png".to_string(), 0, 0),
+            ],
+            "header-shaped lines inside a hunk are content; a deletion keeps its --- path, a new \
+file its +++ one, a rename and a binary file come from their own headers at 0/0"
+        );
+        assert!(diff_stat("").is_empty());
+    }
+
+    /// The whole-colony diff of a stopped colony: the committed change, the uncommitted one and
+    /// the untracked file all appear, and a symlink planted in the worktree reads no host file.
+    #[tokio::test]
+    async fn a_colony_diff_covers_everything_the_colony_changed() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-diff-{}", crate::util::short_id()));
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // The env_remove calls drop the GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE a colony sandbox
+        // exports for its own worktree, so the fixture's git stays inside the scratch repo (the
+        // handler's own probes get the same hygiene from `git_plain`).
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&worktree)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["-c", "user.email=test@colonizer", "-c", "user.name=test"])
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        // A base branch with one commit, then the colony's: one committed file, one commit past
+        // the big-file threshold, one uncommitted edit, one untracked file and one escaping symlink.
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("secret.txt"), "host file\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["checkout", "-qb", "colony"]);
+        std::fs::write(worktree.join("b.txt"), "committed\n").unwrap();
+        git(&["add", "b.txt"]);
+        git(&["commit", "-qm", "colony work"]);
+        std::fs::write(worktree.join("big.txt"), "x".repeat(FILE_DIFF_LIMIT + 1)).unwrap();
+        git(&["add", "big.txt"]);
+        git(&["commit", "-qm", "a file past the diff cap"]);
+        std::fs::write(worktree.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(worktree.join("untracked.txt"), "fresh\n").unwrap();
+        std::os::unix::fs::symlink(root.join("secret.txt"), worktree.join("escape")).unwrap();
+
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Stopped);
+        s.id = "d1".into();
+        s.base = Some("main".into());
+        s.worktree = worktree.to_string_lossy().into_owned();
+        s.git_admin_dir = Some(worktree.join(".git").to_string_lossy().into_owned());
+        app.sessions.write().await.push(s);
+
+        let Json(value) = session_diff(State(app.clone()), Path("d1".into())).await.unwrap();
+        let diff = value["diff"].as_str().unwrap();
+        assert!(diff.contains("b.txt"), "the committed change is in the diff");
+        assert!(diff.contains("+two"), "the uncommitted change is in the diff");
+        assert!(diff.contains("+fresh"), "the untracked file is synthesised as new");
+        assert!(!diff.contains("host file"), "the planted symlink reads no host file");
+        assert!(
+            diff.contains("and b/big.txt differ"),
+            "a file past the cap diffs as binary, not as text"
+        );
+        let paths: Vec<&str> = value["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["a.txt", "b.txt", "big.txt", "untracked.txt"],
+            "the binary file counts 0/0 but stays listed"
+        );
+        assert_eq!(
+            (
+                value["base"].as_str(),
+                value["added"].as_u64(),
+                value["removed"].as_u64(),
+                value["truncated"].as_bool()
+            ),
+            (Some("main"), Some(3), Some(0), Some(false))
+        );
+
+        // A colony that never booted has no worktree to diff: a 409, and an unknown id stays a 404.
+        let mut ghost = crate::sessions::tests::colony("acme", SessionStatus::Queued);
+        ghost.id = "d2".into();
+        app.sessions.write().await.push(ghost);
+        let err = session_diff(State(app.clone()), Path("d2".into())).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        let err = session_diff(State(app), Path("nope".into())).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

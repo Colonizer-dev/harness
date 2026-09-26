@@ -19,6 +19,8 @@ The tool set is the token's scope, resolved once at startup from the mothership
 | `colony_status` | read | `id` | the colony's detail — status, branch, pull request, cost, and what it is doing now |
 | `colony_question` | read | `id` | the question the colony is waiting on: `question_id`, `risk`, and the questions with their options; plain text when nothing is pending |
 | `colony_pr` | read | `id` | one sentence: the pull request URL and state (checks state when known), or that there is none yet |
+| `colony_diff` | read | `id`, `stat_only?` | everything the colony changed against its base branch: `{id, repo, base, files, added, removed, diff, truncated}`; `stat_only` omits the diff text |
+| `search_repo_map` | read | `repo`, `query` | the repository's architecture map searched for components matching the query — a label, id, type, source path, or a file under one — with the connections that touch each hit; a tool error when the repository has no map yet |
 | `answer_colony` | operate | `id`, `answer` | a confirmation. The answer matches the pending question the way `colonizer answer` does: an option's 1-based number, its whole label, or free text |
 | `stop_colony` | operate | `id` | a confirmation; the microVM goes away, the worktree is kept for a later resume |
 | `resume_colony` | operate | `id` | a confirmation with the colony's new status |

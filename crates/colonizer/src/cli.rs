@@ -1,7 +1,7 @@
 //! The `colonizer` command line, built on clap: the commands that run against this machine
 //! (`version`, `update`, `open`, `login-item`, `telemetry`), and the client commands that drive a
 //! mothership already running somewhere — here or across a tailnet (`launch`, `list`, `status`,
-//! `logs`, `ask`, `answer`, `stop`, `resume`, `pr`, `token`, `mcp`).
+//! `logs`, `diff`, `ask`, `answer`, `stop`, `resume`, `pr`, `map`, `token`, `mcp`).
 //!
 //! With no subcommand at all the binary starts the mothership, exactly as it always has.
 //!
@@ -156,6 +156,13 @@ enum Command {
         #[arg(short = 'f', long)]
         follow: bool,
     },
+    /// Print everything a colony has changed against its base branch, as a unified diff
+    Diff {
+        id: String,
+        /// Print per-file +/- counts instead of the diff text
+        #[arg(long)]
+        stat: bool,
+    },
     /// Print the question a colony is waiting on, with its options numbered
     Ask { id: String },
     /// Answer a colony's pending question: an option's number, its label, or free text
@@ -171,6 +178,15 @@ enum Command {
     Resume { id: String },
     /// Print a colony's pull request URL and state
     Pr { id: String },
+    /// Print a repository's architecture map as a text outline, or search it with --find
+    Map {
+        /// The repository the map was drawn from, as owner/repo
+        #[arg(value_name = "OWNER/REPO")]
+        repo: String,
+        /// Print only the components matching this query: a label, id, type or source path
+        #[arg(long, value_name = "QUERY")]
+        find: Option<String>,
+    },
     /// Serve this harness to MCP clients over stdio (tools for listing, watching and driving
     /// colonies); the tool set follows the token's scope
     Mcp {
@@ -859,6 +875,41 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                 .await
             }
         }
+        Command::Diff { id, stat } => {
+            let json = cli.json;
+            client_command(cli, move |machine| async move {
+                let body = machine.get(&format!("/api/sessions/{id}/diff")).await?;
+                if json {
+                    println!("{}", pretty(&body)?);
+                    return Ok(EXIT_OK);
+                }
+                if body["truncated"] == json!(true) {
+                    eprintln!("note: the diff was truncated; the colony's worktree has the whole thing");
+                }
+                if !stat {
+                    // The raw diff on stdout, so it pipes into `git apply`, a pager or a file.
+                    print!("{}", body["diff"].as_str().unwrap_or_default());
+                    return Ok(EXIT_OK);
+                }
+                let files = values(&body["files"]);
+                let count = |v: &Value| v.as_u64().unwrap_or(0);
+                let stat = |a: u64, r: u64, what: &str| format!("+{a:<4} -{r:<4} {what}");
+                for file in files {
+                    println!(
+                        "{}",
+                        stat(
+                            count(&file["added"]),
+                            count(&file["removed"]),
+                            file["path"].as_str().unwrap_or("?")
+                        )
+                    );
+                }
+                let total = format!("across {} files", files.len());
+                println!("{}", stat(count(&body["added"]), count(&body["removed"]), &total));
+                Ok(EXIT_OK)
+            })
+            .await
+        }
         Command::Ask { id } => {
             let json = cli.json;
             client_command(cli, move |machine| async move {
@@ -974,6 +1025,41 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                         println!("{url} ({state}{ci})");
                     }
                     None => println!("no pull request yet"),
+                }
+                Ok(EXIT_OK)
+            })
+            .await
+        }
+        Command::Map { repo, find } => {
+            let json = cli.json;
+            client_command(cli, move |machine| async move {
+                let Some((owner, name)) = repo.split_once('/') else {
+                    return Err(Fail::Transport(anyhow::anyhow!(
+                        "the repository is owner/repo (got \"{repo}\")"
+                    )));
+                };
+                let body = machine.get(&format!("/api/maps/{owner}/{name}")).await?;
+                // No map drawn yet is a not-found the words explain, not an empty outline.
+                if body["map"].is_null() {
+                    eprintln!("no map for {repo} yet: draw one from the cockpit's Map view");
+                    return Ok(EXIT_NOT_FOUND);
+                }
+                let doc = &body["map"];
+                if let Some(query) = &find {
+                    let found = search_map(doc, query)?;
+                    if json {
+                        println!("{}", pretty(&found)?);
+                    } else {
+                        for component in values(&found["components"]) {
+                            print!("{}", component_outline(component));
+                        }
+                    }
+                    return Ok(EXIT_OK);
+                }
+                if json {
+                    println!("{}", pretty(doc)?);
+                } else {
+                    print!("{}", map_outline(doc));
                 }
                 Ok(EXIT_OK)
             })
@@ -1115,6 +1201,172 @@ fn recent_line(event: &Value) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// The repository map: searching it and drawing it as text.
+// ---------------------------------------------------------------------------
+
+/// A JSON array as a slice, empty when it is absent or not an array — every map-document field
+/// the renderers walk.
+fn values(v: &Value) -> &[Value] {
+    v.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+
+/// A component's label by its id, for rendering connections: the label when it has one, else the
+/// raw id.
+fn component_labels(components: &[Value]) -> impl Fn(&str) -> String + '_ {
+    move |id| {
+        components
+            .iter()
+            .find(|c| c["id"].as_str() == Some(id))
+            .and_then(|c| c["label"].as_str())
+            .unwrap_or(id)
+            .to_string()
+    }
+}
+
+/// One connection's ends as labels — the spelling both renderings share.
+fn connection_ends(x: &Value, label_of: &impl Fn(&str) -> String) -> (String, String) {
+    (
+        label_of(x["from"].as_str().unwrap_or_default()),
+        label_of(x["to"].as_str().unwrap_or_default()),
+    )
+}
+
+/// Searches a stored map document (`GET /api/maps/{owner}/{name}`'s `map`) for the components
+/// matching `query`, case-insensitively: a substring of the id, label, sublabel, type or a source
+/// path — or a file under a source path (`src/auth/login.rs` finds the component whose source is
+/// `src/auth`). The answer is `{repo, revision, query, components}`, each hit carrying the
+/// connections that touch it; an empty query is refused. Pure, so the CLI and the MCP tool agree.
+pub(crate) fn search_map(doc: &Value, query: &str) -> Result<Value, Fail> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(Fail::Transport(anyhow::anyhow!("the map search query is empty")));
+    }
+    let wanted = query.to_lowercase();
+    let map = &doc["map"];
+    let label_of = component_labels(values(&map["components"]));
+    let hits: Vec<Value> = values(&map["components"])
+        .iter()
+        .filter(|c| component_matches(c, &wanted))
+        .map(|c| {
+            let id = c["id"].as_str().unwrap_or_default();
+            json!({
+                "id": c["id"],
+                "label": c["label"],
+                "type": c["type"],
+                "sublabel": c["sublabel"],
+                "sources": c["sources"],
+                "connections": values(&map["connections"])
+                    .iter()
+                    .filter(|x| x["from"].as_str() == Some(id) || x["to"].as_str() == Some(id))
+                    .map(|x| {
+                        let (from, to) = connection_ends(x, &label_of);
+                        json!({"from": from, "to": to, "label": x["label"]})
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(json!({"repo": doc["repo"], "revision": doc["revision"], "query": query, "components": hits}))
+}
+
+/// Whether one component matches the lowercased query, the way [`search_map`] says.
+fn component_matches(c: &Value, wanted: &str) -> bool {
+    let holds = |v: &Value| v.as_str().unwrap_or_default().to_lowercase().contains(wanted);
+    holds(&c["id"])
+        || holds(&c["label"])
+        || holds(&c["sublabel"])
+        || holds(&c["type"])
+        || values(&c["sources"]).iter().any(|s| {
+            let path = s["path"].as_str().unwrap_or_default().to_lowercase();
+            let dir = path.trim_end_matches('/');
+            path.contains(wanted) || wanted == dir || wanted.starts_with(&format!("{dir}/"))
+        })
+}
+
+/// A stored map document drawn as a compact text outline: title and subtitle, the revision, the
+/// components grouped under their boundary labels (the ones in no boundary last), then the
+/// connections by component label.
+fn map_outline(doc: &Value) -> String {
+    fn id_of(c: &Value) -> &str {
+        c["id"].as_str().unwrap_or_default()
+    }
+    let map = &doc["map"];
+    let components = values(&map["components"]);
+    let mut out = String::new();
+    out.push_str(map["title"].as_str().unwrap_or("Architecture"));
+    if let Some(subtitle) = map["subtitle"].as_str() {
+        out.push_str(&format!(" — {subtitle}"));
+    }
+    out.push('\n');
+    if let Some(revision) = doc["revision"].as_str() {
+        out.push_str(&format!("revision {revision}\n"));
+    }
+    let mut grouped: Vec<&str> = Vec::new();
+    for boundary in values(&map["boundaries"]) {
+        // A component two boundaries wrap renders under the first one only.
+        let members: Vec<&Value> = components
+            .iter()
+            .filter(|c| !grouped.contains(&id_of(c)))
+            .filter(|c| values(&boundary["wraps"]).iter().any(|w| w.as_str() == Some(id_of(c))))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        out.push('\n');
+        if let Some(label) = boundary["label"].as_str().filter(|l| !l.is_empty()) {
+            out.push_str(&format!("{label}:\n"));
+        }
+        for c in members {
+            out.push_str(&component_outline(c));
+            grouped.push(id_of(c));
+        }
+    }
+    let rest: Vec<&Value> = components.iter().filter(|c| !grouped.contains(&id_of(c))).collect();
+    if !rest.is_empty() && !grouped.is_empty() {
+        out.push('\n');
+    }
+    for c in rest {
+        out.push_str(&component_outline(c));
+    }
+    let label_of = component_labels(components);
+    let connections: Vec<String> = values(&map["connections"])
+        .iter()
+        .map(|x| {
+            let (from, to) = connection_ends(x, &label_of);
+            format!(
+                "{from} → {to}{}",
+                x["label"].as_str().map(|l| format!("  {l}")).unwrap_or_default()
+            )
+        })
+        .collect();
+    if !connections.is_empty() {
+        out.push('\n');
+        out.push_str(&connections.join("\n"));
+        out.push('\n');
+    }
+    out
+}
+
+/// One component's outline block: `label (type) — sublabel`, its source paths (`path:line`)
+/// indented under it.
+fn component_outline(c: &Value) -> String {
+    let mut out = format!(
+        "{} ({}){}\n",
+        c["label"].as_str().unwrap_or_else(|| c["id"].as_str().unwrap_or("?")),
+        c["type"].as_str().unwrap_or("?"),
+        c["sublabel"].as_str().map(|s| format!(" — {s}")).unwrap_or_default()
+    );
+    for s in values(&c["sources"]) {
+        let path = s["path"].as_str().unwrap_or_default();
+        match s["line"].as_u64() {
+            Some(line) => out.push_str(&format!("    {path}:{line}\n")),
+            None => out.push_str(&format!("    {path}\n")),
+        }
+    }
+    out
+}
+
 /// The pending question behind `ask`/`answer`, with the raw body `--json` reprints. `None` is the
 /// question route's 204 — the colony is not asking anything — the empty-inbox case `ask` and
 /// `answer` report with their own exit code (5), not an error; an unknown colony stays a 404.
@@ -1228,11 +1480,15 @@ mod tests {
             &["status", "abc123"][..],
             &["logs", "abc123"][..],
             &["logs", "abc123", "-f"][..],
+            &["diff", "abc123"][..],
+            &["diff", "abc123", "--stat"][..],
             &["ask", "abc123"][..],
             &["answer", "abc123", "1"][..],
             &["stop", "abc123"][..],
             &["resume", "abc123"][..],
             &["pr", "abc123"][..],
+            &["map", "acme/app"][..],
+            &["map", "acme/app", "--find", "login"][..],
             &["mcp"][..],
             &["mcp", "--scope", "launch"][..],
             &["token", "list"][..],
@@ -1472,6 +1728,81 @@ mod tests {
         assert_eq!(filter_sessions(sessions.clone(), None, Some("RUNNING")).len(), 2);
         let both = filter_sessions(sessions, Some("acme"), Some("pr_opened"));
         assert_eq!(both.iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["b"]);
+    }
+
+    /// A stored map document, as `GET /api/maps/{owner}/{name}`'s `map` carries it.
+    fn map_doc() -> Value {
+        json!({
+            "repo": "acme/app",
+            "revision": "abc123",
+            "generated_at": "2026-09-26T00:00:00Z",
+            "session": "m1",
+            "map": {
+                "title": "Demo",
+                "subtitle": "the app",
+                "components": [
+                    {"id": "web", "type": "frontend", "label": "Web", "pos": [10, 20], "size": [160, 60],
+                     "sources": [{"path": "web/src", "line": 3}]},
+                    {"id": "auth", "type": "backend", "label": "Auth", "sublabel": "logins and tokens",
+                     "pos": [300, 20], "sources": [{"path": "src/auth"}]},
+                    {"id": "gh", "type": "external", "label": "GitHub", "pos": [600, 20]}
+                ],
+                "connections": [{"from": "web", "to": "auth", "label": "REST"}, {"from": "auth", "to": "gh"}],
+                "boundaries": [{"label": "app", "wraps": ["web", "auth"]}, {"label": "core", "wraps": ["auth"]}]
+            }
+        })
+    }
+
+    /// A map search finds components by label, by source path and by a file under a source
+    /// directory — case-insensitively — and a query nothing matches finds nothing.
+    #[test]
+    fn a_map_search_finds_labels_types_and_source_paths() {
+        fn ids(found: &Value) -> Vec<&str> {
+            found["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_str().unwrap())
+                .collect()
+        }
+        let found = search_map(&map_doc(), " AUTH ").unwrap();
+        assert_eq!(ids(&found), ["auth"], "a label or id hit, case-insensitively, trimmed");
+        assert_eq!(found["repo"], "acme/app");
+        assert_eq!(found["revision"], "abc123");
+        assert_eq!(found["query"], "AUTH");
+        assert_eq!(
+            found["components"][0]["connections"][0],
+            json!({"from": "Web", "to": "Auth", "label": "REST"}),
+            "the hit carries its connections, from/to as labels"
+        );
+        assert_eq!(ids(&search_map(&map_doc(), "frontend").unwrap()), ["web"], "a type hit");
+        assert_eq!(
+            ids(&search_map(&map_doc(), "src/auth/login.rs").unwrap()),
+            ["auth"],
+            "a file under a component's source directory finds it"
+        );
+        assert_eq!(ids(&search_map(&map_doc(), "src/auth/").unwrap()), ["auth"]);
+        assert!(ids(&search_map(&map_doc(), "nowhere").unwrap()).is_empty());
+        assert!(search_map(&map_doc(), "   ").is_err(), "an empty query is refused");
+    }
+
+    /// The human outline groups the components under their boundaries, leaves the ones in no
+    /// boundary for last, and ends with the connections.
+    #[test]
+    fn the_map_outline_draws_boundaries_components_and_connections() {
+        let out = map_outline(&map_doc());
+        assert!(out.contains("Demo — the app\nrevision abc123\n"), "{out}");
+        assert!(
+            out.contains("\napp:\nWeb (frontend)\n    web/src:3\nAuth (backend) — logins and tokens\n    src/auth\n"),
+            "{out}"
+        );
+        assert!(out.contains("GitHub (external)"), "a component in no boundary is drawn last");
+        assert_eq!(
+            out.matches("Auth (backend)").count(),
+            1,
+            "a component two boundaries wrap renders under the first only"
+        );
+        assert!(out.ends_with("\nWeb → Auth  REST\nAuth → GitHub\n"), "{out}");
     }
 
     /// `--host` accepts the shapes a mothership answers on: a bare host gets the default port, a
