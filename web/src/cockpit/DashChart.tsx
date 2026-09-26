@@ -47,9 +47,13 @@ export function Section({
   );
 }
 
-/** The two hairlines every section body sits between. */
-export function Rules({ children, className }: { children: ReactNode; className?: string }): ReactElement {
-  return <div className={`overflow-hidden border-y border-border ${className ?? ""}`}>{children}</div>;
+/** The two hairlines every section body sits between. The body clips its overflow so hairline
+ *  grids drawn with box-shadows (the KPI tiles' -1px left/top shadows) do not poke past the
+ *  edges. `spill` clips only sideways — overflow-x: clip, unlike hidden, leaves the other axis
+ *  visible — so a hover card anchored inside the body (the chart's side-column card) can rise
+ *  above the top rule instead of being cut off at it. */
+export function Rules({ children, className, spill = false }: { children: ReactNode; className?: string; spill?: boolean }): ReactElement {
+  return <div className={`${spill ? "overflow-x-clip" : "overflow-hidden"} border-y border-border ${className ?? ""}`}>{children}</div>;
 }
 
 /** Legend entries for a section heading: a small square per series. */
@@ -486,7 +490,7 @@ export function ChartSection({
         )
       }
     >
-      <Rules className="flex flex-wrap">
+      <Rules spill className="flex flex-wrap">
         <div className="min-w-0 flex-[2_1_460px] py-5 pr-6">
           {typeof chart === "function" ? chart(hot) : chart}
           {foot && <div className="mt-3 text-[12.5px] text-faint">{foot}</div>}
