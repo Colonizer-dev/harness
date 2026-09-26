@@ -1771,13 +1771,24 @@ worktree, reads the git state directly (commits ahead of base, changed files, wh
 description names are on the branch), and re-runs the repository's test command in a fresh one-shot
 microVM over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
 codes. The verdict is `confirmed` (the fresh run is green and the git state matches the description),
-`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — no test
-command known, the runner unavailable — which is never treated as confirmed. The fresh run's exit
-number is the one the guest itself writes to a report file mounted for exactly that
+`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — an empty
+branch, no test command known, the runner unavailable — which is never treated as confirmed.
+The fresh run's exit number is the one the guest itself writes to a report file mounted for exactly that
 (`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it, so a runner that never
 reported has not verified anything. Autopilot publishes on
 `confirmed` and on `unverifiable` exactly as before; on `contradicted` the colony is held with
 `attention.reason` `autopilot_held` and the contradictions in the event below.
+
+The description's paths are the backticked path-like tokens in `pr.md`; a path counts as in the
+repository when the branch or the diff carries it or its directory is on the branch (an example URL
+or an untracked build dir is wording, not weighed). The git state **contradicts** the description
+only when it names in-repo paths and **none** of them is on the branch or in the diff, and no changed
+file is named in the text either (by path, or by file name in prose): the work it describes is not
+there. A described path that is missing while the description is otherwise borne out is an
+**advisory** — descriptions routinely name files that were deliberately not created, belong to other
+or future work, or were renamed on the way. Advisories are listed once each in `advisories`, logged,
+and added to the published pull request as a "Verification notes" block; they never change the
+verdict or hold autopilot.
 
 The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
 colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
@@ -1794,7 +1805,7 @@ same object minus `type`/`seq`/`ts`):
 
 ```jsonc
 {"type":"verification","verdict":"confirmed","by_declaration":false,"summary":"one plain line",
- "contradictions":[],"command":"npm test","command_source":"package.json","exit_code":0,
+ "contradictions":[],"advisories":[],"command":"npm test","command_source":"package.json","exit_code":0,
  "tests_ms":8100,"commits":2,"files_changed":["src/scan.rs"],"snapshot":"<sha>|null","ms":12345}
 ```
 

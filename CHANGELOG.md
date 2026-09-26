@@ -296,6 +296,16 @@ setting) is called out under **Take care** rather than left for you to find.
   strip's hairline grid does not poke past its edges) cut the card's top, rounded border and all,
   off at that rule. The chart section now clips sideways only, so the card rises over the heading
   intact; the KPI strip and every other ruled section still clip both ways. ([#565])
+- **A pull request description that names a file it did not create no longer holds autopilot.**
+  The done-claim verifier treated every path in `pr.md` as a claimed change, so a docs-only colony
+  that explained its file name by pointing at a `docs/remote-access.md` it had deliberately avoided
+  came back `contradicted` — the same path listed twice — and autopilot held. A described path that
+  is missing now only contradicts the claim when **none** of the description's in-repo paths is on the
+  branch or in the diff (and no changed file is named in it): the work it describes is not there.
+  Otherwise the missing path is an advisory, recorded in the verification's new `advisories`, shown
+  once in the activity line and added to the published pull request as a verification note, without
+  changing the verdict. Empty branches (unverifiable) and failing tests (contradicted) are unchanged.
+  ([#531])
 - **History no longer repeats or re-dates events.** The page dated each colony by its `updated_at`,
   which moves on every housekeeping write — a reclaim sweep marking worktrees cleaned up, an update or
   restart touching every colony — so one sweep re-dated days-old outcomes to "just now" and drew them as
@@ -958,6 +968,7 @@ Macs. ([#74])
 [#516]: https://github.com/Colonizer-dev/harness/issues/516
 [#519]: https://github.com/Colonizer-dev/harness/pull/519
 [#527]: https://github.com/Colonizer-dev/harness/pull/527
+[#531]: https://github.com/Colonizer-dev/harness/issues/531
 [#533]: https://github.com/Colonizer-dev/harness/issues/533
 [#309]: https://github.com/Colonizer-dev/harness/issues/309
 [#303]: https://github.com/Colonizer-dev/harness/issues/303

@@ -1168,6 +1168,8 @@ export type AgentEventBody =
       by_declaration: boolean;
       summary: string;
       contradictions: string[];
+      /** Observations that do not change the verdict, e.g. a described path missing beside ones that are there. Absent on events recorded before it existed. */
+      advisories?: string[];
       command: string | null;
       command_source: "config" | "package.json" | "Cargo.toml" | "Makefile" | null;
       exit_code: number | null;

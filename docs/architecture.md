@@ -179,7 +179,10 @@ stateDiagram-v2
    branch — and re-runs the repository's test command in a fresh one-shot microVM over a git archive of
    the snapshot, never on the host and never from the agent's own logs. The verdict, recorded as a
    `verification` host event in the colony's log, is `confirmed`, `contradicted` (the contradictions
-   stated plainly) or `unverifiable`, which is never treated as confirmed. The command comes from the
+   stated plainly) or `unverifiable`, which is never treated as confirmed. Only a description whose
+   in-repo paths are *all* missing from the branch and the diff contradicts the claim; a missing path
+   beside ones that are there — a file deliberately not created, or one for other work — is an
+   advisory, shown with the verdict and in the pull request, and never changes it. The command comes from the
    `publish` module's `verify` setting — `auto` (the default) reads the repository's own declaration on
    the base branch (package.json `scripts.test` → `npm ci && npm test`, or `npm install && npm
    test` without a lockfile; else Cargo.toml → `cargo test`; else a Makefile `test:` target →
