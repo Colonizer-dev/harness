@@ -125,6 +125,15 @@ export interface Session {
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+  /**
+   * Set while the colony is paused with its question outstanding (issue #562): the microVM is
+   * stopped and it holds no parallelism slot, but `status` stays `waiting_for_answer` and the
+   * question stays answerable exactly as before. The answer re-boots the colony with priority;
+   * older mothership builds omit the field.
+   */
+  suspended?: { at: string; snapshot: string | null; reason: string; path: string } | null;
+  /** The stored answer between the user sending it and the re-boot; opaque to the UI (issue #562). */
+  pending_answer?: unknown;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */

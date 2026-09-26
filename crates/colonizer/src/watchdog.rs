@@ -138,9 +138,12 @@ async fn check_all(app: &Shared) {
     let sessions = app.sessions.read().await.clone();
     let modules = app.modules.read().await.clone();
     let now = Utc::now();
+    // A suspended colony is skipped (issue #562): its microVM was removed on purpose and its link
+    // with it, so there is nothing to nudge and the question is already a person's to answer — the
+    // restore pass, not a nudge, brings it back.
     for s in sessions
         .into_iter()
-        .filter(|s| s.status.is_live() && s.status != SessionStatus::Starting)
+        .filter(|s| s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none())
     {
         let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
             continue;

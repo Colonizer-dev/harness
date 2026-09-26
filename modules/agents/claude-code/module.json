@@ -14,6 +14,10 @@
     ],
     "image": "glibc + node >= 20"
   },
+  "session_resume": {
+    "dir": "/root/.claude/projects",
+    "description": "Claude Code keeps one transcript per session under ~/.claude/projects and can resume any of them given its session id, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact."
+  },
   "secrets": [
     {
       "env": [

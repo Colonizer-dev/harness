@@ -349,8 +349,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 AgentState::Error | AgentState::Exited => runner_start_failure_attention(error.as_deref()),
                 _ => None,
             };
+            // A suspended colony (issue #562) is not taking its runner's word any more: its link is
+            // draining on the way down, and a straggler status — Working, Idle, Exited — must not
+            // flip the record out of `waiting_for_answer`, or the restore pass would never pick the
+            // held answer up. The teardown was planned, so an `exited` here is no failure either.
             if let Some(current) = app.session(id).await
                 && current.status.is_live()
+                && current.suspended.is_none()
                 && (current.status != next || error.is_some())
             {
                 let became_idle = next == SessionStatus::Idle && current.status != SessionStatus::Idle;
@@ -392,6 +397,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             activity.question_since = None;
             // The question is resolved either way, so an unanswered-provider streak behind it is over.
             activity.judge_failures = 0;
+        }
+        AgentEvent::AgentSession { session_id } => {
+            // The runner's own session id (issue #562), kept so a colony suspended while it waits
+            // on its user can come back and resume this same conversation. A write that changes
+            // nothing — an init re-reporting the id it already gave — persists and broadcasts
+            // nothing.
+            app.update_session(id, |x| x.agent_session = Some(session_id)).await;
         }
         AgentEvent::MemoryProposal {
             scope,
@@ -1376,6 +1388,46 @@ mod tests {
         assert!(activity.last > stalled_since, "a tool call is the agent working");
         assert!(app.session("abc").await.unwrap().attention.is_none());
         drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony being suspended (issue #562) is not taking its runner's word any more: the link is
+    /// draining on the way down, and a straggler status — `working`, or an `exited` that is the
+    /// planned teardown and no failure — must not flip the record out of `waiting_for_answer`, or
+    /// the restore pass would never pick a held answer up.
+    #[tokio::test]
+    async fn a_straggler_status_event_leaves_a_suspended_colony_alone() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::WaitingForAnswer).await;
+        let rt = app.runtime("abc").await;
+        app.update_session("abc", |x| {
+            x.suspended = Some(crate::sessions::Suspension {
+                at: Utc::now(),
+                snapshot: None,
+                reason: crate::sessions::WAITING_FOR_ANSWER.into(),
+                path: crate::sessions::SESSION_RESUME.into(),
+            });
+        })
+        .await
+        .unwrap();
+
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":1,"type":"status","state":"working"}"#).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "the runner's word does not make a torn-down colony live again"
+        );
+        assert!(s.suspended.is_some(), "still suspended, its answer restorable");
+
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":2,"type":"status","state":"exited"}"#).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "the exit is the teardown, not a failure"
+        );
+        assert_eq!(s.error, None, "so no agent-exited error painted over the suspension");
+        assert!(s.suspended.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 }

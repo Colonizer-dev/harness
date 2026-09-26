@@ -228,6 +228,9 @@ pub(crate) enum AgentEvent {
         #[serde(default)]
         response: Option<String>,
     },
+    /// The runner's own agent-session id (issue #562): what a resumed boot continues when a colony
+    /// suspended while it waited on its user comes back. Acted on — the id is kept on the record.
+    AgentSession { session_id: String },
     /// A turn ended: the trigger for cost accounting and the autopilot's publish decision (§6.3).
     TurnEnd {
         is_error: bool,
@@ -353,46 +356,52 @@ mod tests {
                 detail: None
             }
         ));
+        // The agent-session id the harness keeps on the record (issue #562): a resumable runner
+        // announces it at init, before the log line naming the same session.
         assert!(matches!(
-            &events[8],
+            &events[3],
+            AgentEvent::AgentSession { session_id } if !session_id.is_empty()
+        ));
+        assert!(matches!(
+            &events[9],
             AgentEvent::Question { question_id, questions, message_id: Some(message_id), .. }
                 if question_id == "toolu_ask" && message_id == "msg_1" && questions.len() == 1
         ));
         assert!(matches!(
-            &events[9],
+            &events[10],
             AgentEvent::Status {
                 state: AgentState::WaitingForAnswer,
                 detail: None
             }
         ));
         assert!(matches!(
-            &events[10],
+            &events[11],
             AgentEvent::QuestionAnswered { question_id, response: None, .. } if question_id == "toolu_ask"
         ));
         assert!(matches!(
-            &events[15],
+            &events[16],
             AgentEvent::MemoryProposal { scope: Some(scope), tags, .. }
                 if scope == "repo" && tags == &["workspace".to_string()]
         ));
         assert!(matches!(
-            &events[16],
+            &events[17],
             AgentEvent::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
         ));
         assert!(matches!(
-            &events[20],
+            &events[21],
             AgentEvent::Status {
                 state: AgentState::Idle,
                 detail: None
             }
         ));
         assert!(matches!(
-            &events[21],
+            &events[22],
             AgentEvent::Status {
                 state: AgentState::Exited,
                 detail: None
             }
         ));
-        match &events[19] {
+        match &events[20] {
             AgentEvent::TurnEnd {
                 is_error,
                 cost_usd,
@@ -407,15 +416,15 @@ mod tests {
         }
 
         // The forwarded-only types land on the catch-all on purpose: the browser is their consumer.
-        assert_eq!(events[3], AgentEvent::Other, "log");
-        assert_eq!(events[4], AgentEvent::Other, "model_changed");
-        assert_eq!(events[5], AgentEvent::Other, "assistant_text_delta");
-        assert_eq!(events[7], AgentEvent::Other, "assistant_text");
-        assert_eq!(events[12], AgentEvent::Other, "thinking");
-        assert_eq!(events[13], AgentEvent::Other, "tool_call");
-        assert_eq!(events[14], AgentEvent::Other, "tool_result");
-        assert_eq!(events[17], AgentEvent::Other, "tool_call");
-        assert_eq!(events[18], AgentEvent::Other, "tool_result with a denial");
+        assert_eq!(events[4], AgentEvent::Other, "log");
+        assert_eq!(events[5], AgentEvent::Other, "model_changed");
+        assert_eq!(events[6], AgentEvent::Other, "assistant_text_delta");
+        assert_eq!(events[8], AgentEvent::Other, "assistant_text");
+        assert_eq!(events[13], AgentEvent::Other, "thinking");
+        assert_eq!(events[14], AgentEvent::Other, "tool_call");
+        assert_eq!(events[15], AgentEvent::Other, "tool_result");
+        assert_eq!(events[18], AgentEvent::Other, "tool_call");
+        assert_eq!(events[19], AgentEvent::Other, "tool_result with a denial");
     }
 
     /// The regression guard for browser pass-through: a type a newer runner adds, or a known body
@@ -446,6 +455,7 @@ mod tests {
             "user_message",
             "question",
             "question_answered",
+            "agent_session",
             "turn_end",
             "memory_proposal",
             "finding",

@@ -88,6 +88,15 @@ pub async fn remove(msb: &str, name: &str) {
     let _ = exec(Command::new(msb).args(["rm", "--force", "--quiet", name])).await;
 }
 
+/// Whether this sandbox provider can snapshot a running microVM's memory, so a colony waiting on its
+/// user could be frozen in place and thawed with the conversation and every open process intact
+/// (issue #562). The pinned microsandbox (0.6.18) cannot: a suspend therefore stops the VM and keeps
+/// the worktree plus the agent's own session transcript, and the answer re-boots a fresh VM that
+/// resumes that session. If a provider ever gains a real snapshot, this is the seam it switches.
+pub(crate) fn supports_memory_snapshot() -> bool {
+    false
+}
+
 /// Runs a one-shot command in a fresh microVM and answers its exit code: [`boot`] without
 /// `--detach`, so `msb run` stays attached, the VM lives for the command, and the CLI exits with
 /// the command's own code. The VM is removed either way, so nothing outlives the call.

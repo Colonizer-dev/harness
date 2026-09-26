@@ -198,6 +198,46 @@ stateDiagram-v2
    Changing models does not need a resume: a live `set_model` switches the running colony's model for
    its next turns and keeps the session (docs/protocol.md §6.1b).
 
+### Suspending colonies that wait for an answer
+
+A colony waiting on its user holds a slot while doing nothing. Past a grace period the queue suspends it: the
+mothership tears the microVM down but keeps the worktree and the agent's own session transcript, the colony holds
+no parallel slot (the queue advances), and the status stays `waiting_for_answer` — the question stays answerable
+in the cockpit, over the events WebSocket, at `POST /api/sessions/{id}/answer`, and from the phone, exactly as
+before. The answer is persisted on the colony (`pending_answer`) before it is acknowledged, and the next queue
+tick brings the colony back ahead of new launches through the same slot admission every boot answers to: a fresh
+microVM in which the runner resumes its own session — `COLONIZER_RESUME_SESSION` carries the `agent_session` id;
+the module declares where it keeps transcripts in `session_resume.dir`, and the harness mounts the colony's
+`transcripts/` directory there — with the answer as its first message. `pending_answer` is cleared only once a
+boot has delivered it, so a failed boot or a mothership restart never loses it; a manual Resume delivers a held
+answer the same way.
+
+Two sandbox module settings drive this, global with no per-org override: `suspend_waiting` (default on) and
+`suspend_after_minutes` (default 10, 1 to 1440). Only a colony whose agent can resume its session and has
+reported its session id is suspended; anything else keeps its microVM, said once in the colony log. A suspension
+lasts until answered, stopped or deleted — stopping clears the suspension and any held answer — and the sandbox
+watchdog and restart recovery both leave a suspended colony alone: its microVM is gone by design, not by crash.
+Suspension also requires the question to still be open in the runtime: the live answer path and the suspension
+claim take the same open-question lock, so an answer and a claim cannot interleave and an answer is never lost
+in between.
+The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
+
+This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
+microsandbox 0.6.18 cannot snapshot a running VM's memory: `msb snapshot create` is disk-only and wants a stopped
+sandbox, and `--resumable` answers `unsupported: resumable snapshots require VM pause/resume restore support`, so
+`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. microsandbox
+0.7.x can (`msb snapshot create --full`, `msb restore`, `msb pause/resume`); measured on a nested-KVM host, a full
+checkpoint of a running 512 MiB VM took 0.46 s (the VM pauses during capture) and 304 MB on disk, an incremental
+re-checkpoint +24 MB at 0.22 s, and a restore to usable 0.3 s. Adopting it wants a vendor pin bump, and
+`MSB_HOME` is version-locked — an older msb against a newer home fails every command — so it is follow-up work.
+Resuming a transcript whose `AskUserQuestion` tool_use was left unresolved is valid, too — verified with the
+SDK's bundled Claude Code CLI 2.1.270, which inserts the missing `tool_result` itself (`is_error`,
+"[Request interrupted by user for tool use]"), so the held answer arrives as the next user message.
+
+Disk-wise nothing new is kept: there is no snapshot file in this path. What a suspension keeps is the worktree
+and the transcript directory under the colony's session dir, which already count against the per-colony
+host-disk checks and are deleted with the colony.
+
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
 written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
 whose contract — atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session —

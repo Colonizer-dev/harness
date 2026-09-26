@@ -5,7 +5,7 @@
 import { useEffect, useRef, type CSSProperties, type ReactElement } from "react";
 
 import { AntAvatar, type AntActivity, type AntState } from "../components/AntAvatar";
-import { SESSION_STATUS } from "../components/ui";
+import { statusLabel } from "../components/ui";
 import { antActivity, describeTool } from "../components/activity";
 import type { Session, SessionStatus } from "../types";
 import type { SubagentView } from "../sessionStream";
@@ -139,7 +139,7 @@ export function ChamberZoom({
     return () => window.clearTimeout(timer);
   }, [closing, onClosed]);
 
-  const status = SESSION_STATUS[session.status];
+  const status = statusLabel(session);
   const steps = settlers.reduce((total, settler) => total + settler.steps, 0);
   const seed = tunnelSeed(session.repo, session.issue);
   const mouth = tunnelPath(DEN, DEN_BOX, seed);
@@ -185,10 +185,10 @@ export function ChamberZoom({
           {session.repo}{issue}
         </span>
         <span className="shrink-0 font-mono text-[11px]" style={{ color: edge }}>
-          {status?.label ?? ""}
+          {status}
         </span>
         <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
-          {taskLine(session, status?.label ?? "")}
+          {taskLine(session, status)}
         </span>
         <span className="shrink-0 font-mono text-[11px] text-faint tabular-nums">
           {steps} steps · {settlerCount}

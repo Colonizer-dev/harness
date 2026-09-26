@@ -42,6 +42,11 @@ pub struct AgentModule {
     pub schema: Value,
     /// The manifest's `egress` declaration; third-party modules may omit the section.
     pub egress: Option<Egress>,
+    /// The manifest's `session_resume.dir` — a path inside the VM where the runner keeps agent
+    /// session transcripts — when the agent can pick an old conversation back up (`None` when it
+    /// cannot). The harness mounts a host directory over the path so transcripts survive a stopped
+    /// microVM, and a suspended colony's answer resumes the same agent session (issue #562).
+    pub resume_dir: Option<String>,
 }
 
 /// The fixed network hosts an agent module's runner needs, declared under `egress` in `module.json`
@@ -186,6 +191,18 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
     let secrets = manifest["secrets"].to_string();
     let binaries = manifest["requires"]["binaries"].to_string();
     let egress = parse_egress(&manifest)?;
+    // An agent that declares session resumability must name the directory, or a suspended colony
+    // would later boot with its transcript nowhere to be found: name the manifest problem now.
+    let resume_dir = match manifest.get("session_resume") {
+        None => None,
+        Some(section) => Some(
+            section["dir"]
+                .as_str()
+                .filter(|dir| !dir.is_empty() && dir.starts_with('/'))
+                .ok_or("\"session_resume\" must name an absolute in-VM transcript directory as \"dir\"")?
+                .to_string(),
+        ),
+    };
     // A declared egress omitting a host its secrets are for would have the allowlist (#304) break
     // the requests those secrets authenticate; with no section, nothing is held to this.
     if let Some(egress) = &egress {
@@ -209,6 +226,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         schema: normalize_schema(&manifest["settings"]),
         dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
         egress,
+        resume_dir,
     })
 }
 
@@ -283,6 +301,10 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "description": "Comma-separated host[:port] entries a colony is denied, on top of the always-blocked set, in the same form as the allow list. Blocks win over allows: both are the operator's word, and the deny is the cautious reading. An org's list adds to this one."},
                 "hold_timeout_minutes": {"type": "integer", "title": "Held colony timeout (minutes)", "minimum": 1, "maximum": 1440, "default": 30,
                     "description": "How long a colony waiting on a human (an autopilot hold) keeps its microVM slot before the queue parks it to free the slot: the microVM is removed and the worktree kept, so the colony resumes where it left off. Within the timeout a held colony still counts against the parallel limits."},
+                "suspend_waiting": {"type": "boolean", "title": "Suspend colonies waiting on you", "default": true,
+                    "description": "When a colony has asked you something and you have not answered within the grace period below, its microVM is torn down to free the slot: the worktree and the agent's session transcript are kept, and answering the question re-boots the colony and continues the conversation where it left off. The question stays open and answerable the whole time. Only agents that can resume their session (Claude Code today) are suspended; anything else keeps running."},
+                "suspend_after_minutes": {"type": "integer", "title": "Suspend waiting colonies after (minutes)", "minimum": 1, "maximum": 1440, "default": 10,
+                    "description": "How long a colony keeps its microVM after asking you something before the suspension above stops it. Minimum 1."},
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
                     "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it — a provider without pricing, such as a prepaid token plan, costs nothing here, so hold it to the token budget below instead. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
                 "budget_tokens": {"type": "integer", "title": "Token budget per colony", "minimum": 0, "default": 0,
@@ -699,6 +721,7 @@ mod tests {
             needs_claude: true,
             schema: Value::Null,
             egress: None,
+            resume_dir: None,
         };
         let command = module.vm_command();
         assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
@@ -791,6 +814,7 @@ mod tests {
             needs_claude: true,
             schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
             egress: None,
+            resume_dir: None,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
         // A skillset needs a manifest to pass validation (plugins::validate).

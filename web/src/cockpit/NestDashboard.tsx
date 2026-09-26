@@ -7,7 +7,7 @@
 // than picking a workspace of its own.
 import { type ReactElement } from "react";
 
-import { SESSION_STATUS, attentionText, timeAgo, type Tone } from "../components/ui";
+import { SESSION_STATUS, attentionText, statusLabel, timeAgo, type Tone } from "../components/ui";
 import { colonyLabel, needsYou } from "../notifications";
 import { formatCost, sessionCost, sumCosts } from "../spend";
 import type { Session } from "../types";
@@ -207,7 +207,7 @@ export function NestDashboard({
                   >
                     <span className="min-w-0 flex-1 truncate text-[12.5px]">{colonyLabel(s.repo, s.issue)}</span>
                     <span className="shrink-0 text-[11px]" style={{ color: TONE_VAR[SESSION_STATUS[s.status]?.tone ?? "neutral"] }}>
-                      {SESSION_STATUS[s.status]?.label ?? s.status}
+                      {statusLabel(s)}
                     </span>
                     <span className="shrink-0 font-mono text-[10.5px] text-faint tabular-nums">{timeAgo(s.last_activity_at ?? s.updated_at)}</span>
                     <span className="w-11 shrink-0 text-right font-mono text-[11px] text-muted tabular-nums">{formatCost(sessionCost(s))}</span>

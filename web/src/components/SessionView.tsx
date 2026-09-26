@@ -201,7 +201,7 @@ export function SessionView({
                 {session.repo}
                 {session.issue != null && `#${session.issue}`}
               </span>
-              <StatusBadge status={session.status} />
+              <StatusBadge session={session} />
               <AttentionBadge attention={attention} />
               {session.issue == null && <Badge>No issue</Badge>}
               {session.autopilot && <Badge>Autopilot</Badge>}

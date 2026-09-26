@@ -609,6 +609,10 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
     options.debugFile = env.COLONIZER_JEV_COMPACTION_LOG || join(tmpdir(), 'colonizer-jev-compaction.log');
   }
   if (env.COLONIZER_MODEL) options.model = env.COLONIZER_MODEL;
+  // A colony suspended while it waited on its user boots to deliver the answer (issue #562): the
+  // session id the agent reported last run continues that conversation, whose transcript the
+  // mothership kept on the host. Absent means a fresh conversation.
+  if (env.COLONIZER_RESUME_SESSION) options.resume = env.COLONIZER_RESUME_SESSION;
   // Harness-level tool switch (module.json `disabled_tools`): the session's own disallow list, on top
   // of whatever the provider strips per connection. The SDK removes these tools from the model's
   // context entirely, so the setting holds whatever endpoint serves the model.
@@ -660,6 +664,7 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
   let streamMessageId = null;
   let jevDebugOffset = 0; // bytes of the debug log already scanned for a Jev verdict
   let currentModel = null; // the orchestrator model last announced in a model_changed
+  let agentSession = null; // the session id last announced in an agent_session
   // Jev visibility ladder bookkeeping: a decision token indexes tool-use/tool-result pairs by the
   // order their calls were made, so track calls still awaiting a result and the resolved pairs a
   // compaction pass can then remove from (an applied drop_call) or score again.
@@ -918,6 +923,12 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
             break;
           case 'system':
             if (msg.subtype === 'init') {
+              // The id a resumed boot continues (issue #562); the mothership keeps it on the
+              // colony's record. Announced only when it is news, like the model below.
+              if (typeof msg.session_id === 'string' && msg.session_id && msg.session_id !== agentSession) {
+                agentSession = msg.session_id;
+                emit({ type: 'agent_session', session_id: msg.session_id });
+              }
               emit({ type: 'log', level: 'info', message: `Claude Code session ${msg.session_id} started (model ${msg.model})` });
               if (jevEnabled(options)) {
                 // A restarted runAgent must not re-report a verdict from before it started.

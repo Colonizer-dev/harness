@@ -7,7 +7,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
-import { SESSION_STATUS, isLive, store, stored, timeAgo } from "../components/ui";
+import { SESSION_STATUS, isLive, statusLabel, store, stored, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
 import type { Loop, NewLoop, RepoMap, Session } from "../types";
 import { describeLoopCadence } from "./loops";
@@ -816,7 +816,7 @@ function ChamberPanel({
                 {taskLine(session, "open session")}
                 <span className="ml-1.5 font-mono text-[11px] text-faint">{session.issue != null ? `#${session.issue}` : ""}</span>
               </button>
-              <span className="text-[11.5px] text-faint">{SESSION_STATUS[session.status]?.label}</span>
+              <span className="text-[11.5px] text-faint">{statusLabel(session)}</span>
               <button type="button" onClick={() => onOpen(session.id)} className="cursor-pointer rounded-md border-0 bg-text px-2 py-0.5 text-[11.5px] font-medium text-bg hover:opacity-85">
                 open
               </button>

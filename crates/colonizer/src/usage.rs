@@ -321,7 +321,14 @@ fn build(
         harness_version: env!("CARGO_PKG_VERSION"),
         platform: telemetry::platform(),
         colonies: Colonies {
-            parallel_now: bucket_count(sessions.iter().filter(|s| s.status.is_live()).count()),
+            // Suspended colonies excluded: their microVMs are down — that is what the suspension
+            // freed (issue #562).
+            parallel_now: bucket_count(
+                sessions
+                    .iter()
+                    .filter(|s| s.status.is_live() && s.suspended.is_none())
+                    .count(),
+            ),
             terminal: Terminal {
                 pr_opened: terminal_count(sessions, SessionStatus::PrOpened),
                 no_changes: terminal_count(sessions, SessionStatus::NoChanges),
@@ -729,6 +736,9 @@ mod tests {
             cleaned_up: false,
             keep_worktree: false,
             attention: None,
+            suspended: None,
+            agent_session: None,
+            pending_answer: None,
             last_activity_at: Some(now),
             boot_timing: None,
             boot_cpus: None,
@@ -749,6 +759,7 @@ mod tests {
             needs_claude: true,
             schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
             egress: None,
+            resume_dir: None,
         }
     }
 

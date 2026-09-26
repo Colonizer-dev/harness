@@ -81,7 +81,7 @@ export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: Org
     const e = entry(org, null);
     e.total += 1;
     if (session.status === "queued") e.queued += 1;
-    else if (occupiesSlot(session.status)) e.live += 1;
+    else if (occupiesSlot(session)) e.live += 1;
   }
   const visible: OrgEntry[] = [];
   const hidden: OrgEntry[] = [];
