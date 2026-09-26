@@ -272,6 +272,12 @@ setting) is called out under **Take care** rather than left for you to find.
 
 ### Fixed
 
+- **The Overview's workspace card shows whole again.** Hovering a row of "Share by workspace" beside
+  the merged-PRs chart opens a card for that workspace, centred on the row; for the top rows it
+  reaches above the chart's top rule, and the chart body's `overflow: hidden` (there so the KPI
+  strip's hairline grid does not poke past its edges) cut the card's top, rounded border and all,
+  off at that rule. The chart section now clips sideways only, so the card rises over the heading
+  intact; the KPI strip and every other ruled section still clip both ways.
 - **History no longer repeats or re-dates events.** The page dated each colony by its `updated_at`,
   which moves on every housekeeping write — a reclaim sweep marking worktrees cleaned up, an update or
   restart touching every colony — so one sweep re-dated days-old outcomes to "just now" and drew them as

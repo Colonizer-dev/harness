@@ -14,6 +14,7 @@ import {
   KpiTile,
   niceStep,
   RangePicker,
+  Rules,
   SegTabs,
   ShareBar,
   Sparkline,
@@ -221,6 +222,22 @@ describe("ChartSection", () => {
     expect(html).toContain('aria-label="org6: 1 (6%)"');
     expect(html).toContain("logo6");
     expect(html).toContain("0 0 0 3.5px rgb(1, 2, 3)");
+  });
+
+  it("lets a side row's hover card rise above the top rule: its body clips sideways only", () => {
+    // The side-column card is anchored inside the rules, centred on its row; for the first rows it
+    // reaches above the top rule, so an overflow-hidden body cut its top off there.
+    const html = renderToStaticMarkup(
+      <ChartSection title="Merged PRs per day" chart={<div>CHART</div>} sideTitle="Share by workspace" side={[{ label: "acme", value: 1, share: 100, color: "red", card: <p>CARD</p> }]} />,
+    );
+    const rules = html.match(/<div class="([^"]*border-y border-border[^"]*)"/)?.[1] ?? "";
+    expect(rules.split(" ")).toContain("overflow-x-clip");
+    expect(rules.split(" ")).not.toContain("overflow-hidden");
+  });
+
+  it("keeps plain rules clipping both ways, for the KPI strip's shadow-drawn hairline grid", () => {
+    expect(renderToStaticMarkup(<Rules>x</Rules>)).toMatch(/^<div class="overflow-hidden border-y border-border/);
+    expect(renderToStaticMarkup(<KpiStrip items={[{ label: "Merged", value: "3", hint: "h" }]} />)).toContain("overflow-hidden border-y border-border");
   });
 });
 
