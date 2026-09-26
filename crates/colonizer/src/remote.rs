@@ -1066,6 +1066,22 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves:
+/// the remote-access tunnel dials the relay while the switch is on. It gets a clone of the finished
+/// router, so tunnelled requests land on exactly what localhost would.
+pub(crate) fn start_tasks(app: &crate::Shared, router: &Router) {
+    tokio::spawn(run(app.clone(), router.clone()));
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/remote", routing::get(status).put(put))
+        .route("/api/remote/reset", routing::post(reset))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1229,7 +1245,7 @@ mod tests {
             .route("/api/big", get(big_answer))
             .route("/api/park", get(park_handler))
             .layer(Extension(park))
-            .layer(middleware::from_fn_with_state(app.clone(), crate::host_guard))
+            .layer(middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
             .with_state(app.clone())
     }
 
@@ -1720,7 +1736,7 @@ mod tests {
             .unwrap();
         let res = Router::new()
             .route("/api/activity", get(crate::activity::list))
-            .layer(middleware::from_fn_with_state(app.clone(), crate::host_guard))
+            .layer(middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
             .with_state(app.clone())
             .oneshot(request)
             .await

@@ -2654,6 +2654,19 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
     let _ = down_tx.close().await;
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/sessions", routing::get(list).post(create))
+        .route("/api/sessions/{id}", routing::get(get))
+        .route("/api/sessions/{id}/question", routing::get(question))
+        .route("/api/sessions/{id}/answer", routing::post(answer))
+        .route("/api/sessions/{id}/events", routing::get(events_ws))
+        .route("/api/sessions/{id}/terminal", routing::get(terminal_ws))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::util::faults::{self, Op};

@@ -689,6 +689,21 @@ pub async fn check_mem0(State(app): State<Shared>) -> Json<Value> {
     })
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/memory", routing::get(get))
+        .route("/api/memory/proposals", routing::get(list_proposals))
+        .route("/api/memory/proposals/{id}/approve", routing::post(approve))
+        .route("/api/memory/proposals/{id}/reject", routing::post(reject))
+        .route("/api/memory/notes", routing::post(create_note))
+        .route("/api/memory/notes/{id}", routing::delete(delete_note))
+        .route("/api/memory/mem0", routing::get(mem0_status).put(put_mem0_key))
+        .route("/api/memory/mem0/check", routing::post(check_mem0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,7 +802,7 @@ mod tests {
             json!({"session_id": "abc", "repo": "o/r", "reviewed": true})
         );
 
-        let dir = root.join("memory/repos/o/r");
+        let dir = root.join("data/memory/repos/o/r");
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
         let index = read("MEMORY.md");
         for (id, entry, text) in [

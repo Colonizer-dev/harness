@@ -309,6 +309,15 @@ pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -
     Ok(Filed::Issue(truncate(url, 500)))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/sessions/{id}/findings", routing::get(list))
+        .route("/api/findings", routing::get(list_all))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

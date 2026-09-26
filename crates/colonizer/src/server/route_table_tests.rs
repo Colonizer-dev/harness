@@ -82,10 +82,10 @@ fn request(method: Method, uri: &str) -> Request {
 async fn route_table() -> String {
     let root = std::env::temp_dir().join(format!("colonizer-routes-{}", crate::util::short_id()));
     let app = crate::tests::test_app(&root);
-    let probed = crate::api_routes()
+    let probed = crate::server::api_routes()
         .route_layer(middleware::from_fn(probe))
         .with_state(app.clone());
-    let full = crate::router(&app);
+    let full = crate::server::router(&app);
 
     let mut lines = Vec::new();
     for template in candidate_paths() {

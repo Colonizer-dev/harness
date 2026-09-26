@@ -1316,6 +1316,28 @@ pub async fn delete_draft(
     Ok(Json(json!({"removed": removed})))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/repos/{owner}/{name}/loc", routing::get(loc))
+        .route("/api/repos/{owner}/{name}/coverage", routing::get(coverage))
+        .route("/api/repos/{owner}/{name}/git-summary", routing::get(git_summary))
+        .route("/api/repos/{owner}/{name}/branches", routing::get(branches))
+        .route("/api/repos/{owner}/{name}/tree", routing::get(tree))
+        .route("/api/repos/{owner}/{name}/blob", routing::get(blob))
+        .route("/api/repos/{owner}/{name}/history", routing::get(history))
+        .route("/api/repos/{owner}/{name}/blame", routing::get(blame))
+        .route("/api/repos/{owner}/{name}/edits", routing::post(edits))
+        .route("/api/repos/{owner}/{name}/ask", routing::post(ask))
+        .route(
+            "/api/repos/{owner}/{name}/drafts",
+            routing::get(list_drafts).put(put_draft).delete(delete_draft),
+        )
+        .route("/api/editor/settings", routing::get(editor_settings).put(put_editor_settings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

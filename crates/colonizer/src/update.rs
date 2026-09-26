@@ -734,6 +734,13 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
     Ok(Json(json!({ "started": true })))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/update/apply", routing::post(apply))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

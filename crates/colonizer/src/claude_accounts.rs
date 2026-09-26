@@ -6,7 +6,7 @@
 
 use crate::{
     ApiResult, Shared, client_error,
-    util::{read_trimmed, short_id, write_secret},
+    util::{delete_secret, read_trimmed, short_id, write_secret},
 };
 use axum::{
     Json,
@@ -359,6 +359,39 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     save_meta(&app.cfg.config_dir, &meta)?;
     let _ = std::fs::remove_file(account_file(&app.cfg.config_dir, &id));
     Ok(Json(json!({"ok": true})))
+}
+
+/// `POST /api/settings/claude-token`: saves a `claude setup-token` token or an API key as the
+/// install's single-token credential.
+async fn set_claude_token(State(app): State<Shared>, Json(body): Json<Value>) -> ApiResult<Value> {
+    let token = body["token"].as_str().unwrap_or_default().trim();
+    if !token.starts_with("sk-ant-") || token.contains(char::is_whitespace) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)",
+        ));
+    }
+    write_secret(&app.claude_token_file(), token)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// `DELETE /api/settings/claude-token`: removes that credential.
+async fn delete_claude_token(State(app): State<Shared>) -> ApiResult<Value> {
+    delete_secret(&app.claude_token_file());
+    Ok(Json(json!({"ok": true})))
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route(
+            "/api/settings/claude-token",
+            routing::post(set_claude_token).delete(delete_claude_token),
+        )
+        .route("/api/claude-accounts", routing::get(list).post(create))
+        .route("/api/claude-accounts/{id}", routing::delete(delete))
 }
 
 #[cfg(test)]

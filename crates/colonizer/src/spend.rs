@@ -572,6 +572,13 @@ fn history_json(days: Vec<(String, Vec<(String, DayOrg)>)>) -> Value {
     })
     .collect::<Vec<Value>>()})
 }
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/spend/history", routing::get(history))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -651,6 +651,37 @@ where
     bail!("timed out after {}s", timeout.as_secs())
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) async fn start_tasks(app: &crate::Shared) {
+    let mesh_vendored = app.cfg.assets.as_deref().is_some_and(binaries_present);
+    if app.modules.read().await.mesh_enabled() && !mesh_vendored && app.cfg.assets.is_some() {
+        // Restarting would never help: the binaries are missing from this install, and the app does
+        // not fetch them at runtime. Colonies use a loopback port instead.
+        println!("mesh: no mesh binaries for this platform; colonies will use a loopback port");
+    }
+    if app.modules.read().await.mesh_enabled() && mesh_vendored {
+        let mesh_app = app.clone();
+        tokio::spawn(async move {
+            let mut delay = Duration::from_secs(2);
+            for attempt in 1..=8 {
+                match async { mesh_app.mesh().await?.ensure_started().await }.await {
+                    Ok(()) => {
+                        if attempt > 1 {
+                            println!("mesh: started on attempt {attempt}");
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("mesh: attempt {attempt} failed: {e:#}");
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

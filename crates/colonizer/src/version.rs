@@ -389,6 +389,20 @@ pub async fn run(app: Shared) {
     }
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    tokio::spawn(run(app.clone()));
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/version", routing::get(version))
+        .route("/api/update", routing::get(status).put(put))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

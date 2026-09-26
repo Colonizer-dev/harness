@@ -479,6 +479,11 @@ fn backfill_order(missing: &mut [(bool, chrono::DateTime<chrono::Utc>, String)])
     missing.iter().take(BACKFILL_CAP).map(|(_, _, id)| id.clone()).collect()
 }
 
+/// One-line task summaries for live colonies that have none.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    tokio::spawn(backfill(app.clone()));
+}
+
 #[cfg(test)]
 mod backfill_order_tests {
     use super::*;

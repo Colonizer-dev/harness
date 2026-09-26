@@ -218,6 +218,15 @@ async fn download_verified(app: &Shared, pin: &Pin, generation: u64, part: &Path
         .with_context(|| format!("Headroom {}", pin.release))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/headroom", routing::get(status))
+        .route("/api/headroom/download", routing::post(download))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

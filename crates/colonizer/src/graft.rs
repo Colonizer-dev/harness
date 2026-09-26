@@ -251,6 +251,15 @@ async fn fetch(app: &Shared, pin: &Pin, generation: u64) -> Result<()> {
     unpacked
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/plugins/graft", routing::get(status))
+        .route("/api/plugins/graft/download", routing::post(download))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

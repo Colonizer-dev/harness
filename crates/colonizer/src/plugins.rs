@@ -394,6 +394,13 @@ pub async fn list(State(app): State<Shared>) -> Json<Value> {
     Json(body)
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/plugins", routing::get(list))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

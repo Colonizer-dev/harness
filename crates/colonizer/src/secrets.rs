@@ -695,6 +695,17 @@ fn editable_path(item: &Item) -> Result<PathBuf, crate::AppError> {
     }
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/secrets", routing::get(list))
+        .route("/api/secrets/health", routing::get(health))
+        .route("/api/secrets/{id}", routing::put(put).delete(delete))
+        .route("/api/secrets/{id}/move", routing::post(move_secret))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -503,6 +503,18 @@ pub(crate) async fn collect_garbage(app: &App, released: &HashSet<String>) -> us
     removed
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route(
+            "/api/chat/attachments",
+            routing::post(upload).layer(axum::extract::DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
+        .route("/api/chat/attachments/{sha}", routing::get(serve))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

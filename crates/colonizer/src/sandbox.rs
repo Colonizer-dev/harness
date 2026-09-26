@@ -322,6 +322,13 @@ pub async fn pull_status(State(app): State<crate::Shared>) -> axum::Json<PullSta
     axum::Json(app.pull.lock().await.clone())
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/sandbox/pull", routing::post(pull_configured).get(pull_status))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

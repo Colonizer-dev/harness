@@ -168,3 +168,12 @@ pub async fn catch_up(State(app): State<Shared>, Path(id): Path<String>) -> ApiR
         }
     }
 }
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/sessions/{id}/behind", routing::get(behind))
+        .route("/api/sessions/{id}/catch-up", routing::post(catch_up))
+}

@@ -810,6 +810,15 @@ pub async fn probe_handler(State(app): State<Shared>, Path(id): Path<String>) ->
     Ok(Json(json!({"manifest": m, "installed": installed, "probe": p})))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/hunters/{id}/install", routing::post(install_handler))
+        .route("/api/hunters/{id}/probe", routing::get(probe_handler))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

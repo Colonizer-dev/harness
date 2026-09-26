@@ -1940,6 +1940,18 @@ pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) 
     Ok(Json(health))
 }
 
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    tokio::spawn(flush_loop(app.clone()));
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/providers/{id}/health", routing::get(provider_health))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

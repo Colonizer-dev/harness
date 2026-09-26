@@ -413,7 +413,7 @@ pub async fn append_line(path: &Path, line: &str) -> Result<()> {
 }
 
 /// A test-only seam for injecting filesystem faults into the two helpers above (and the startup
-/// move-aside and salvage copy in main.rs), so the error paths around persistence can be exercised
+/// move-aside and salvage copy in app.rs), so the error paths around persistence can be exercised
 /// deterministically.
 /// Real-filesystem tricks are unreliable here: the container runs as root, so chmod-based permission
 /// denial does not fail. Production builds compile this away — `check` becomes an inlined no-op.

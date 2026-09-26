@@ -443,6 +443,13 @@ pub async fn show(State(app): State<Shared>, AxumPath(id): AxumPath<String>) -> 
     Ok(Json(record))
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/sessions/{id}/egress", routing::get(show))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

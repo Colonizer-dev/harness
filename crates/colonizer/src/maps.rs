@@ -999,6 +999,17 @@ pub async fn touched(State(app): State<Shared>) -> Json<Value> {
     Json(value)
 }
 
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/maps/{owner}/{name}", routing::get(get).post(create))
+        .route("/api/maps/{owner}/{name}/files", routing::get(files))
+        .route("/api/maps/{owner}/{name}/file", routing::get(file))
+        .route("/api/touched", routing::get(touched))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
