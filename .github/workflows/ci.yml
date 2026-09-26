@@ -132,7 +132,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      # Two commits deep: on a pull request HEAD is GitHub's merge commit, and HEAD^1 is the base it
+      # merged onto, which is what the changelog check below diffs against.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -140,6 +144,17 @@ jobs:
 
       - name: Test
         run: node --test scripts/test/*.test.mjs
+
+      # Pending changelog entries are fragments under changelog.d/, one file per change, so parallel
+      # pull requests never collide in CHANGELOG.md. This validates every fragment and, on a pull
+      # request, fails one that edits CHANGELOG.md unless it is the release (it adds the section for
+      # the bumped crate version) or carries the `changelog-edit` label; a code change without a
+      # fragment only warns. See changelog.d/README.md.
+      - name: Changelog fragments
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+          ALLOW_EDIT: ${{ contains(github.event.pull_request.labels.*.name, 'changelog-edit') && '--allow-changelog-edit' || '' }}
+        run: node scripts/changelog.mjs check ${BASE:+--base "$BASE"} $ALLOW_EDIT
 
       # The packs an install actually ships, staged exactly as scripts/fetch-vendor.sh stages
       # them, checked against the full rule set in scripts/validate-plugins.mjs — the unit

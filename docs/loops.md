@@ -3,7 +3,7 @@
 A loop is a saved prompt on a repository that launches a colony on a schedule — the mothership's
 version of Claude Code's `/loop`. Use one for work that recurs: triaging new issues every morning,
 keeping dependencies current every week, fixing last night's flaky tests, or writing yesterday's
-CHANGELOG entries.
+changelog entries (as `changelog.d/` fragments in a repository that keeps them, like this one).
 
 ## Making one
 
