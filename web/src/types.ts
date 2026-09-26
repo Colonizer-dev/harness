@@ -1709,6 +1709,37 @@ export interface PushSubscribeBody {
 }
 
 // ---------------------------------------------------------------------------
+// Remote access (issue #535): GET/PUT /api/remote, POST /api/remote/reset
+// (docs/protocol.md §6.10), plus the relay's pairing view the cockpit mirrors
+// ---------------------------------------------------------------------------
+
+/** The switch, the tunnel host and the live link, as all three /api/remote endpoints answer. */
+export interface RemoteStatus {
+  enabled: boolean;
+  /** e.g. `h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev`; null until the first enable. The link is `https://<host>`. */
+  host: string | null;
+  /** True only while the switch is on and the tunnel's handshake has succeeded. */
+  connected: boolean;
+  /** RFC3339, only while connected: when the current tunnel came up. */
+  since: string | null;
+}
+
+/** One pairing code waiting at the relay (services/relay/src/worker.js `pairingView`). */
+export interface RemotePairingRequest {
+  /** Six digits. */
+  code: string;
+  github_login: string;
+  /** When the code stops working, in unix seconds — the encoding the relay pins for timestamps. */
+  expires_at: number;
+}
+
+/** GET /api/remote/pairing: the owner binding and the pending codes, mirrored from the relay. */
+export interface RemotePairing {
+  owner: { github_login: string } | null;
+  pending: RemotePairingRequest[];
+}
+
+// ---------------------------------------------------------------------------
 // Chat: a direct conversation with a model, no colony (GET/POST /api/chat, docs/protocol.md)
 // ---------------------------------------------------------------------------
 
@@ -2003,6 +2034,9 @@ export type ActivityKind =
   | "redteam.stop"
   | "redteam.schedule"
   | "redteam.unschedule"
+  | "remote.enable"
+  | "remote.disable"
+  | "remote.reset"
   | "workspace.enable"
   | "workspace.disable"
   | "workspace.settings"

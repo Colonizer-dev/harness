@@ -160,6 +160,12 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return "You saved a red-team schedule";
     case "redteam.unschedule":
       return "You removed a red-team schedule";
+    case "remote.enable":
+      return "You switched remote access on";
+    case "remote.disable":
+      return "You switched remote access off";
+    case "remote.reset":
+      return "You reset the remote access link";
     case "workspace.enable":
       return `You switched the ${target || entry.org || ""} workspace on`;
     case "workspace.disable":

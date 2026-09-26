@@ -260,6 +260,16 @@ const GUIDES: Record<string, Guide> = {
       { icon: "globe", label: "Live map" },
     ],
   },
+  remote: {
+    icon: "globe",
+    blurb: "Opens this cockpit from your phone or another computer, through the Colonizer relay.",
+    flow: [
+      { icon: "user", label: "Your phone" },
+      { icon: "lock", label: "Paired sign-in" },
+      { icon: "mothership", label: "This cockpit" },
+    ],
+    both: true,
+  },
   updates: {
     icon: "download",
     blurb: "Keeps Colonizer current with the latest release.",

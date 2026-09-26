@@ -45,6 +45,7 @@ import type {
   OrgInfo,
   OrgSettings,
   RedTeamRun,
+  RemoteStatus,
   Session,
   StartRedTeamRunRequest,
   StorageHealth,
@@ -75,6 +76,9 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
   const [usage, setUsage] = useState<UsageStatus | null>(null);
+  // The remote-access view (issue #535), one state for the whole app: the header's badge and the
+  // settings pane read it, and the pane's setter folds a toggle or reset straight back in.
+  const [remote, setRemote] = useState<RemoteStatus | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   // Whether the first /api/orgs answer (or its failure) is in: until then an empty list says nothing.
@@ -204,6 +208,14 @@ export function App() {
     }
   }, [api]);
 
+  const loadRemote = useCallback(async () => {
+    try {
+      setRemote(await api.remote());
+    } catch {
+      /* older mothership without remote access, or offline: no badge, and nothing said */
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadStatus();
     void loadFleet();
@@ -214,8 +226,9 @@ export function App() {
     void loadPendingMemory();
     void loadUpdate();
     void loadRedRuns();
+    void loadRemote();
     api.modules().then(applyModules).catch(() => {});
-  }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, loadRedRuns, applyModules]);
+  }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, loadRedRuns, loadRemote, applyModules]);
 
   // The poll schedule lives in a module worker (usePollTick) whose timers keep their cadence
   // while the tab is hidden — Chrome throttles hidden-tab main-thread timers to one wake-up per
@@ -267,7 +280,11 @@ export function App() {
   usePollTick({
     sessions: () => void pollSessions(),
     redRuns: loadRedRuns,
-    status: loadStatus,
+    // The remote-access view changes about as slowly as the host's own, so it shares the 30 s tick.
+    status: () => {
+      void loadStatus();
+      void loadRemote();
+    },
     // Fleet stats change about as slowly as the host's own, so it shares that cadence.
     fleet: () => void pollFleet(),
     orgs: () => void pollOrgs(),
@@ -652,6 +669,8 @@ export function App() {
       onUsageChanged={setUsage}
       notifications={notifyPrefs}
       onNotificationsChanged={setNotifyPrefs}
+      remote={remote}
+      onRemoteChanged={setRemote}
       initialSection={settingsSection}
       setup={setup}
       pull={pull}
@@ -713,6 +732,7 @@ export function App() {
               onOpenColony={openColony}
               status={status}
               statusError={statusError}
+              remoteOn={remote?.enabled ?? false}
               fleet={fleet}
               update={updateStatus}
               liveConnection={liveConnection}
@@ -758,6 +778,8 @@ export function App() {
         onUsageChanged={setUsage}
         notifications={notifyPrefs}
         onNotificationsChanged={setNotifyPrefs}
+        remote={remote}
+        onRemoteChanged={setRemote}
         initialSection={settingsSection}
         setup={setup}
         pull={pull}

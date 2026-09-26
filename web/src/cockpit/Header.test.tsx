@@ -20,7 +20,15 @@ const header = ({
   connection = "open" as "open" | "connecting" | "closed",
 } = {}) =>
   renderToStaticMarkup(
-    <Header orgs={orgs} selectedOrg={selectedOrg} onSelectOrg={() => {}} needByOrg={needByOrg} statusError={statusError} connection={connection as never} />,
+    <Header
+      orgs={orgs}
+      selectedOrg={selectedOrg}
+      onSelectOrg={() => {}}
+      needByOrg={needByOrg}
+      statusError={statusError}
+      connection={connection as never}
+      onOpenRemote={() => {}}
+    />,
   );
 
 const rail = ({
@@ -87,7 +95,7 @@ describe("Header running workspaces", () => {
     expect(html).not.toContain("running workspaces");
     expect(html).not.toContain("Acme · 2 running");
     const withUser = renderToStaticMarkup(
-      <Header orgs={[]} selectedOrg={null} onSelectOrg={() => {}} needByOrg={{}} statusError={false}
+      <Header orgs={[]} selectedOrg={null} onSelectOrg={() => {}} needByOrg={{}} statusError={false} onOpenRemote={() => {}}
         user={{ login: "octocat", name: "Mona", avatarUrl: null, onOpenSettings: () => {}, onOpenSecrets: () => {} }} />,
     );
     expect(withUser).toContain('aria-label="account · Mona (@octocat)"');
@@ -112,6 +120,7 @@ describe("Header notifications bell", () => {
         onSelectOrg={() => {}}
         needByOrg={{}}
         statusError={false}
+        onOpenRemote={() => {}}
         inbox={{ sessions, onOpenColony: () => {}, onOpenInbox: () => {}, onOpenNotificationSettings: () => {} }}
       />,
     );
@@ -126,6 +135,25 @@ describe("Header notifications bell", () => {
   it("is absent without an inbox, and quiet when nothing waits", () => {
     expect(header()).not.toContain("notifications");
     expect(withBell([colony("c", "running")])).not.toContain("need you");
+  });
+});
+
+describe("Header remote access badge (issue #535)", () => {
+  const withRemote = (remoteOn: boolean) =>
+    renderToStaticMarkup(
+      <Header orgs={[]} selectedOrg={null} onSelectOrg={() => {}} needByOrg={{}} statusError={false} onOpenRemote={() => {}} remoteOn={remoteOn} />,
+    );
+
+  it("is absent while remote access is off", () => {
+    expect(header()).not.toContain("Remote access");
+    expect(withRemote(false)).not.toContain("Remote access");
+  });
+
+  it("is a persistent, accessibly named button while on, opening its settings", () => {
+    const html = withRemote(true);
+    expect(html).toContain("<button");
+    expect(html).toContain("Remote access ON");
+    expect(html).toContain('aria-label="Remote access on"');
   });
 });
 

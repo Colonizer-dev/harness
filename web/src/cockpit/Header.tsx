@@ -1,8 +1,9 @@
 // The cockpit's top bar: the workspaces that have colonies running right now, as avatars at the
 // right, each a filter, then the notifications bell (the inbox) at the far right. (Issues are handed
-// off from Colonize: the sidebar's button, the dashboard's, or ⌘K.) Navigation and the rest of the state live in the sidebar and the views;
-// the bar only speaks up otherwise when something is wrong (the mothership unreachable, the live feed
-// down).
+// off from Colonize: the sidebar's button, the dashboard's, or ⌘K.) Navigation and the rest of the
+// state live in the sidebar and the views; the bar only speaks up otherwise when something is wrong
+// (the mothership unreachable, the live feed down), plus the one persistent marker: remote access
+// being on (issue #535).
 import { useEffect, useRef, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
@@ -37,8 +38,12 @@ export function Header(props: {
   inbox?: InboxActions;
   /** The signed-in GitHub user, shown as the one avatar at the right with its menu. */
   user?: UserMenuProps;
+  /** The remote-access switch (issue #535): while on, a small persistent badge. */
+  remoteOn?: boolean;
+  /** Opens Settings → Remote access from the badge. */
+  onOpenRemote: () => void;
 }): ReactElement {
-  const { statusError, connection, inbox, user } = props;
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote } = props;
 
   return (
     <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)]">
@@ -53,6 +58,21 @@ export function Header(props: {
           <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-faint" />
           reconnecting…
         </span>
+      )}
+      {/* One compact badge for the tunnel being up, quieter than the fault spans beside it: a
+          shorter label at phone width, and the full name kept for screen readers either way. */}
+      {remoteOn && (
+        <button
+          type="button"
+          onClick={onOpenRemote}
+          aria-label="Remote access on"
+          title="Remote access is on — open its settings"
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-ok-soft px-2 py-0.5 text-[12px] font-medium text-ok"
+        >
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-ok" />
+          <span className="max-sm:hidden">Remote access ON</span>
+          <span className="sm:hidden">Remote</span>
+        </button>
       )}
 
       <div className="min-w-0 flex-1" />

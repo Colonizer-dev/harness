@@ -227,3 +227,52 @@ describe("mock push subscriptions (issue #516)", () => {
     expect(listed.map((row) => row.id)).toEqual([added.id]);
   });
 });
+
+describe("mock remote access (issue #535)", () => {
+  it("starts off, and switching on mints the host, a live tunnel and an activity row", async () => {
+    const api = createMockApi();
+    expect(await api.remote()).toEqual({ enabled: false, host: null, connected: false, since: null });
+    const on = await api.setRemote(true);
+    expect(on).toMatchObject({ enabled: true, connected: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev" });
+    expect(on.since).toBeTruthy();
+    const { entries } = await api.activity({ kind: "remote.enable" });
+    expect(entries[0]).toMatchObject({ kind: "remote.enable", actor: "you", target: "remote access", section: "remote" });
+  });
+
+  it("switching off drops the link but keeps the host, and a no-change PUT records nothing, like the server", async () => {
+    const api = createMockApi();
+    const on = await api.setRemote(true);
+    const off = await api.setRemote(false);
+    expect(off).toMatchObject({ enabled: false, connected: false, since: null, host: on.host });
+    const before = (await api.activity({ kind: "remote" })).entries.length;
+    expect(await api.setRemote(false)).toEqual(off);
+    expect((await api.activity({ kind: "remote" })).entries).toHaveLength(before);
+  });
+
+  it("a reset changes the host, so the old link stops working", async () => {
+    const api = createMockApi();
+    const on = await api.setRemote(true);
+    const reset = await api.resetRemote();
+    // The relay's install-id shape: 20 base32 characters.
+    expect(reset.host).toMatch(/^[a-z2-7]{20}\.my\.colonizer\.dev$/);
+    expect(reset.host).not.toBe(on.host);
+    expect(reset).toMatchObject({ enabled: true, connected: true });
+    const { entries } = await api.activity({ kind: "remote.reset" });
+    expect(entries[0]).toMatchObject({ kind: "remote.reset", target: "remote access", section: "remote" });
+  });
+
+  it("pairing mirrors the relay: one seeded code, single-use, with the relay's refusals", async () => {
+    const api = createMockApi();
+    const view = await api.remotePairing();
+    expect(view?.owner).toBeNull();
+    expect(view?.pending).toHaveLength(1);
+    const code = view!.pending[0].code;
+    await expect(api.confirmRemotePairing("12345")).rejects.toMatchObject({ status: 400 }); // not six digits
+    await expect(api.confirmRemotePairing("000000")).rejects.toMatchObject({ status: 404 }); // unknown
+    const done = await api.confirmRemotePairing(code);
+    expect(done.owner).toEqual({ github_login: view!.pending[0].github_login });
+    // A confirm deletes every pending code, so the used one is gone — a 404, like at the relay.
+    await expect(api.confirmRemotePairing(code)).rejects.toMatchObject({ status: 404 });
+    expect((await api.remotePairing())?.pending).toEqual([]);
+  });
+});
