@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ApiError, heldByFor, heldInBatch } from "../api";
+import { ApiError, epicMarker, heldByFor, heldInBatch, isEpic } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
@@ -787,14 +787,19 @@ export function NewSession({
   // behind the holder queues each for its issue instead.
   const heldSelected = activeRepo ? heldInBatch(sessions, activeRepo, selected) : [];
   const overrideHeld = allowDuplicate || queueBehind;
-  const launchCount = overrideHeld ? selected.size : selected.size - heldSelected.length;
+  // Epics never go out in a batch: the mothership would refuse each (409), and their sub-issues are
+  // the work. Launching one on purpose is the issue's own Launch colony, with Start on the epic anyway.
+  const epicSelected = (issues ?? []).filter((i) => selected.has(i.number) && isEpic(i)).map((i) => i.number);
+  const launchCount = [...selected].filter((n) => !epicSelected.includes(n) && (overrideHeld || !heldSelected.includes(n))).length;
 
   // One colony per issue, launched in the order they appear. Past the parallel limit the harness
   // queues them, so a batch is a plan rather than a burst.
   const launchSelected = async () => {
     if (!activeRepo) return;
     const held = new Set(overrideHeld ? [] : heldInBatch(sessions, activeRepo, selected));
-    const batch = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number));
+    const epics = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number) && isEpic(i));
+    if (epics.length > 0) console.info(`batch launch: skipping epic${epics.length === 1 ? "" : "s"} ${epics.map((i) => `#${i.number}`).join(", ")}`);
+    const batch = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number) && !isEpic(i));
     setLaunching(true);
     setBlockedByDuplicate(false);
     let started = 0;
@@ -829,6 +834,7 @@ export function NewSession({
       started > 0 ? `${started} started` : null,
       queued > 0 ? `${queued} queued` : null,
       held.size > 0 ? `${held.size} already held, skipped` : null,
+      epics.length > 0 ? `${epics.length} ${epics.length === 1 ? "epic" : "epics"} skipped` : null,
     ]
       .filter(Boolean)
       .join(", ");
@@ -911,6 +917,11 @@ export function NewSession({
                   {heldSelected.length > 0 && (
                     <span className="block text-[11.5px] text-warn">
                       {heldSelected.length} already held — skipped unless Allow duplicate or Wait behind the holder
+                    </span>
+                  )}
+                  {epicSelected.length > 0 && (
+                    <span className="block text-[11.5px] text-warn">
+                      {epicSelected.length} {epicSelected.length === 1 ? "epic" : "epics"} — skipped; launch its sub-issues instead
                     </span>
                   )}
                 </span>
@@ -1113,6 +1124,8 @@ function IssueRow({
   const [autopilot, setAutopilot] = useState<boolean | null>(null);
   const [starting, setStarting] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+  const epic = epicMarker(issue);
+  const [allowEpic, setAllowEpic] = useState(false);
 
   const start = async () => {
     setStarting(true);
@@ -1125,6 +1138,7 @@ function IssueRow({
         instructions: instructions.trim() || undefined,
         autopilot: autopilot ?? undefined,
         allow_duplicate: allowDuplicate || undefined,
+        allow_epic: allowEpic || undefined,
         queue_behind_holder: queueBehind || undefined,
       });
       toast(
@@ -1178,6 +1192,11 @@ function IssueRow({
                   {label.name}
                 </span>
               ))}
+              {epic && (
+                <span className="text-warn" title={issue.epic?.reason ? `An epic: ${issue.epic.reason}` : "An epic: a planning container"}>
+                  {epic}
+                </span>
+              )}
               <span>{timeAgo(issue.updatedAt)}</span>
               {holder && (
                 <span className="text-warn" title={`Already held by ${holder.id} (${holder.status}) — Wait behind the holder to queue for it`}>
@@ -1250,6 +1269,18 @@ function IssueRow({
                 </label>
               )}
             </>
+          )}
+          {epic && (
+            <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+              <input
+                type="checkbox"
+                checked={allowEpic}
+                onChange={(e) => setAllowEpic(e.target.checked)}
+                aria-label={`Start a colony on epic #${issue.number} anyway`}
+                className="size-3.5 cursor-pointer accent-[var(--accent)]"
+              />
+              Start on the epic anyway — its sub-issues are usually the work
+            </label>
           )}
           {launchError && <p className="text-[12.5px] text-err [overflow-wrap:anywhere]">{launchError}</p>}
           <textarea

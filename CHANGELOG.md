@@ -306,6 +306,13 @@ setting) is called out under **Take care** rather than left for you to find.
   once in the activity line and added to the published pull request as a verification note, without
   changing the verdict. Empty branches (unverifiable) and failing tests (contradicted) are unchanged.
   ([#531])
+- **Colonies are no longer launched on epics.** An epic is a planning container: a colony on it
+  duplicates the colonies on its sub-issues (one spent $1.82 and an hour on #531). A launch on an
+  issue with sub-issues, an `epic` label, or a title ending "(epic)" or starting "Epic:" is now a
+  **409** naming why and listing up to ten open sub-issues to launch instead; `allow_epic: true`
+  starts one anyway. The check sits in `POST /api/sessions`, so the dashboard, the Colonize pane,
+  the MCP tool and the CLI all get it. Issue lists mark epics ("Epic · 5 sub-issues") and leave them
+  out of bulk hand-offs, noting how many were skipped. ([#531])
 - **History no longer repeats or re-dates events.** The page dated each colony by its `updated_at`,
   which moves on every housekeeping write — a reclaim sweep marking worktrees cleaned up, an update or
   restart touching every colony — so one sweep re-dated days-old outcomes to "just now" and drew them as

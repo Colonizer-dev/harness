@@ -94,6 +94,17 @@ describe("issue filters and selection", () => {
     expect(selectable(issues, sessions).map((i) => i.number)).toEqual([2]);
   });
 
+  it("leaves epics out of a hand-off: sub-issues, an epic label, or a title marking one", () => {
+    const epics = [
+      { ...issue("acme/web", 531, "Remote access"), epic: { reason: "it has 5 sub-issues", sub_issues: 5 } },
+      issue("acme/web", 532, "Planning", ["Epic"]),
+      issue("acme/web", 533, "Remote access (epic)"),
+      issue("acme/web", 534, "Epic: billing"),
+      issue("acme/web", 535, "Fix the epic loader", ["epic-followup"]),
+    ];
+    expect(selectable(epics, []).map((i) => i.number)).toEqual([535]);
+  });
+
   it("select all toggles the shown selectable issues and keeps hidden picks", () => {
     const hidden = issueKey("acme/other", 99);
     const shown = issues.slice(0, 2);

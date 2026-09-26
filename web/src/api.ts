@@ -134,6 +134,20 @@ export function heldByFor(sessions: Session[], repo: string, issue: number): Ses
   );
 }
 
+/** The client-side mirror of the mothership's epic check (epic.rs), for lists: the list's own `epic` marker, else an `epic` label or a title ending "(epic)" / starting "Epic:". */
+export function isEpic(issue: Pick<Issue, "title" | "labels" | "epic">): boolean {
+  if (issue.epic) return true;
+  const title = issue.title.trim().toLowerCase();
+  return issue.labels.some((l) => l.name.trim().toLowerCase() === "epic") || title.endsWith("(epic)") || title.startsWith("epic:");
+}
+
+/** The marker an epic carries in an issue list: "Epic · 5 sub-issues", or just "Epic"; null for any other issue. */
+export function epicMarker(issue: Pick<Issue, "title" | "labels" | "epic">): string | null {
+  if (!isEpic(issue)) return null;
+  const n = issue.epic?.sub_issues ?? 0;
+  return n > 0 ? `Epic · ${n} sub-issue${n === 1 ? "" : "s"}` : "Epic";
+}
+
 /** The issues of a batch launch another colony already holds, in the order given — each one a 409 waiting to happen. */
 export function heldInBatch(sessions: Session[], repo: string, issues: Iterable<number>): number[] {
   return [...issues].filter((issue) => heldByFor(sessions, repo, issue) !== null);

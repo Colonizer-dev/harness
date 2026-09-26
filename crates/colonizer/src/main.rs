@@ -29,6 +29,7 @@ mod config;
 mod deps;
 mod diagnosis;
 mod egress;
+mod epic;
 mod events;
 mod exec_bits;
 mod execution;

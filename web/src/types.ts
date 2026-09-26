@@ -192,6 +192,8 @@ export interface Issue {
   author: { login: string } | null;
   updatedAt: string;
   url: string;
+  /** Set by the mothership's issue list when the issue is an epic (sub-issues, an `epic` label, or a title marking it): why, and how many sub-issues. A launch on it answers 409 without `allow_epic`. */
+  epic?: { reason: string; sub_issues: number } | null;
 }
 
 /** One issue Colonize drafted from free text, shown for a confirm or an edit before it is filed. */
@@ -1211,6 +1213,8 @@ export interface NewSessionRequest {
   automerge?: boolean;
   /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
   allow_duplicate?: boolean;
+  /** Start a colony on an epic anyway; the mothership answers 409 without it, listing the epic's open sub-issues. */
+  allow_epic?: boolean;
   /** Queue the colony for an issue another colony already holds instead of refusing: it comes back `queued` (`claim_wait`, `queued_behind` naming the holder) and starts when the holder releases. `allow_duplicate` wins if both are set; a remote conflict still answers 409. */
   queue_behind_holder?: boolean;
   /** Stack the new colony on another's branch: the parent session's id, which becomes `parent` and whose branch becomes `base`. Launching a stack is API-only; no form picker yet. */

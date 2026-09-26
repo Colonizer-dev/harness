@@ -2307,7 +2307,15 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         let modules = app.modules.read().await;
         LabelFilter::from_source(modules.get("source"), &app.agents)
     };
-    Ok(Json(filter.apply(issues)))
+    // Each issue carries `epic` (null, or why it is one and its sub-issue count), so the cockpit
+    // marks epics and leaves them out of bulk hand-offs. The sub-issue totals are one best-effort
+    // read: without them the label and title still mark an epic, and the launch gate
+    // (`sessions::create`, epic.rs) asks GitHub about the one issue either way.
+    let totals = crate::epic::open_sub_issue_totals(&app, &repo).await.unwrap_or_else(|e| {
+        eprintln!("epic: could not read sub-issue totals for {repo} ({e:#}); marking epics by label and title only");
+        Default::default()
+    });
+    Ok(Json(crate::epic::annotate(filter.apply(issues), &totals)))
 }
 
 /// The Source module's label filter: which open issues are offered for a colony. Labels compare
