@@ -409,6 +409,7 @@ than the "scanning" placeholder, which now appears only for a scope never scanne
 - Git objects and worktree metadata are mounted read-only; publish treats VM output as untrusted.
 - agentd requires a per-session bearer token even inside the private mesh.
 - Browser API: loopback bind by default, Host/Origin checks (including WebSocket upgrades).
+- Remote access (opt-in): the `<install_id>.my.colonizer.dev` link tunnels out to a relay, keeping the same fence and auth — [remote-tunnel.md](remote-tunnel.md).
 - Network: what a colony's microsandbox profiles allow and deny is in
   [sandbox-network.md](sandbox-network.md).
 - In the guest the agent runs as root, but hardened: see [In-guest hardening](#in-guest-hardening).
