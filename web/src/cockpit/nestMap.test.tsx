@@ -7,7 +7,7 @@ import { DEMO_MAP } from "../mock";
 import type { RepoMap } from "../types";
 import { SURFACE_Y } from "./nest";
 import { NestMapView, colonyPlaces, mapRepos } from "./NestMapView";
-import { DENSE_MAP } from "./mapFixtures";
+import { DENSE_MAP, OFF_CENTRE_ENTRY_MAP } from "./mapFixtures";
 import {
   LABEL_MAX_W,
   antRoute,
@@ -19,7 +19,9 @@ import {
   fitView,
   labelCollisions,
   layoutMap,
+  mouthPath,
   routeBetween,
+  shaftCrossings,
   titleCollisions,
   tunnelPaths,
   zoomAt,
@@ -160,6 +162,61 @@ describe("layoutMap on a dense map", () => {
     expect(flung.x).toBe(0);
     expect(flung.y).toBe(view.height - layout.height * flung.k);
     expect(clampView({ ...fit, k: 50 }, layout, view).k).toBe(2.5);
+  });
+});
+
+describe("the mothership's shaft", () => {
+  /** The points a path's commands land on, in order. */
+  const points = (d: string) => [...d.matchAll(/(-?\d+) (-?\d+)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+
+  // The reported map: its entry at the bottom-left, a boundary's title between it and the centre.
+  it.each([
+    { width: 1400, height: 800 },
+    { width: 2000, height: 900 },
+    { width: 1000, height: 640 },
+    { width: 360, height: 480 },
+  ])("comes straight down above an off-centre entry, crossing no title or chamber, at $width×$height", (view) => {
+    const layout = layoutMap(OFF_CENTRE_ENTRY_MAP, view);
+    const entry = entryComponent(OFF_CENTRE_ENTRY_MAP, layout)!;
+    expect(entry).toBe("user");
+    const e = layout.byId.get(entry)!;
+    // Nothing is above App User, so the mouth is right over it, nowhere near the plot's centre.
+    expect(layout.mouth.x).toBe(e.x);
+    expect(Math.abs(layout.mouth.x - layout.width / 2)).toBeGreaterThan(layout.width / 4);
+    expect(shaftCrossings(layout, entry)).toEqual([]);
+    const d = mouthPath(layout, entry);
+    expect(d.startsWith(`M${layout.mouth.x} ${layout.mouth.y}`)).toBe(true);
+    // Every point it passes on the way down stays in the shaft's lane.
+    for (const [x] of points(d)) expect(Math.abs(x - e.x)).toBeLessThanOrEqual(4);
+    expect(antRoute(OFF_CENTRE_ENTRY_MAP, layout, "pay").startsWith(d)).toBe(true);
+  });
+
+  it.each([
+    { width: 360, height: 480 },
+    { width: 1024, height: 560 },
+    { width: 1700, height: 790 },
+  ])("finds a clear way down on a dense map at $width×$height", (view) => {
+    const layout = layoutMap(DENSE_MAP, view);
+    expect(shaftCrossings(layout, entryComponent(DENSE_MAP, layout)!)).toEqual([]);
+  });
+
+  it("steps aside when a chamber sits right above the entry, then turns in to it", () => {
+    const at = (id: string, x: number, y: number) => ({ id, type: "backend", label: id, pos: [x, y] as [number, number], size: [120, 60] as [number, number], sources: [] });
+    const map = {
+      title: "stacked",
+      components: [at("roof", 0, 0), at("entry", 0, 300), at("next", 400, 300)],
+      connections: [{ from: "entry", to: "next" }],
+      boundaries: [],
+    };
+    const layout = layoutMap(map, box);
+    const e = layout.byId.get("entry")!;
+    const roof = layout.byId.get("roof")!;
+    expect(roof.x).toBe(e.x);
+    expect(layout.mouth.x).not.toBe(e.x);
+    expect(shaftCrossings(layout, "entry")).toEqual([]);
+    const d = points(mouthPath(layout, "entry"));
+    expect(d.at(-1)![0]).toBe(e.x);
+    expect(d.at(-1)![1]).toBeGreaterThan(e.y - e.r);
   });
 });
 

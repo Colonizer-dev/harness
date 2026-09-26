@@ -388,7 +388,7 @@ export function NestMapView({
         <span
           aria-hidden="true"
           className="map-mouth absolute grid h-11 w-11 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full text-accent"
-          style={{ left: box.width / 2, top: SURFACE_Y }}
+          style={{ left: layout?.mouth.x ?? box.width / 2, top: SURFACE_Y }}
         >
           <svg width="20" height="20" viewBox="0 0 24 24">
             <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
@@ -398,13 +398,14 @@ export function NestMapView({
 
         {map && layout && (
             <>
-              {/* Mounds: the boundaries archify drew, behind their chambers, titled where no other text is. */}
+              {/* Mounds: the boundaries archify drew, behind their chambers, titled where no other text is.
+                  A title sits above the tunnels (z-[1]), so a tunnel passing it never covers it. */}
               {layout.mounds.map((m, i) => (
                 <div key={i} aria-hidden="true" className="map-mound absolute" style={{ left: m.box.x, top: m.box.y, width: m.box.w, height: m.box.h }}>
                   {m.title && labelsShown && (
                     <span
                       title={m.label}
-                      className="map-text absolute truncate whitespace-nowrap text-[10.5px] uppercase tracking-[0.1em] text-faint"
+                      className="map-text absolute z-[1] truncate whitespace-nowrap text-[10.5px] uppercase tracking-[0.1em] text-faint"
                       style={{ left: m.title.x - m.box.x, top: m.title.y - m.box.y, width: m.title.w, textAlign: "center" }}
                     >
                       {m.label}
@@ -531,7 +532,7 @@ export function NestMapView({
                 }),
               )}
 
-              {/* Colonies with nothing changed yet wait by the mouth. */}
+              {/* Colonies with nothing changed yet wait by the mouth, on the side with more surface. */}
               {places.waiting.map((s, i) => (
                 <button
                   key={`wait-${s.id}`}
@@ -540,7 +541,7 @@ export function NestMapView({
                   title={`${taskLine(s, s.id)} · ${isBlocked(s) ? (s.status === "waiting_for_answer" ? "waiting for you" : "idle") : "starting — nothing read or changed yet"}`}
                   aria-label={`colony ${s.issue_title || s.id}, nothing read or changed yet`}
                   className="absolute z-[3] -translate-x-1/2 -translate-y-full cursor-pointer"
-                  style={{ left: box.width / 2 + 34 + i * 22, top: SURFACE_Y }}
+                  style={{ left: layout.mouth.x + (layout.mouth.x > box.width / 2 ? -1 : 1) * (34 + i * 22), top: SURFACE_Y }}
                 >
                   <AntAvatar state="thinking" size={20} phase={i} ground={false} framed={false} />
                 </button>
