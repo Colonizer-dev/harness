@@ -36,5 +36,8 @@ describe("LoopsView", () => {
   it("builds a full-replace body that keeps every setting and applies a change", () => {
     const body = bodyOf(loop, { enabled: false });
     expect(body).toMatchObject({ name: "Triage", repo: "acme/web", cadence: loop.cadence, max_runs: 5, enabled: false, autopilot: true });
+    // A full replace must not quietly turn a map loop back into a colony loop.
+    expect(bodyOf({ ...loop, kind: "map", repo: "acme/*" })).toMatchObject({ kind: "map", repo: "acme/*" });
+    expect(bodyOf(loop).kind).toBe("colony");
   });
 });

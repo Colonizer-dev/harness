@@ -36,8 +36,27 @@ use std::{
 
 /// The `origin` a mapping colony carries, so its end is recognised and the UI can label it.
 pub const MAP_ORIGIN: &str = "map";
+/// The `origin` prefix a map-refresh loop's colonies carry (`loops.rs`), naming the loop.
+pub const LOOP_ORIGIN: &str = "map:loop:";
 /// The skillset a mapping colony loads, whatever its org has switched on.
 pub const ARCHIFY_SKILLSET: &str = "archify";
+
+/// The origin of a map-refresh loop's colonies: `map:loop:<loop id>`.
+pub fn loop_origin(loop_id: &str) -> String {
+    format!("{LOOP_ORIGIN}{loop_id}")
+}
+
+/// The map-refresh loop a colony belongs to, from its origin. A hand-launched mapping colony has
+/// none.
+fn refresh_loop_of(origin: &str) -> Option<&str> {
+    origin.strip_prefix(LOOP_ORIGIN).filter(|id| !id.is_empty())
+}
+
+/// Whether a colony was launched to draw a map: by hand from the Map view (`map`) or by a refresh
+/// loop (`map:loop:<id>`). Either way it ingests, idles out and reads as `mapping` the same.
+pub fn is_map_origin(origin: &str) -> bool {
+    origin == MAP_ORIGIN || origin.starts_with(LOOP_ORIGIN)
+}
 
 /// The agent settings a mapping colony runs with, over the install's own: one agent (no
 /// delegation), medium effort, on Sonnet for every tier. Mapping is read-heavy and bounded, so the
@@ -300,18 +319,40 @@ pub async fn ingest(app: &App, s: &Session) -> Result<Value> {
     Ok(stored)
 }
 
-/// Called when a colony's publish finishes, whatever the outcome: a mapping colony's map is picked up.
+/// Called when a colony's publish finishes, whatever the outcome: a mapping colony's map is picked
+/// up, and a map-refresh loop's colony reports back to its loop and to the activity log.
 pub async fn on_colony_end(app: &App, s: &Session) {
-    if s.origin.as_deref() != Some(MAP_ORIGIN) {
+    if !s.origin.as_deref().is_some_and(is_map_origin) {
         return;
     }
-    match ingest(app, s).await {
+    let outcome = ingest(app, s).await;
+    match &outcome {
         Ok(_) => {
             app.session_log(&s.id, "info", format!("architecture map stored for {}", s.repo))
                 .await
         }
         Err(e) => app.session_log(&s.id, "error", format!("no architecture map: {e:#}")).await,
     }
+    note_refresh_outcome(app, s, &outcome).await;
+}
+
+/// A map-refresh loop's colony finished its refresh: the loop's note says how it went and History
+/// records `map.refresh`. A hand-drawn map (origin `map`) has no loop to tell. Called wherever a
+/// mapping colony ends — usually the idle path below, since a mapping colony publishes nothing.
+async fn note_refresh_outcome(app: &App, s: &Session, outcome: &Result<Value>) {
+    let Some(loop_id) = s.origin.as_deref().and_then(refresh_loop_of) else {
+        return;
+    };
+    let mut entry = crate::activity::Entry::new("map.refresh", "colony").colony(s);
+    match outcome {
+        Ok(_) => crate::loops::note_refresh(app, loop_id, &format!("map of {} refreshed", s.repo)).await,
+        Err(e) => {
+            // The stored map is untouched — ingest only writes a valid map — so the old one stands.
+            crate::loops::note_refresh(app, loop_id, &format!("map refresh of {} failed: {e:#}", s.repo)).await;
+            entry.detail = Some(format!("{e:#}"));
+        }
+    }
+    crate::activity::record(app, entry).await;
 }
 
 /// How long a mapping colony may sit idle without a valid map before it gives its slot back: the
@@ -329,7 +370,7 @@ pub async fn on_idle(app: Shared, id: String) {
 
 pub(crate) async fn on_idle_after(app: Shared, id: String, grace: std::time::Duration) {
     let Some(s) = app.session(&id).await else { return };
-    if s.origin.as_deref() != Some(MAP_ORIGIN) || s.status != SessionStatus::Idle {
+    if !s.origin.as_deref().is_some_and(is_map_origin) || s.status != SessionStatus::Idle {
         return;
     }
     if finish_if_drawn(&app, &s).await {
@@ -346,7 +387,7 @@ pub(crate) async fn on_idle_after(app: Shared, id: String, grace: std::time::Dur
         if finish_if_drawn(&app, &s).await {
             return;
         }
-        crate::lifecycle::stop_colony(
+        let stopped = crate::lifecycle::stop_colony(
             &app,
             &s,
             |x| x.status == SessionStatus::Idle && x.updated_at == idle_since,
@@ -357,14 +398,22 @@ pub(crate) async fn on_idle_after(app: Shared, id: String, grace: std::time::Dur
             ),
         )
         .await;
+        if stopped {
+            // A refresh loop's usual failure: the old map stands and the loop's note says why.
+            let outcome = Err(anyhow::anyhow!("went idle without a valid architecture.json"));
+            note_refresh_outcome(&app, &s, &outcome).await;
+        }
     });
 }
 
 /// Stores the colony's map and stops it when its `architecture.json` is valid. Returns whether it did.
 async fn finish_if_drawn(app: &Shared, s: &Session) -> bool {
-    if ingest(app, s).await.is_err() {
+    let outcome = ingest(app, s).await;
+    if outcome.is_err() {
         return false;
     }
+    // The usual end of a mapping colony — nothing is published, so the refresh loop hears here.
+    note_refresh_outcome(app, s, &outcome).await;
     let idle_since = s.updated_at;
     crate::lifecycle::finish_colony(
         app,
@@ -409,7 +458,7 @@ pub async fn get(State(app): State<Shared>, Path((owner, name)): Path<(String, S
     let sessions = app.sessions.read().await.clone();
     let newest = sessions
         .iter()
-        .filter(|s| s.repo == repo && s.origin.as_deref() == Some(MAP_ORIGIN))
+        .filter(|s| s.repo == repo && s.origin.as_deref().is_some_and(is_map_origin))
         .max_by_key(|s| s.created_at)
         .cloned();
     let mut stored = read_stored(&app, &repo);
@@ -466,39 +515,48 @@ pub async fn files(State(app): State<Shared>, Path((owner, name)): Path<(String,
     ))
 }
 
-/// `POST /api/maps/{owner}/{repo}`: launches a mapping colony through the ordinary admission path.
-pub async fn create(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
-    let repo = format!("{owner}/{name}");
-    if !valid_repo(&repo) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
-    }
+/// Launches a mapping colony for `repo` through the ordinary admission path, with the same prompt
+/// and skillset whoever asks: the Map view by hand (`origin` `map`) or a map-refresh loop
+/// (`map:loop:<id>`, `loops.rs`). Returns the mapping colony already running for the repository, if
+/// there is one, rather than a duplicate.
+pub async fn launch(app: &Shared, repo: &str, origin: &str) -> Result<Session, crate::AppError> {
     if crate::plugins::resolve(&app.cfg, ARCHIFY_SKILLSET).is_err() {
         return Err(client_error(
             StatusCode::CONFLICT,
             "the archify skillset is not installed with this app (scripts/fetch-vendor.sh stages it)",
         ));
     }
-    let running = app
+    if let Some(s) = app
         .sessions
         .read()
         .await
         .iter()
-        .find(|s| s.repo == repo && s.origin.as_deref() == Some(MAP_ORIGIN) && !is_ended(s.status))
-        .cloned();
-    if let Some(s) = running {
-        return Ok(Json(json!({"repo": repo, "mapping": mapping_json(&s)})));
+        .find(|s| s.repo == repo && s.origin.as_deref().is_some_and(is_map_origin) && !is_ended(s.status))
+        .cloned()
+    {
+        return Ok(s);
     }
     let body = json!({
         "repo": repo,
         "title": "Map the architecture",
-        "instructions": map_prompt(&repo),
+        "instructions": map_prompt(repo),
         "autopilot": true,
         "allow_duplicate": true,
-        "origin": MAP_ORIGIN,
+        "origin": origin,
     });
     let new_session: sessions::NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
     let Json(session) = sessions::create(State(app.clone()), None, Json(new_session)).await?;
+    Ok(session)
+}
+
+/// `POST /api/maps/{owner}/{repo}`: launches a mapping colony through the ordinary admission path.
+pub async fn create(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let session = launch(&app, &repo, MAP_ORIGIN).await?;
     Ok(Json(json!({"repo": repo, "mapping": mapping_json(&session)})))
 }
 
@@ -1197,6 +1255,104 @@ mod tests {
         assert_eq!(with_archify(""), "archify");
         assert_eq!(with_archify("ecc, superpowers"), "ecc,superpowers,archify");
         assert_eq!(with_archify("archify,ecc"), "archify,ecc");
+    }
+
+    #[test]
+    fn loop_origins_are_map_origins_and_name_their_loop() {
+        assert!(is_map_origin(MAP_ORIGIN));
+        assert!(is_map_origin(&loop_origin("loop_a")));
+        assert_eq!(refresh_loop_of(&loop_origin("loop_a")), Some("loop_a"));
+        assert!(!is_map_origin("loop:loop_a"));
+        assert!(!is_map_origin("map:loopish"), "the prefix must be whole");
+        assert_eq!(refresh_loop_of(&loop_origin("")), None, "an empty loop id is no loop");
+        assert_eq!(refresh_loop_of(MAP_ORIGIN), None, "a hand-drawn map has no loop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_loop_hears_how_each_repository_went() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-refresh-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/loops.json"),
+            json!([{
+                "id": "loop_a", "name": "Freshen", "org": "acme", "repo": "acme/*",
+                "prompt": "", "cadence": {"every": "every_days", "days": 14, "hour": 3, "minute": 0},
+                "kind": "map", "autopilot": true, "enabled": true,
+                "created_at": "2026-09-01T00:00:00Z"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let app = crate::tests::test_app(&root);
+        assert_eq!(app.loops.get("loop_a").await.unwrap().kind, crate::loops::LoopKind::Map);
+
+        // A drawn map: the loop's note says so, and History records the refresh.
+        let mut run = crate::sessions::tests::colony("acme", SessionStatus::NoChanges);
+        run.id = "m1".into();
+        run.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(run);
+        let out = app.session_dir("m1").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), serde_json::to_vec(&doc()).unwrap()).unwrap();
+        on_colony_end(&app, &app.session("m1").await.unwrap()).await;
+        assert_eq!(
+            app.loops.get("loop_a").await.unwrap().last_note.as_deref(),
+            Some("map of acme/repo refreshed")
+        );
+
+        // No drawn map: the note says why, and the old map stands.
+        let mut broken = crate::sessions::tests::colony("acme", SessionStatus::NoChanges);
+        broken.id = "m2".into();
+        broken.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(broken);
+        let out = app.session_dir("m2").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), b"{ not json").unwrap();
+        on_colony_end(&app, &app.session("m2").await.unwrap()).await;
+        let note = app.loops.get("loop_a").await.unwrap().last_note.unwrap();
+        assert!(note.starts_with("map refresh of acme/repo failed"), "{note}");
+        assert!(read_stored(&app, "acme/repo").is_some(), "the old map stands");
+
+        // The usual success — going idle with a valid map drawn, nothing published — reports too.
+        let mut idled = crate::sessions::tests::colony("acme", SessionStatus::Idle);
+        idled.id = "m3".into();
+        idled.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(idled);
+        let out = app.session_dir("m3").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), serde_json::to_vec(&doc()).unwrap()).unwrap();
+        on_idle_after(app.clone(), "m3".into(), std::time::Duration::from_secs(60)).await;
+        assert_eq!(
+            app.session("m3").await.unwrap().status,
+            SessionStatus::Stopped,
+            "the colony stops itself"
+        );
+        assert_eq!(
+            app.loops.get("loop_a").await.unwrap().last_note.as_deref(),
+            Some("map of acme/repo refreshed")
+        );
+
+        // And the usual failure — idle past the grace with still no valid map.
+        let mut stalled = crate::sessions::tests::colony("acme", SessionStatus::Idle);
+        stalled.id = "m4".into();
+        stalled.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(stalled);
+        let out = app.session_dir("m4").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), b"{ not json").unwrap();
+        let grace = std::time::Duration::from_secs(60);
+        on_idle_after(app.clone(), "m4".into(), grace).await;
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(app.session("m4").await.unwrap().status, SessionStatus::Stopped);
+        let note = app.loops.get("loop_a").await.unwrap().last_note.unwrap();
+        assert!(note.starts_with("map refresh of acme/repo failed"), "{note}");
+
+        let activity = std::fs::read_to_string(app.cfg.data_dir.join("activity.jsonl")).unwrap();
+        assert_eq!(activity.lines().filter(|l| l.contains("\"kind\":\"map.refresh\"")).count(), 4);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

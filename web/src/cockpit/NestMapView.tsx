@@ -9,7 +9,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { AntAvatar } from "../components/AntAvatar";
 import { SESSION_STATUS, isLive, store, stored, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
-import type { RepoMap, Session } from "../types";
+import type { Loop, NewLoop, RepoMap, Session } from "../types";
+import { describeLoopCadence } from "./loops";
+import { MapRefreshCovered, MapRefreshPrompt, mapRefreshKey, mapRefreshPrompt, parseMapRefreshAnswer, type MapRefreshAnswer } from "./MapRefreshPrompt";
 import { SURFACE_Y, surfaceGrass, type NestBox } from "./nest";
 import { FileTreePane } from "./FileTreePane";
 import { RepoCard, RepoPicker } from "./RepoPicker";
@@ -96,6 +98,7 @@ export function NestMapView({
   selectedId,
   onSelect,
   onOpen,
+  onOpenLoops,
   initialMap,
   initialTouched,
   initialReading,
@@ -105,6 +108,8 @@ export function NestMapView({
   selectedId: string | null;
   onSelect: (id: string) => void;
   onOpen: (id: string) => void;
+  /** The Loops page, for a covered map's "edit" and the loops this view creates. */
+  onOpenLoops?: () => void;
   /** Static markup never runs effects: the tests hand the map and the touched files in directly. */
   initialMap?: RepoMap | null;
   initialTouched?: Record<string, string[]>;
@@ -191,6 +196,16 @@ export function NestMapView({
     setData(null);
   };
 
+  // Map freshness (issue #564): the loops that could cover this repository, what the visitor answered
+  // the last time it asked, and the "Keep fresh…" link's way of asking again anyway.
+  const [loops, setLoops] = useState<Loop[] | null>(null);
+  const [answer, setAnswer] = useState<MapRefreshAnswer | null>(null);
+  const [reopen, setReopen] = useState(false);
+  useEffect(() => {
+    setReopen(false);
+    setAnswer(parseMapRefreshAnswer(repo ? stored(mapRefreshKey(repo)) : null));
+  }, [repo]);
+
   const drawMap = async () => {
     if (!repo) return;
     setStarting(true);
@@ -213,7 +228,39 @@ export function NestMapView({
 
   const stored_ = data && data.repo === repo ? data.map : null;
   const map = stored_?.map ?? null;
+  const hasMap = stored_ !== null;
   const layout = useMemo(() => (map ? layoutMap(map, viewport) : null), [map, viewport]);
+
+  // The map loops that might cover this repository, fetched once its map is on screen.
+  useEffect(() => {
+    if (!repo || !hasMap) return;
+    let cancelled = false;
+    api.loops().then((ls) => !cancelled && setLoops(ls), () => !cancelled && setLoops([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [api, repo, hasMap]);
+  const decision = useMemo(
+    () => (repo && hasMap && loops ? mapRefreshPrompt(loops, repo, answer) : null),
+    [repo, hasMap, loops, answer],
+  );
+  const rememberMapAnswer = (next: MapRefreshAnswer) => {
+    setAnswer(next);
+    setReopen(false);
+    if (repo) store(mapRefreshKey(repo), JSON.stringify(next));
+  };
+  const createMapLoop = (body: NewLoop) => {
+    api
+      .createLoop(body)
+      .then((l) => {
+        setLoops((cur) => [...(cur ?? []), l]);
+        rememberMapAnswer({ answer: "created" });
+        toast({ title: `Loop "${l.name}" created`, body: `The map refreshes ${describeLoopCadence(l.cadence)}; manage it under Loops.`, kind: "success" });
+      })
+      .catch((e) => toast(errorMessage(e), "error"));
+  };
+  // What sits under the map bar: the question, the covered line, or nothing once asked-and-answered.
+  const refresh = decision && !drawing && !drawingQueued ? (decision === "ask" || (decision === "hidden" && reopen) ? "ask" : typeof decision === "object" ? decision : null) : null;
   // The plot: the map's own size when there is one, else just the viewport.
   const box: NestBox = layout ? { width: layout.width, height: layout.height } : viewport;
   // Pan and zoom: fitted until the viewer moves it, and fitted again whenever the layout changes.
@@ -336,6 +383,11 @@ export function NestMapView({
         <div className="flex-1" />
         {stored_ && (
           <div className="flex shrink-0 items-center gap-2">
+            {decision === "hidden" && !reopen && !drawing && !drawingQueued && (
+              <button type="button" onClick={() => setReopen(true)} className={MAP_BUTTON}>
+                Keep fresh…
+              </button>
+            )}
             <button type="button" onClick={() => setRawOpen(true)} className={MAP_BUTTON}>
               <span aria-hidden="true" className="font-mono text-[11px]">{"{ }"}</span>
               Raw JSON
@@ -351,6 +403,16 @@ export function NestMapView({
       {repo && (
         <div className="relative z-[4] px-6 pb-2">
           <RepoCard repo={repo} />
+        </div>
+      )}
+      {refresh === "ask" && repo && (
+        <div className="relative z-[4] px-6 pb-2">
+          <MapRefreshPrompt repo={repo} onCreate={createMapLoop} onNotNow={() => rememberMapAnswer({ answer: "not_now", at: new Date().toISOString() })} />
+        </div>
+      )}
+      {refresh && refresh !== "ask" && (
+        <div className="relative z-[4] px-6 pb-2">
+          <MapRefreshCovered covered={refresh.covered} onEdit={() => onOpenLoops?.()} />
         </div>
       )}
       {rawOpen && stored_ && <RawMapDialog value={stored_} onClose={() => setRawOpen(false)} />}

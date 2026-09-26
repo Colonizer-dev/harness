@@ -1340,7 +1340,17 @@ async fn read_scan(app: &Shared, repo: &str, bare: &std::path::Path, sha: String
 }
 
 /// The workspace's repositories, most recently pushed first: not archived, capped at [`MAX_REPOS`].
-async fn org_repos(app: &Shared, org: &str) -> Result<Vec<String>> {
+pub(crate) async fn org_repos(app: &Shared, org: &str) -> Result<Vec<String>> {
+    org_repos_capped(app, org, Some(MAX_REPOS)).await
+}
+
+/// The same list, every repository of it: a map loop over `owner/*` refreshes them all, and a cap
+/// would silently leave the ones past it without a fresh map.
+pub(crate) async fn all_org_repos(app: &Shared, org: &str) -> Result<Vec<String>> {
+    org_repos_capped(app, org, None).await
+}
+
+async fn org_repos_capped(app: &Shared, org: &str, cap: Option<usize>) -> Result<Vec<String>> {
     let Json(list) = crate::github::list_repos(State(app.clone()))
         .await
         .map_err(|e| anyhow::anyhow!("could not list repositories: {}", e.message()))?;
@@ -1356,7 +1366,7 @@ async fn org_repos(app: &Shared, org: &str) -> Result<Vec<String>> {
         })
         .collect();
     repos.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(repos.into_iter().take(MAX_REPOS).map(|(_, r)| r).collect())
+    Ok(repos.into_iter().take(cap.unwrap_or(usize::MAX)).map(|(_, r)| r).collect())
 }
 
 async fn scan_all(app: &Shared, repos: &[String]) -> Vec<Result<RepoScan, (String, String)>> {

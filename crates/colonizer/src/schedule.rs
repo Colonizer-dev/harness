@@ -24,6 +24,9 @@ pub enum Cadence {
     Weekly { weekday: u32, hour: u32, minute: u32 },
     /// `day` 1–31; a day past the month's end fires on its last day (31 → 30 April, 28/29 February).
     Monthly { day: u32, hour: u32, minute: u32 },
+    /// Every `days` days (1–365) at `hour:minute` UTC, anchored: the slot is the first one strictly
+    /// after `after + days - 1` days, so a run that fires late does not push the anchor later.
+    EveryDays { days: u32, hour: u32, minute: u32 },
     /// The colony chooses: it names its next run (loop_next), else [`SELF_PACED_FALLBACK_MINUTES`].
     SelfPaced {},
 }
@@ -50,6 +53,12 @@ impl Cadence {
             Cadence::Monthly { day, hour, minute } => {
                 if !(1..=31).contains(day) {
                     return Err(format!("day must be 1 to 31, got {day}"));
+                }
+                (*hour, *minute)
+            }
+            Cadence::EveryDays { days, hour, minute } => {
+                if !(1..=365).contains(days) {
+                    return Err(format!("every N days must be 1 to 365 days, got {days} days"));
                 }
                 (*hour, *minute)
             }
@@ -113,6 +122,18 @@ pub fn next_run_after(cadence: &Cadence, after: DateTime<Utc>) -> DateTime<Utc> 
             }
             after + ChronoDuration::days(28)
         }
+        Cadence::EveryDays { days, hour, minute } => {
+            let base = after + ChronoDuration::days(i64::from(days.max(1) - 1));
+            let base_date = base.date_naive();
+            for extra in [0, 1] {
+                if let Some(when) = at(base_date + ChronoDuration::days(extra), hour, minute)
+                    && when > base
+                {
+                    return when;
+                }
+            }
+            base + ChronoDuration::days(1)
+        }
     }
 }
 
@@ -160,5 +181,101 @@ mod tests {
         );
         assert!(Cadence::Daily { hour: 24, minute: 0 }.check().is_err());
         assert!(Cadence::SelfPaced {}.check().is_ok());
+    }
+
+    #[test]
+    fn checks_bound_every_n_days() {
+        let days = |d| Cadence::EveryDays {
+            days: d,
+            hour: 3,
+            minute: 0,
+        };
+        assert!(days(1).check().is_ok());
+        assert!(days(365).check().is_ok());
+        assert!(days(0).check().unwrap_err().contains("1 to 365"), "no zero-days loop");
+        assert!(days(366).check().unwrap_err().contains("1 to 365"), "no two-years loop");
+        assert!(
+            days(366).check().unwrap_err().contains("366 days"),
+            "the message names the value"
+        );
+        assert!(
+            Cadence::EveryDays {
+                days: 14,
+                hour: 24,
+                minute: 0
+            }
+            .check()
+            .is_err(),
+            "bad time"
+        );
+    }
+
+    #[test]
+    fn every_n_days_fires_a_whole_interval_away_and_does_not_drift() {
+        let fortnight = Cadence::EveryDays {
+            days: 14,
+            hour: 3,
+            minute: 0,
+        };
+        assert_eq!(
+            next_run_after(&fortnight, utc(2026, 9, 24, 15, 0)),
+            utc(2026, 10, 8, 3, 0),
+            "14 days later, at the anchor time of day"
+        );
+        assert_eq!(
+            next_run_after(&fortnight, utc(2026, 9, 24, 3, 0)),
+            utc(2026, 10, 8, 3, 0),
+            "a fire at the anchor books 14 days later"
+        );
+        assert_eq!(
+            next_run_after(&fortnight, utc(2026, 9, 24, 3, 0) + ChronoDuration::seconds(30)),
+            utc(2026, 10, 8, 3, 0),
+            "a fire late the same morning does not push the anchor later"
+        );
+    }
+
+    #[test]
+    fn every_n_days_crosses_month_ends_leap_februarys_and_year_ends() {
+        let days = |d, h, m| Cadence::EveryDays {
+            days: d,
+            hour: h,
+            minute: m,
+        };
+        assert_eq!(
+            next_run_after(&days(14, 3, 0), utc(2026, 1, 20, 3, 0)),
+            utc(2026, 2, 3, 3, 0),
+            "Jan 20 + 14 days"
+        );
+        assert_eq!(
+            next_run_after(&days(30, 6, 15), utc(2026, 1, 31, 6, 15)),
+            utc(2026, 3, 2, 6, 15),
+            "Jan 31 + 30 days"
+        );
+        assert_eq!(
+            next_run_after(&days(60, 8, 30), utc(2028, 2, 27, 8, 30)),
+            utc(2028, 4, 27, 8, 30),
+            "60 days across leap February 2028"
+        );
+        assert_eq!(
+            next_run_after(&days(14, 23, 45), utc(2026, 12, 25, 23, 45)),
+            utc(2027, 1, 8, 23, 45),
+            "the year end"
+        );
+    }
+
+    #[test]
+    fn one_day_is_the_daily_cadence() {
+        let slot = [
+            Cadence::Daily { hour: 9, minute: 0 },
+            Cadence::EveryDays {
+                days: 1,
+                hour: 9,
+                minute: 0,
+            },
+        ];
+        for after in [utc(2026, 9, 24, 8, 59), utc(2026, 12, 31, 9, 0)] {
+            let [daily, one] = slot.each_ref().map(|c| next_run_after(c, after));
+            assert_eq!(daily, one, "days = 1 behind daily");
+        }
     }
 }

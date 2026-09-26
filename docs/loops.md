@@ -10,7 +10,9 @@ CHANGELOG entries.
 - **Loops** in the sidebar → **New loop**: pick a repository, write what each run does (or start
   from a template), choose when, and optionally a model, a subagent model, autopilot and a run limit.
 - **Composer (⌘K)**: `/loop 1h check CI on main and fix flakes` creates a loop on the composer's
-  repository that runs every hour. `/loop <task>` without an interval is self-paced.
+  repository that runs every hour. `/loop 14d …` runs every 14 days at the current time of day — a
+  whole-day interval past a week becomes an every-N-days cadence. `/loop <task>` without an
+  interval is self-paced.
 
 ## When it runs
 
@@ -20,6 +22,7 @@ CHANGELOG entries.
 | Daily | every day at a time you pick, in your local time |
 | Weekly | on a weekday at a time |
 | Monthly | on a day of the month at a time; days 29–31 fire on a shorter month's last day |
+| Every N days | every N days (1–365) at a time you pick, anchored in UTC so a run that fires late never moves the schedule |
 | Self-paced | each run names the next with `loop_next` (15 minutes to 24 hours); without one, 24 hours later |
 
 Times are stored in UTC; the cockpit converts your local choice when you save.
@@ -41,6 +44,29 @@ call:
 
 A loop also ends by itself after its **max runs**, or when its next run would fall past its **end
 date**.
+
+## Map refresh
+
+A map loop keeps architecture maps fresh instead of running a prompt: each firing launches the same
+mapping colony as the Map view — same instructions, same `archify` skillset, reuse of a colony
+already drawing — so its runs are the map, exactly as if it had been drawn by hand. Its prompt is
+not used and may be left empty. Choose a scope:
+
+- **This repository** — maps the one repository on its cadence.
+- **All repositories in the org** (`owner/*`) — maps them one at a time, ten minutes apart, and
+  re-lists the org at the start of every cycle, so repositories added later are included.
+
+Launches go through the ordinary admission path, so parallel limits, org budgets and the archify
+skillset rule the loop in exactly as they rule the Map view. A firing that is refused says so in the
+loop's note and tries again at its next slot; org-wide, one repository's failure is noted and the
+cycle moves on to the next — and a workspace that is switched off altogether skips its whole cycle
+with that single note rather than one per repository. When a refresh ends, History records it as
+`map.refresh` — and a repository whose refresh failed keeps its old map.
+
+**Keep this map up to date?** — the Map view asks once per repository when its first map is drawn.
+The answer defaults to every 14 days, with presets 7/14/30/60/90 or a custom number; **Not now** is
+remembered in that browser for 30 days. Once a refresh loop exists, the map shows
+"Refreshed every N days · edit". Map loops can also be made from the Loops page.
 
 ## Cost
 

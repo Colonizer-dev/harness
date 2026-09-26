@@ -1,11 +1,13 @@
 // The pure half of loops (loops.rs): the operator's local schedule choice as the UTC cadence the
 // mothership stores, a cadence back in words, the Composer's `/loop <interval> <prompt>` shorthand,
-// and the prompt templates the "New loop" dialog offers. Kept apart from the view so it is testable.
-import type { LoopCadence } from "../types";
+// the map loops that keep architecture maps fresh, and the prompt templates the "New loop" dialog
+// offers. Kept apart from the view so it is testable.
+import type { Loop, LoopCadence, NewLoop } from "../types";
 import { WEEKDAYS, describeCadence, toUtcCadence } from "./redTeamPlan";
 
 export type LoopChoice =
   | { every: "interval"; minutes: number }
+  | { every: "every_days"; days: number; time: string }
   | { every: "daily"; time: string }
   | { every: "weekly"; weekday: number; time: string }
   | { every: "monthly"; day: number; time: string }
@@ -13,6 +15,9 @@ export type LoopChoice =
 
 export const MIN_INTERVAL = 15;
 export const MAX_INTERVAL = 7 * 24 * 60;
+/** An `every_days` cadence runs 1–365 days apart (the server refuses the rest); the dialog offers these. */
+export const MAX_DAYS = 365;
+export const DAY_PRESETS: readonly number[] = [7, 14, 30, 60, 90];
 
 function hm(time: string): [number, number] {
   const [h, m] = time.split(":").map((n) => Number.parseInt(n, 10));
@@ -34,6 +39,13 @@ export function toUtcLoopCadence(choice: LoopChoice, now = new Date()): LoopCade
       local.setHours(h, m, 0, 0);
       return { every: "daily", hour: local.getUTCHours(), minute: local.getUTCMinutes() };
     }
+    case "every_days": {
+      const [h, m] = hm(choice.time);
+      const local = new Date(now);
+      local.setHours(h, m, 0, 0);
+      const days = Math.round(choice.days);
+      return { every: "every_days", days: Number.isFinite(days) ? Math.min(MAX_DAYS, Math.max(1, days)) : 1, hour: local.getUTCHours(), minute: local.getUTCMinutes() };
+    }
     default:
       return toUtcCadence(choice, now) as LoopCadence;
   }
@@ -49,6 +61,10 @@ export function toLocalChoice(cadence: LoopCadence, now = new Date()): LoopChoic
     case "daily": {
       const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cadence.hour, cadence.minute));
       return { every: "daily", time: `${pad(d.getHours())}:${pad(d.getMinutes())}` };
+    }
+    case "every_days": {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cadence.hour, cadence.minute));
+      return { every: "every_days", days: cadence.days, time: `${pad(d.getHours())}:${pad(d.getMinutes())}` };
     }
     case "weekly": {
       const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cadence.hour, cadence.minute));
@@ -72,6 +88,10 @@ export function describeLoopCadence(cadence: LoopCadence, now = new Date()): str
     case "daily": {
       const local = toLocalChoice(cadence, now) as { time: string };
       return `every day at ${local.time}`;
+    }
+    case "every_days": {
+      const local = toLocalChoice(cadence, now) as { time: string };
+      return `every ${cadence.days} ${cadence.days === 1 ? "day" : "days"} at ${local.time}`;
     }
     default:
       return describeCadence(cadence, now).replace(/^Every /, "every ").replace(/^Monthly /, "monthly ");
@@ -111,9 +131,10 @@ export function parseInterval(raw: string): number | null {
 
 /**
  * The Composer's `/loop` shorthand, like Claude Code's: `/loop 1h check CI on main` runs every hour;
- * `/loop check CI on main` (no interval) is self-paced. Null when the text is not a `/loop` command.
+ * `/loop check CI on main` (no interval) is self-paced; `/loop 14d …` runs every 14 days, anchored
+ * at this UTC time of day. Null when the text is not a `/loop` command.
  */
-export function parseLoopCommand(text: string): { cadence: LoopCadence; prompt: string; error: string | null } | null {
+export function parseLoopCommand(text: string, now = new Date()): { cadence: LoopCadence; prompt: string; error: string | null } | null {
   const m = text.trim().match(/^\/loop(?:\s+([\s\S]*))?$/i);
   if (!m) return null;
   const rest = (m[1] ?? "").trim();
@@ -123,14 +144,45 @@ export function parseLoopCommand(text: string): { cadence: LoopCadence; prompt: 
   if (!prompt) return { cadence: { every: "self_paced" }, prompt: "", error: "Say what the loop should do: /loop 1h check CI on main and fix flakes" };
   if (minutes == null) return { cadence: { every: "self_paced" }, prompt, error: null };
   if (minutes < MIN_INTERVAL) return { cadence: { every: "interval", minutes }, prompt, error: `A loop runs at most every ${MIN_INTERVAL} minutes` };
-  if (minutes > MAX_INTERVAL) return { cadence: { every: "interval", minutes }, prompt, error: "A loop's interval is at most 7 days; use weekly or monthly in Loops" };
-  return { cadence: { every: "interval", minutes }, prompt, error: null };
+  if (minutes <= MAX_INTERVAL) return { cadence: { every: "interval", minutes }, prompt, error: null };
+  // Past a week the shorthand speaks in whole days (8d–365d), anchored at the current UTC time.
+  const days = Math.round(minutes / 1440);
+  if (minutes % 1440 !== 0 || days > MAX_DAYS)
+    return { cadence: { every: "interval", minutes }, prompt, error: "Over 7 days a loop runs in whole days, up to 365 of them: /loop 14d check CI" };
+  return { cadence: { every: "every_days", days, hour: now.getUTCHours(), minute: now.getUTCMinutes() }, prompt, error: null };
 }
 
 /** A short name for a loop from its prompt. */
 export function nameFromPrompt(prompt: string): string {
   const line = prompt.trim().split("\n")[0].replace(/\s+/g, " ");
   return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || "Loop";
+}
+
+/** The Loops page's row line: when a colony loop runs, or which maps a map loop refreshes. */
+export function describeLoop(l: Pick<Loop, "kind" | "repo" | "cadence">): string {
+  if ((l.kind ?? "colony") !== "map") return describeLoopCadence(l.cadence);
+  const what = l.repo.endsWith("/*") ? `Refreshes the maps of every repository in ${l.repo.slice(0, -2)}` : `Refreshes the map of ${l.repo}`;
+  return `${what} · ${describeLoopCadence(l.cadence)}`;
+}
+
+/** A default name for a map loop, from its scope. */
+export function mapLoopName(repo: string): string {
+  return repo.endsWith("/*") ? `Keep every map in ${repo.slice(0, -2)} fresh` : `Keep the map of ${repo} fresh`;
+}
+
+/** The POST body for a map loop at 03:00 local: this repository, or every repository in its org. */
+export function mapLoopBody(repo: string, all: boolean, days: number, now = new Date()): NewLoop {
+  const scope = all ? `${repo.split("/")[0]}/*` : repo;
+  return {
+    name: mapLoopName(scope),
+    repo: scope,
+    prompt: "",
+    kind: "map",
+    cadence: toUtcLoopCadence({ every: "every_days", days, time: "03:00" }, now),
+    tz_offset_minutes: -now.getTimezoneOffset(),
+    autopilot: true,
+    enabled: true,
+  };
 }
 
 export const LOOP_TEMPLATES: { label: string; prompt: string; choice: LoopChoice }[] = [

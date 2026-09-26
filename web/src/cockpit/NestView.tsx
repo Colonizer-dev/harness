@@ -257,6 +257,7 @@ export function NestView({
   onOpen,
   onSelectMothership,
   onLaunch,
+  onOpenLoops,
   liveEvents,
   initialMode,
 }: {
@@ -284,6 +285,8 @@ export function NestView({
   onOpen: (id: string) => void;
   onSelectMothership: () => void;
   onLaunch: () => void;
+  /** The Loops page, for the map view's "edit" on a covered map. */
+  onOpenLoops?: () => void;
   /** What moved, for the strip and the flashes. Derived from `sessions` in production; the tests
    *  pin it here because static markup never runs the effect that derives it. */
   liveEvents?: LiveEvents;
@@ -450,7 +453,7 @@ export function NestView({
       />
 
       {mode === "map" ? (
-        <NestMapView sessions={sessions} selectedId={selectedId} onSelect={onSelect} onOpen={openColony} />
+        <NestMapView sessions={sessions} selectedId={selectedId} onSelect={onSelect} onOpen={openColony} onOpenLoops={onOpenLoops} />
       ) : (
         <div ref={plotRef} className="relative min-h-0 overflow-hidden">
           <div className="absolute inset-0">

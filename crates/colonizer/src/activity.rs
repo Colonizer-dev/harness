@@ -104,6 +104,7 @@ pub(crate) const KINDS: &[&str] = &[
     "burn_down.stop",
     "app.update",
     "map.create",
+    "map.refresh",
 ];
 
 /// The actors a line names: a person through the API (`you`), or the colony itself.
