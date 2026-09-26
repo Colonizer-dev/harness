@@ -1019,7 +1019,13 @@ export function ChatView({
           onFile={async (body) => {
             const r = await api.chatIssue(current.id, body);
             setIssue(null);
-            toast({ title: "Issue created", body: r.url, kind: "success", action: { label: "Open", onClick: () => window.open(r.url, "_blank", "noopener") } });
+            const skipped = r.labels_skipped ?? [];
+            toast({
+              title: "Issue created",
+              body: skipped.length > 0 ? `${r.url} — without ${skipped.join(", ")} (the repository has no such label and it could not be created)` : r.url,
+              kind: skipped.length > 0 ? "error" : "success",
+              action: { label: "Open", onClick: () => window.open(r.url, "_blank", "noopener") },
+            });
           }}
         />
       )}

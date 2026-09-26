@@ -136,7 +136,8 @@ export function draftRepo(scope: readonly Repo[], chosen: string): string | null
 /** A filed issue as a row of the list, so it shows (and can be dispatched) before GitHub's list catches up. */
 export function asScopedIssue(made: CreatedIssue, body: string, now: Date = new Date()): ScopedIssue | null {
   if (made.number == null) return null;
-  return { repo: made.repo, number: made.number, title: made.title, body, labels: [], author: null, updatedAt: now.toISOString(), url: made.url };
+  const labels = (made.labels ?? []).map((name) => ({ name, color: "c5def5" }));
+  return { repo: made.repo, number: made.number, title: made.title, body, labels, author: null, updatedAt: now.toISOString(), url: made.url };
 }
 
 /** The fetched issues with the ones this pane just filed, newest first and never twice. */
@@ -155,15 +156,18 @@ export interface FiledDrafts {
   /** Filed, but GitHub's answer named no number, so it cannot be dispatched from here. */
   unnumbered: CreatedIssue[];
   failed: { title: string; message: string }[];
+  /** Source labels some issue could not be given, each named once. */
+  skippedLabels: string[];
 }
 
 /** Files each draft on `repo`, one at a time, and says what was made and what failed. */
 export async function fileDrafts(api: Pick<Api, "createIssue">, repo: string, drafts: readonly IssueDraft[], now: Date = new Date()): Promise<FiledDrafts> {
-  const out: FiledDrafts = { created: [], unnumbered: [], failed: [] };
+  const out: FiledDrafts = { created: [], unnumbered: [], failed: [], skippedLabels: [] };
   for (const draft of drafts) {
     try {
       const made = await api.createIssue(repo, { title: draft.title.trim(), body: draft.body.trim() });
       const row = asScopedIssue(made, draft.body.trim(), now);
+      for (const l of made.labels_skipped ?? []) if (!out.skippedLabels.includes(l)) out.skippedLabels.push(l);
       if (row) out.created.push(row);
       else out.unnumbered.push(made);
     } catch (e) {
@@ -216,8 +220,8 @@ export interface DraftRow extends IssueDraft {
 export type DraftStep =
   | { step: "write" }
   | { step: "drafting" }
-  | { step: "confirm"; drafts: DraftRow[]; repo: string | null; note: string | null }
-  | { step: "creating"; drafts: DraftRow[]; repo: string; note: string | null };
+  | { step: "confirm"; drafts: DraftRow[]; repo: string | null; note: string | null; labels?: string[] }
+  | { step: "creating"; drafts: DraftRow[]; repo: string; note: string | null; labels?: string[] };
 
 export interface DraftState {
   text: string;
@@ -228,7 +232,7 @@ export interface DraftState {
 export type DraftAction =
   | { type: "text"; text: string }
   | { type: "drafting" }
-  | { type: "drafted"; drafts: IssueDraft[]; repo: string | null; note: string | null }
+  | { type: "drafted"; drafts: IssueDraft[]; repo: string | null; note: string | null; labels?: string[] }
   | { type: "failed"; message: string }
   | { type: "edit"; id: number; patch: Partial<Omit<DraftRow, "id">> }
   | { type: "repo"; repo: string | null }
@@ -260,7 +264,7 @@ export function draftReducer(state: DraftState, action: DraftAction): DraftState
       if (stage.step !== "drafting") return state;
       return {
         ...state,
-        stage: { step: "confirm", drafts: action.drafts.map((d, id) => ({ ...d, id, keep: true })), repo: action.repo, note: action.note },
+        stage: { step: "confirm", drafts: action.drafts.map((d, id) => ({ ...d, id, keep: true })), repo: action.repo, note: action.note, labels: action.labels ?? [] },
       };
     case "failed":
       return { ...state, stage: stage.step === "creating" ? { ...stage, step: "confirm" } : { step: "write" }, error: action.message };
@@ -590,7 +594,7 @@ export function ColonizePane({
     send({ type: "drafting" });
     try {
       const answer = await api.draftIssues(target ? { text, repo: target } : { text });
-      send({ type: "drafted", drafts: answer.issues, repo: target, note: answer.model ? `Drafted by ${answer.model}` : (answer.note ?? null) });
+      send({ type: "drafted", drafts: answer.issues, repo: target, note: answer.model ? `Drafted by ${answer.model}` : (answer.note ?? null), labels: answer.labels ?? [] });
     } catch (e) {
       send({ type: "failed", message: errorMessage(e) });
     }
@@ -634,6 +638,12 @@ export function ColonizePane({
       if (dispatchAfter) await dispatch(filed.created);
     }
     for (const u of filed.unnumbered) toast({ title: `Created ${u.title}`, body: u.url, kind: "success" });
+    if (filed.skippedLabels.length > 0)
+      toast({
+        title: `Filed without ${filed.skippedLabels.join(", ")}`,
+        body: `${on} has no such label and it could not be created, so the Source filter may hide the issue after a reload.`,
+        kind: "error",
+      });
   };
 
   const repoChoices = repoQuery.trim() ? scope.filter((r) => r.full_name.toLowerCase().includes(repoQuery.trim().toLowerCase())) : scope;
@@ -974,6 +984,16 @@ function ConfirmDrafts({
           Edit the text
         </button>
       </div>
+      {stage.labels && stage.labels.length > 0 && (
+        <p data-source-labels className="m-0 flex flex-wrap items-center gap-1 text-[12px] text-muted" title="Settings → Source: added so the filtered issue list keeps offering the new issues">
+          <span>labels:</span>
+          {stage.labels.map((l) => (
+            <span key={l} className="rounded-full border border-border px-1.5 leading-4">
+              {l}
+            </span>
+          ))}
+        </p>
+      )}
       <label className="flex items-center gap-2 text-[12.5px] text-muted">
         <span className="shrink-0">Create on</span>
         <select

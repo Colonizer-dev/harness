@@ -1851,35 +1851,135 @@ pub fn check_issue(req: &NewIssue) -> Result<(), String> {
 pub async fn file_issue(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<NewIssue>) -> ApiResult<Value> {
     check_id(&id)?;
     load_or_404(read_meta(&app, &id).await)?;
-    let url = create_github_issue(&app, &id, &req).await?;
-    Ok(Json(json!({"url": url})))
+    let filed = create_github_issue(&app, &id, &req).await?;
+    Ok(Json(
+        json!({"url": filed.url, "labels": filed.labels, "labels_skipped": filed.skipped}),
+    ))
 }
 
+/// An issue `gh` filed: its URL, the Source labels it carries, and the ones it could not be given.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct FiledIssue {
+    pub url: String,
+    pub labels: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// The colour and description a Source label gets when filing has to create it on the repository.
+const SOURCE_LABEL_COLOR: &str = "C5DEF5";
+const SOURCE_LABEL_DESCRIPTION: &str = "Offered to Colonizer colonies (Settings → Source)";
+
 /// Files a checked `{repo, title, body}` with the Mothership's `gh issue create` and answers the new
-/// issue's URL. The body goes through a file named after `tag` in the chats directory (never the
-/// command line) and is removed after. Shared by the chat's "file an issue" and Colonize
-/// (`colonize::create_issue`), so both file the same way.
-pub(crate) async fn create_github_issue(app: &App, tag: &str, req: &NewIssue) -> Result<String, crate::AppError> {
+/// issue's URL and labels. The body goes through a file named after `tag` in the chats directory
+/// (never the command line) and is removed after. Shared by the chat's "file an issue" and Colonize
+/// (`colonize::create_issue`), so both file the same way — including the Source module's include
+/// labels, so a filed issue is one the filtered issue list still offers (see [`file_labelled`]).
+/// Refused while external writes are blocked (issue #84), like every other filed issue.
+pub(crate) async fn create_github_issue(app: &App, tag: &str, req: &NewIssue) -> Result<FiledIssue, crate::AppError> {
     check_issue(req).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    if crate::authority::external_writes_blocked() {
+        return Err(client_error(StatusCode::FORBIDDEN, crate::publish::BLOCKED));
+    }
+    let labels = crate::github::source_include_labels(app).await;
     let dir = dir(app);
     tokio::fs::create_dir_all(&dir).await?;
     let body_path = dir.join(format!("{tag}.issue-{}.md", short_id()));
     tokio::fs::write(&body_path, format!("{}\n", req.body.trim())).await?;
-    let mut cmd = app.gh([
-        "issue",
-        "create",
-        "-R",
-        req.repo.as_str(),
-        "--title",
+    let body_arg = body_path.to_string_lossy().into_owned();
+    let filed = file_labelled(
+        |args| {
+            let mut cmd = app.gh(args);
+            async move { crate::util::exec(&mut cmd).await }
+        },
+        &req.repo,
         req.title.trim(),
-        "--body-file",
-    ]);
-    cmd.arg(&body_path);
-    let out = crate::util::exec(&mut cmd).await;
+        &body_arg,
+        &labels,
+    )
+    .await;
     let _ = tokio::fs::remove_file(&body_path).await;
-    let out = out.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("gh could not file the issue: {e:#}")))?;
-    let url = out.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(out.trim());
-    Ok(crate::util::truncate(url, 500))
+    let filed = filed.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("gh could not file the issue: {e:#}")))?;
+    if !filed.skipped.is_empty() {
+        eprintln!(
+            "issues: filed {} without the Source label(s) {} (they could not be created or added)",
+            filed.url,
+            filed.skipped.join(", ")
+        );
+    }
+    Ok(filed)
+}
+
+/// Files an issue carrying `labels`, and never fails over a label: the house rule findings and
+/// claims already follow. Each label is created first, best effort (it may exist already, or the
+/// token may not be allowed to create labels). If `gh issue create` then refuses, it is retried
+/// without labels, and each label is added afterwards one by one with `gh issue edit --add-label`,
+/// so one missing label costs only itself. `run` gets `gh`'s arguments; the tests pass a fake.
+pub(crate) async fn file_labelled<F, Fut>(
+    mut run: F,
+    repo: &str,
+    title: &str,
+    body_file: &str,
+    labels: &[String],
+) -> Result<FiledIssue>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let args = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    for label in labels {
+        let _ = run(args(&[
+            "label",
+            "create",
+            label,
+            "-R",
+            repo,
+            "--color",
+            SOURCE_LABEL_COLOR,
+            "--description",
+            SOURCE_LABEL_DESCRIPTION,
+        ]))
+        .await;
+    }
+    let create = |with: &[String]| {
+        let mut a = args(&["issue", "create", "-R", repo, "--title", title, "--body-file", body_file]);
+        for label in with {
+            a.push("--label".into());
+            a.push(label.clone());
+        }
+        a
+    };
+    let url_of = |out: &str| {
+        let url = out.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(out.trim());
+        crate::util::truncate(url, 500)
+    };
+    let first = run(create(labels)).await;
+    let first_error = match first {
+        Ok(out) => {
+            return Ok(FiledIssue {
+                url: url_of(&out),
+                labels: labels.to_vec(),
+                skipped: Vec::new(),
+            });
+        }
+        Err(e) if !labels.is_empty() => e,
+        Err(e) => return Err(e),
+    };
+    eprintln!(
+        "issues: gh would not file on {repo} with the labels {}: {first_error:#}; filing without them",
+        labels.join(", ")
+    );
+    let url = url_of(&run(create(&[])).await?);
+    let mut filed = FiledIssue {
+        url: url.clone(),
+        ..FiledIssue::default()
+    };
+    for label in labels {
+        match run(args(&["issue", "edit", url.as_str(), "-R", repo, "--add-label", label])).await {
+            Ok(_) => filed.labels.push(label.clone()),
+            Err(_) => filed.skipped.push(label.clone()),
+        }
+    }
+    Ok(filed)
 }
 
 struct ReplyOpts {
@@ -2262,6 +2362,137 @@ mod tests {
         assert_eq!(clean_title("  \n\"\"  "), None);
         let long = clean_title(&"word ".repeat(40)).unwrap();
         assert!(long.chars().count() <= 60 && long.ends_with('…'));
+    }
+
+    /// A stand-in `gh` for [`file_labelled`]: the labels the repository has, whether the token may
+    /// create labels, and every call it saw. `issue create` refuses a label the repository lacks,
+    /// as the real one does; `issue edit --add-label` too.
+    struct FakeGh {
+        existing: std::collections::HashSet<String>,
+        can_create_labels: bool,
+        calls: Vec<Vec<String>>,
+    }
+
+    impl FakeGh {
+        fn new(existing: &[&str], can_create_labels: bool) -> std::cell::RefCell<Self> {
+            std::cell::RefCell::new(FakeGh {
+                existing: existing.iter().map(|l| l.to_lowercase()).collect(),
+                can_create_labels,
+                calls: Vec::new(),
+            })
+        }
+
+        fn run(&mut self, args: Vec<String>) -> Result<String> {
+            self.calls.push(args.clone());
+            let flagged = |flag: &str| {
+                args.windows(2)
+                    .filter(|w| w[0] == flag)
+                    .map(|w| w[1].to_lowercase())
+                    .collect::<Vec<_>>()
+            };
+            match (args[0].as_str(), args[1].as_str()) {
+                ("label", "create") if self.existing.contains(&args[2].to_lowercase()) => anyhow::bail!("label already exists"),
+                ("label", "create") if !self.can_create_labels => anyhow::bail!("HTTP 403"),
+                ("label", "create") => {
+                    self.existing.insert(args[2].to_lowercase());
+                    Ok(String::new())
+                }
+                ("issue", "create") => match flagged("--label").into_iter().find(|l| !self.existing.contains(l)) {
+                    Some(missing) => anyhow::bail!("could not add label: '{missing}' not found"),
+                    None => Ok("https://github.com/acme/web/issues/7\n".into()),
+                },
+                ("issue", "edit") => match flagged("--add-label").into_iter().find(|l| !self.existing.contains(l)) {
+                    Some(missing) => anyhow::bail!("'{missing}' not found"),
+                    None => Ok(String::new()),
+                },
+                _ => anyhow::bail!("unexpected gh call {args:?}"),
+            }
+        }
+    }
+
+    async fn file_with(gh: &std::cell::RefCell<FakeGh>, labels: &[&str]) -> Result<FiledIssue> {
+        let labels: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+        file_labelled(
+            |args| {
+                let out = gh.borrow_mut().run(args);
+                async move { out }
+            },
+            "acme/web",
+            "Fix it",
+            "/tmp/body.md",
+            &labels,
+        )
+        .await
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn no_source_labels_file_a_plain_issue() {
+        let gh = FakeGh::new(&[], true);
+        let filed = file_with(&gh, &[]).await.unwrap();
+        assert_eq!(
+            filed,
+            FiledIssue {
+                url: "https://github.com/acme/web/issues/7".into(),
+                ..FiledIssue::default()
+            }
+        );
+        let calls = gh.borrow().calls.clone();
+        assert_eq!(calls.len(), 1, "no label is created or added: {calls:?}");
+        assert!(!calls[0].contains(&"--label".to_string()));
+    }
+
+    #[tokio::test]
+    async fn several_source_labels_are_all_added_and_existing_ones_are_not_a_failure() {
+        let gh = FakeGh::new(&["ready", "colonize"], false);
+        let filed = file_with(&gh, &["ready", "colonize"]).await.unwrap();
+        assert_eq!((filed.labels, filed.skipped), (strings(&["ready", "colonize"]), vec![]));
+        let create = gh
+            .borrow()
+            .calls
+            .iter()
+            .find(|c| c[..2] == ["issue", "create"])
+            .cloned()
+            .unwrap();
+        assert_eq!(create.iter().filter(|a| *a == "--label").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_missing_label_is_created_first() {
+        let gh = FakeGh::new(&["ready"], true);
+        let filed = file_with(&gh, &["ready", "colonize"]).await.unwrap();
+        assert_eq!((filed.labels, filed.skipped), (strings(&["ready", "colonize"]), vec![]));
+        assert!(gh.borrow().existing.contains("colonize"));
+    }
+
+    #[tokio::test]
+    async fn a_label_that_cannot_be_created_is_skipped_and_the_issue_still_filed() {
+        let gh = FakeGh::new(&["ready"], false);
+        let filed = file_with(&gh, &["ready", "colonize"]).await.unwrap();
+        assert_eq!(filed.url, "https://github.com/acme/web/issues/7");
+        assert_eq!((filed.labels, filed.skipped), (strings(&["ready"]), strings(&["colonize"])));
+        let calls = gh.borrow().calls.clone();
+        let creates: Vec<_> = calls.iter().filter(|c| c[..2] == ["issue", "create"]).collect();
+        assert_eq!(creates.len(), 2, "retried once without labels");
+        assert!(!creates[1].contains(&"--label".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_filing_failure_without_labels_is_still_an_error() {
+        let gh = FakeGh::new(&[], true);
+        let failing = file_labelled(
+            |_args| async { anyhow::bail!("gh: not logged in") },
+            "acme/web",
+            "t",
+            "/tmp/b",
+            &[],
+        )
+        .await;
+        assert!(failing.is_err());
+        assert!(gh.borrow().calls.is_empty());
     }
 
     #[test]

@@ -375,7 +375,8 @@ export interface Api {
   saveChatPersona(id: string, system: string | null): Promise<ChatPrefs>;
   /** Keeps a note on a reply; `null` clears it. */
   saveChatFeedback(messageId: string, note: string | null): Promise<ChatPrefs>;
-  chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string }>;
+  /** Files the issue with the Source include labels (as Colonize does); `labels_skipped` are any the repository could not be given. */
+  chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string; labels?: string[]; labels_skipped?: string[] }>;
   /** GET /api/maps/{owner}/{repo}/files: every file at the map's revision, from the local clone. */
   repoMapFiles(repo: string): Promise<{ repo: string; revision: string; paths: string[]; truncated: boolean }>;
   /** GET /api/maps/{owner}/{repo}/file?path=…: live colonies on one file, their calls on it and their diff. */
