@@ -21,6 +21,7 @@ import {
   parseArgs,
   parseFragment,
   parseName,
+  splitLinks,
 } from '../changelog.mjs';
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../changelog.mjs');
@@ -383,6 +384,62 @@ test('convert skips a fragment that is already there, and numbers a clashing nam
   assert.equal(convert(WITH_ENTRIES, clash).fragments[0].file, '12-shiny-2.added.md');
   assert.throws(() => convert(HEAD.replace('Pending entries live in changelog.d/.', '- **Loose.** x')), /no "### <Section>"/);
   assert.throws(() => convert(HEAD.replace('Pending entries live in changelog.d/.', '### Misc\n\n- x')), /not a section/);
+});
+
+// Issue #574's branch: a rebase left a blank line inside the link-definition block, and convert
+// crashed with "Cannot read properties of null (reading '1')". These are that branch's entries: a
+// bold summary holding a code span and a path, and a "### Take care" section.
+const FROM_574 = `${HEAD.trimEnd().replace(
+  'Pending entries live in changelog.d/.',
+  `Pending entries live in changelog.d/.
+
+### Added
+
+- **Waiting colonies free their slot.** A colony whose question has waited past a grace period is
+  now suspended, at \`POST /api/sessions/{id}/answer\` too. ([#562])
+
+### Take care
+
+- **Claude Code colonies now mount a writable host directory at \`/root/.claude/projects\`**, where
+  the runner keeps its session transcripts. ([#562])
+- **Colonies waiting on an answer when you upgrade get suspended** once the grace has passed. ([#562])`,
+)}\n\n[#562]: ${REPO_URL}/issues/562\n`;
+
+test('convert survives a blank line inside the link block and code spans in a summary (#574)', () => {
+  const { changelog, fragments } = convert(FROM_574);
+  assert.deepEqual(
+    fragments.map((f) => f.file),
+    [
+      '562-waiting-colonies-free-their-slot.added.md',
+      '562-claude-code-colonies-now-mount-a.take-care.md',
+      '562-colonies-waiting-on-an-answer-when.take-care.md',
+    ],
+  );
+  assert.match(fragments[1].text, /^- \*\*Claude Code colonies now mount a writable host directory at `\/root\/\.claude\/projects`\*\*/);
+  assert.match(fragments[0].text, new RegExp(`\\[#562\\]: ${REPO_URL}/issues/562\\n$`));
+  assert.deepEqual(lintChangelog(changelog), []);
+  assert.doesNotMatch(changelog, /#562/);
+  const root = repo({ changelog: FROM_574 });
+  const r = run(root, 'convert');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(run(root, 'check').status, 0);
+});
+
+test('splitLinks keeps definitions across blank lines and never returns a blank one', () => {
+  const { prose, links } = splitLinks('# T\n\ntext\n\n[a]: https://a\n\n[#2]: https://b\n   \n[v0.1.0]: https://c\n');
+  assert.equal(prose, '# T\n\ntext');
+  assert.deepEqual(links, [
+    ['a', 'https://a'],
+    ['#2', 'https://b'],
+    ['v0.1.0', 'https://c'],
+  ]);
+});
+
+test('an entry convert cannot place is named in the error', () => {
+  assert.throws(
+    () => convert(HEAD.replace('Pending entries live in changelog.d/.', '- **Loose entry.** No section above it.')),
+    /"- \*\*Loose entry\.\*\* No section above it\.…" is under Unreleased but no "### <Section>"/,
+  );
 });
 
 test('the CLI converts in place, and check passes afterwards', () => {
