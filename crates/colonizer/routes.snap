@@ -130,6 +130,7 @@
 /api/sessions/{id}/behind                            GET    unauth=401    token=owner            activity=-
 /api/sessions/{id}/catch-up                          POST   unauth=401    token=owner            activity=colony.catch_up
 /api/sessions/{id}/cleanup                           POST   unauth=401    token=owner            activity=colony.cleanup
+/api/sessions/{id}/diff                              GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/egress                            GET    unauth=401    token=owner            activity=-
 /api/sessions/{id}/events                            GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/findings                          GET    unauth=401    token=owner            activity=-
