@@ -10,7 +10,7 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, 
 
 import { AntAvatar, type AntState } from "../components/AntAvatar";
 import { Avatar } from "../components/Avatar";
-import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg, store, stored } from "../components/ui";
+import { SESSION_STATUS, type Tone, isLive, orgOf, sameOrg, statusLabel, store, stored } from "../components/ui";
 import { formatCost, sessionCost } from "../spend";
 import { needsYou } from "../notifications";
 import { isActive, isRaiding } from "../redTeam";
@@ -648,8 +648,8 @@ export function NestView({
                 <button
                   type="button"
                   onClick={() => onSelect(session.id)}
-                  title={`${chamberLabel(session, 112)} · ${SESSION_STATUS[session.status]?.label ?? ""}`}
-                  aria-label={`${chamberLabel(session, 112)}, ${SESSION_STATUS[session.status]?.label ?? ""}`}
+                  title={`${chamberLabel(session, 112)} · ${statusLabel(session)}`}
+                  aria-label={`${chamberLabel(session, 112)}, ${statusLabel(session)}`}
                   className="block -translate-x-1/2 -translate-y-full cursor-pointer"
                 >
                   <AntAvatar state={state} size={30} phase={i} ground={false} framed={false} />
@@ -686,7 +686,7 @@ export function NestView({
               const selected = session.id === selectedId;
               const hot = isBusy(session.status) || needsYou(session);
               const diameter = slot.r * 2;
-              const status = SESSION_STATUS[session.status];
+              const status = statusLabel(session);
               // Only the open colony has real settlers; every other chamber shows the colony itself.
               const ants = selected && settlers.length > 0 ? settlers.slice(0, 3) : null;
               const flashed = isFlashed(events, session.id, now);
@@ -698,8 +698,8 @@ export function NestView({
                   type="button"
                   onClick={() => select(session.id, slot)}
                   onDoubleClick={() => openColony(session.id)}
-                  title={`${session.repo}#${session.issue ?? ""} · ${taskLine(session, status?.label ?? "")}${taskTooltip(session) ? ` — ${taskTooltip(session)}` : ""}`}
-                  aria-label={`${session.repo} ${session.issue != null ? `#${session.issue}` : ""}, ${status?.label ?? ""}`}
+                  title={`${session.repo}#${session.issue ?? ""} · ${taskLine(session, status)}${taskTooltip(session) ? ` — ${taskTooltip(session)}` : ""}`}
+                  aria-label={`${session.repo} ${session.issue != null ? `#${session.issue}` : ""}, ${status}`}
                   data-flash={flashed || undefined}
                   className={`absolute flex cursor-pointer flex-col items-center justify-center gap-[3px] overflow-hidden border p-1.5 text-center transition-[transform,box-shadow,border-color] duration-500 ${flashed ? "nest-flash" : ""}`}
                   style={{
@@ -735,7 +735,7 @@ export function NestView({
                     {chamberLabel(session, diameter)}
                   </span>
                   <span className="text-[11px] transition-colors duration-500" style={{ color: edge }}>
-                    {status?.label ?? ""}
+                    {status}
                   </span>
                   {diameter >= 112 && cost != null && (
                     <span

@@ -85,6 +85,25 @@ export function isLive(status: SessionStatus): boolean {
   return SESSION_STATUS[status]?.live ?? false;
 }
 
+/** Whether the colony's microVM is currently down because it is suspended (or already being
+ *  restored): no live machine to pulse about, even though `status` still reads as live. */
+export function isSuspended(session: Pick<Session, "suspended" | "pending_answer">): boolean {
+  return session.suspended != null || session.pending_answer != null;
+}
+
+/** The label a colony's status reads as, suspension-aware (issue #562): a `waiting_for_answer`
+ *  colony whose microVM is stopped is suspended rather than working, and one whose answer is
+ *  stored and a boot is underway (queued or starting) says so. A colony still suspended while its
+ *  answer sits stored keeps the suspended label — nothing is resuming yet. Everything else keeps
+ *  the plain status label. */
+export function statusLabel(session: Pick<Session, "status" | "suspended" | "pending_answer">): string {
+  if (session.pending_answer != null && (session.status === "queued" || session.status === "starting")) {
+    return "Resuming with your answer";
+  }
+  if (session.suspended != null && session.status === "waiting_for_answer") return "Suspended — resumes when you answer";
+  return SESSION_STATUS[session.status]?.label ?? session.status;
+}
+
 /** Whether the mesh is actually broken, as opposed to unavailable on this platform.
  *
  *  A Mac vendors no `tailscaled`, so the mothership reports `state: "unavailable"` and colonies use a
@@ -97,26 +116,28 @@ export function meshBroken(mesh: HarnessStatus["mesh"]): boolean {
   return mesh.state === "error" || Boolean(mesh.error);
 }
 
-/** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone.
- *  Mirrors `has_room`'s busy closure in crates/colonizer/src/sessions.rs; keep the two in step. */
-export function occupiesSlot(status: SessionStatus): boolean {
-  return isLive(status) || status === "publishing";
+/** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone,
+ *  while a suspended colony holds none — its microVM was removed to free exactly that slot (issue #562).
+ *  Mirrors `Session::holds_slot` in crates/colonizer/src/sessions.rs; keep the two in step. */
+export function occupiesSlot(session: Pick<Session, "status" | "suspended">): boolean {
+  return session.suspended == null && (isLive(session.status) || session.status === "publishing");
 }
 
 /** Statuses the publish endpoint accepts: live colonies, plus stopped, failed and no-changes ones whose worktree can still be finished. */
 const PUBLISHABLE: SessionStatus[] = ["running", "waiting_for_answer", "idle", "stopped", "failed", "no_changes"];
 
-/** Whether publishing this colony is possible: it kept its worktree (`git_admin_dir`, the server's own condition) and its status is one the endpoint reconciles — mirrored from the server, so the button never offers a publish that would 409. */
-export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git_admin_dir">): boolean {
-  return !session.cleaned_up && session.git_admin_dir != null && PUBLISHABLE.includes(session.status);
+/** Whether publishing this colony is possible: it kept its worktree (`git_admin_dir`, the server's own condition), its status is one the endpoint reconciles, and it is not suspended — the endpoint refuses a suspended colony, whose answer must stay restorable (issue #562). Mirrored from the server, so the button never offers a publish that would 409. */
+export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git_admin_dir" | "suspended">): boolean {
+  return !session.cleaned_up && session.git_admin_dir != null && session.suspended == null && PUBLISHABLE.includes(session.status);
 }
 
-export function StatusBadge({ status }: { status: SessionStatus }) {
-  const meta = SESSION_STATUS[status] ?? { label: status, tone: "neutral" as Tone, live: false };
-  const animated = status === "starting" || status === "running" || status === "publishing" || status === "waiting_for_answer";
+export function StatusBadge({ session }: { session: Pick<Session, "status" | "suspended" | "pending_answer"> }) {
+  const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone, live: false };
+  // A suspended colony's microVM is stopped: the pulse would read as a machine burning while it is not.
+  const animated = !isSuspended(session) && (session.status === "starting" || session.status === "running" || session.status === "publishing" || session.status === "waiting_for_answer");
   return (
     <Badge tone={meta.tone} pulse={animated}>
-      {meta.label}
+      {statusLabel(session)}
     </Badge>
   );
 }

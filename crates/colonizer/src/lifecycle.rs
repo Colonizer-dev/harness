@@ -154,6 +154,13 @@ pub async fn recover(app: &Shared) {
         if !fresh.status.is_live() {
             continue;
         }
+        // A suspended colony survived the restart exactly as it was (issue #562): the record still
+        // carries the suspension and any held answer, and the queue's restore brings it back. Its
+        // microVM is gone by design, so the orphan branch below would read the suspension as a
+        // crash and stop a colony whose answer is still pending.
+        if fresh.suspended.is_some() {
+            continue;
+        }
         if claimed_boot_after_snapshot(&s, &fresh) {
             // A resume or the queue claimed the colony after the snapshot; tearing it down would
             // `msb rm --force` the microVM the boot is creating.
@@ -292,12 +299,14 @@ pub async fn watch_sandboxes(app: Shared) {
     }
 }
 
-/// Whether the sandbox watchdog has business with a colony: a live one that is no longer booting. The
-/// snapshot pass adds one more condition on top — the microVM must actually be gone from `msb ls` —
-/// but the re-check under the lifecycle lock cannot re-ask that (`msb ls` was the tick's one look,
-/// and a removed microVM does not come back), so both passes share this and only this.
+/// Whether the sandbox watchdog has business with a colony: a live one that is no longer booting and
+/// not suspended — a suspended colony's microVM is gone by design, and flipping it `stopped` would
+/// read a planned teardown as a crash (issue #562). The snapshot pass adds one more condition on
+/// top — the microVM must actually be gone from `msb ls` — but the re-check under the lifecycle lock
+/// cannot re-ask that (`msb ls` was the tick's one look, and a removed microVM does not come back),
+/// so both passes share this and only this.
 fn watch_candidate(s: &Session) -> bool {
-    s.status.is_live() && s.status != SessionStatus::Starting
+    s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none()
 }
 
 /// The colony this tick is stopping, re-read under the lifecycle lock its caller holds: the snapshot
@@ -384,6 +393,11 @@ async fn stop_colony_with(
                 x.status = SessionStatus::Stopped;
                 x.error = error;
                 attention = x.clear_attention();
+                // The host's own stops (budget, host disk, hold timeout) end a colony outright,
+                // suspended or not: the held answer goes with it, as a manual stop's does
+                // (issue #562).
+                x.suspended = None;
+                x.pending_answer = None;
             }
             due
         })
@@ -585,6 +599,15 @@ pub(crate) fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: 
     matches!(status, SessionStatus::Stopped | SessionStatus::Failed) && !cleaned_up && has_worktree
 }
 
+/// Whether this colony is suspended while it waits on its user (issue #562) — the only shape a
+/// suspension takes, since the claim and every path that touches a suspended colony keep the
+/// status at `waiting_for_answer`. The gates that give a suspension an escape (`resume`) check
+/// this and not the flag alone, so a stray flag on a colony in any other state stays what it
+/// reads as: a record to refuse, not a back door past `can_resume`.
+pub(crate) fn suspended_waiting(s: &Session) -> bool {
+    s.status == SessionStatus::WaitingForAnswer && s.suspended.is_some()
+}
+
 /// Moves a finished microVM's event log aside, so a resumed colony's `seq` numbering starts from 1
 /// again. A failure here must stop the resume, not degrade it: agentd keeps its event store inside
 /// the microVM, so a resumed colony numbers from 1 regardless, and with the stale log still in
@@ -660,10 +683,17 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
+    // A suspended colony resumes too (issue #562): the operator may not want to wait for an answer
+    // to bring it back. Its claim below clears the suspension; any held answer is delivered by the
+    // boot, exactly as the queue's restore delivers one. The escape is for a colony actually
+    // waiting — status `waiting_for_answer` — not the flag alone (`suspended_waiting`).
+    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
     let previous_status = s.status;
+    // What a failed rotation below puts back: the suspension as well as the status, so the colony
+    // stays restorable and `can_resume`-shaped for the retry this error asks for.
+    let suspension = s.suspended.clone();
     // Past the limit a colony waits its turn rather than being refused, as in `create`; `run_queue`
     // resumes it later.
     let modules = app.modules.read().await.clone();
@@ -705,7 +735,7 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
                 return Ok(None);
             };
             // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
-            if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) {
+            if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) && !suspended_waiting(x) {
                 return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
             }
             x.status = if room {
@@ -717,6 +747,9 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             x.attention = None;
             x.mesh = None;
             x.local_port = None;
+            // A suspended colony stops being one here (issue #562), so the claim holds its slot for
+            // the boot; any held answer stays on the record, and the boot delivers it.
+            x.suspended = None;
             // The last boot's phases would read as this one's under `starting` or `queued`.
             x.boot_timing = None;
             x.updated_at = Utc::now();
@@ -759,8 +792,16 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     if let Err(e) = rotated {
         // The claim already moved this colony off its old status — and may have taken a parallel
         // slot with it — so put it back, or the colony is left mid-resume and `can_resume` refuses
-        // the retry this error asks for.
-        if let Some((s, ())) = app.update_session(&id, |x| x.status = previous_status).await {
+        // the retry this error asks for. The suspension comes back with it (as the queue's restore
+        // revert does), so a suspended colony is suspended again, its answer back on the restore
+        // pass's books.
+        if let Some((s, ())) = app
+            .update_session(&id, |x| {
+                x.status = previous_status;
+                x.suspended = suspension.clone();
+            })
+            .await
+        {
             app.persist_and_broadcast(&s).await;
         }
         let e = anyhow::Error::from(e);
@@ -834,6 +875,11 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
             if was.is_live() || was == SessionStatus::Queued {
                 x.status = SessionStatus::Stopped;
                 attention = x.clear_attention();
+                // A suspended colony stopped by hand is just stopped (issue #562): its held answer
+                // would be delivered by a resume that is never coming, and the question it was
+                // waiting on is closed for good.
+                x.suspended = None;
+                x.pending_answer = None;
             }
             was
         })
@@ -2226,6 +2272,143 @@ exit 0
             log.contains("harness restarted: reconnecting to the running microVM"),
             "the pass reconnected once `msb ls` answered: {log}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- suspended colonies (issue #562) ---------------------------------------------------------
+
+    /// The suspension a waiting colony carries: reason and path as the queue writes them.
+    fn suspension() -> Suspension {
+        Suspension {
+            at: Utc::now(),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        }
+    }
+
+    #[test]
+    fn the_sandbox_watchdog_has_no_business_with_a_suspended_colony() {
+        let mut s = colony("acme", SessionStatus::Running);
+        assert!(watch_candidate(&s), "a running colony is judged on its own");
+        s.suspended = Some(suspension());
+        assert!(
+            !watch_candidate(&s),
+            "its microVM is gone by design, not by crash — a pass that read the absence as a crash would stop it"
+        );
+        assert!(
+            !watch_candidate(&colony("acme", SessionStatus::Starting)),
+            "a boot keeps its grace"
+        );
+    }
+
+    /// A restart must not read a suspension as a crash either: `recover` reaps live colonies whose
+    /// microVM did not survive the restart, and a suspended colony's microVM was removed on
+    /// purpose — the queue's restore pass is what brings it back.
+    #[tokio::test]
+    async fn a_recover_leaves_a_suspended_colony_alone() {
+        let (mut app, root) = app_with_colony("abc", SessionStatus::WaitingForAnswer).await;
+        // `msb ls` answers with nothing running, which is the truth for a suspended colony.
+        stand_in_msb(&mut app, &root, "exit 0");
+        app.update_session("abc", |x| x.suspended = Some(suspension())).await.unwrap();
+        recover(&app).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "the planned teardown is not a crash to recover from"
+        );
+        assert_eq!(s.error, None, "no microVM-gone error painted over it");
+        assert!(s.suspended.is_some(), "still suspended, for the restore pass to pick up");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stop ends a suspended colony outright, its held answer with it — by hand (`stop`) or by
+    /// the host's own decision (`stop_colony`, the budget and hold-timeout path). A stopped
+    /// colony is never suspended, and an answer whose resume is never coming must not sit on the
+    /// record.
+    #[tokio::test]
+    async fn a_stop_clears_the_suspension_and_any_held_answer() {
+        let (app, root) = app_with_colony("manual", SessionStatus::WaitingForAnswer).await;
+        let mut host = colony("acme", SessionStatus::WaitingForAnswer);
+        host.id = "host".into();
+        app.sessions.write().await.push(host);
+        for id in ["manual", "host"] {
+            app.update_session(id, |x| {
+                x.suspended = Some(suspension());
+                x.pending_answer = Some(PendingAnswer {
+                    question_id: "q1".into(),
+                    prompt: "Q: Ship it?\nA: yes".into(),
+                });
+            })
+            .await
+            .unwrap();
+        }
+        let reply = stop(State(app.clone()), Path("manual".into())).await.unwrap();
+        assert_eq!(reply.0.session.status, SessionStatus::Stopped, "the stop went through");
+        let stopped = app.session("manual").await.unwrap();
+        assert_eq!(stopped.status, SessionStatus::Stopped);
+        assert!(
+            stopped.suspended.is_none() && stopped.pending_answer.is_none(),
+            "the held answer goes where the suspension goes: away"
+        );
+        assert!(stopped.error.is_none(), "a stop by hand is not a failure");
+        // The host's own stop: same outcome, the error naming its reason.
+        let s = app.session("host").await.unwrap();
+        let claimed = stop_colony(&app, &s, |_| true, "passed its budget".into(), "stopping: over budget".into()).await;
+        assert!(claimed, "the live colony is this stop's to stop");
+        let host = app.session("host").await.unwrap();
+        assert_eq!(host.status, SessionStatus::Stopped);
+        assert_eq!(host.error.as_deref(), Some("passed its budget"));
+        assert!(
+            host.suspended.is_none() && host.pending_answer.is_none(),
+            "the host's stop ends the suspension and the held answer too"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A resume of a suspended colony whose log rotation fails puts the suspension back with the
+    /// status (issue #562), exactly as the queue's restore revert does — without it the colony
+    /// would sit claimed out of its suspension, `can_resume` refusing the very retry the error
+    /// asks for, its answer stranded off the restore pass's books.
+    #[tokio::test]
+    async fn a_failed_rotation_puts_a_suspended_colony_back_with_its_suspension() {
+        let (app, root) = app_with_colony("abc", SessionStatus::WaitingForAnswer).await;
+        app.update_session("abc", |x| {
+            x.suspended = Some(suspension());
+            x.pending_answer = Some(PendingAnswer {
+                question_id: "q1".into(),
+                prompt: "Q: Ship it?\nA: yes".into(),
+            });
+        })
+        .await
+        .unwrap();
+        // Rotation only runs over a log that is there; the injected fault fails its rename.
+        std::fs::write(app.session_dir("abc").join("events.jsonl"), b"{}\n").unwrap();
+        let _guard = crate::util::faults::inject("events.jsonl", crate::util::faults::Op::Rename, || {
+            std::io::Error::from(std::io::ErrorKind::StorageFull)
+        });
+
+        let error = resume(State(app.clone()), Path("abc".into())).await.unwrap_err();
+        assert_eq!(
+            error.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the resume is refused, not degraded"
+        );
+
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "put back as the suspension left it, the retry `can_resume`-shaped again"
+        );
+        assert!(s.suspended.is_some(), "the suspension comes back with the status");
+        assert_eq!(
+            s.pending_answer.as_ref().map(|a| a.question_id.as_str()),
+            Some("q1"),
+            "the held answer is back on the restore pass's books"
+        );
+        drop(_guard);
         let _ = std::fs::remove_dir_all(root);
     }
 }

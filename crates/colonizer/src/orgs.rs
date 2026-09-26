@@ -418,6 +418,24 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").clamp(1, 1440) as i64)
 }
 
+/// Whether colonies waiting on a user answer are suspended once the grace period below passes, from
+/// the sandbox module. On by default: the suspension keeps the question answerable, so it only frees
+/// a slot early. A module config written before the setting existed reads the schema default.
+pub fn suspend_waiting(modules: &ModulesConfig) -> bool {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting(&modules.sandbox, &schema, "suspend_waiting")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// The grace period a colony keeps its microVM after asking its question before the suspension above
+/// tears it down. Same clamp-as-read reasoning as [`hold_timeout`]: modules.json is not re-validated
+/// on load, and `chrono::Duration::minutes` panics out of bounds.
+pub fn suspend_after(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "suspend_after_minutes").clamp(1, 1440) as i64)
+}
+
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
 pub fn org_enabled(org: &OrgSettings) -> bool {

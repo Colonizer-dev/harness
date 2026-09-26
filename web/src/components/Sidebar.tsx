@@ -283,7 +283,7 @@ function OrgSwitcher({
   const { visible, hidden } = orgEntries(orgs, sessions);
   // A hidden org still answers "where am I" if it was selected when it was switched off.
   const current = selected ? [...visible, ...hidden].find((e) => sameOrg(e.org, selected)) : null;
-  const totalLive = sessions.filter((s) => occupiesSlot(s.status)).length;
+  const totalLive = sessions.filter((s) => occupiesSlot(s)).length;
   const totalQueued = sessions.filter((s) => s.status === "queued").length;
   const live = current ? current.live : totalLive;
   const queued = current ? current.queued : totalQueued;
@@ -522,7 +522,7 @@ function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpe
               className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left hover:bg-panel-2"
             >
               <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted">{colonyLabel(session.repo, session.issue)}</span>
-              <StatusBadge status={session.status} />
+              <StatusBadge session={session} />
             </button>
           </li>
         ))}
@@ -624,7 +624,7 @@ function SessionList({
                   {session.repo}
                   {session.issue != null && `#${session.issue}`}
                 </span>
-                <StatusBadge status={session.status} />
+                <StatusBadge session={session} />
               </div>
               <div className="mt-1 line-clamp-2 text-[13.5px] font-medium leading-snug">
                 {session.issue_title || (session.issue != null ? `Issue #${session.issue}` : "Open colony")}

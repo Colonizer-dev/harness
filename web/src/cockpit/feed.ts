@@ -162,7 +162,7 @@ export function heldSlots(sessions: Session[], now: number | Date = Date.now()):
  */
 export function queueStalled(sessions: Session[]): boolean {
   if (!sessions.some((session) => session.status === "queued")) return false;
-  const occupying = sessions.filter((session) => occupiesSlot(session.status));
+  const occupying = sessions.filter((session) => occupiesSlot(session));
   return occupying.length > 0 && occupying.every(isHeld);
 }
 

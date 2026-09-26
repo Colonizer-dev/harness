@@ -9,7 +9,7 @@ import { AntAvatar } from "../components/AntAvatar";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../components/AskUserCard";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
-import { SESSION_STATUS, type Tone, cx, isLive, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, cx, isLive, statusLabel, timeAgo } from "../components/ui";
 import { claimWaitPosition } from "../api";
 import { useBehind } from "../behind";
 import { useApi } from "../context";
@@ -319,10 +319,10 @@ export function Inspector({
   // A `claim_wait` successor also knows its place: the issue's oldest waiter takes over first.
   const inLine = session ? claimWaitPosition(sessions, session) : null;
   const position = inLine ? ` · #${inLine} in line` : "";
-  const statusLabel =
+  const statusText =
     session?.status === "queued" && queuedBehind
       ? `Queued behind ${queuedBehind}${position}`
-      : (session ? (SESSION_STATUS[session.status]?.label ?? session.status) : "");
+      : (session ? statusLabel(session) : "");
   // Cross-colony boot medians for the mothership pane; the colony branch never reads it.
   const medianBoot = mothership ? bootMedians(sessions) : null;
 
@@ -486,7 +486,7 @@ export function Inspector({
             <>
               <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.1em]" style={{ color: edge }}>
                 <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: edge }} />
-                {statusLabel}
+                {statusText}
                 <span className="tracking-normal text-faint">· {timeAgo(session.created_at)}</span>
               </div>
 

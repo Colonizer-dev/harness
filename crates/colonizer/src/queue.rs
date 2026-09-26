@@ -304,9 +304,15 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Quota-parked colonies whose provider recovered rejoin the queue on this same 5 s tick, ahead
     // of admission; a colony that only just parked keeps its terminal state until its reset passes.
     resume_quota_parked(app).await;
+    // Read once per tick, so a settings save applies at once — to the hold timeout here and the
+    // suspension settings just below (issue #562).
+    let modules = app.modules.read().await.clone();
     // Holds past their timeout park on this same tick, ahead of admission, so the slots they release
-    // are visible to the loop below. Read per tick, so a settings save applies at once.
-    park_expired_holds(app, orgs::hold_timeout(&app.modules.read().await.clone())).await;
+    // are visible to the loop below.
+    park_expired_holds(app, orgs::hold_timeout(&modules)).await;
+    // Colonies whose question has waited past the grace period suspend on this same tick, ahead of
+    // admission, for the same reason: the slots they release are visible below (issue #562).
+    suspend_waiting_colonies(app, &modules).await;
     // Every routable provider's plan out: the queue holds, and `/api/status` says why. Checked per
     // tick rather than per colony, so a recovered provider unpauses the whole queue at once.
     if providers::quota_status(app).await.paused {
@@ -317,7 +323,6 @@ pub(crate) async fn start_queued(app: &Shared) {
     // start takes no slot, and leaving it Queued would stall the queue head (and all the disk the
     // tick is trying to free behind it) for as long as the floor holds.
     let paused = crate::reclaim::admission_paused(app).await;
-    let modules = app.modules.read().await.clone();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Issue #321: a waiter whose holder changed says so. `queued_behind` follows whoever
     // effectively holds its issue now, so the second waiter shows it is queued behind the first
@@ -340,6 +345,12 @@ pub(crate) async fn start_queued(app: &Shared) {
             })
             .await;
         }
+    }
+    // Before the fresh launches: a suspended colony holding an undelivered answer comes back ahead
+    // of them — answering it is what the user has been waiting for (issue #562). The floor above
+    // holds this back with every other start.
+    if !paused {
+        restore_suspended(app, &modules).await;
     }
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
@@ -483,6 +494,238 @@ pub(crate) async fn park_expired_holds(app: &Shared, timeout: chrono::Duration) 
 fn stamp_hold_timeout(x: &mut Session) {
     if x.status == SessionStatus::Stopped && !x.cleaned_up {
         x.attention = Some(json!({"reason": HOLD_TIMEOUT_REASON, "since": Utc::now(), "nudges": 0}));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Suspend and restore (issue #562)
+// ---------------------------------------------------------------------------
+
+/// Whether this colony can be suspended: its agent's module declares a session transcript
+/// directory (`session_resume` in module.json) and the runner has reported its session id. Both
+/// are needed to bring the colony back with its conversation intact.
+fn suspendable(s: &Session, agents: &[crate::modules::AgentModule]) -> bool {
+    s.agent_session.is_some() && agents.iter().any(|a| a.id == s.agent && a.resume_dir.is_some())
+}
+
+/// Suspends colonies whose question has waited past the grace period (issue #562): the microVM is
+/// torn down to free the slot, the worktree and the agent's session transcript are kept, and the
+/// status stays `waiting_for_answer` — the question stays answerable, and answering re-boots the
+/// colony, which [`restore_suspended`] brings back ahead of new launches. A colony whose agent
+/// cannot resume its session is left running, said once per run. The claim is re-checked under the
+/// write lock and the teardown holds the colony's lifecycle lock, the discipline of every stop: a
+/// resume admitted by the claim waits for the teardown instead of booting a microVM this in-flight
+/// removal then takes with it.
+pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::config::ModulesConfig) {
+    if !orgs::suspend_waiting(modules) {
+        return;
+    }
+    let grace = orgs::suspend_after(modules);
+    let now = Utc::now();
+    let ids: Vec<String> = {
+        app.sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.status == SessionStatus::WaitingForAnswer && s.suspended.is_none())
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    for id in ids {
+        let Some(s) = app.session(&id).await else { continue };
+        let rt = app.runtime(&id).await;
+        if !suspendable(&s, &app.agents) {
+            // Left running, said once per run rather than every tick.
+            if !rt.suspend_skip_logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                app.session_log(
+                    &id,
+                    "info",
+                    "this agent cannot resume its session, so the colony keeps its microVM while it waits for an answer".into(),
+                )
+                .await;
+            }
+            continue;
+        }
+        // The grace reads off the question's own timestamp, live or replayed; a colony whose wait
+        // start is unknown never expires, the rule `hold_expired` also holds — parking on an
+        // ambiguous timestamp could suspend a colony that was only just asked.
+        let Some(since) = rt.activity.lock().await.question_since else {
+            continue;
+        };
+        if now - since < grace {
+            continue;
+        }
+        let lifecycle = app.session_lock(&id).await;
+        let _lifecycle = lifecycle.lock().await;
+        // The answer gate (issue #562): the open question's lock, held across the claim below. The
+        // live answer path (`submit_answer`) holds this same lock across its not-suspended
+        // re-check, its taking-down of the question and its send, so an answer and this claim
+        // cannot interleave: an answer that went first reads here as no open question, and the
+        // colony is skipped — its answer is in flight to a runner this tick must not tear down,
+        // and the runner's own status events take it from here.
+        let open_question = rt.open_question.lock().await;
+        let Some(s) = app.session(&id).await else { continue };
+        if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_some() || open_question.is_none() {
+            continue;
+        }
+        // How the colony comes back. Today's sandbox has no memory snapshot (the seam in
+        // `sandbox::supports_memory_snapshot`), so the path is always the fallback: the agent
+        // resumes its own session transcript in a fresh microVM.
+        let path = if crate::sandbox::supports_memory_snapshot() {
+            "memory_snapshot"
+        } else {
+            SESSION_RESUME
+        };
+        let claimed = app
+            .update_session(&id, |x| {
+                if x.status != SessionStatus::WaitingForAnswer || x.suspended.is_some() {
+                    return false;
+                }
+                x.suspended = Some(Suspension {
+                    at: Utc::now(),
+                    snapshot: None,
+                    reason: WAITING_FOR_ANSWER.into(),
+                    path: path.into(),
+                });
+                x.updated_at = Utc::now();
+                true
+            })
+            .await
+            .is_some_and(|(_, landed)| landed);
+        if !claimed {
+            continue;
+        }
+        // Claimed: the answer path can no longer forward into this runtime — it reads suspended
+        // under the gate and holds instead — so the link may go.
+        drop(open_question);
+        let minutes = grace.num_minutes();
+        app.session_log(
+            &id,
+            "info",
+            format!(
+                "no answer for {minutes} min; suspending — the microVM is removed, the worktree and the \
+                 agent's session transcript are kept, and the question stays answerable"
+            ),
+        )
+        .await;
+        let mut entry = crate::activity::Entry::new("outcome.suspended", "colony").colony(&s);
+        entry.detail = Some(format!(
+            "waiting {minutes} min for an answer; the worktree and the agent's session are kept"
+        ));
+        crate::activity::record(app, entry).await;
+        teardown_vm(app, &s).await;
+    }
+}
+
+/// Restores suspended colonies that hold an undelivered answer, ahead of the fresh launches in the
+/// admission loop (issue #562): the answer is what the user has been waiting for. Each restore
+/// claims a slot through the same admission every launch answers to; the claim clears the
+/// suspension — so `holds_slot` is true for the boot — but keeps the answer, which the boot itself
+/// delivers once the runner is up, so a failed boot leaves it on the record. The link drop and the
+/// event-log rotation are the resume handler's, for the same reason: the fresh microVM's agentd
+/// numbers events from 1, and a stale log would swallow them.
+pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::ModulesConfig) {
+    let mut candidates: Vec<(DateTime<Utc>, String)> = {
+        app.sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
+            .map(|s| (s.suspended.as_ref().map(|x| x.at).unwrap_or(s.updated_at), s.id.clone()))
+            .collect()
+    };
+    candidates.sort();
+    let max_parallel = orgs::global_max_parallel(modules) as usize;
+    for (_, id) in candidates {
+        let Some(s) = app.session(&id).await else { continue };
+        let settings = app.org_settings(&s.org);
+        let (org_limit, repo_limit) = (orgs::org_max_parallel(&settings), repo_limit(modules, &settings));
+        // The snapshot decides whether to try; the claim re-checks under the lock. One that does
+        // not fit right now does not stop the tick: a later candidate of another repository might.
+        {
+            let sessions = app.sessions.read().await;
+            if !has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit) {
+                continue;
+            }
+        }
+        let lifecycle = app.session_lock(&id).await;
+        let _lifecycle = lifecycle.lock().await;
+        let Some(s) = app.session(&id).await else { continue };
+        if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_none() || s.pending_answer.is_none() {
+            continue;
+        }
+        let suspension = s.suspended.clone();
+        let claimed = with_slot(
+            &app.sessions,
+            &s.org,
+            &s.repo,
+            max_parallel,
+            org_limit,
+            repo_limit,
+            |sessions, room| {
+                let x = sessions.iter_mut().find(|x| x.id == id)?;
+                if !room || x.status != SessionStatus::WaitingForAnswer || x.suspended.is_none() || x.pending_answer.is_none() {
+                    return None;
+                }
+                x.status = SessionStatus::Starting;
+                x.suspended = None;
+                x.error = None;
+                x.attention = None;
+                x.mesh = None;
+                x.local_port = None;
+                // The last boot's phases would read as this one's under `starting`.
+                x.boot_timing = None;
+                x.updated_at = Utc::now();
+                Some(x.clone())
+            },
+        )
+        .await;
+        let Some(s) = claimed else { continue };
+        app.persist_and_broadcast(&s).await;
+        // The colony is ours: drop the old agent link and rotate the event log, exactly as the
+        // resume handler does, with the log's own file lock held across the rename.
+        let runtime = app.runtimes.lock().await.remove(&id);
+        if let Some(rt) = &runtime {
+            rt.stop.send_replace(true);
+            rt.retired.send_replace(true);
+        }
+        let dir = app.session_dir(&id);
+        let rotated = {
+            let _file_lock = match runtime.as_ref() {
+                Some(rt) => Some(rt.file_lock.lock().await),
+                None => None,
+            };
+            rotate_events(&dir)
+        };
+        if let Err(e) = rotated {
+            // Put the colony back as the suspension left it, answer included, and stop this tick:
+            // a rotation failure is a storage problem, and a retry every 5 s would only churn.
+            let e = anyhow::Error::from(e);
+            if let Some((x, ())) = app
+                .update_session(&id, |x| {
+                    x.status = SessionStatus::WaitingForAnswer;
+                    x.suspended = suspension.clone();
+                })
+                .await
+            {
+                app.persist_and_broadcast(&x).await;
+            }
+            app.storage_failed("rotate the old event log", &e).await;
+            app.session_log(
+                &id,
+                "error",
+                format!("could not move the old event log aside ({e}); the colony stays suspended and its answer kept"),
+            )
+            .await;
+            break;
+        }
+        app.session_log(
+            &id,
+            "info",
+            "answer in hand; booting a fresh microVM to resume the agent's session with it".into(),
+        )
+        .await;
+        tokio::spawn(boot(app.clone(), id, s.git_admin_dir.is_some()));
     }
 }
 
@@ -1387,5 +1630,244 @@ mod tests {
             attempts - starting("acme") - starting("other"),
             "every colony past a limit queued instead"
         );
+    }
+
+    // -- suspending colonies that wait on an answer (issue #562) ---------------------------------
+
+    /// The smallest agent module, with or without the `session_resume` declaration that makes a
+    /// colony's suspension possible at all.
+    fn agent_module(id: &str, resume_dir: Option<&str>) -> crate::modules::AgentModule {
+        crate::modules::AgentModule {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            dir: std::path::PathBuf::from("/opt/colonizer/agent"),
+            entry: vec!["runner.mjs".into()],
+            needs_claude: false,
+            schema: json!({}),
+            egress: None,
+            resume_dir: resume_dir.map(String::from),
+        }
+    }
+
+    /// A colony waiting on its user, with whatever session id its runner has (or has not) reported.
+    fn waiting_colony(id: &str, agent: &str, agent_session: Option<&str>) -> Session {
+        let mut s = colony("acme", SessionStatus::WaitingForAnswer);
+        s.id = id.into();
+        s.agent = agent.into();
+        s.agent_session = agent_session.map(String::from);
+        s
+    }
+
+    #[test]
+    fn suspension_needs_a_resumable_agent_and_a_reported_session_id() {
+        let agents = vec![agent_module("claude-code", Some("/root/.claude/projects"))];
+        assert!(
+            suspendable(&waiting_colony("a", "claude-code", Some("s1")), &agents),
+            "transcript dir declared, session id reported: suspendable"
+        );
+        assert!(
+            !suspendable(&waiting_colony("b", "claude-code", None), &agents),
+            "without the session id there is nothing to resume into"
+        );
+        assert!(
+            !suspendable(&waiting_colony("c", "shell", Some("s1")), &agents),
+            "an agent whose module declares no transcript dir cannot pick its session back up"
+        );
+    }
+
+    #[test]
+    fn a_suspended_colony_holds_no_slot_but_stays_answerable() {
+        let mut s = waiting_colony("a", "claude-code", Some("s1"));
+        assert!(s.holds_slot(), "a waiting colony holds its slot like any live one");
+        s.suspended = Some(Suspension {
+            at: Utc::now(),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        assert!(!s.holds_slot(), "the suspension is the slot given back");
+        assert!(
+            s.status.is_live(),
+            "the status stays waiting_for_answer, so the question is still answerable"
+        );
+    }
+
+    /// The suspension tick, end to end over a throwaway App: past the grace a resumable colony's
+    /// microVM claim is dropped (`suspended` set, status untouched), inside it and with the setting
+    /// off nothing happens, and a colony that cannot resume keeps running with one log line.
+    #[tokio::test]
+    async fn the_queue_suspends_a_waiting_colony_only_once_it_is_allowed_and_past_its_grace() {
+        /// Puts a waiting colony in the app, its question asked `minutes_ago` ago and still open —
+        /// the claim requires the open question (issue #562), the same lock an answer takes.
+        async fn asked(app: &Shared, id: &str, minutes_ago: i64) {
+            app.sessions.write().await.push(waiting_colony(id, "claude-code", Some("s1")));
+            std::fs::create_dir_all(app.session_dir(id)).unwrap();
+            let rt = app.runtime(id).await;
+            rt.activity.lock().await.question_since = Some(Utc::now() - chrono::Duration::minutes(minutes_ago));
+            *rt.open_question.lock().await = Some(("q1".into(), Vec::new(), crate::protocol::QuestionRisk::ReadOnly));
+        }
+
+        let root = std::env::temp_dir().join(format!("colonizer-suspend-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![agent_module("claude-code", Some("/root/.claude/projects"))],
+            |_| {},
+        );
+        let modules = app.modules.read().await.clone();
+        asked(&app, "past-grace", 20).await;
+        asked(&app, "within-grace", 1).await;
+        asked(&app, "no-timestamp", 20).await;
+        app.runtime("no-timestamp").await.activity.lock().await.question_since = None;
+        app.sessions
+            .write()
+            .await
+            .push(waiting_colony("no-session-id", "claude-code", None));
+        std::fs::create_dir_all(app.session_dir("no-session-id")).unwrap();
+        app.runtime("no-session-id").await.activity.lock().await.question_since =
+            Some(Utc::now() - chrono::Duration::minutes(20));
+        app.sessions
+            .write()
+            .await
+            .push(waiting_colony("other-agent", "shell", Some("s1")));
+        std::fs::create_dir_all(app.session_dir("other-agent")).unwrap();
+        app.runtime("other-agent").await.activity.lock().await.question_since = Some(Utc::now() - chrono::Duration::minutes(20));
+
+        suspend_waiting_colonies(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        let suspended = by_id("past-grace");
+        let suspension = suspended.suspended.as_ref().expect("past the grace, suspended");
+        assert_eq!(suspension.reason, WAITING_FOR_ANSWER);
+        assert_eq!(
+            suspension.path, SESSION_RESUME,
+            "no memory snapshot today: the agent resumes its own transcript"
+        );
+        assert_eq!(
+            suspended.status,
+            SessionStatus::WaitingForAnswer,
+            "the status is untouched, so the question stays answerable"
+        );
+        assert!(!suspended.holds_slot(), "the slot is back");
+        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent"] {
+            assert!(by_id(id).suspended.is_none(), "{id} must keep its microVM and its slot");
+        }
+        drop(sessions);
+
+        // The setting off suspends nobody, however long the wait.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("suspend_waiting".into(), json!(false));
+        let modules = app.modules.read().await.clone();
+        suspend_waiting_colonies(&app, &modules).await;
+        // Back on, the same tick finishes the job for the one that is now past its grace too.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("suspend_waiting".into(), json!(true));
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("suspend_after_minutes".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+        suspend_waiting_colonies(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        assert!(
+            by_id("within-grace").suspended.is_some(),
+            "the setting off only delayed it: back on and past the (now one minute) grace, it suspends too"
+        );
+        assert!(
+            by_id("no-timestamp").suspended.is_none(),
+            "an unknown wait start never expires"
+        );
+        assert!(
+            by_id("no-session-id").suspended.is_none(),
+            "nothing to resume, never suspended"
+        );
+        assert!(
+            by_id("other-agent").suspended.is_none(),
+            "the agent cannot resume, never suspended"
+        );
+        assert!(by_id("past-grace").suspended.is_some(), "already suspended, left as it is");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The restore pass, ahead of the queue's own admissions: an answered suspension claims the
+    /// last slot through the same admission a launch answers to — keeping its held answer for the
+    /// boot to deliver — while an older queued launch waits for the next tick, and a second
+    /// answered suspension for which no room is left stays suspended.
+    #[tokio::test]
+    async fn an_answered_suspension_is_restored_ahead_of_an_older_queued_launch() {
+        let root = std::env::temp_dir().join(format!("colonizer-restore-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+
+        let mut answered = waiting_colony("answered", "claude-code", Some("s1"));
+        answered.suspended = Some(Suspension {
+            at: Utc::now() - chrono::Duration::minutes(5),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        answered.pending_answer = Some(PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Which file name?\nA: hello.txt".into(),
+        });
+        let mut second = answered.clone();
+        second.id = "second".into();
+        second.suspended.as_mut().unwrap().at = Utc::now();
+        let mut older_launch = colony("acme", SessionStatus::Queued);
+        older_launch.id = "older-launch".into();
+        older_launch.created_at = Utc::now() - chrono::Duration::minutes(30);
+        *app.sessions.write().await = vec![older_launch, second, answered];
+        std::fs::create_dir_all(app.session_dir("answered")).unwrap();
+        std::fs::create_dir_all(app.session_dir("second")).unwrap();
+
+        restore_suspended(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        let restored = by_id("answered");
+        assert_eq!(restored.status, SessionStatus::Starting, "the slot went to the answer first");
+        assert!(restored.suspended.is_none(), "restored, no longer suspended");
+        let kept = restored.pending_answer.as_ref().expect("the answer survives the claim");
+        assert_eq!(kept.question_id, "q1", "the boot, not the claim, delivers it");
+        assert!(
+            by_id("older-launch").status == SessionStatus::Queued,
+            "the queued launch is older but waits: the answer was ahead of it"
+        );
+        assert!(
+            !has_room(
+                &sessions,
+                "acme",
+                "acme/repo",
+                orgs::global_max_parallel(&modules) as usize,
+                None,
+                repo_limit(&modules, &app.org_settings("acme")),
+            ),
+            "so the queue itself could not admit anything else right now"
+        );
+        let waiting = by_id("second");
+        assert!(
+            waiting.suspended.is_some() && waiting.status == SessionStatus::WaitingForAnswer,
+            "no room left: the second answered suspension stays suspended with its answer"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

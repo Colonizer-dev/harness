@@ -157,7 +157,10 @@ impl Session {
     /// from a stopped, failed or no-changes colony boots nothing (host-side push only) and holds
     /// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
     pub fn holds_slot(&self) -> bool {
-        self.status.is_live() || (self.status == SessionStatus::Publishing && self.publishing_holds_slot)
+        // A suspended colony's microVM is gone — that is the point (issue #562) — so it holds no
+        // slot and the queue can admit someone else until the answer restores it.
+        self.suspended.is_none()
+            && (self.status.is_live() || (self.status == SessionStatus::Publishing && self.publishing_holds_slot))
     }
 }
 
@@ -231,6 +234,40 @@ pub struct FixFor {
 /// publish held its slot back then, and a row of unknown origin must not silently free one.
 fn publishing_holds_slot_legacy() -> bool {
     true
+}
+
+/// Why a colony was suspended, in its [`Suspension`] record and in the log line: the only reason
+/// this build suspends is a question waiting past its grace period.
+pub(crate) const WAITING_FOR_ANSWER: &str = "waiting_for_answer";
+
+/// How a suspended colony comes back (`Suspension::path`): today only the fallback — a fresh
+/// microVM boots, the agent runner resumes the session transcript it kept, and the answer is the
+/// next user message. `sandbox::supports_memory_snapshot` is the seam a real snapshot enters at,
+/// and would record a different path here.
+pub(crate) const SESSION_RESUME: &str = "session_resume";
+
+/// A colony torn down while it waits on its user (issue #562). The status stays
+/// `waiting_for_answer` and the question answerable; `at` is when the microVM came down,
+/// `snapshot` is what a real memory snapshot would carry — always `None` today, the pinned
+/// microsandbox has none (`sandbox::supports_memory_snapshot`) — and `path` says how the colony
+/// comes back ([`SESSION_RESUME`]).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Suspension {
+    pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Value>,
+    pub reason: String,
+    pub path: String,
+}
+
+/// A user answer that arrived while the colony was suspended and is still undelivered.
+/// `question_id` is the question it answered; `prompt` is the user message the resumed runner
+/// receives, formatted at answer time while the question text is still known — a manual resume
+/// rotates the event log, so boot time would be too late to quote the question.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PendingAnswer {
+    pub question_id: String,
+    pub prompt: String,
 }
 
 /// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
@@ -426,6 +463,22 @@ pub struct Session {
     pub keep_worktree: bool,
     /// Set by the watchdog: `{reason, since, nudges}`.
     pub attention: Option<Value>,
+    /// The colony is suspended while it waits on its user (issue #562): the microVM is torn down,
+    /// the worktree and the agent's session transcript are kept, and the answer re-boots it.
+    /// `None` while the colony runs. A suspended colony keeps its `waiting_for_answer` status and
+    /// holds no parallel slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended: Option<Suspension>,
+    /// The agent runner's own session id, as last reported by the `agent_session` event: what a
+    /// resumed boot continues. `None` until the first report, and permanently unknown to agents
+    /// whose module declares no `session_resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
+    /// The user's answer to a suspended colony's question, kept until a boot delivers it: set when
+    /// the answer arrives, cleared once the resumed runner is up. It survives a failed boot and a
+    /// mothership restart, so an answer is never lost (issue #562).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_answer: Option<PendingAnswer>,
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
@@ -520,6 +573,9 @@ impl Default for Session {
             cleaned_up: false,
             keep_worktree: false,
             attention: None,
+            suspended: None,
+            agent_session: None,
+            pending_answer: None,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,
@@ -568,6 +624,10 @@ pub struct Runtime {
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
+    /// Set once a run has been told its agent cannot resume a session, so the queue's suspension
+    /// tick says so once instead of every 5 s (issue #562). In memory like the other cursors: a
+    /// restart saying it again is a minor repeat, a per-tick drumbeat is the leak.
+    pub(crate) suspend_skip_logged: std::sync::atomic::AtomicBool,
     pub(crate) stop: watch::Sender<bool>,
     /// Set once, by `resume` on the retired run's Runtime only: pre-existing event sockets hold
     /// that Runtime and can never see the new run's events, so they close and reconnect into the
@@ -720,6 +780,7 @@ impl Runtime {
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
+            suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
@@ -1619,6 +1680,9 @@ pub async fn create(
         cleaned_up: false,
         keep_worktree: false,
         attention: None,
+        suspended: None,
+        agent_session: None,
+        pending_answer: None,
         last_activity_at: None,
         boot_timing: None,
         boot_cpus: None,
@@ -2049,6 +2113,13 @@ enum AnswerError {
 /// over the wire the runner owns the question's lifecycle and refuses an answer whose question has
 /// closed, so the socket path does not pre-check; over HTTP a stale id is a 409, because an HTTP
 /// caller cannot otherwise tell "delivered" from "answered nothing".
+///
+/// A suspended colony takes answers too (issue #562) — it is exactly the colony whose question
+/// must stay answerable — but has no runner to hand one to, so the answer is held on the record
+/// ([`hold_answer`]) until a boot delivers it. A colony not yet suspended forwards to its live
+/// runner under the open question's lock — the same lock the suspension tick claims under — so an
+/// answer and a suspension cannot interleave: either the answer goes first and the tick leaves the
+/// colony alone, or the claim goes first and the answer is held.
 async fn submit_answer(
     app: &Shared,
     id: &str,
@@ -2059,12 +2130,16 @@ async fn submit_answer(
     require_pending: bool,
 ) -> Result<(), AnswerError> {
     let s = app.session(id).await.ok_or(AnswerError::NoSession)?;
-    if !accepts_commands(s.status) {
+    let suspended = s.suspended.is_some();
+    if !accepts_commands(s.status) && !suspended {
         return Err(AnswerError::NotAccepting(s.status));
     }
-    if require_pending {
-        let open = rt.open_question().await;
-        let open_matches = open.as_ref().is_some_and(|(open_id, _, _)| open_id == &answer.question_id);
+    let open = rt.open_question().await;
+    // Over the socket the runner owns the question's lifecycle and refuses a stale answer itself;
+    // a suspended colony has no runner to do that, so the host checks here whatever path brought
+    // the answer in.
+    if require_pending || suspended {
+        let open_matches = open.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id);
         if !open_matches {
             return Err(if open.is_some() {
                 AnswerError::Stale
@@ -2073,8 +2148,144 @@ async fn submit_answer(
             });
         }
     }
+    if suspended {
+        return hold_answer(app, id, rt, open, answer, external, via).await;
+    }
+    // The suspension tick's gate (issue #562): the tick claims a colony for suspension holding the
+    // open question's lock, so this re-check, the taking-down of the question and the send are one
+    // step beside it. If the tick claimed first, the colony reads suspended here and the answer is
+    // held for the restore instead of being sent into the link the tick is tearing down; if this
+    // path goes first, the question reads taken-down in the tick and the colony is left alone, its
+    // answer in flight to a runner that keeps its microVM.
+    let mut gate = rt.open_question.lock().await;
+    let Some(s) = app.session(id).await else {
+        return Err(AnswerError::NoSession);
+    };
+    if s.suspended.is_some() {
+        drop(gate);
+        return hold_answer(app, id, rt, open, answer, external, via).await;
+    }
+    // The answer is on its way to the runner, whose own `question_answered` echo closes the
+    // question: close it here first, so the tick — which claims only under an open question, and
+    // matching the one the answer is for — reads none. A stale answer (socket path) matches
+    // nothing and leaves the live question standing for the runner to refuse it.
+    if gate.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id) {
+        *gate = None;
+    }
+    drop(gate);
     let _ = rt.commands.send(answer.forward(external));
     crate::activity::record_answer(app, &s, via).await;
+    Ok(())
+}
+
+/// The user message a resumed runner receives for a suspended colony's answer (issue #562): the
+/// question as it was asked, then the choices made, then the free-text note. Pure, so tests pin the
+/// wording the agent reads.
+fn answer_prompt(questions: &[Value], answers: &Value, response: &str) -> String {
+    let mut lines = vec![
+        "Earlier you asked the user something, and this colony was suspended while it waited (its \
+         microVM was stopped to free its slot). The conversation continues now — this is their answer."
+            .to_string(),
+    ];
+    let given = |text: &str| -> Option<String> {
+        let map = answers.as_object()?;
+        match map.get(text) {
+            Some(Value::String(label)) => Some(label.clone()),
+            Some(Value::Array(labels)) => Some(labels.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+            _ => None,
+        }
+    };
+    for q in questions {
+        let Some(text) = q["question"].as_str().filter(|t| !t.trim().is_empty()) else {
+            continue;
+        };
+        match given(text) {
+            Some(choice) => lines.push(format!("Q: {text}\nA: {choice}")),
+            None => lines.push(format!("Q: {text}\nA: (no choice given)")),
+        }
+    }
+    let note = response.trim();
+    if !note.is_empty() {
+        lines.push(format!("Their note: {note}"));
+    }
+    lines.join("\n")
+}
+
+/// The suspended colony's answer path (issue #562): hold the answer on the record — persisted by
+/// the write before this returns — close the question in the event log so a restart's replay does
+/// not re-open it, and leave the delivery to the queue's restore (or a manual Resume). `Err` back
+/// means the answer was not held: the colony was claimed out of its suspension in between (a
+/// restore's boot is already carrying an answer) or has vanished — telling the caller is what keeps
+/// the answer from being silently dropped.
+async fn hold_answer(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    open: Option<(String, Vec<Value>, QuestionRisk)>,
+    answer: AnswerCommand,
+    external: Option<&str>,
+    via: Option<crate::auth::Via>,
+) -> Result<(), AnswerError> {
+    // The free-text note carries the external-input marker exactly as the live path's `forward` does.
+    let response = match external {
+        Some(name) => external_text(name, answer.response.as_str().unwrap_or_default()),
+        None => answer.response.as_str().unwrap_or_default().to_string(),
+    };
+    let questions = open.map(|(_, questions, _)| questions).unwrap_or_default();
+    let prompt = answer_prompt(&questions, &answer.answers, &response);
+    // Conditional on purpose: a restore or a stop that claimed the colony between the caller's
+    // snapshot and this write must not hang a pending answer on a colony that is no longer
+    // suspended. `false` back means exactly that happened.
+    let stored = app
+        .update_session(id, |x| {
+            let was = x.suspended.is_some();
+            if was {
+                x.pending_answer = Some(PendingAnswer {
+                    question_id: answer.question_id.clone(),
+                    prompt: prompt.clone(),
+                });
+            }
+            was
+        })
+        .await;
+    match stored {
+        Some((_, true)) => {
+            // The question is closed as of now, in the same terms the runner closes it, so a
+            // restart's replay (which skips host chain lines only for the reconnect cursor, not
+            // for the question) finds no question still open. The answers travel too, so the
+            // transcript keeps what was chosen.
+            crate::validation::emit_chain(
+                app,
+                id,
+                json!({
+                    "type": "question_answered",
+                    "question_id": answer.question_id,
+                    "answers": answer.answers,
+                    "response": response,
+                }),
+            )
+            .await;
+            *rt.open_question.lock().await = None;
+            rt.activity.lock().await.question_since = None;
+            if let Some(s) = app.session(id).await {
+                crate::activity::record_answer(app, &s, via).await;
+            }
+            app.session_log(
+                id,
+                "info",
+                "answer received while suspended; it is kept on the colony and delivered when it resumes".into(),
+            )
+            .await;
+        }
+        // A restore claimed the colony in between: the boot in flight carries the earlier answer,
+        // and `rt` is the very runtime that restore retired — a message sent into it would vanish
+        // with the link it was tearing down. Refuse instead (a 409 over HTTP), so the answer is
+        // not silently dropped; answered again once the fresh runner is up, it goes straight down
+        // the new link.
+        Some((x, false)) => return Err(AnswerError::NotAccepting(x.status)),
+        // The colony is gone: the same answer an unknown id gets.
+        None => return Err(AnswerError::NoSession),
+    }
     Ok(())
 }
 
@@ -2731,6 +2942,292 @@ pub(crate) mod tests {
         assert!(s.holds_slot());
     }
 
+    /// And one saved before a colony could be suspended (issue #562): such a colony was never
+    /// suspended, holds no agent session id and keeps no answer.
+    #[test]
+    fn a_session_saved_before_suspension_existed_still_deserialises() {
+        let saved = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"waiting_for_answer","branch":"b","base":null,"worktree":"","git_admin_dir":"git","sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: Session = serde_json::from_str(saved).unwrap();
+        assert_eq!(s.suspended, None);
+        assert_eq!(s.agent_session, None);
+        assert_eq!(s.pending_answer, None);
+    }
+
+    /// The suspension record and the held answer survive the trip to the wire and back intact —
+    /// this is the shape sessions.json keeps across a restart, so a suspended colony with an
+    /// answer in hand must read back exactly as it was written.
+    #[test]
+    fn a_suspension_and_a_held_answer_round_trip_through_the_wire() {
+        let mut s = colony("acme", SessionStatus::WaitingForAnswer);
+        s.id = "c".into();
+        s.agent_session = Some("sess_123".into());
+        s.suspended = Some(Suspension {
+            at: Utc::now(),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        s.pending_answer = Some(PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Which file name?\nA: hello.txt".into(),
+        });
+        let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(again.suspended, s.suspended);
+        assert_eq!(again.agent_session, s.agent_session);
+        assert_eq!(again.pending_answer, s.pending_answer);
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!(wire["agent_session"], json!("sess_123"));
+        assert_eq!(wire["suspended"]["reason"], json!("waiting_for_answer"));
+        assert_eq!(wire["suspended"]["path"], json!("session_resume"));
+        assert_eq!(wire["pending_answer"]["question_id"], json!("q1"));
+    }
+
+    /// The user message a resumed runner receives (issue #562): every question as it was asked,
+    /// the choices made (a multi-select joined), a question with no choice said so, and the
+    /// free-text note trimmed in. Wording the agent reads — pinned.
+    #[test]
+    fn the_answer_prompt_replays_the_questions_the_choices_and_the_note() {
+        let questions = vec![
+            json!({"question": "Which file name?", "options": [{"label": "hello.txt"}]}),
+            json!({"question": "Which extras?", "options": []}),
+            json!({"question": "Ship it?"}),
+        ];
+        let answers = json!({"Which file name?": "hello.txt", "Which extras?": ["lint", "format"]});
+        let prompt = answer_prompt(&questions, &answers, "  make it quick  ");
+        assert!(prompt.starts_with("Earlier you asked the user something"), "{prompt}");
+        assert!(prompt.contains("Q: Which file name?\nA: hello.txt"), "{prompt}");
+        assert!(prompt.contains("Q: Which extras?\nA: lint, format"), "{prompt}");
+        assert!(prompt.contains("Q: Ship it?\nA: (no choice given)"), "{prompt}");
+        assert!(prompt.ends_with("Their note: make it quick"), "{prompt}");
+        let quiet = answer_prompt(&questions, &answers, "   ");
+        assert!(!quiet.contains("Their note"), "{quiet}");
+    }
+
+    /// An answer to a suspended colony (issue #562) goes nowhere — there is no runner — but must
+    /// never be lost: it is held on the record and persisted before the answer returns, the open
+    /// question is closed in the event log so a restart does not re-open it, the colony keeps its
+    /// status and its suspension, and a second answer finds no question to answer.
+    #[tokio::test]
+    async fn an_answer_to_a_suspended_colony_is_kept_and_the_question_closed() {
+        let (app, root) = app_with_colony("abc", SessionStatus::WaitingForAnswer).await;
+        let rt = app.runtime("abc").await;
+        let mut rx = rt.commands_rx.lock().await.take().unwrap();
+        let questions = vec![json!({
+            "question": "Which file name?",
+            "header": "File",
+            "options": [{"label": "hello.txt"}, {"label": "hi.txt"}],
+        })];
+        *rt.open_question.lock().await = Some(("q1".into(), questions, QuestionRisk::ReadOnly));
+        rt.activity.lock().await.question_since = Some(Utc::now());
+        app.update_session("abc", |x| {
+            x.suspended = Some(Suspension {
+                at: Utc::now(),
+                snapshot: None,
+                reason: WAITING_FOR_ANSWER.into(),
+                path: SESSION_RESUME.into(),
+            });
+        })
+        .await
+        .unwrap();
+
+        let answer = AnswerCommand {
+            question_id: "q1".into(),
+            answers: json!({"Which file name?": "hello.txt"}),
+            response: Value::String("go ahead".into()),
+        };
+        assert!(
+            submit_answer(&app, "abc", &rt, answer, None, None, true).await.is_ok(),
+            "a suspended colony takes answers"
+        );
+
+        let s = app.session("abc").await.unwrap();
+        let held = s.pending_answer.as_ref().expect("the answer is held on the record");
+        assert_eq!(held.question_id, "q1");
+        assert!(held.prompt.contains("Q: Which file name?\nA: hello.txt"), "{}", held.prompt);
+        assert!(held.prompt.ends_with("Their note: go ahead"), "{}", held.prompt);
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "the status is untouched — the colony is still waiting, now with the answer"
+        );
+        assert!(
+            s.suspended.is_some(),
+            "and still suspended: nothing answered the question yet"
+        );
+        assert!(
+            std::fs::read_to_string(app.sessions_file())
+                .unwrap()
+                .contains("pending_answer"),
+            "the held answer reaches sessions.json before the answer returns"
+        );
+        let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        assert!(
+            events.contains("\"question_answered\"") && events.contains("\"q1\""),
+            "the question is closed in the event log so a restart's replay does not re-open it: {events}"
+        );
+        assert!(rt.open_question.try_lock().unwrap().is_none(), "no question is open any more");
+        assert!(rt.activity.lock().await.question_since.is_none());
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing is sent down the link — there is no runner to receive it"
+        );
+        {
+            let logs = rt.logs.lock().await;
+            let last = logs.back().unwrap();
+            assert!(last["message"].as_str().unwrap().contains("kept on the colony"), "{last}");
+        }
+        // A second answer finds no open question: the first was taken.
+        let again = AnswerCommand {
+            question_id: "q1".into(),
+            answers: json!({}),
+            response: Value::Null,
+        };
+        assert!(
+            matches!(
+                submit_answer(&app, "abc", &rt, again, None, None, true).await,
+                Err(AnswerError::NoQuestion)
+            ),
+            "the held answer took the question with it"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The race the suspension tick and a live answer could make (issue #562), closed by the open
+    /// question's lock both take: an answer that forwarded to the live runner takes the question
+    /// down as it goes, so the tick reads no question and leaves the colony running with its
+    /// answer in flight — and a tick that claimed first has the answer held instead, with nothing
+    /// sent down a link that teardown is stopping.
+    #[tokio::test]
+    async fn an_answer_and_the_suspension_claim_cannot_interleave() {
+        /// A waiting, resumable colony with the question `q1` open and past the grace, and the
+        /// receiver end of its agent link's command channel.
+        async fn asked(app: &Shared, id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+            let mut s = colony("acme", SessionStatus::WaitingForAnswer);
+            s.id = id.into();
+            s.agent = "claude-code".into();
+            s.agent_session = Some("s1".into());
+            app.sessions.write().await.push(s);
+            std::fs::create_dir_all(app.session_dir(id)).unwrap();
+            let rt = app.runtime(id).await;
+            rt.activity.lock().await.question_since = Some(Utc::now() - chrono::Duration::minutes(20));
+            *rt.open_question.lock().await = Some((
+                "q1".into(),
+                vec![json!({"question": "Push now?", "options": []})],
+                QuestionRisk::WorkspaceWrite,
+            ));
+            rt.commands_rx.lock().await.take().unwrap()
+        }
+        let answer = || AnswerCommand {
+            question_id: "q1".into(),
+            answers: json!({"Push now?": "yes"}),
+            response: Value::Null,
+        };
+
+        let root = std::env::temp_dir().join(format!("colonizer-answer-race-{}", crate::util::short_id()));
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![crate::modules::AgentModule {
+                id: "claude-code".into(),
+                name: "claude-code".into(),
+                description: String::new(),
+                dir: std::path::PathBuf::from("/opt/colonizer/agent"),
+                entry: vec!["runner.mjs".into()],
+                needs_claude: false,
+                schema: json!({}),
+                egress: None,
+                resume_dir: Some("/root/.claude/projects".into()),
+            }],
+            |_| {},
+        );
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("suspend_waiting".into(), json!(true));
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("suspend_after_minutes".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+        let mut live = asked(&app, "answered-first").await;
+        let mut claimed = asked(&app, "claimed-first").await;
+
+        // The answer wins the race: it is forwarded to the runner that is still up, and takes the
+        // open question down with it.
+        assert!(
+            submit_answer(
+                &app,
+                "answered-first",
+                &app.runtime("answered-first").await,
+                answer(),
+                None,
+                None,
+                true
+            )
+            .await
+            .is_ok()
+        );
+        let forwarded = live.try_recv().unwrap();
+        assert_eq!(forwarded["type"], "answer", "the answer went down the live link");
+        assert_eq!(forwarded["question_id"], "q1");
+        assert!(
+            app.runtime("answered-first")
+                .await
+                .open_question
+                .try_lock()
+                .unwrap()
+                .is_none(),
+            "the question went with the answer, as the runner's own echo would take it"
+        );
+
+        // So the tick skips this colony: an answer is in flight to a runner it must not tear down.
+        crate::queue::suspend_waiting_colonies(&app, &modules).await;
+        let s = app.session("answered-first").await.unwrap();
+        assert!(
+            s.suspended.is_none() && s.holds_slot(),
+            "the colony keeps its microVM and its slot — its answer is on its way"
+        );
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "the runner has not echoed yet; its status events take it from here"
+        );
+        assert!(s.pending_answer.is_none(), "nothing was held — it was delivered");
+
+        // The claim wins the other race: the same tick suspended the colony still waiting, and an
+        // answer arriving after that is held, not sent into the link the teardown is stopping.
+        let s = app.session("claimed-first").await.unwrap();
+        assert!(
+            s.suspended.is_some() && !s.holds_slot(),
+            "the unanswered colony was suspended"
+        );
+        assert!(
+            submit_answer(
+                &app,
+                "claimed-first",
+                &app.runtime("claimed-first").await,
+                answer(),
+                None,
+                None,
+                true
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            claimed.try_recv().is_err(),
+            "nothing goes down a link the teardown is stopping"
+        );
+        let s = app.session("claimed-first").await.unwrap();
+        let held = s.pending_answer.as_ref().expect("the answer is held for the restore");
+        assert_eq!(held.question_id, "q1");
+        assert!(s.suspended.is_some(), "still suspended, the restore to deliver it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The container-level `#[serde(default)]` is the whole contract that keeps a sessions.json from
     /// an older version loadable, so it is enforced mechanically: take a fully populated record,
     /// drop one key at a time, and the rest must still load. A field added without a usable default
@@ -2885,6 +3382,9 @@ pub(crate) mod tests {
             cleaned_up: false,
             keep_worktree: false,
             attention: None,
+            suspended: None,
+            agent_session: None,
+            pending_answer: None,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,
@@ -3987,6 +4487,7 @@ pub(crate) mod tests {
             needs_claude: false,
             schema: json!({}),
             egress: None,
+            resume_dir: None,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
         // The org is still awaiting an answer when the colony starts, sighting and avatar both.
@@ -4053,6 +4554,7 @@ pub(crate) mod tests {
             needs_claude: false,
             schema: json!({}),
             egress: None,
+            resume_dir: None,
         };
         crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))
     }

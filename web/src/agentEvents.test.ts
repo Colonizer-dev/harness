@@ -41,6 +41,11 @@ const WEB_TYPES = {
 // arrive on the same stream. Unknown ones are ignored; the screening gate also logs harness lines.
 const HOST_TYPES = new Set(["verification", "screening"]);
 
+// Runner events the harness consumes alone (docs/agent-events.schema.json's preamble): typed on the
+// Rust side, and ignored by the web's stream as an unknown type. `agent_session` (#562) — the
+// runner's own session id, kept so a suspended colony can resume its conversation — is the one.
+const HARNESS_ONLY = new Set(["agent_session"]);
+
 describe("agent event types", () => {
   it("cover every event the schema defines, and nothing else", () => {
     const schema = JSON.parse(read("../../docs/agent-events.schema.json")) as {
@@ -49,13 +54,15 @@ describe("agent event types", () => {
     const schemaTypes = Object.values(schema.$defs)
       .map((def) => def.properties?.type?.const)
       .filter((t): t is string => typeof t === "string");
-    expect(schemaTypes.sort()).toEqual(Object.keys(WEB_TYPES).filter((t) => !HOST_TYPES.has(t)).sort());
+    expect(
+      schemaTypes.filter((t) => !HOST_TYPES.has(t) && !HARNESS_ONLY.has(t)).sort(),
+    ).toEqual(Object.keys(WEB_TYPES).filter((t) => !HOST_TYPES.has(t)).sort());
   });
 
   it("cover every line of the runner's fixture", () => {
     const lines = read("../../modules/agents/claude-code/test/fixtures/events.jsonl").split("\n").filter((l) => l.trim());
     const types = lines.map((l) => (JSON.parse(l) as { type: string }).type);
-    expect(types.filter((t) => !(t in WEB_TYPES))).toEqual([]);
+    expect(types.filter((t) => !(t in WEB_TYPES) && !HARNESS_ONLY.has(t))).toEqual([]);
   });
 
   it("carry only the closed set of envelope origins, the ones the schema defines (issue #312)", () => {

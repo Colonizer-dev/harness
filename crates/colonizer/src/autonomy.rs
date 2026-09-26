@@ -546,7 +546,13 @@ pub async fn run(app: Shared) {
         let modules = app.modules.read().await.clone();
         let Some(judge) = judge(&modules, &app.agents) else { continue };
         let sessions = app.sessions.read().await.clone();
-        for s in sessions.into_iter().filter(|s| s.status == SessionStatus::WaitingForAnswer) {
+        // Suspended colonies excluded (issue #562): the question they wait on is a person's — the
+        // colony was parked precisely so its slot could go while a human answers — and their link
+        // is being torn down, so an answer sent there would be dropped with it.
+        for s in sessions
+            .into_iter()
+            .filter(|s| s.status == SessionStatus::WaitingForAnswer && s.suspended.is_none())
+        {
             let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
                 continue;
             };

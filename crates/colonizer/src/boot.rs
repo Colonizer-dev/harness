@@ -678,6 +678,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "COLONIZER_IMAGE".into(),
         Value::String(colony_image(&app.agents, &modules, &stack)),
     );
+    // A colony coming back to deliver a held answer (issue #562) resumes the agent session it
+    // reported, and the answer is the first thing the resumed runner is told (the `initial_prompt`
+    // below). Without a session id — never reported, or the module stopped declaring resumability
+    // since — the answer still rides the prompt, so it is delivered either way.
+    if s.pending_answer.is_some()
+        && let Some(session_id) = &s.agent_session
+    {
+        runner_env.insert("COLONIZER_RESUME_SESSION".into(), Value::String(session_id.clone()));
+    }
 
     // The private mesh needs the three vendored binaries. Without them a colony is reached on a
     // loopback port rather than failing to boot.
@@ -732,6 +741,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             read_only: true,
         },
     ];
+    // The agent's session transcripts (issue #562): a resumable module gets a writable host
+    // directory over the in-VM path its runner keeps transcripts at, so a suspension can stop the
+    // microVM without losing the conversation, and the resumed boot picks the same session up. The
+    // host directory sits with the colony's other host-side state, so deleting the colony deletes
+    // the transcripts with it.
+    if let Some(resume_dir) = &agent.resume_dir {
+        let host = dir.join("transcripts");
+        std::fs::create_dir_all(&host)?;
+        mounts.push(Mount {
+            source: host,
+            target: resume_dir.clone(),
+            read_only: false,
+        });
+    }
     // Claude Code plugin directories, mounted read-only from the mothership.
     //
     // Outside /workspace on purpose: publish runs `git add -A`, so a plugin
@@ -873,12 +896,22 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Written only now, after the last change to `runner_env`: the plugin paths and the token-savings
     // switches above are decided here, and a session.json written earlier carried a plugin's bare name
     // instead of its in-VM path, and switches the install could not honour.
+    //
+    // What the runner is first told (issue #562): a resumed session that comes back to deliver a
+    // held answer gets just the answer — its transcript already carries the task brief — and a
+    // colony without a session id to resume gets the answer appended, so the answer never rides on
+    // the resume working.
+    let initial_prompt = match (&s.pending_answer, &s.agent_session) {
+        (Some(pa), Some(_)) => pa.prompt.clone(),
+        (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
+        (None, _) => prompt,
+    };
     let session_json = json!({
         "session_id": id,
         "workspace": "/workspace",
         "listen": format!("0.0.0.0:{AGENTD_PORT}"),
         "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
-        "initial_prompt": prompt,
+        "initial_prompt": initial_prompt,
     });
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
@@ -1143,6 +1176,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     ensure_starting(app, id).await?;
     start_link(app, id).await;
+    // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
+    // only then take it off the record. A boot that failed above never reaches this, and the answer
+    // stays for the next resume; a stop cleared it under its own claim.
+    let delivered = app.update_session(id, |x| x.pending_answer.take().is_some()).await;
+    if let Some((s, true)) = delivered {
+        app.session_log(
+            id,
+            "info",
+            "held answer delivered: the agent resumes its session with it".into(),
+        )
+        .await;
+        crate::activity::record_restored(app, &s).await;
+    }
     Ok(())
 }
 

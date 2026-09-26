@@ -55,3 +55,12 @@ itself is [protocol.md](protocol.md) §2; this page is everything beside it.
    both.
 8. **CI.** `cargo test --workspace` walks every `modules/agents/*/module.json` (the egress test
    included) and runs the runner's `npm test`; both must pass before merge.
+9. **Session resume (optional).** If the runner can pick an old conversation back up, declare
+   `session_resume: { "dir": "/absolute/in-vm/path" }` in `module.json`: the harness mounts a
+   writable host directory over that path (the colony session dir's `transcripts/`), the runner
+   announces its session id with an `agent_session` event when the SDK's init first names one, and
+   a colony suspended while it waits on its user boots again with `COLONIZER_RESUME_SESSION` set
+   ([#562](https://github.com/Colonizer-dev/harness/issues/562)) — the id goes to the SDK's resume
+   option (Claude Code: `options.resume`) and the held answer arrives as the first user message.
+   Omit the declaration and the runner is simply never suspended: its colonies keep their microVM
+   while their question waits, said once in the colony log.

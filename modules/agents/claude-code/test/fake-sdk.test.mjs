@@ -288,6 +288,7 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
     'tool_result',
     'question',
     'question_answered',
+    'agent_session',
     'turn_end',
     'log',
     'model_changed',
@@ -297,6 +298,37 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
   const types = new Set(fixture.map((e) => e.type));
   for (const type of protocolTypes) assert.ok(types.has(type), `the fixture has no ${type} event`);
   assert.deepEqual([...types].sort(), protocolTypes.slice().sort());
+});
+
+test('a resumed session resumes the reported session id and delivers the answer', async () => {
+  // Issue #562: a colony suspended while it waited on its user boots to deliver the answer — the
+  // session id travels as an SDK option, the answer as the first user message, so the conversation
+  // continues where the suspended one stopped. Without an id to resume, no option is set.
+  const { options } = buildOptions({ COLONIZER_RESUME_SESSION: 's1' });
+  assert.equal(options.resume, 's1');
+  const { options: fresh } = buildOptions({});
+  assert.equal(fresh.resume, undefined);
+
+  const { query, calls } = fakeQuery(async function* () {
+    yield { type: 'system', subtype: 'init', session_id: 's1', model: 'fake-model' };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0, duration_ms: 1 };
+  });
+  const events = [];
+  const commands = new AsyncQueue();
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', id: 'initial', text: 'Q: Which file name?\nA: hello.txt' });
+
+  await runAgent({ query, commands, emit, options, graceMs: 100 });
+
+  assert.equal(calls.options.resume, 's1');
+  assert.deepEqual(calls.prompts, [
+    { type: 'user', message: { role: 'user', content: 'Q: Which file name?\nA: hello.txt' }, parent_tool_use_id: null },
+  ]);
+  // The id the resumed session reports is announced, and it is the one being resumed.
+  assert.deepEqual(events.filter((e) => e.type === 'agent_session'), [{ type: 'agent_session', session_id: 's1' }]);
 });
 
 test('interrupt reaches the query, unknown answers are logged, EOF exits', async () => {

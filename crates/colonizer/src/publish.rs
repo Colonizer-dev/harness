@@ -941,7 +941,7 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     if crate::authority::external_writes_blocked() {
         return Err(client_error(StatusCode::CONFLICT, BLOCKED));
     }
-    if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) {
+    if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) || s.suspended.is_some() {
         return Err(client_error(
             StatusCode::CONFLICT,
             "this session can't be published right now",
@@ -958,8 +958,13 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
 /// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
 /// Returns whether the claim landed, and whether a microVM was live under it.
 pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
+    // A suspended colony is refused (issue #562): its microVM is gone by design and it may hold an
+    // undelivered answer — publishing would flip the status out of `waiting_for_answer`, so the
+    // restore pass would never pick that answer up, and it would tear into a worktree the question
+    // is still about. It publishes once it is answered or resumed. Clearing the suspension here is
+    // not an option for the same reason: the answer must stay restorable.
     // `pr_allowed` implies the commit and push gates, and fails closed on the kill-switch (#84).
-    let allowed = pr_allowed(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+    let allowed = x.suspended.is_none() && pr_allowed(x.status, x.cleaned_up, x.git_admin_dir.is_some());
     // Before the mutation: `publishing` itself is not a live status.
     let was_live = allowed && x.status.is_live();
     if allowed {
@@ -1066,6 +1071,29 @@ mod tests {
                 "{status:?} never takes a slot another colony is waiting for"
             );
         }
+    }
+
+    #[test]
+    fn the_publish_claim_refuses_a_suspended_colony() {
+        let mut s = colony("acme", SessionStatus::WaitingForAnswer);
+        s.git_admin_dir = Some("git".into());
+        s.suspended = Some(Suspension {
+            at: Utc::now(),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        assert_eq!(
+            claim_publish(&mut s),
+            (false, false),
+            "a suspended colony's microVM is gone by design and it may hold an undelivered answer"
+        );
+        assert_eq!(
+            s.status,
+            SessionStatus::WaitingForAnswer,
+            "untouched, so the restore pass can still pick the answer up"
+        );
+        assert!(s.suspended.is_some(), "the suspension is not cleared away either");
     }
 
     #[test]

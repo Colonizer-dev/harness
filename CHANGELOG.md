@@ -18,6 +18,36 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+
+### Added
+
+- **Waiting colonies free their slot.** A colony whose question has waited past a grace period is
+  now suspended: the mothership removes its microVM but keeps the worktree and the agent's own
+  session transcript, freeing the parallel slot for the queue, while the status stays
+  `waiting_for_answer` and the question stays answerable exactly as before — in the cockpit
+  ("Suspended — resumes when you answer"), over the events WebSocket, at
+  `POST /api/sessions/{id}/answer`, and from the phone. The answer is held on the record
+  (persisted before it is acknowledged, cleared only once delivered, so a failed boot or a restart
+  never loses it), and the next queue tick boots a fresh microVM ahead of new launches that resumes
+  the agent's own session and delivers the answer as its first message. Only agents that can resume
+  a session are suspended: Claude Code declares `session_resume` in its `module.json` (a writable
+  mount on `/root/.claude/projects`) and reports its session id through a new `agent_session` runner
+  event; anything else keeps its microVM. Two global sandbox settings: `suspend_waiting` (default
+  on) and `suspend_after_minutes` (default 10). This is transcript resume, not a VM snapshot — the
+  pinned microsandbox 0.6.18 cannot checkpoint a running VM's memory (0.7.x can; measured at
+  0.46 s and 304 MB for a 512 MiB VM). The activity log gains `outcome.suspended` and
+  `outcome.restored`. See [docs/architecture.md](docs/architecture.md). ([#562])
+
+### Take care
+
+- **Claude Code colonies now mount a writable host directory at `/root/.claude/projects`**, where
+  the runner keeps its session transcripts, so a suspension can stop the microVM without losing the
+  conversation. The directory lives under the colony's session dir on the host: it counts against
+  the per-colony host-disk quota and is deleted with the colony. ([#562])
+- **Colonies waiting on an answer when you upgrade get suspended** once the default 10-minute grace
+  has passed on the new build — the question stays answerable and answering brings the colony back
+  — unless `suspend_waiting` is switched off first. ([#562])
+
 ## [v0.1.9] - 2026-09-24
 
 ### Added
@@ -620,3 +650,5 @@ Macs. ([#74])
 [v0.1.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.2
 [v0.1.1]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.0
+
+[#562]: https://github.com/Colonizer-dev/harness/issues/562

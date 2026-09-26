@@ -68,6 +68,8 @@ pub(crate) const KINDS: &[&str] = &[
     "outcome.stopped",
     "outcome.failed",
     "outcome.question",
+    "outcome.suspended",
+    "outcome.restored",
     "colony.launch",
     "colony.stop",
     "colony.resume",
@@ -862,6 +864,13 @@ async fn buffer_json(response: Response) -> (Response, Option<Value>) {
 pub(crate) async fn record_answer(app: &App, colony: &Session, via: Option<auth::Via>) {
     let mut entry = Entry::new("colony.answer", "you").colony(colony);
     entry.via = via_name(via);
+    record(app, entry).await;
+}
+
+/// Records the harness bringing a suspended colony back to deliver its answer (issue #562): the
+/// boot path calls it once the runner is up, which is when the answer counts as delivered.
+pub(crate) async fn record_restored(app: &App, colony: &Session) {
+    let entry = Entry::new("outcome.restored", "colony").colony(colony);
     record(app, entry).await;
 }
 

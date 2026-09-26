@@ -1157,7 +1157,10 @@ mod tests {
             "[external input from API token \"ci\"] go",
             "the note is marked as external input"
         );
-        // A stale id, and a colony that is not asking, each refuse with their own words.
+        // A stale id, and a colony that is not asking, each refuse with their own words. The
+        // forwarded answer took `q1` down (the runner's `question_answered` echo would), so a
+        // newer question is open for the stale one to miss.
+        *rt.open_question.lock().await = Some(("q2".into(), Vec::new(), crate::protocol::QuestionRisk::ReadOnly));
         let stale = r#"{"question_id":"q0","answers":{},"response":""}"#;
         let res = router
             .clone()
