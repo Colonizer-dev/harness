@@ -1,5 +1,5 @@
 // The composer: one place to tell Colonizer what to do next, typed or spoken. It floats at the foot of
-// the cockpit as a quiet pill ("Describe a task…", ⌘K), opens into a prompt with a repository chip, and
+// the cockpit as a quiet pill ("Describe a task…"; ⌘K unless the cockpit gives it to Colonize), opens into a prompt with a repository chip, and
 // sends the words as a new colony's instructions — the same open-session launch the Launch view makes,
 // nothing invented on top. Voice is whichever service the voice module connects: the browser's own
 // recognition by default (words land as they are heard), or a clip recorded here and transcribed by the
@@ -272,6 +272,60 @@ function useServiceDictation({
   return { listening, transcribing, elapsed, levels: meter.levels, start, stop };
 }
 
+// --- Voice input ----------------------------------------------------------------------------------
+
+/**
+ * The mic behind a text box: whichever service the voice module connects (read while `active`), or
+ * the browser's own recognition, which also stands in for the rest of the visit once a service
+ * fails. `onHeard` gets each phrase or transcript. Shared by the composer and the Colonize pane.
+ */
+export function useVoiceInput({ active, onHeard }: { active: boolean; onHeard: (phrase: string) => void }) {
+  const api = useApi();
+  const toast = useToast();
+  // Which voice service the mic uses: the module's, read when the composer opens, unless a service
+  // failed this visit, in which case the browser's recogniser stands in until the next reload.
+  const [service, setService] = useState<VoiceStatus | null>(null);
+  const [fallback, setFallback] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    api.voice().then(
+      (status) => !cancelled && setService(status),
+      () => !cancelled && setService(null),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api, active]);
+
+  const browserVoice = useBrowserDictation(onHeard);
+  const useService = !fallback && service !== null && service.provider !== "browser" && service.configured && canRecord();
+  const serviceVoice = useServiceDictation({
+    maxSeconds: service?.max_seconds ?? 120,
+    transcribe: (clip) => api.transcribe(clip),
+    onText: onHeard,
+    onFailed: (reason, blocked) => {
+      if (!blocked && browserVoice.supported) {
+        setFallback(true);
+        toast(`${service?.name ?? "Voice service"}: ${reason} — using the browser's recognition for now`, "error");
+      } else toast(reason, "error");
+    },
+  });
+  return {
+    recording: useService,
+    supported: useService || browserVoice.supported,
+    listening: useService ? serviceVoice.listening : browserVoice.listening,
+    transcribing: useService && serviceVoice.transcribing,
+    levels: useService ? serviceVoice.levels : browserVoice.levels,
+    error: useService ? null : browserVoice.error,
+    interim: useService ? "" : browserVoice.interim,
+    left: useService && serviceVoice.listening ? countdown(serviceVoice.elapsed, service?.max_seconds ?? 120) : null,
+    label: useService && service ? `${service.name}${service.model ? ` · ${service.model}` : ""}` : "the browser's recognition",
+    start: () => (useService ? void serviceVoice.start() : browserVoice.start()),
+    stop: () => (useService ? void serviceVoice.stop() : browserVoice.stop()),
+  };
+}
+
 // --- The composer -------------------------------------------------------------------------------
 
 export function Composer({
@@ -282,6 +336,7 @@ export function Composer({
   sessions = [],
   onCreated,
   onAsk,
+  shortcutTaken = false,
 }: {
   /** The workspace in scope; the repository chip only offers its repositories. */
   org: string | null;
@@ -293,6 +348,8 @@ export function Composer({
   onCreated: (session: Session) => void;
   /** Sends the text to Chat instead of launching a colony; absent, the composer only launches. */
   onAsk?: (text: string) => void;
+  /** ⌘K / Ctrl+K belongs to something else (the cockpit opens Colonize with it); otherwise it opens the composer. */
+  shortcutTaken?: boolean;
 }): ReactElement {
   const api = useApi();
   const toast = useToast();
@@ -338,54 +395,15 @@ export function Composer({
   // A chip or a #123 in the prompt links an issue; the chip wins, and switching repository drops it.
   useEffect(() => setPicked(null), [repo]);
 
-  // Which voice service the mic uses: the module's, read when the composer opens, unless a service
-  // failed this visit, in which case the browser's recogniser stands in until the next reload.
-  const [service, setService] = useState<VoiceStatus | null>(null);
-  const [fallback, setFallback] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    api.voice().then(
-      (status) => !cancelled && setService(status),
-      () => !cancelled && setService(null),
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [api, open]);
-
   const heard = (phrase: string) => setText((current) => appendHeard(current, phrase));
-  const browserVoice = useBrowserDictation(heard);
-  const useService = !fallback && service !== null && service.provider !== "browser" && service.configured && canRecord();
-  const serviceVoice = useServiceDictation({
-    maxSeconds: service?.max_seconds ?? 120,
-    transcribe: (clip) => api.transcribe(clip),
-    onText: heard,
-    onFailed: (reason, blocked) => {
-      if (!blocked && browserVoice.supported) {
-        setFallback(true);
-        toast(`${service?.name ?? "Voice service"}: ${reason} — using the browser's recognition for now`, "error");
-      } else toast(reason, "error");
-    },
-  });
-  const voice = {
-    supported: useService || browserVoice.supported,
-    listening: useService ? serviceVoice.listening : browserVoice.listening,
-    transcribing: useService && serviceVoice.transcribing,
-    levels: useService ? serviceVoice.levels : browserVoice.levels,
-    error: useService ? null : browserVoice.error,
-    interim: useService ? "" : browserVoice.interim,
-    left: useService && serviceVoice.listening ? countdown(serviceVoice.elapsed, service?.max_seconds ?? 120) : null,
-    label: useService && service ? `${service.name}${service.model ? ` · ${service.model}` : ""}` : "the browser's recognition",
-    start: () => (useService ? void serviceVoice.start() : browserVoice.start()),
-    stop: () => (useService ? void serviceVoice.stop() : browserVoice.stop()),
-  };
+  const voice = useVoiceInput({ active: open, onHeard: heard });
   const shown = voice.interim ? appendHeard(text, voice.interim) : text;
   const linked = picked ?? mentionedIssue(shown, issues);
   const suggestions = repo && !linked && !shown.trim() ? suggestedIssues(issues, sessions, repo) : [];
 
-  // ⌘K / Ctrl+K opens and focuses from anywhere; Escape closes.
+  // ⌘K / Ctrl+K opens and focuses from anywhere, unless the cockpit gave it to Colonize; Escape closes.
   useEffect(() => {
+    if (shortcutTaken) return;
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -395,7 +413,7 @@ export function Composer({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [shortcutTaken]);
 
   // A click outside an empty composer folds it back to the pill.
   useEffect(() => {
@@ -496,7 +514,7 @@ export function Composer({
   };
 
   const filtered = query.trim() ? choices.filter((r) => r.full_name.toLowerCase().includes(query.trim().toLowerCase())) : choices;
-  const placeholder = asking ? "Ask a model anything — no colony, just a conversation…" : !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (useService ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, pick an issue below, or /loop 1h <task> to repeat it…";
+  const placeholder = asking ? "Ask a model anything — no colony, just a conversation…" : !githubConnected ? "Connect GitHub in Settings to launch colonies" : voice.transcribing ? "Transcribing…" : voice.listening ? (voice.recording ? "Recording — press the mic again to transcribe" : "Listening…") : linked ? `Anything to add for #${linked.number}? (optional)` : "Describe a task, pick an issue below, or /loop 1h <task> to repeat it…";
 
   return (
     <div ref={root} className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-6 max-sm:bottom-[calc(4.25rem+env(safe-area-inset-bottom))]">
@@ -515,7 +533,7 @@ export function Composer({
             >
               <Sparkle />
               <span className="truncate">Describe a task for a new colony…</span>
-              <kbd className="ml-auto hidden shrink-0 rounded-md border border-border px-1.5 py-0.5 font-mono text-[11px] text-faint sm:inline">⌘K</kbd>
+              {!shortcutTaken && <kbd className="ml-auto hidden shrink-0 rounded-md border border-border px-1.5 py-0.5 font-mono text-[11px] text-faint sm:inline">⌘K</kbd>}
             </button>
             {voice.supported && <MicButton listening={false} label={voice.label} onClick={toggleVoice} />}
           </div>

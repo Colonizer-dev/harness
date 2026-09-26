@@ -100,6 +100,7 @@ export function OrgDashboard({
   initialPackages,
   initialPackage = null,
   toolbar,
+  action,
   events,
   onOpenColony,
 }: {
@@ -122,8 +123,10 @@ export function OrgDashboard({
   initialPackage?: string | null;
   /** The realtime feed's connection (issue #446); the header shows it now, so this is unread. */
   connection?: LiveConnection;
-  /** The range/compare toolbar, which the caller owns; drawn at the title row's right. */
+  /** The range/compare toolbar, which the caller owns; drawn at the right, below the title row. */
   toolbar?: ReactNode;
+  /** The page's primary action (Colonize), drawn on the title row itself, centred on the title. */
+  action?: ReactNode;
   /** What moved since the last push, for the colonies' row flash and cost highlight. */
   events?: LiveEvents;
   onOpenColony?: (id: string) => void;
@@ -343,22 +346,29 @@ export function OrgDashboard({
 
   return (
     <div className="flex flex-col gap-10">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0">
-          <button type="button" onClick={onBack} className="mb-3 cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
-            ← All workspaces
-          </button>
-          <h1 className="m-0 flex items-center gap-3 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
+      <div>
+        <button type="button" onClick={onBack} className="mb-3 cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
+          ← All workspaces
+        </button>
+        {/* The primary action shares the title's row and centres on it; narrow, it wraps under the
+            title rather than floating mid-block. The range controls stay below, at the right. */}
+        <div data-org-title-row className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+          <h1 className="m-0 flex min-w-0 items-center gap-3 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
             <OrgTile org={org.org} avatar={org.avatar} size={28} />
             <span className="truncate">{org.org}</span>
           </h1>
-          {org.description && <p data-org-description className="m-0 mt-2 max-w-[640px] text-[14px] leading-snug text-text/80 [text-wrap:pretty]">{org.description}</p>}
-          <div className="mt-2 text-[14px] text-muted">
-            {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
-            {repo ? ` · filtered to ${shortRepo(repo)}${pkg ? ` / ${pkgLabel(pkg)}` : ""}` : ""}
-          </div>
+          {action}
         </div>
-        {toolbar}
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            {org.description && <p data-org-description className="m-0 mt-2 max-w-[640px] text-[14px] leading-snug text-text/80 [text-wrap:pretty]">{org.description}</p>}
+            <div className="mt-2 text-[14px] text-muted">
+              {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
+              {repo ? ` · filtered to ${shortRepo(repo)}${pkg ? ` / ${pkgLabel(pkg)}` : ""}` : ""}
+            </div>
+          </div>
+          {toolbar}
+        </div>
       </div>
 
       <div role="group" aria-label="Repository" className="-mt-4 flex flex-wrap gap-1.5">

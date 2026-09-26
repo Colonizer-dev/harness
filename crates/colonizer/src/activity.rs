@@ -79,6 +79,8 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.answer",
     "chat.colony",
     "chat.issue",
+    "colonize.issue",
+    "colonize.colony",
     "loop.create",
     "loop.update",
     "loop.pause",
@@ -368,6 +370,8 @@ enum Target {
     Workspace,
     /// The response is the red-team run just started.
     NewRun,
+    /// The response is the issue just filed (`{repo, number, title}`).
+    NewIssue,
     /// Something named by a label and the route's `{id}`/`{kind}` when it has one, shown in a
     /// cockpit section (`module:` is completed with the module's kind).
     Named(&'static str, &'static str),
@@ -406,6 +410,7 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/sessions/{id}/cleanup", "colony.cleanup", Target::Colony),
     rule("POST", "/api/sessions/{id}/retain", "colony.retain", Target::Colony),
     rule("POST", "/api/chat/{id}/issue", "chat.issue", Target::None),
+    rule("POST", "/api/repos/{owner}/{name}/issues", "colonize.issue", Target::NewIssue),
     rule("POST", "/api/loops", "loop.create", Target::NewLoop),
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
@@ -691,8 +696,10 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
     if !response.status().is_success() {
         return response;
     }
-    let reads_body = matches!(rule.target, Target::NewColony | Target::NewLoop | Target::NewRun)
-        || rule.kind == "loop.run_now"
+    let reads_body = matches!(
+        rule.target,
+        Target::NewColony | Target::NewLoop | Target::NewRun | Target::NewIssue
+    ) || rule.kind == "loop.run_now"
         || rule.kind == "colony.publish";
     let (response, body) = if reads_body {
         buffer_json(response).await
@@ -725,8 +732,10 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
             let Some(made) = body.as_ref().filter(|b| b["id"].is_string()) else {
                 return response;
             };
-            if made["origin"].as_str() == Some(CHAT_ORIGIN) {
-                entry.kind = "chat.colony".into();
+            match made["origin"].as_str() {
+                Some(CHAT_ORIGIN) => entry.kind = "chat.colony".into(),
+                Some(COLONIZE_ORIGIN) => entry.kind = "colonize.colony".into(),
+                _ => {}
             }
             match app.session(made["id"].as_str().unwrap_or_default()).await {
                 Some(session) => entry = entry.colony(&session),
@@ -790,6 +799,13 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
             }
             entry = entry.target("red-team run").section("redteam");
         }
+        Target::NewIssue => {
+            let Some(made) = body.as_ref() else { return response };
+            entry.repo = made["repo"].as_str().map(str::to_string);
+            entry.org = entry.repo.as_deref().and_then(owner_of);
+            entry.issue = made["number"].as_u64();
+            entry.title = made["title"].as_str().map(str::to_string);
+        }
         Target::Named(label, section) => {
             let name = param("id").or_else(|| param("kind"));
             entry = entry.target(match &name {
@@ -822,6 +838,8 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
 
 /// The `origin` the cockpit's chat sends when it turns a conversation into a colony.
 pub(crate) const CHAT_ORIGIN: &str = "chat";
+/// The `origin` the cockpit's Colonize pane sends when it hands issues off to colonies.
+pub(crate) const COLONIZE_ORIGIN: &str = "colonize";
 
 /// The response's JSON, for the few routes whose answer names what they made. The body is ours,
 /// already in memory, so buffering it costs a copy; anything that is not JSON passes through as it
@@ -1270,6 +1288,12 @@ mod tests {
             )
             .route("/api/sessions/{id}/retain", post(|| async { "kept" }))
             .route(
+                "/api/repos/{owner}/{name}/issues",
+                post(|| async {
+                    Json(serde_json::json!({"repo": "acme/web", "number": 77, "title": "Add dark mode", "url": "https://github.com/acme/web/issues/77"}))
+                }),
+            )
+            .route(
                 "/api/secrets/{id}",
                 axum::routing::put(move |body: String| {
                     let _ = &secret_app;
@@ -1391,5 +1415,35 @@ mod tests {
         assert_eq!(lines[0].colony.as_deref(), Some("new1"));
         assert_eq!((lines[0].repo.as_deref(), lines[0].issue), (Some("acme/web"), Some(12)));
         assert_eq!(lines[0].title.as_deref(), Some("Fix the checkout"));
+    }
+
+    #[tokio::test]
+    async fn colonize_records_the_issue_it_filed_and_the_colonies_it_sent() {
+        let root = root();
+        let app = test_app(&root);
+        router(&app)
+            .oneshot(request(
+                &app,
+                "POST",
+                "/api/repos/acme/web/issues",
+                "{\"title\":\"Add dark mode\"}",
+            ))
+            .await
+            .unwrap();
+        router(&app)
+            .oneshot(request(&app, "POST", "/api/sessions", "{\"origin\":\"colonize\"}"))
+            .await
+            .unwrap();
+        let lines = all(&app);
+        assert_eq!(
+            lines.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(),
+            vec!["colonize.issue", "colonize.colony"]
+        );
+        assert_eq!(
+            (lines[0].repo.as_deref(), lines[0].org.as_deref()),
+            (Some("acme/web"), Some("acme"))
+        );
+        assert_eq!((lines[0].issue, lines[0].title.as_deref()), (Some(77), Some("Add dark mode")));
+        assert_eq!(lines[1].colony.as_deref(), Some("new1"));
     }
 }

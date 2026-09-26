@@ -1,6 +1,6 @@
 // The cockpit's sidebar: a slim, quiet column of icons that opens into labels. Collapsed it is 64px
 // of clear glyphs, each naming itself on hover or focus; expanded (the choice is remembered) every
-// item carries its label and count. One accent does the talking: the launch button, and the bar
+// item carries its label and count. One accent does the talking: the Colonize button, and the bar
 // beside wherever you are. The workspace switcher sits at the top and is the cockpit's scope: every
 // view reads it, and Overview shows the chosen org's dashboard, or every workspace when none is.
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
@@ -9,6 +9,8 @@ import { Avatar } from "../components/Avatar";
 import { sameOrg, store, stored } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import type { UpdateStatus } from "../types";
+import { AntGlyph } from "./chat/PersonaAnt";
+import { useColonize } from "./Colonize";
 import { needFor } from "./feed";
 
 export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "loops" | "settings" | "memory" | "host" | "secrets" | "code" | "chat";
@@ -235,10 +237,15 @@ export function NavRail(props: {
   /** The installed version and whether a newer one is out; an available update shows in the foot. */
   update?: UpdateStatus | null;
   onOpenUpdates?: () => void;
+  /** Opens the Colonize pane; absent, the surrounding ColonizeProvider's, and outside one (static
+   *  tests) the button goes to the Launch view instead. */
+  onColonize?: () => void;
   /** Start expanded regardless of the remembered choice; the tests pin both states through it. */
   initialExpanded?: boolean;
 }): ReactElement {
   const { orgs, hiddenOrgs, onOpenOrgSettings, selectedOrg, onSelectOrg, needByOrg, view, onNavigate, inboxCount, liveCount, pendingMemory, theme, onToggleTheme, update = null, onOpenUpdates } = props;
+  const colonizer = useColonize();
+  const onColonize = props.onColonize ?? colonizer?.open;
   const [expanded, setExpanded] = useState<boolean>(() => props.initialExpanded ?? stored(EXPANDED_KEY) !== "0");
   const toggle = () =>
     setExpanded((open) => {
@@ -333,16 +340,19 @@ export function NavRail(props: {
         expanded={expanded}
       />
 
-      <Tip label="Launch a colony" show={tip}>
+      <Tip label="Colonize · ⌘K" show={tip}>
         <button
           type="button"
-          aria-label="launch a colony"
-          aria-current={view === "launch" ? "page" : undefined}
-          onClick={() => onNavigate("launch")}
-          className={`v3-launch mb-3 flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-[10px] border-0 font-medium text-[13.5px] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-[0.98] ${pad}`}
+          aria-label="colonize"
+          aria-haspopup={onColonize ? "dialog" : undefined}
+          aria-keyshortcuts="Meta+K Control+K"
+          aria-current={!onColonize && view === "launch" ? "page" : undefined}
+          onClick={() => (onColonize ? onColonize() : onNavigate("launch"))}
+          className={`v3-launch ant-glyph-host mb-3 flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-[10px] border-0 font-semibold text-[13.5px] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-[0.98] ${pad}`}
         >
-          <Glyph name="plus" size={18} />
-          {expanded && "New colony"}
+          <AntGlyph size={24} className="-m-[3px]" />
+          {expanded && "Colonize"}
+          {expanded && <kbd className="ml-auto font-sans text-[11px] font-medium opacity-70">⌘K</kbd>}
         </button>
       </Tip>
 

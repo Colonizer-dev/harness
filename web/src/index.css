@@ -2060,6 +2060,18 @@ body {
     transform: rotate(8deg);
   }
 }
+/* The Colonize buttons' ant (AntGlyph): one colour, heavier legs so it holds up at icon size, and an
+   antennae twitch while its button is hovered or focused. The reduced-motion block below stops it. */
+.ant-glyph .pa-line,
+.ant-glyph .pa-leg {
+  stroke-width: 2.4;
+}
+.ant-glyph-host:is(:hover, :focus-visible) .ant-glyph .pa-antenna {
+  animation: pa-twitch 1.3s ease-in-out infinite;
+}
+.ant-glyph-host:is(:hover, :focus-visible) .ant-glyph .pa-antenna + .pa-antenna {
+  animation-delay: -0.4s;
+}
 @media (prefers-reduced-motion: reduce) {
   .persona-ant,
   .persona-ant *,

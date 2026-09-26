@@ -29,6 +29,7 @@ import type {
   HeadroomStatus,
   DownloadableSkillset,
   Issue,
+  IssueDrafts,
   LogLevel,
   LoginView,
   Mem0Status,
@@ -806,7 +807,7 @@ function mockTerminal(session: MockSession | undefined): SocketLike {
 }
 
 const REPOS: Repo[] = [
-  { full_name: "acme/webshop", description: "Storefront and checkout", private: true, fork: false, archived: false, open_issues_count: 2, pushed_at: ago(30) },
+  { full_name: "acme/webshop", description: "Storefront and checkout", private: true, fork: false, archived: false, open_issues_count: 12, pushed_at: ago(30) },
   { full_name: "acme/design-system", description: "Shared UI components", private: false, fork: false, archived: false, open_issues_count: 5, pushed_at: ago(600) },
   { full_name: "octocat/hello-world", description: null, private: false, fork: true, archived: false, open_issues_count: 0, pushed_at: ago(9000) },
 ];
@@ -834,6 +835,96 @@ const ISSUES: Record<string, Issue[]> = {
       updatedAt: ago(1500),
       url: "https://github.com/acme/webshop/issues/43",
     },
+    {
+      number: 44,
+      title: "Search results ignore the size filter",
+      body: null,
+      labels: [{ name: "bug", color: "d73a4a" }, { name: "search", color: "1d76db" }],
+      author: { login: "noor" },
+      updatedAt: ago(200),
+      url: "https://github.com/acme/webshop/issues/44",
+    },
+    {
+      number: 45,
+      title: "Show stock levels on the product page",
+      body: null,
+      labels: [{ name: "enhancement", color: "a2eeef" }],
+      author: { login: "sam" },
+      updatedAt: ago(400),
+      url: "https://github.com/acme/webshop/issues/45",
+    },
+    {
+      number: 46,
+      title: "Cart badge does not update after removing the last item",
+      body: null,
+      labels: [{ name: "bug", color: "d73a4a" }],
+      author: { login: "maria" },
+      updatedAt: ago(700),
+      url: "https://github.com/acme/webshop/issues/46",
+    },
+    {
+      number: 47,
+      title: "Add Apple Pay to checkout",
+      body: null,
+      labels: [{ name: "checkout", color: "0e8a16" }, { name: "enhancement", color: "a2eeef" }],
+      author: { login: "lee" },
+      updatedAt: ago(900),
+      url: "https://github.com/acme/webshop/issues/47",
+    },
+    {
+      number: 48,
+      title: "Product images load at full resolution on mobile",
+      body: null,
+      labels: [{ name: "performance", color: "fbca04" }],
+      author: { login: "noor" },
+      updatedAt: ago(1100),
+      url: "https://github.com/acme/webshop/issues/48",
+    },
+    {
+      number: 49,
+      title: "Wishlist loses items after signing out",
+      body: null,
+      labels: [{ name: "bug", color: "d73a4a" }],
+      author: { login: "sam" },
+      updatedAt: ago(1300),
+      url: "https://github.com/acme/webshop/issues/49",
+    },
+    {
+      number: 50,
+      title: "Translate the footer into German",
+      body: null,
+      labels: [{ name: "i18n", color: "c5def5" }],
+      author: { login: "maria" },
+      updatedAt: ago(1700),
+      url: "https://github.com/acme/webshop/issues/50",
+    },
+    {
+      number: 51,
+      title: "Order history pagination skips page 2",
+      body: null,
+      labels: [{ name: "bug", color: "d73a4a" }],
+      author: { login: "lee" },
+      updatedAt: ago(2100),
+      url: "https://github.com/acme/webshop/issues/51",
+    },
+    {
+      number: 52,
+      title: "Rate-limit the newsletter signup form",
+      body: null,
+      labels: [{ name: "security", color: "b60205" }],
+      author: { login: "noor" },
+      updatedAt: ago(2500),
+      url: "https://github.com/acme/webshop/issues/52",
+    },
+    {
+      number: 53,
+      title: "Add a sitemap.xml for the catalogue",
+      body: null,
+      labels: [{ name: "seo", color: "bfd4f2" }],
+      author: { login: "sam" },
+      updatedAt: ago(3200),
+      url: "https://github.com/acme/webshop/issues/53",
+    },
   ],
   "acme/design-system": [
     {
@@ -847,6 +938,27 @@ const ISSUES: Record<string, Issue[]> = {
     },
   ],
 };
+
+/** The mock's summary model for Colonize: each bullet or numbered line an issue, else the text as one. */
+export function mockDrafts(text: string): IssueDrafts {
+  const items = text
+    .split("\n")
+    .map((l) => l.match(/^\s*(?:[-*•]|\d+[.)])\s+(.+)$/)?.[1]?.trim())
+    .filter((l): l is string => Boolean(l));
+  const tasks = items.length > 1 ? items.slice(0, 5) : [text.trim()];
+  const title = (t: string) => {
+    const line = t.split(/[.\n]/)[0].trim().replace(/^please\s+/i, "");
+    const cut = line.length > 72 ? `${line.slice(0, 71).trimEnd()}…` : line;
+    return cut.charAt(0).toUpperCase() + cut.slice(1);
+  };
+  return {
+    issues: tasks.map((t) => ({
+      title: title(t),
+      body: `${t}\n\n### Done when\n- The change is covered by a test\n- The existing suite still passes`,
+    })),
+    model: "mock/summary",
+  };
+}
 
 function baseSession(id: string, repo: string, issue: number | null, title: string): Session {
   const slug = issue != null ? `issue-${issue}-${id}` : `session-${id}`;
@@ -2445,6 +2557,17 @@ export function createMockApi(): Api {
     },
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
+    // Colonize: a stand-in for the summary model — one issue per bullet or numbered line, otherwise one.
+    draftIssues: (body) => later(() => mockDrafts(body.text), 900),
+    createIssue: async (repo, body) => {
+      await sleep(500);
+      const list = (ISSUES[repo] ??= []);
+      const number = Math.max(99, ...Object.values(ISSUES).flat().map((i) => i.number)) + 1;
+      const url = `https://github.com/${repo}/issues/${number}`;
+      list.unshift({ number, title: body.title, body: body.body, labels: [], author: { login: "octocat" }, updatedAt: now(), url });
+      logActivity({ kind: "colonize.issue", actor: "you", via: "cockpit", org: repo.split("/")[0], repo, issue: number, title: body.title });
+      return { repo, number, title: body.title, url };
+    },
     repoPackages: (repo) =>
       later(
         () =>
@@ -2494,7 +2617,7 @@ export function createMockApi(): Api {
     body.instructions ?? null,
       );
       sessions.set(id, session);
-      colonyActivity(body.origin === "chat" ? "chat.colony" : "colony.launch", session.session);
+      colonyActivity(body.origin === "chat" ? "chat.colony" : body.origin === "colonize" ? "colonize.colony" : "colony.launch", session.session);
       return clone(session.session);
     },
     resumeSession: async (id) => {

@@ -1851,8 +1851,19 @@ pub fn check_issue(req: &NewIssue) -> Result<(), String> {
 pub async fn file_issue(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<NewIssue>) -> ApiResult<Value> {
     check_id(&id)?;
     load_or_404(read_meta(&app, &id).await)?;
-    check_issue(&req).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
-    let body_path = dir(&app).join(format!("{id}.issue-{}.md", short_id()));
+    let url = create_github_issue(&app, &id, &req).await?;
+    Ok(Json(json!({"url": url})))
+}
+
+/// Files a checked `{repo, title, body}` with the Mothership's `gh issue create` and answers the new
+/// issue's URL. The body goes through a file named after `tag` in the chats directory (never the
+/// command line) and is removed after. Shared by the chat's "file an issue" and Colonize
+/// (`colonize::create_issue`), so both file the same way.
+pub(crate) async fn create_github_issue(app: &App, tag: &str, req: &NewIssue) -> Result<String, crate::AppError> {
+    check_issue(req).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    let dir = dir(app);
+    tokio::fs::create_dir_all(&dir).await?;
+    let body_path = dir.join(format!("{tag}.issue-{}.md", short_id()));
     tokio::fs::write(&body_path, format!("{}\n", req.body.trim())).await?;
     let mut cmd = app.gh([
         "issue",
@@ -1868,7 +1879,7 @@ pub async fn file_issue(State(app): State<Shared>, Path(id): Path<String>, Json(
     let _ = tokio::fs::remove_file(&body_path).await;
     let out = out.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("gh could not file the issue: {e:#}")))?;
     let url = out.lines().rev().find(|l| l.starts_with("https://")).unwrap_or(out.trim());
-    Ok(Json(json!({"url": crate::util::truncate(url, 500)})))
+    Ok(crate::util::truncate(url, 500))
 }
 
 struct ReplyOpts {

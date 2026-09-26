@@ -194,6 +194,27 @@ export interface Issue {
   url: string;
 }
 
+/** One issue Colonize drafted from free text, shown for a confirm or an edit before it is filed. */
+export interface IssueDraft {
+  title: string;
+  body: string;
+}
+
+/** POST /api/colonize/draft: `model` is null (and `note` says why) when the text came back as its own draft. */
+export interface IssueDrafts {
+  issues: IssueDraft[];
+  model: string | null;
+  note?: string;
+}
+
+/** POST /api/repos/{owner}/{repo}/issues: the issue just filed; `number` is null if gh's answer named none. */
+export interface CreatedIssue {
+  repo: string;
+  number: number | null;
+  title: string;
+  url: string;
+}
+
 export interface HarnessStatus {
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
   claude: { configured: boolean; source: string | null; kind: string | null; account?: string | null; account_note?: string | null; saved_at?: string | null; expires_at?: string | null; expires_estimated?: boolean };
@@ -1194,7 +1215,7 @@ export interface NewSessionRequest {
   after?: string;
   /** Opt in to overlap-aware queueing: queue behind a live same-repo colony that's already touching files, instead of developing against the same paths at once. Off by default. */
   serialize?: boolean;
-  /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, which the activity log records as such. */
+  /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
 }
 
@@ -1947,6 +1968,8 @@ export type ActivityKind =
   | "colony.answer"
   | "chat.colony"
   | "chat.issue"
+  | "colonize.issue"
+  | "colonize.colony"
   | "loop.create"
   | "loop.update"
   | "loop.pause"
