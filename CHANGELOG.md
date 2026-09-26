@@ -287,6 +287,7 @@ setting) is called out under **Take care** rather than left for you to find.
   sits on the surface right above the entry chamber, stepping aside only when that way down would
   pass through another chamber, a name or a title, and its shaft drops straight down and turns in.
   Boundary titles are also drawn over the tunnels, so a passing tunnel no longer hides one. (PRLINK)
+  Boundary titles are also drawn over the tunnels, so a passing tunnel no longer hides one. ([#566])
 
 ### Fixed
 
@@ -961,6 +962,7 @@ Macs. ([#74])
 [#534]: https://github.com/Colonizer-dev/harness/issues/534
 [#508]: https://github.com/Colonizer-dev/harness/issues/508
 [#565]: https://github.com/Colonizer-dev/harness/pull/565
+[#566]: https://github.com/Colonizer-dev/harness/pull/566
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
