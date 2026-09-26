@@ -205,9 +205,9 @@ export const LOOP_TEMPLATES: { label: string; prompt: string; choice: LoopChoice
     choice: { every: "daily", time: "07:00" },
   },
   {
-    label: "Summarise yesterday's merged PRs into CHANGELOG",
+    label: "Write changelog entries for yesterday's merged PRs",
     prompt:
-      "Add a user-facing CHANGELOG entry under Unreleased for every pull request merged yesterday that does not have one yet, in the file's existing style, and open one pull request.",
+      "For every pull request merged yesterday that has no changelog entry yet, write a user-facing one the way this repository keeps its changelog: one fragment file per change when it has a fragments directory such as changelog.d/ (follow its README, and leave CHANGELOG.md alone), otherwise under Unreleased in CHANGELOG.md in the file's existing style. Open one pull request.",
     choice: { every: "daily", time: "06:00" },
   },
 ];

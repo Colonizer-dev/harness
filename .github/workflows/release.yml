@@ -250,9 +250,10 @@ jobs:
             [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match $manifest version $crate" >&2; exit 1; }
           done
 
+      # The section for the tag exists, and no changelog.d/ fragment was left out of it: a fragment
+      # still pending at the tagged commit is an entry this release would ship without.
       - name: Check the changelog covers the tag
-        run: |
-          grep -qF "## [$TAG] " CHANGELOG.md || { echo "CHANGELOG.md has no section for $TAG" >&2; exit 1; }
+        run: node scripts/changelog.mjs check --release "$TAG"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

@@ -205,8 +205,10 @@ settings → Agent module; without a pick, the mothership's agent choice applies
 ## What changed
 
 [CHANGELOG.md](CHANGELOG.md) covers every release, newest first, with the pull
-request behind each line and anything that could cost work called out. The
-mothership also tells you when a newer release is out, and can install it.
+request behind each line and anything that could cost work called out. What has
+merged since the last release waits in [changelog.d/](changelog.d/README.md), one
+file per change. The mothership also tells you when a newer release is out, and
+can install it.
 
 ## What's in the repository
 

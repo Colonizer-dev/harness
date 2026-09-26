@@ -879,7 +879,10 @@ pub fn build_prompt(
         "How to work:\n\
          1. Read the relevant code and understand the task (reproduce the problem, if there is one) before changing anything.\n\
          2. Make a focused change that accomplishes it, following the project's existing conventions. Add or \
-            update tests where the project has them, and run the relevant tests, linters and type checkers.\n\
+            update tests where the project has them, and run the relevant tests, linters and type checkers. When \
+            the repository keeps changelog entries as one file per change (a directory such as `changelog.d/` or \
+            `.changeset/`), add yours there and leave the changelog file itself alone: parallel pull requests all \
+            editing its top is what makes them conflict.\n\
          3. Keep the pull request reviewable in one sitting: a soft ceiling of {PR_LINE_BUDGET} changed lines \
             across {PR_FILE_BUDGET} files. Run `git diff --stat` before finishing so you know your actual size. \
             A sibling touching many files is not evidence that your own task needs to; going over is allowed \
@@ -2662,6 +2665,16 @@ mod tests {
             None => format!("colonizer/session-{id}"),
         };
         s
+    }
+
+    /// Colonies open pull requests in parallel, and every one of them editing the top of a changelog
+    /// is what made them conflict: the prompt points them at a fragments directory instead.
+    #[test]
+    fn the_prompt_asks_for_a_changelog_fragment_over_editing_the_changelog() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        let prompt = build_prompt(&me, None, "main", false, &[], None, None);
+        assert!(prompt.contains("`changelog.d/`"), "{prompt}");
+        assert!(prompt.contains("leave the changelog file itself alone"), "{prompt}");
     }
 
     /// Issue #508: instructions that arrived through a scoped API token are marked as external
