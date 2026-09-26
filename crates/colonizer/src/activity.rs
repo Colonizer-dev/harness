@@ -89,6 +89,9 @@ pub(crate) const KINDS: &[&str] = &[
     "redteam.stop",
     "redteam.schedule",
     "redteam.unschedule",
+    "remote.enable",
+    "remote.disable",
+    "remote.reset",
     "workspace.enable",
     "workspace.disable",
     "workspace.settings",
@@ -622,7 +625,7 @@ fn absorb(colony: &str) -> Option<(String, Option<String>)> {
         .ok()
 }
 
-fn via_name(via: Option<auth::Via>) -> Option<String> {
+pub(crate) fn via_name(via: Option<auth::Via>) -> Option<String> {
     via.map(|v| match v {
         auth::Via::Cockpit => "cockpit".to_string(),
         auth::Via::Api => "api".to_string(),
