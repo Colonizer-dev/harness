@@ -153,10 +153,18 @@ export function readFragments(dir) {
 /** Splits CHANGELOG.md into its prose and the reference definitions block at its foot. */
 export function splitLinks(text) {
   const lines = text.replace(/\s+$/, '').split('\n');
+  const blank = (line) => line.trim() === '';
+  // The block is the run of definitions at the foot, blank lines between them included: a merge or a
+  // rebase often leaves one there, and it must not end the block (or become a definition).
   let start = lines.length;
-  while (start > 0 && (LINK_DEF.test(lines[start - 1]) || (lines[start - 1] === '' && start < lines.length))) start--;
-  while (start < lines.length && lines[start] === '') start++;
-  const links = lines.slice(start).map((l) => LINK_DEF.exec(l)).map((m) => [m[1], m[2]]);
+  while (start > 0 && (LINK_DEF.test(lines[start - 1]) || (blank(lines[start - 1]) && start < lines.length))) start--;
+  while (start < lines.length && blank(lines[start])) start++;
+  const links = lines
+    .slice(start)
+    .filter((line) => !blank(line))
+    .map((line) => LINK_DEF.exec(line))
+    .filter(Boolean)
+    .map((m) => [m[1], m[2]]);
   return { prose: lines.slice(0, start).join('\n').replace(/\s+$/, ''), links };
 }
 
@@ -289,6 +297,13 @@ export function convert(changelog, existing = new Map()) {
   const taken = new Map(existing);
   const moved = new Set();
   for (const entry of entries) {
+    try {
+      convertEntry(entry);
+    } catch (e) {
+      throw new Error(`could not convert the ${entry.type} entry "${entry.lines[0].slice(0, 60)}…": ${e.message}`);
+    }
+  }
+  function convertEntry(entry) {
     while (entry.lines.length && entry.lines[entry.lines.length - 1].trim() === '') entry.lines.pop();
     const body = entry.lines.join('\n');
     const title = /\*\*(.+?)\*\*/.exec(body)?.[1] ?? body.slice(2, 60);
@@ -300,7 +315,7 @@ export function convert(changelog, existing = new Map()) {
     const stem = [issue, slugify(title)].filter(Boolean).join('-') || 'entry';
     let file = `${stem}.${entry.type}.md`;
     for (let n = 2; taken.has(file) && taken.get(file) !== text; n++) file = `${stem}-${n}.${entry.type}.md`;
-    if (taken.get(file) === text) continue;
+    if (taken.get(file) === text) return;
     taken.set(file, text);
     fragments.push({ file, text });
   }
@@ -579,4 +594,12 @@ export function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exit(main());
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  // Every expected failure already returns a message; anything else is a bug, and says where.
+  try {
+    process.exit(main());
+  } catch (e) {
+    console.error(`changelog.mjs ${process.argv[2] ?? ''} failed unexpectedly: ${e.stack ?? e}`);
+    process.exit(1);
+  }
+}
