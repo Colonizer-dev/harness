@@ -1,0 +1,56 @@
+# The relay: my.colonizer.dev and every <install>.my.colonizer.dev (issues #532 and #534).
+# Deploy from this directory (README.md has the full human checklist):
+#   npx --no-install wrangler d1 migrations apply colonizer-relay --remote
+#   npx --no-install wrangler deploy
+# Wrangler is pinned via devDependencies + package-lock.json in this directory.
+name = "colonizer-relay"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+[observability]
+enabled = true
+
+[vars]
+RELAY_DOMAIN = "my.colonizer.dev"
+# The GitHub OAuth App's client id (a human creates the app, callback https://my.colonizer.dev/_auth/callback,
+# and replaces this). The client secret and the cookie-signing key are secrets, never config:
+#   npx --no-install wrangler secret put GITHUB_CLIENT_SECRET
+#   npx --no-install wrangler secret put SESSION_SECRET
+GITHUB_CLIENT_ID = "REPLACE_WITH_GITHUB_CLIENT_ID"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "colonizer-relay"
+# Placeholder — a human replaces this with the real id from `wrangler d1 create colonizer-relay` (README).
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# One tunnel DO per install; SQLite-backed so D1 and the DO live on the same storage tier.
+[[durable_objects]]
+bindings = [{ name = "TUNNELS", class_name = "InstallTunnel" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["InstallTunnel"]
+
+# Only registration is limited: it is the one unauthenticated write. Keyed on the connecting IP, in
+# memory, never stored.
+[[ratelimits]]
+name = "REGISTER_LIMITER"
+namespace_id = "7302"
+simple = { limit = 10, period = 60 }
+
+# The tunnel dial is unauthenticated until the hello and a re-dial loop is cheap, so it is limited per
+# connecting IP too (the DO also caps concurrent pending handshakes). Generous: a mothership retries.
+[[ratelimits]]
+name = "DIAL_LIMITER"
+namespace_id = "7303"
+simple = { limit = 30, period = 60 }
+
+[[routes]]
+pattern = "my.colonizer.dev/*"
+zone_name = "colonizer.dev"
+
+[[routes]]
+pattern = "*.my.colonizer.dev/*"
+zone_name = "colonizer.dev"

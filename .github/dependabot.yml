@@ -36,3 +36,11 @@ updates:
     groups:
       telemetry:
         patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /services/relay
+    schedule:
+      interval: weekly
+    groups:
+      relay:
+        patterns: ["*"]
