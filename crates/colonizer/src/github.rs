@@ -2318,6 +2318,35 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
     Ok(Json(crate::epic::annotate(filter.apply(issues), &totals)))
 }
 
+/// The Source module's include labels as the operator typed them (case kept, duplicates dropped
+/// case-insensitively): what a filed issue is given so the filtered list still offers it. Empty
+/// when the list offers every issue. The Source module is one setting for the whole Mothership, so
+/// every repository gets the same labels.
+pub async fn source_include_labels(app: &crate::App) -> Vec<String> {
+    let raw = {
+        let modules = app.modules.read().await;
+        match modules.get("source") {
+            Some(choice) => {
+                let schema = crate::modules::schema_for("source", &choice.provider, &app.agents);
+                crate::config::setting_str(choice, &schema, "include_labels")
+            }
+            None => String::new(),
+        }
+    };
+    split_labels(&raw)
+}
+
+/// `"Ready, colonize ,ready,"` → `["Ready", "colonize"]`. Pure, for the tests.
+pub fn split_labels(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for label in raw.split(',').map(str::trim).filter(|l| !l.is_empty()) {
+        if !out.iter().any(|seen| seen.eq_ignore_ascii_case(label)) {
+            out.push(label.to_string());
+        }
+    }
+    out
+}
+
 /// The Source module's label filter: which open issues are offered for a colony. Labels compare
 /// case-insensitively; an empty include list offers everything, and an exclude always wins.
 #[derive(Debug, Default, PartialEq)]
@@ -2400,6 +2429,13 @@ mod tests {
             {"number": 3, "labels": [{"name": "ready"}, {"name": "blocked"}]}
         ]);
         assert_eq!(f.apply(issues), json!([{"number": 1, "labels": [{"name": "ready"}]}]));
+    }
+
+    #[test]
+    fn source_labels_keep_their_case_and_drop_duplicates() {
+        assert_eq!(super::split_labels(" Ready, colonize ,ready,, "), vec!["Ready", "colonize"]);
+        assert!(super::split_labels("").is_empty());
+        assert!(super::split_labels(" , ").is_empty());
     }
 
     #[test]

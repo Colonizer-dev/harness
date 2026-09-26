@@ -207,6 +207,8 @@ export interface IssueDrafts {
   issues: IssueDraft[];
   model: string | null;
   note?: string;
+  /** The Source module's include labels, which filing adds so the filtered list still offers the issue. Absent from older motherships. */
+  labels?: string[];
 }
 
 /** POST /api/repos/{owner}/{repo}/issues: the issue just filed; `number` is null if gh's answer named none. */
@@ -215,6 +217,10 @@ export interface CreatedIssue {
   number: number | null;
   title: string;
   url: string;
+  /** The Source labels the issue carries. Absent from older motherships. */
+  labels?: string[];
+  /** Source labels it could not be given (missing on the repository and not creatable); the issue is filed anyway. */
+  labels_skipped?: string[];
 }
 
 export interface HarnessStatus {

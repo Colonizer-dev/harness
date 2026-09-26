@@ -8,8 +8,9 @@
 //!   read) the text itself is the one draft, so the flow never dead-ends on configuration.
 //! - `POST /api/repos/{owner}/{name}/issues` files one confirmed draft with the Mothership's `gh`,
 //!   through the chat's own [`chat::create_github_issue`], and answers the issue's number too, so the
-//!   cockpit can put it in the list and hand it off at once. The activity layer records it as
-//!   `colonize.issue`.
+//!   cockpit can put it in the list and hand it off at once. The issue gets the Source module's
+//!   include labels, so the filtered list still offers it after a reload; the draft's answer names
+//!   them for the confirm step. The activity layer records it as `colonize.issue`.
 
 use crate::{ApiResult, Shared, chat, client_error, summaries};
 use axum::{
@@ -111,8 +112,9 @@ pub fn fallback_draft(text: &str) -> Draft {
     }
 }
 
-/// `POST /api/colonize/draft`: `{text, repo?}` → `{issues: [{title, body}], model, note?}`. `model`
-/// is null and `note` says why when the text came back as its own single draft.
+/// `POST /api/colonize/draft`: `{text, repo?}` → `{issues: [{title, body}], model, note?, labels}`.
+/// `model` is null and `note` says why when the text came back as its own single draft; `labels` are
+/// the Source include labels filing will add.
 pub async fn draft(State(app): State<Shared>, Json(req): Json<DraftRequest>) -> ApiResult<Value> {
     let text = req.text.trim();
     if text.is_empty() {
@@ -127,7 +129,7 @@ pub async fn draft(State(app): State<Shared>, Json(req): Json<DraftRequest>) -> 
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
     }
     let prompt = draft_prompt(text, req.repo.as_deref());
-    let answer = match summaries::ask_freeform(&app, &prompt).await {
+    let mut answer = match summaries::ask_freeform(&app, &prompt).await {
         Ok((answer, model)) => match parse_drafts(&answer) {
             Some(issues) => json!({"issues": issues, "model": model}),
             None => json!({
@@ -138,6 +140,7 @@ pub async fn draft(State(app): State<Shared>, Json(req): Json<DraftRequest>) -> 
         },
         Err(e) => json!({"issues": [fallback_draft(text)], "model": null, "note": e}),
     };
+    answer["labels"] = json!(crate::github::source_include_labels(&app).await);
     Ok(Json(answer))
 }
 
@@ -155,7 +158,8 @@ pub fn issue_number(url: &str) -> Option<u64> {
 }
 
 /// `POST /api/repos/{owner}/{name}/issues`: files `{title, body}` on the repository and answers
-/// `{repo, number, title, url}`.
+/// `{repo, number, title, url, labels, labels_skipped}`: the Source labels the issue carries, and
+/// any it could not be given (the issue is filed either way).
 pub async fn create_issue(
     State(app): State<Shared>,
     Path((owner, name)): Path<(String, String)>,
@@ -167,12 +171,14 @@ pub async fn create_issue(
         title: req.title,
         body: req.body,
     };
-    let url = chat::create_github_issue(&app, "colonize", &issue).await?;
+    let filed = chat::create_github_issue(&app, "colonize", &issue).await?;
     Ok(Json(json!({
         "repo": repo,
-        "number": issue_number(&url),
+        "number": issue_number(&filed.url),
         "title": issue.title.trim(),
-        "url": url,
+        "url": filed.url,
+        "labels": filed.labels,
+        "labels_skipped": filed.skipped,
     })))
 }
 

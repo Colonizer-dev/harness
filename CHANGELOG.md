@@ -369,6 +369,14 @@ setting) is called out under **Take care** rather than left for you to find.
   the button sits on the title row, centred on the org name, with the range and Compare controls
   below it.
 
+- **Filed issues carry the Source labels, so they stay in the list.** When Settings → Source
+  offers only issues with certain labels, an issue created from Colonize or from a chat's "file an
+  issue" now gets all of those include labels (none when the setting is empty), and Colonize's
+  confirm step shows them ("labels: ready, colonize"). A label the repository lacks is created
+  first; one that cannot be created is skipped, logged and named in the toast, and the issue is
+  filed anyway. Both routes now also refuse while external writes are blocked, like every other
+  filed issue.
+
 ### Take care
 
 - **Colony agents can no longer ptrace, unshare or mount**, and `/proc/sys` and `/sys` are

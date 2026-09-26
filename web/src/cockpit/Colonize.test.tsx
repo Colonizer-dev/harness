@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Api } from "../api";
 import { ApiContext } from "../context";
-import { mockDrafts } from "../mock";
+import { mockDrafts, mockSplitLabels } from "../mock";
 import type { CreatedIssue, NewSessionRequest, Repo, Session } from "../types";
 import {
   COLONIZE_ORIGIN,
@@ -336,6 +336,44 @@ describe("from text to issues to colonies", () => {
     ]);
     expect(heard).toEqual(["acme/web#100:started", "acme/web#101:queued"]);
     expect(summarize(results)).toBe("1 started · 1 queued");
+  });
+
+  it("shows the Source labels filing will add on the confirm step, and nothing when there are none", () => {
+    const confirm = (labels?: string[]): DraftState => ({
+      text: "x",
+      stage: { step: "confirm", drafts: [{ id: 0, title: "Add dark mode", body: "", keep: true }], repo: "acme/web", note: null, labels },
+      error: null,
+    });
+    const html = pane({ initialDraft: confirm(["ready", "colonize"]) });
+    expect(html).toMatch(/data-source-labels[^>]*><span>labels:<\/span><span[^>]*>ready<\/span><span[^>]*>colonize<\/span>/);
+    expect(pane({ initialDraft: confirm([]) })).not.toContain("data-source-labels");
+    expect(pane({ initialDraft: confirm() })).not.toContain("data-source-labels");
+    const drafted = draftReducer(draftReducer({ ...DRAFT_START, text: "x" }, { type: "drafting" }), { type: "drafted", drafts: [{ title: "A", body: "" }], repo: null, note: null, labels: ["ready"] });
+    expect(drafted.stage.step === "confirm" && drafted.stage.labels).toEqual(["ready"]);
+  });
+
+  it("puts the labels an issue was filed with on its row, and names the ones it could not get", async () => {
+    const api = {
+      createIssue: async (repo: string, body: { title: string; body: string }): Promise<CreatedIssue> => ({
+        repo,
+        number: body.title === "A" ? 1 : 2,
+        title: body.title,
+        url: "u",
+        labels: ["ready"],
+        labels_skipped: ["locked-label"],
+      }),
+    };
+    const out = await fileDrafts(api, "acme/web", [{ title: "A", body: "" }, { title: "B", body: "" }]);
+    expect(out.created.map((i) => i.labels.map((l) => l.name))).toEqual([["ready"], ["ready"]]);
+    expect(out.skippedLabels).toEqual(["locked-label"]);
+    const plain = await fileDrafts({ createIssue: async (repo, b) => ({ repo, number: 3, title: b.title, url: "u" }) }, "acme/web", [{ title: "C", body: "" }]);
+    expect(plain.created[0].labels).toEqual([]);
+    expect(plain.skippedLabels).toEqual([]);
+  });
+
+  it("the mock reads the Source labels the way the mothership does", () => {
+    expect(mockSplitLabels(" Ready, colonize ,ready,, ")).toEqual(["Ready", "colonize"]);
+    expect(mockSplitLabels("")).toEqual([]);
   });
 
   it("the mock drafts one issue per listed task, else one from the text", () => {

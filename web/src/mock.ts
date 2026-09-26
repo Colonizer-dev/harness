@@ -940,6 +940,13 @@ const ISSUES: Record<string, Issue[]> = {
   ],
 };
 
+/** `"Ready, colonize ,ready"` → `["Ready", "colonize"]`: the mothership's split_labels. */
+export function mockSplitLabels(raw: string): string[] {
+  const out: string[] = [];
+  for (const l of raw.split(",").map((x) => x.trim()).filter(Boolean)) if (!out.some((o) => o.toLowerCase() === l.toLowerCase())) out.push(l);
+  return out;
+}
+
 /** The mock's summary model for Colonize: each bullet or numbered line an issue, else the text as one. */
 export function mockDrafts(text: string): IssueDrafts {
   const items = text
@@ -2364,6 +2371,8 @@ export function createMockApi(): Api {
     seeds.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
     for (const seedEntry of seeds) logActivity(seedEntry);
   }
+  /** The Source module's include labels, as the mothership reads them for filing (github::split_labels). */
+  const sourceLabels = (): string[] => mockSplitLabels(String(modules.find((m) => m.kind === "source")?.settings?.include_labels ?? ""));
   const colonyActivity = (kind: string, s: Session) =>
     logActivity({ kind, actor: "you", via: "cockpit", org: s.org, repo: s.repo, issue: s.issue, colony: s.id, title: s.issue_title, pr_url: s.pr_url });
 
@@ -2563,15 +2572,20 @@ export function createMockApi(): Api {
     repos: () => later(() => REPOS, 350),
     issues: (repo) => later(() => ISSUES[repo] ?? [], 300),
     // Colonize: a stand-in for the summary model — one issue per bullet or numbered line, otherwise one.
-    draftIssues: (body) => later(() => mockDrafts(body.text), 900),
+    draftIssues: (body) => later(() => ({ ...mockDrafts(body.text), labels: sourceLabels() }), 900),
+    // Filing adds the Source include labels, as the mothership does; one the mock repository cannot
+    // create (any label named `locked…`) is skipped and the issue filed without it.
     createIssue: async (repo, body) => {
       await sleep(500);
       const list = (ISSUES[repo] ??= []);
       const number = Math.max(99, ...Object.values(ISSUES).flat().map((i) => i.number)) + 1;
       const url = `https://github.com/${repo}/issues/${number}`;
-      list.unshift({ number, title: body.title, body: body.body, labels: [], author: { login: "octocat" }, updatedAt: now(), url });
+      const wanted = sourceLabels();
+      const labels = wanted.filter((l) => !/^locked/i.test(l));
+      const labels_skipped = wanted.filter((l) => !labels.includes(l));
+      list.unshift({ number, title: body.title, body: body.body, labels: labels.map((name) => ({ name, color: "c5def5" })), author: { login: "octocat" }, updatedAt: now(), url });
       logActivity({ kind: "colonize.issue", actor: "you", via: "cockpit", org: repo.split("/")[0], repo, issue: number, title: body.title });
-      return { repo, number, title: body.title, url };
+      return { repo, number, title: body.title, url, labels, labels_skipped };
     },
     repoPackages: (repo) =>
       later(
@@ -3336,7 +3350,7 @@ export function createMockApi(): Api {
         else mockPrefs.feedback[messageId] = note;
         return structuredClone(mockPrefs);
       }),
-    chatIssue: async (_id, body) => ({ url: `https://github.com/${body.repo}/issues/999` }),
+    chatIssue: async (_id, body) => ({ url: `https://github.com/${body.repo}/issues/999`, labels: sourceLabels(), labels_skipped: [] }),
     orgPublished: (org) =>
       later(
         (): PackagesPublished => ({
