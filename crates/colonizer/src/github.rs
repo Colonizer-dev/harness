@@ -124,7 +124,12 @@ impl App {
         c.args(["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"])
             .args(HOST_GIT_NO_EXEC)
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GH_PROMPT_DISABLED", "1");
+            .env("GH_PROMPT_DISABLED", "1")
+            // A colony sandbox exports these for its own worktree; host-side git never inherits
+            // them (callers that set them after construction still override).
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }

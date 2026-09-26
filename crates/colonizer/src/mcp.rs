@@ -71,6 +71,8 @@ const ROLES: &[(&str, Scope)] = &[
     ("colony_status", Scope::Read),
     ("colony_question", Scope::Read),
     ("colony_pr", Scope::Read),
+    ("colony_diff", Scope::Read),
+    ("search_repo_map", Scope::Read),
     ("answer_colony", Scope::Operate),
     ("stop_colony", Scope::Operate),
     ("resume_colony", Scope::Operate),
@@ -117,6 +119,22 @@ struct ListColonies {
 struct ColonyId {
     /// The colony id, as `list_colonies` or the cockpit shows it
     id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ColonyDiff {
+    /// The colony id, as `list_colonies` or the cockpit shows it
+    id: String,
+    /// Return only the per-file counts, without the diff text
+    stat_only: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchRepoMap {
+    /// The repository whose architecture map to search, as owner/repo
+    repo: String,
+    /// What to look for: a component's label, id, type, or one of its source paths
+    query: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -218,6 +236,44 @@ impl ColonyServer {
             }
             None => format!("{}: no pull request yet", params.id),
         })
+    }
+
+    /// Everything a colony changed against its base branch.
+    #[tool(description = "Show everything a colony changed against its base branch: per-file counts and the unified diff")]
+    async fn colony_diff(&self, Parameters(params): Parameters<ColonyDiff>) -> Result<CallToolResult, McpError> {
+        let diff = self.machine.get(&format!("/api/sessions/{}/diff", params.id)).await;
+        Self::rendered(diff, |body| {
+            let mut body = body.clone();
+            if params.stat_only.unwrap_or(false)
+                && let Some(object) = body.as_object_mut()
+            {
+                object.remove("diff");
+            }
+            body.to_string()
+        })
+    }
+
+    /// The components of a repository's architecture map matching a query.
+    #[tool(description = "Search a repository's architecture map: the components matching a label, id, type or source path")]
+    async fn search_repo_map(&self, Parameters(params): Parameters<SearchRepoMap>) -> Result<CallToolResult, McpError> {
+        let Some((owner, name)) = params.repo.split_once('/') else {
+            return is_error("the repository is owner/repo");
+        };
+        let body = match self.machine.get(&format!("/api/maps/{owner}/{name}")).await {
+            Ok(body) => body,
+            Err(fail) => return is_error(fail),
+        };
+        if body["map"].is_null() {
+            return is_error(format!(
+                "{} has no architecture map yet: draw one from the cockpit's Map view",
+                params.repo
+            ));
+        }
+        // The same search the CLI's `map --find` runs, so both answer alike.
+        match crate::cli::search_map(&body["map"], &params.query) {
+            Ok(found) => text_result(found.to_string()),
+            Err(fail) => is_error(fail),
+        }
     }
 
     /// Answer a colony's question: option number, option label, or free text.
@@ -380,7 +436,14 @@ mod tests {
         };
         assert_eq!(
             names(Scope::Read),
-            sorted(vec!["list_colonies", "colony_status", "colony_question", "colony_pr"])
+            sorted(vec![
+                "list_colonies",
+                "colony_status",
+                "colony_question",
+                "colony_pr",
+                "colony_diff",
+                "search_repo_map"
+            ])
         );
         assert_eq!(
             names(Scope::Operate),
@@ -389,6 +452,8 @@ mod tests {
                 "colony_status",
                 "colony_question",
                 "colony_pr",
+                "colony_diff",
+                "search_repo_map",
                 "answer_colony",
                 "stop_colony",
                 "resume_colony"
@@ -468,6 +533,27 @@ mod tests {
                 }),
             )
             .route(
+                "/api/sessions/{id}/diff",
+                get(|| async {
+                    Json(json!({
+                        "id": "abc123", "repo": "acme/app", "base": "main", "added": 2, "removed": 1, "truncated": false,
+                        "files": [{"path": "src/main.rs", "added": 2, "removed": 1}],
+                        "diff": "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n keep\n-old\n+new\n+extra\n",
+                    }))
+                }),
+            )
+            .route(
+                "/api/maps/{owner}/{name}",
+                get(|| async {
+                    Json(json!({
+                        "repo": "acme/app", "mapping": null,
+                        "map": {"repo": "acme/app", "revision": "abc123", "map": {
+                            "title": "Demo", "connections": [], "boundaries": [],
+                            "components": [{"id": "api", "type": "backend", "label": "API", "sources": [{"path": "src/main.rs"}]}]}},
+                    }))
+                }),
+            )
+            .route(
                 "/api/sessions/{id}/question",
                 get(|Path(id): Path<String>| async move {
                     // The "quiet" colony is not asking anything: the route's 204, no body.
@@ -531,12 +617,22 @@ mod tests {
         let base = serve_stub("col_read").await;
         let client = connected(&base, "col_read", None).await;
 
-        // Read scope: exactly the four read tools, none of the driving or launching ones. The
+        // Read scope: exactly the read tools, none of the driving or launching ones. The
         // protocol reports tool names sorted.
         let listed = client.peer().list_tools(Default::default()).await.unwrap();
         let mut names: Vec<&str> = listed.tools.iter().map(|t| t.name.as_ref()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec!["colony_pr", "colony_question", "colony_status", "list_colonies"]);
+        assert_eq!(
+            names,
+            vec![
+                "colony_diff",
+                "colony_pr",
+                "colony_question",
+                "colony_status",
+                "list_colonies",
+                "search_repo_map"
+            ]
+        );
 
         // list_colonies answers the stub's session list, reduced to the tool's record shape.
         let result = client.peer().call_tool(call("list_colonies", json!({}))).await.unwrap();
@@ -563,6 +659,26 @@ mod tests {
             "{}",
             text_of(&result)
         );
+
+        // colony_diff answers the diff route; stat_only drops the diff text from the JSON.
+        let result = client
+            .peer()
+            .call_tool(call("colony_diff", json!({"id": "abc123", "stat_only": true})))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        let body: Value = serde_json::from_str(&text_of(&result)).unwrap();
+        assert_eq!(body["files"][0]["path"], json!("src/main.rs"));
+        assert!(body.get("diff").is_none(), "stat_only omits the diff text");
+
+        // search_repo_map finds the stub map's one component by its source path.
+        let result = client
+            .peer()
+            .call_tool(call("search_repo_map", json!({"repo": "acme/app", "query": "src/main.rs"})))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true), "{}", text_of(&result));
+        assert!(text_of(&result).contains("\"id\":\"api\""), "{}", text_of(&result));
         let _ = client.cancel().await;
     }
 
