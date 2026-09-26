@@ -383,7 +383,7 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize) -> Value {
 #[cfg(not(test))]
 async fn launch_hunter(app: Shared, brief: Value) -> Result<Session, String> {
     let req: NewSession = serde_json::from_value(brief).map_err(|e| format!("could not build the hunter brief: {e}"))?;
-    match sessions::create(State(app), Json(req)).await {
+    match sessions::create(State(app), None, Json(req)).await {
         Ok(Json(session)) => Ok(session),
         Err(e) => Err(e.message()),
     }

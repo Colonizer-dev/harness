@@ -23,6 +23,16 @@ setting) is called out under **Take care** rather than left for you to find.
   with it. Clearing the workspace filter aggregates every workspace under "All workspaces". It
   occupies the inspector's slot, gives it back on a chamber click, and yields on narrow windows to
   a Dashboard button parked above the nest's own view toggle. ([#200])
+- **A CLI, an MCP server, and scoped API tokens.** The `colonizer` binary is now also a client:
+  `launch`, `list`, `status`, `logs`, `ask`, `answer`, `stop`, `resume` and `pr` drive a mothership
+  here or across a tailnet (`--host`, `COLONIZER_TOKEN` or `--token-file`), with exit codes a
+  script can read, shell completions and a man page. `token create/list/revoke` mints scoped API
+  tokens — named, least-privilege keys ordered `read` < `operate` < `launch`, with org and repo
+  limits, a concurrency cap and a daily dollar budget, stored as a SHA-256 hash and accepted as a
+  Bearer header only; what a token launches is marked to the agent as external input, and the
+  activity log records it as `token:<name>`. And `colonizer mcp` serves the harness to MCP clients
+  over stdio, its tool set following the token's scope. See [docs/cli.md](docs/cli.md) and
+  [docs/mcp.md](docs/mcp.md). ([#508])
 - **A read-only `repo-explorer` subagent.** A new first-party agent alongside Explore, always
   available regardless of `subagent_effort`: before grepping, it checks the Skill tool for a shipped
   retrieval skill (starting with graft's code map) and prefers it, falling back to find/grep like
@@ -924,6 +934,7 @@ Macs. ([#74])
 [#199]: https://github.com/Colonizer-dev/harness/issues/199
 [#532]: https://github.com/Colonizer-dev/harness/issues/532
 [#534]: https://github.com/Colonizer-dev/harness/issues/534
+[#508]: https://github.com/Colonizer-dev/harness/issues/508
 [v0.1.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.5
 [v0.1.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.6
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7

@@ -73,7 +73,9 @@ dist/bin/colonizer
 installer does on a Mac, the install options, the first run, where things live and how to update. It is
 also on [colonizer.dev/docs/install](https://colonizer.dev/docs/install). The binary takes a few
 arguments, too: `colonizer --help` lists them — `telemetry show`, `telemetry on` and `telemetry off`
-for the [usage data](docs/usage-data.md) switch, and `--version`.
+for the [usage data](docs/usage-data.md) switch, and `--version`. The whole command set — driving a
+mothership from a terminal, scoped API tokens included — is in
+[docs/cli.md](docs/cli.md), and serving it to an MCP client is in [docs/mcp.md](docs/mcp.md).
 
 ---
 

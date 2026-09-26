@@ -346,7 +346,7 @@ async fn launch(app: &Shared, repo: &str, instructions: &str) {
             return;
         }
     };
-    match sessions::create(State(app.clone()), Json(new_session)).await {
+    match sessions::create(State(app.clone()), None, Json(new_session)).await {
         Ok(Json(session)) => {
             app.session_log_as(
                 Origin::BurnDown,

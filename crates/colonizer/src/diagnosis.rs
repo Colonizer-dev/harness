@@ -569,7 +569,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let Json(list) = sessions::list(State(app)).await;
+        let Json(list) = sessions::list(State(app), None).await;
         let wire = serde_json::to_value(&list).unwrap();
         assert!(wire[0].get("recent_events").is_none());
         assert!(wire[0].get("diagnosis").is_none());

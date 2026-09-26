@@ -18,6 +18,10 @@ anyhow = "1.0.104"
 # Web Push (push.rs): base64url for VAPID JWTs, push keys and subscription secrets.
 base64 = "0.22"
 axum = { version = "0.8.9", features = ["ws"] }
+# The `colonizer` command line: parsing (`clap`), shell completions, the man page.
+clap = { version = "4.5", features = ["derive", "env", "string"] }
+clap_complete = "4.5"
+clap_mangen = "0.2"
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10"
 futures-util = "0.3.34"
@@ -26,6 +30,10 @@ libc = "0.2"
 # Already built for rustls; used directly to check the Headroom bundle's sha256 while it downloads.
 ring = "0.17.14"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2"] }
+# The official Rust MCP SDK: `colonizer mcp` serves the harness to MCP clients over stdio.
+rmcp = { version = "3.4.1", features = ["server", "transport-io", "macros", "client"] }
+# rmcp's `JsonSchema` derive emits `schemars::` paths, so it must be linked beside it.
+schemars = "1.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # The log archive (archive.rs): one tar per revision of a colony's session directory, zstd-compressed.

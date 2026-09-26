@@ -436,7 +436,7 @@ async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, c
     });
     let req: NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    let Json(session) = sessions::create(State(app.clone()), Json(req)).await?;
+    let Json(session) = sessions::create(State(app.clone()), None, Json(req)).await?;
     app.loops.update(&l.id, |x| x.record_run(&session.id, now)).await;
     Ok(session)
 }

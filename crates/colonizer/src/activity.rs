@@ -626,6 +626,9 @@ fn via_name(via: Option<auth::Via>) -> Option<String> {
     via.map(|v| match v {
         auth::Via::Cockpit => "cockpit".to_string(),
         auth::Via::Api => "api".to_string(),
+        // A scoped API token acts under its name, never under its secret: `token:<name>` is what
+        // History shows, and the name is all the log knows.
+        auth::Via::Token(name) => format!("token:{name}"),
     })
 }
 
@@ -648,7 +651,7 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
     else {
         return next.run(req).await;
     };
-    let via = via_name(req.extensions().get::<auth::Via>().copied());
+    let via = via_name(req.extensions().get::<auth::Via>().cloned());
     let (mut parts, body) = req.into_parts();
     let params: Vec<(String, String)> = RawPathParams::from_request_parts(&mut parts, &())
         .await
