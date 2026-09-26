@@ -1,6 +1,6 @@
 // Shared fixtures for the cockpit's static-markup tests: one running colony, one working
-// settler, each tweakable per test.
-import type { Session } from "../types";
+// settler, one map-refreshing loop, each tweakable per test.
+import type { Loop, Session } from "../types";
 import type { SubagentView } from "../sessionStream";
 
 export function session(overrides: Partial<Session> = {}): Session {
@@ -27,6 +27,33 @@ export function session(overrides: Partial<Session> = {}): Session {
     created_at: "2026-09-18T09:00:00Z",
     updated_at: "2026-09-18T09:10:00Z",
     attention: null,
+    ...overrides,
+  };
+}
+
+/** One enabled map loop keeping acme/webshop's architecture map fresh, tweakable per test. */
+export function mapLoop(overrides: Partial<Loop> = {}): Loop {
+  return {
+    id: "loop_m",
+    name: "Keep the map of acme/webshop fresh",
+    org: "acme",
+    repo: "acme/webshop",
+    prompt: "",
+    cadence: { every: "every_days", days: 14, hour: 1, minute: 0 },
+    kind: "map",
+    tz_offset_minutes: 0,
+    model: null,
+    subagent_model: null,
+    autopilot: true,
+    max_runs: null,
+    end_at: null,
+    enabled: true,
+    next_run_at: null,
+    runs: 0,
+    last_run: null,
+    last_note: null,
+    ended_reason: null,
+    created_at: "2026-09-20T00:00:00Z",
     ...overrides,
   };
 }

@@ -1,9 +1,11 @@
 //! Loops: a saved prompt on a repository that launches a colony on a schedule — the mothership's
-//! version of Claude Code's `/loop`. A loop runs on a fixed cadence (every N minutes, daily, weekly,
-//! monthly) or self-paced, where each colony names its own next run with the `loop_next` tool, and
-//! any colony can end its loop with `loop_stop`. One run at a time: a tick that finds the previous
-//! run still live skips and says so. Loops are operator configuration, saved to
-//! `<config_dir>/loops.json`; their runs are ordinary colonies tagged `origin: "loop:<id>"`.
+//! version of Claude Code's `/loop`. A loop runs on a fixed cadence (every N minutes, daily,
+//! weekly, monthly, every N days) or self-paced, where each colony names its own next run with the
+//! `loop_next` tool, and any colony can end its loop with `loop_stop`. One run at a time: a tick
+//! that finds the previous run still live skips and says so. A map loop instead keeps a repository
+//! — or every repository of an org — mapped: each firing draws one map, exactly as the Map view
+//! would. Loops are operator configuration, saved to `<config_dir>/loops.json`; their runs are
+//! ordinary colonies tagged `origin: "loop:<id>"` (a map loop's: `map:loop:<id>`).
 
 use crate::schedule::{Cadence, next_run_after};
 use crate::sessions::{self, NewSession, Session, SessionStatus};
@@ -33,6 +35,9 @@ pub const NEXT_MIN_MINUTES: u64 = 15;
 pub const NEXT_MAX_MINUTES: u64 = 24 * 60;
 /// How soon a tick that skipped a self-paced loop (its run still live) tries again.
 const SKIP_RETRY_MINUTES: i64 = 15;
+/// How far apart an org-wide map loop's launches sit: one repository at a time, so mapping the
+/// whole org takes its cycle gently instead of all at once.
+pub const MAP_STAGGER_MINUTES: i64 = 10;
 const MAX_PROMPT: usize = 20_000;
 
 /// The loop a colony belongs to, from its origin tag.
@@ -47,14 +52,32 @@ pub struct LastRun {
     pub at: DateTime<Utc>,
 }
 
+/// What a loop launches: an ordinary colony working from its prompt (`colony`), or architecture-map
+/// refreshes (`map`), which ignore the prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopKind {
+    #[default]
+    Colony,
+    Map,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Loop {
     pub id: String,
     pub name: String,
     pub org: String,
     pub repo: String,
+    /// A map loop over the whole org (`owner/*`): the repositories still to map in the current
+    /// cycle. Server-owned — never taken from the API, emptied when the loop is updated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<String>,
     pub prompt: String,
     pub cadence: Cadence,
+    /// What the loop launches: `colony` (the default, so a loop saved before kinds existed reads
+    /// back as one) or `map`.
+    #[serde(default)]
+    pub kind: LoopKind,
     /// The operator's UTC offset when the loop was saved, so the cockpit can show local times; the
     /// cadence itself is UTC.
     #[serde(default)]
@@ -88,6 +111,11 @@ pub struct Loop {
 impl Loop {
     pub fn self_paced(&self) -> bool {
         matches!(self.cadence, Cadence::SelfPaced {})
+    }
+
+    /// Whether the loop maps every repository of the org (`owner/*`), one per firing.
+    pub fn org_wide(&self) -> bool {
+        self.kind == LoopKind::Map && self.repo.ends_with("/*")
     }
 
     /// Ends the loop with a reason: disabled, nothing scheduled.
@@ -179,6 +207,23 @@ pub fn live_run<'a>(sessions: &'a [Session], loop_id: &str) -> Option<&'a Sessio
         .find(|s| s.origin.as_deref() == Some(origin.as_str()) && in_flight(s.status))
 }
 
+/// The loop's run that is still in flight, whichever kind it launches: a colony with origin
+/// `loop:<id>`, or — for a map loop on one repository — a mapping colony with origin
+/// `map:loop:<id>`. An org-wide map loop deliberately maps the next repository while the previous
+/// is still drawing, so it is never held by one.
+fn live_run_for<'a>(sessions: &'a [Session], l: &Loop) -> Option<&'a Session> {
+    if l.kind != LoopKind::Map {
+        return live_run(sessions, &l.id);
+    }
+    if l.org_wide() {
+        return None;
+    }
+    let origin = crate::maps::loop_origin(&l.id);
+    sessions
+        .iter()
+        .find(|s| s.origin.as_deref() == Some(origin.as_str()) && in_flight(s.status))
+}
+
 /// A self-paced colony's `loop_next`: the delay clamped to [15 min, 24 h].
 pub fn clamp_next(delay_minutes: u64) -> u64 {
     delay_minutes.clamp(NEXT_MIN_MINUTES, NEXT_MAX_MINUTES)
@@ -260,8 +305,13 @@ fn load(path: &FsPath) -> Vec<Loop> {
 pub struct NewLoop {
     name: String,
     repo: String,
+    /// A map loop needs no prompt: it launches the same mapping as the Map view. `default`, so its
+    /// request may leave it out.
+    #[serde(default)]
     prompt: String,
     cadence: Cadence,
+    #[serde(default)]
+    kind: LoopKind,
     #[serde(default)]
     tz_offset_minutes: Option<i32>,
     #[serde(default)]
@@ -278,6 +328,12 @@ pub struct NewLoop {
     enabled: Option<bool>,
 }
 
+/// `owner/*`: every repository of the org, which only a map loop may hold. The owner part must
+/// pass the same rules as any repository's.
+fn is_org_wildcard(repo: &str) -> bool {
+    repo.strip_suffix("/*").is_some_and(|owner| valid_repo(&format!("{owner}/x")))
+}
+
 /// A loop request, validated so a loop cannot hold something that would only fail when it fires.
 fn loop_from(
     app: &App,
@@ -292,14 +348,23 @@ fn loop_from(
         return Err(bad("a loop needs a name of 1 to 80 characters"));
     }
     let repo = req.repo.trim().to_string();
-    if !valid_repo(&repo) {
+    if req.kind != LoopKind::Map && is_org_wildcard(&repo) {
+        return Err(bad("owner/* is only for map loops; a colony loop runs on one repository"));
+    }
+    if !valid_repo(&repo) && !is_org_wildcard(&repo) {
         return Err(bad(&format!("invalid repository name {repo:?}")));
     }
     let org = repo.split('/').next().unwrap_or_default().to_string();
-    let prompt = req.prompt.trim().to_string();
-    if prompt.is_empty() || prompt.len() > MAX_PROMPT {
-        return Err(bad("a loop needs a prompt of 1 to 20,000 characters"));
-    }
+    let prompt = if req.kind == LoopKind::Map {
+        // The loop launches the same mapping as the Map view; whatever prompt came with it is ignored.
+        String::new()
+    } else {
+        let prompt = req.prompt.trim().to_string();
+        if prompt.is_empty() || prompt.len() > MAX_PROMPT {
+            return Err(bad("a loop needs a prompt of 1 to 20,000 characters"));
+        }
+        prompt
+    };
     req.cadence.check().map_err(|e| bad(&e))?;
     if req.max_runs == Some(0) {
         return Err(bad("max_runs must be at least 1, or left out"));
@@ -315,9 +380,11 @@ fn loop_from(
         name,
         org,
         repo,
+        pending: Vec::new(),
         prompt,
         next_run_at: enabled.then(|| next_run_after(&req.cadence, now)),
         cadence: req.cadence,
+        kind: req.kind,
         tz_offset_minutes: req.tz_offset_minutes.unwrap_or(0),
         model,
         subagent_model,
@@ -394,13 +461,23 @@ pub async fn run_now(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         .get(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such loop"))?;
-    if let Some(live) = live_run(&app.sessions.read().await, &id) {
+    if let Some(live) = live_run_for(&app.sessions.read().await, &l) {
         return Err(client_error(
             StatusCode::CONFLICT,
             &format!("the loop's previous run ({}) is still live; one run at a time", live.id),
         ));
     }
-    launch(&app, &l, Utc::now()).await.map(Json)
+    let started = match l.kind {
+        LoopKind::Map => fire_map(&app, &l, Utc::now()).await,
+        LoopKind::Colony => launch(&app, &l, Utc::now()).await.map(Some),
+    };
+    match started? {
+        Some(session) => Ok(Json(session)),
+        None => Err(client_error(
+            StatusCode::CONFLICT,
+            "nothing to map right now; the loop's note says why",
+        )),
+    }
 }
 
 /// The loop's colonies, newest first.
@@ -408,20 +485,20 @@ pub async fn runs(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     if app.loops.get(&id).await.is_none() {
         return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
     }
-    let origin = format!("{ORIGIN_PREFIX}{id}");
+    let origins = [format!("{ORIGIN_PREFIX}{id}"), crate::maps::loop_origin(&id)];
     let mut runs: Vec<Session> = app
         .sessions
         .read()
         .await
         .iter()
-        .filter(|s| s.origin.as_deref() == Some(origin.as_str()))
+        .filter(|s| s.origin.as_deref().is_some_and(|o| origins.iter().any(|x| x.as_str() == o)))
         .cloned()
         .collect();
     runs.sort_by_key(|s| std::cmp::Reverse(s.created_at));
     Ok(Json(runs))
 }
 
-/// Launches one run through the normal admission path and books the next.
+/// Launches a colony loop's run through the normal admission path and books the next.
 async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, crate::AppError> {
     let run = l.runs + 1;
     let body = json!({
@@ -441,15 +518,124 @@ async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, c
     Ok(session)
 }
 
+/// One step of an org-wide map loop's cycle. An empty `pending` starts a cycle from the fresh
+/// repository list (listed only then, so repositories added later join in); otherwise the next
+/// repository in line goes. While repositories remain after it, the loop runs again after
+/// [`MAP_STAGGER_MINUTES`]; after the last one, at the cadence's next slot. Pure, so the stagger
+/// is tested without a colony.
+fn fan_out_step(
+    pending: &mut Vec<String>,
+    fresh_repos: impl FnOnce() -> Vec<String>,
+    cadence: &Cadence,
+    now: DateTime<Utc>,
+) -> (Option<String>, DateTime<Utc>) {
+    if pending.is_empty() {
+        *pending = fresh_repos();
+    }
+    let repo = if pending.is_empty() { None } else { Some(pending.remove(0)) };
+    let next = if pending.is_empty() {
+        next_run_after(cadence, now)
+    } else {
+        now + ChronoDuration::minutes(MAP_STAGGER_MINUTES)
+    };
+    (repo, next)
+}
+
+/// One firing of a map loop: map its repository — or, org-wide, the next repository of the cycle —
+/// through the same admission path as the Map view, and book the next firing. `Ok(None)` when
+/// nothing was mapped; the loop's note says why.
+async fn fire_map(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Option<Session>, crate::AppError> {
+    if !l.org_wide() {
+        let session = crate::maps::launch(app, &l.repo, &crate::maps::loop_origin(&l.id)).await?;
+        app.loops.update(&l.id, |x| x.record_run(&session.id, now)).await;
+        return Ok(Some(session));
+    }
+    let mut pending = l.pending.clone();
+    // A new cycle re-lists the org, so repositories added since the last one are included.
+    let fresh = if pending.is_empty() {
+        // A switched-off workspace refuses every colony it would start, so the cycle would spend a
+        // stagger per repository saying so: skip the whole cycle with the one note instead.
+        if !crate::orgs::org_enabled(&app.org_settings(&l.org)) {
+            app.loops
+                .update(&l.id, |x| {
+                    x.next_run_at = Some(next_run_after(&x.cadence, now));
+                    x.last_note = Some(format!("the {} workspace is switched off; nothing mapped this cycle", x.org));
+                })
+                .await;
+            return Ok(None);
+        }
+        match crate::deps::all_org_repos(app, &l.org).await {
+            Ok(repos) => repos,
+            Err(e) => {
+                app.loops
+                    .update(&l.id, |x| {
+                        x.next_run_at = Some(next_run_after(&x.cadence, now));
+                        x.last_note = Some(format!("could not list {}: {e:#}", x.org));
+                    })
+                    .await;
+                return Ok(None);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let (repo, next) = fan_out_step(&mut pending, || fresh, &l.cadence, now);
+    // One repository's refusal (archify missing, parallel limits, a disabled org) does not stop the
+    // cycle: the note says so and the next firing moves on to the next repository.
+    let mut launched = None;
+    let mut note = None;
+    match repo.as_deref() {
+        Some(repo) => match crate::maps::launch(app, repo, &crate::maps::loop_origin(&l.id)).await {
+            Ok(session) => launched = Some(session),
+            Err(e) => {
+                note = Some(format!(
+                    "could not map {repo} at {}: {}",
+                    now.format("%H:%M UTC"),
+                    e.message()
+                ))
+            }
+        },
+        None => note = Some(format!("nothing to map in {}", l.org)),
+    }
+    app.loops
+        .update(&l.id, |x| {
+            x.pending = pending;
+            if let Some(session) = &launched {
+                x.record_run(&session.id, now);
+            }
+            // After record_run, which books the cadence's next slot: until the cycle is done, what
+            // comes next is the next repository, a stagger away. A loop the limits just ended has
+            // no next run, stagger or not.
+            if x.enabled {
+                x.next_run_at = Some(next);
+            }
+            if let Some(note) = note {
+                x.last_note = Some(note);
+            }
+            x.check_limits();
+        })
+        .await;
+    Ok(launched)
+}
+
+/// A map-refresh loop's colony ended: its outcome is the loop's latest news (`maps.rs` calls this).
+pub(crate) async fn note_refresh(app: &App, loop_id: &str, note: &str) {
+    app.loops.update(loop_id, |l| l.last_note = Some(note.to_string())).await;
+}
+
 /// Fires every due loop: launches it, or skips while its previous run is still live.
 pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
     let due_ids = due(&app.loops.loops.read().await, now);
     for id in due_ids {
         let Some(l) = app.loops.get(&id).await else { continue };
-        let live = live_run(&app.sessions.read().await, &id).map(|s| s.id.clone());
+        let live = live_run_for(&app.sessions.read().await, &l).map(|s| s.id.clone());
         match plan_tick(&l, live.as_deref(), now) {
             Tick::Launch => {
-                if let Err(e) = launch(app, &l, now).await {
+                let started = match l.kind {
+                    LoopKind::Map => fire_map(app, &l, now).await,
+                    LoopKind::Colony => launch(app, &l, now).await.map(Some),
+                };
+                if let Err(e) = started {
                     let message = e.message().to_string();
                     app.loops
                         .update(&id, |x| {
@@ -570,8 +756,10 @@ mod tests {
             name: "Triage".into(),
             org: "acme".into(),
             repo: "acme/web".into(),
+            pending: Vec::new(),
             prompt: "Triage new issues".into(),
             cadence,
+            kind: LoopKind::Colony,
             tz_offset_minutes: 120,
             model: None,
             subagent_model: None,
@@ -593,6 +781,174 @@ mod tests {
         assert_eq!(loop_id_of("loop:loop_a"), Some("loop_a"));
         assert_eq!(loop_id_of("loop:"), None);
         assert_eq!(loop_id_of("burn_down"), None);
+    }
+
+    #[tokio::test]
+    async fn a_map_loop_may_cover_the_org_without_a_prompt_a_colony_loop_may_not() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-from-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let now = utc(2026, 9, 24, 9, 0);
+        let req = |repo: &str, kind: LoopKind, prompt: &str| NewLoop {
+            name: "Keep the maps fresh".into(),
+            repo: repo.into(),
+            prompt: prompt.into(),
+            cadence: Cadence::EveryDays {
+                days: 14,
+                hour: 3,
+                minute: 0,
+            },
+            kind,
+            tz_offset_minutes: None,
+            model: None,
+            subagent_model: None,
+            autopilot: None,
+            max_runs: None,
+            end_at: None,
+            enabled: None,
+        };
+        let map = loop_from(&app, req("acme/*", LoopKind::Map, ""), "loop_m".into(), now, now).unwrap();
+        assert_eq!(
+            (map.kind, map.repo.as_str(), map.org.as_str(), map.prompt.as_str()),
+            (LoopKind::Map, "acme/*", "acme", ""),
+            "the prompt is ignored and the pending list is server-owned"
+        );
+        assert!(map.pending.is_empty());
+
+        let err = loop_from(&app, req("acme/*", LoopKind::Colony, "Triage"), "loop_c".into(), now, now).unwrap_err();
+        assert!(err.message().contains("owner/* is only for map loops"), "{}", err.message());
+
+        let mut too_long = req("acme/web", LoopKind::Colony, "Triage");
+        too_long.cadence = Cadence::EveryDays {
+            days: 366,
+            hour: 3,
+            minute: 0,
+        };
+        let err = loop_from(&app, too_long, "loop_d".into(), now, now).unwrap_err();
+        assert!(err.message().contains("1 to 365 days"), "{}", err.message());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_switched_off_org_skips_its_whole_cycle_with_one_note() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-off-{}", short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/orgs.json"), json!({"acme": {"enabled": false}}).to_string()).unwrap();
+        let app = crate::tests::test_app(&root);
+        let mut l = a_loop(Cadence::EveryDays {
+            days: 14,
+            hour: 3,
+            minute: 0,
+        });
+        l.kind = LoopKind::Map;
+        l.repo = "acme/*".into();
+        app.loops.loops.write().await.push(l);
+        let now = utc(2026, 9, 24, 9, 0);
+        let started = fire_map(&app, &app.loops.get("loop_a").await.unwrap(), now).await.unwrap();
+        assert!(started.is_none(), "nothing was launched");
+        let l = app.loops.get("loop_a").await.unwrap();
+        assert!(l.last_note.unwrap().contains("switched off"), "the note says why");
+        assert!(l.pending.is_empty(), "no cycle was started for the dead org");
+        assert_eq!(l.runs, 0);
+        assert_eq!(
+            l.next_run_at,
+            Some(utc(2026, 10, 8, 3, 0)),
+            "the cycle waits for its next slot"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn map_loops_round_trip_and_loops_saved_before_kinds_read_as_colony_loops() {
+        let mut map = a_loop(Cadence::EveryDays {
+            days: 14,
+            hour: 3,
+            minute: 0,
+        });
+        map.kind = LoopKind::Map;
+        map.repo = "acme/*".into();
+        map.prompt = String::new();
+        map.pending = vec!["acme/api".into()];
+        let json = serde_json::to_value(&map).unwrap();
+        assert_eq!(json["kind"], "map");
+        assert_eq!(json["pending"], json!(["acme/api"]));
+        assert_eq!(serde_json::from_value::<Loop>(json).unwrap(), map);
+
+        let mut old = serde_json::to_value(a_loop(Cadence::Interval { minutes: 60 })).unwrap();
+        old.as_object_mut().unwrap().remove("kind");
+        let l: Loop = serde_json::from_value(old).unwrap();
+        assert_eq!(l.kind, LoopKind::Colony, "no kind field means the default");
+        assert!(l.pending.is_empty());
+    }
+
+    #[test]
+    fn an_org_cycle_staggers_its_repositories_then_waits_for_the_next_slot() {
+        let now = utc(2026, 9, 24, 9, 0);
+        let cadence = Cadence::EveryDays {
+            days: 14,
+            hour: 3,
+            minute: 0,
+        };
+        let stagger = now + ChronoDuration::minutes(MAP_STAGGER_MINUTES);
+        let mut pending: Vec<String> = Vec::new();
+        let (repo, next) = fan_out_step(
+            &mut pending,
+            || vec!["acme/web".into(), "acme/api".into(), "acme/cli".into()],
+            &cadence,
+            now,
+        );
+        assert_eq!(repo.as_deref(), Some("acme/web"), "the first step fills from the fresh list");
+        assert_eq!(pending, ["acme/api", "acme/cli"]);
+        assert_eq!(next, stagger);
+        let (repo, next) = fan_out_step(&mut pending, Vec::new, &cadence, now);
+        assert_eq!(repo.as_deref(), Some("acme/api"));
+        assert_eq!(pending, ["acme/cli"]);
+        assert_eq!(next, stagger, "middle steps stay a stagger apart");
+        let (repo, next) = fan_out_step(&mut pending, Vec::new, &cadence, now);
+        assert_eq!(repo.as_deref(), Some("acme/cli"));
+        assert!(pending.is_empty());
+        assert_eq!(next, utc(2026, 10, 8, 3, 0), "after the last one, the cadence's next slot");
+    }
+
+    #[test]
+    fn a_new_cycle_relists_the_org_so_later_repositories_join_in() {
+        let now = utc(2026, 9, 24, 9, 0);
+        let cadence = Cadence::EveryDays {
+            days: 14,
+            hour: 3,
+            minute: 0,
+        };
+        let mut pending: Vec<String> = vec!["acme/api".into()];
+        let (repo, next) = fan_out_step(&mut pending, Vec::new, &cadence, now);
+        assert_eq!(repo.as_deref(), Some("acme/api"), "the old cycle finishes first");
+        assert_eq!(next, utc(2026, 10, 8, 3, 0));
+        let (repo, next) = fan_out_step(&mut pending, || vec!["acme/web".into(), "acme/new".into()], &cadence, now);
+        assert_eq!(repo.as_deref(), Some("acme/web"));
+        assert_eq!(pending, ["acme/new"], "the repository added since is in this cycle");
+        assert_eq!(next, now + ChronoDuration::minutes(MAP_STAGGER_MINUTES));
+    }
+
+    #[test]
+    fn a_map_loop_is_held_by_its_mapping_colony_but_an_org_wide_one_is_not() {
+        let mut sessions = Vec::new();
+        let mut drawing = colony("acme", SessionStatus::Running);
+        drawing.id = "m1".into();
+        drawing.origin = Some(crate::maps::loop_origin("loop_a"));
+        sessions.push(drawing);
+        let mut repo_loop = a_loop(Cadence::EveryDays {
+            days: 14,
+            hour: 3,
+            minute: 0,
+        });
+        repo_loop.kind = LoopKind::Map;
+        repo_loop.repo = "acme/web".into();
+        assert_eq!(live_run_for(&sessions, &repo_loop).map(|s| s.id.as_str()), Some("m1"));
+        let mut org_loop = repo_loop.clone();
+        org_loop.repo = "acme/*".into();
+        assert!(
+            live_run_for(&sessions, &org_loop).is_none(),
+            "an org-wide cycle never holds itself"
+        );
+        assert!(live_run_for(&sessions, &a_loop(Cadence::Daily { hour: 9, minute: 0 })).is_none());
     }
 
     #[test]

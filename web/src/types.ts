@@ -1369,11 +1369,16 @@ export interface NewRedTeamSchedule {
   enabled?: boolean;
 }
 
-/** When a loop runs, in UTC (loops.rs, schedule.rs). `self_paced`: each run names the next (loop_next), else a day later. */
+/**
+ * When a loop runs, in UTC (loops.rs, schedule.rs). `self_paced`: each run names the next
+ * (loop_next), else a day later. `every_days` runs whole days apart at one time of day; the server
+ * refuses days outside 1–365.
+ */
 export type LoopCadence =
   | RedTeamCadence
   | { every: "interval"; minutes: number }
   | { every: "daily"; hour: number; minute: number }
+  | { every: "every_days"; days: number; hour: number; minute: number }
   | { every: "self_paced" };
 
 /** A scheduled colony (GET /api/loops). */
@@ -1384,6 +1389,10 @@ export interface Loop {
   repo: string;
   prompt: string;
   cadence: LoopCadence;
+  /** What a run starts: a colony from `prompt` (the default), or the repository's architecture map. */
+  kind?: "colony" | "map";
+  /** Map loops only: repositories still queued this cycle; `owner/*` is re-listed every run. */
+  pending?: string[];
   tz_offset_minutes: number;
   model: string | null;
   subagent_model: string | null;
@@ -1407,6 +1416,8 @@ export interface NewLoop {
   repo: string;
   prompt: string;
   cadence: LoopCadence;
+  /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. */
+  kind?: "colony" | "map";
   tz_offset_minutes?: number;
   model?: string | null;
   subagent_model?: string | null;

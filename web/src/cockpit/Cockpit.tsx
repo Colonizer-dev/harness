@@ -546,6 +546,7 @@ export function Cockpit({
             onOpen={openColonyById}
             onSelectMothership={() => setInspector({ kind: "mothership" })}
             onLaunch={() => setView("launch")}
+            onOpenLoops={() => setView("loops")}
           />
         );
     }

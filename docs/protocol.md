@@ -674,6 +674,11 @@ that draws it as the nest: components are chambers at archify's layout, boundari
 in, connections tunnels, the mothership's mouth on the surface above the entry chamber (the one nothing
 connects into that starts the most), and each live colony's ants walk from that mouth along the tunnels
 to the chambers whose sources share a directory with the files `GET /api/touched` says it changed.
+The map can keep itself fresh: a loop with `kind: "map"` ([loops.md](loops.md)) launches the same
+mapping colony on a schedule, with origin `map:loop:<loop id>` — its own repository each firing, or
+`owner/*` mapping the org's repositories one at a time, ten minutes apart, the list taken fresh each
+cycle. Its end reports back to the loop and records `map.refresh` in the activity log; a refresh
+that produced no valid map keeps the stored one.
 
 **Keeping vendored plugins current.** `scripts/update-vendored-plugins.mjs` checks every `plugin` entry in
 `vendor/vendor.lock` against its upstream (the latest GitHub release for a `refs/tags/` pin, the default
@@ -2374,7 +2379,7 @@ arrives, on the colony's WebSocket, and the remote-access switches are recorded 
 handlers too (§6.10), because the switch must already hold when the record is written. A refused
 request (non-2xx) records nothing. When a request itself causes an outcome (Stop sets `stopped`
 before the handler returns), the outcome line takes the person as its actor and the request writes
-no second line.
+no second line. A map-refresh loop's colony records its outcome as `map.refresh` when it ends.
 
 **Never recorded**: request bodies and secret values. A line names *which* thing changed — a
 provider id, a secret's id, a module kind — never what it was set to. A response body is read only
@@ -2400,7 +2405,7 @@ request they opened, and only a fixed few fields of it.
   launch whose request carried `origin: "colonize"`),
   `loop.{create,update,pause,resume,delete,run_now}`, `redteam.{start,stop,schedule,unschedule}`,
   `remote.{enable,disable,reset}`, `workspace.{enable,disable,settings}`, `settings.{save,remove}`,
-  `memory.{review,note}`, `burn_down.stop`, `app.update`, `map.create`.
+  `memory.{review,note}`, `burn_down.stop`, `app.update`, `map.create`, `map.refresh`.
 - `org`, `repo`, `issue`, `colony`, `title`, `pr_url` describe the colony (kept on the line, so it
   still reads after the colony is deleted); `target` names a non-colony target; `section` is where
   the cockpit shows it (a settings section id, `secrets`, `loops`, `memory`, `redteam`); `detail`
@@ -2747,16 +2752,18 @@ Bearer token and `Origin` like the other writes.
 
 | Route | What it does |
 |---|---|
-| `GET /api/loops` | Every loop: `{id, name, org, repo, prompt, cadence, tz_offset_minutes, model, subagent_model, autopilot, max_runs, end_at, enabled, next_run_at, runs, last_run: {session, at}, last_note, ended_reason, created_at}`. `next_run_at` is null once the loop has ended. |
-| `POST /api/loops` | Creates one from `{name, repo, prompt, cadence, tz_offset_minutes?, model?, subagent_model?, autopilot? (true), max_runs?, end_at?, enabled? (true)}`. A `<provider>/<model>` must name a configured provider. |
-| `PUT /api/loops/{id}` | Replaces its settings; id, creation time, run count and last run are kept, and the next run is recomputed. |
+| `GET /api/loops` | Every loop: `{id, name, org, repo, prompt, cadence, kind, tz_offset_minutes, model, subagent_model, autopilot, max_runs, end_at, enabled, next_run_at, runs, last_run: {session, at}, last_note, ended_reason, created_at}` — plus, on a map loop over `owner/*`, `pending`: the repositories still to map in the current org cycle (server-owned; a body without it still reads, as `[]`). `next_run_at` is null once the loop has ended. |
+| `POST /api/loops` | Creates one from `{name, repo, prompt, cadence, kind? ("colony"), tz_offset_minutes?, model?, subagent_model?, autopilot? (true), max_runs?, end_at?, enabled? (true)}`. A `<provider>/<model>` must name a configured provider. A map loop (`kind: "map"`) ignores `prompt` and may hold `owner/*` — every repository of the org; a colony loop may not. |
+| `PUT /api/loops/{id}` | Replaces its settings; id, creation time, run count and last run are kept, and the next run is recomputed (`pending` restarts empty). |
 | `DELETE /api/loops/{id}` | Removes the loop; its past colonies stay. |
-| `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight. |
-| `GET /api/loops/{id}/runs` | The loop's colonies (origin `loop:<id>`), newest first. |
+| `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight, or when a map loop had nothing to map. |
+| `GET /api/loops/{id}/runs` | The loop's colonies (origin `loop:<id>`, a map loop's `map:loop:<id>`), newest first. |
 
 `cadence` is tagged by `every`, all times UTC: `{"every":"interval","minutes":60}` (15–10080),
 `{"every":"daily","hour":9,"minute":0}`, `{"every":"weekly","weekday":0,"hour":9,"minute":0}` (0 =
-Monday), `{"every":"monthly","day":31,"hour":6,"minute":0}` (clamped to the month's end), or
+Monday), `{"every":"monthly","day":31,"hour":6,"minute":0}` (clamped to the month's end),
+`{"every":"every_days","days":14,"hour":3,"minute":0}` (1–365 days, anchored: the next slot is the
+first strictly after the last firing plus `days − 1` days, so a late firing never drifts), or
 `{"every":"self_paced"}`.
 
 A loop's colony emits two agent events (§3), acted on only for colonies whose origin names a loop:

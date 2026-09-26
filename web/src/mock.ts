@@ -2169,6 +2169,7 @@ export function createMockApi(): Api {
     repo: body.repo,
     prompt: body.prompt,
     cadence: body.cadence,
+    kind: body.kind,
     tz_offset_minutes: body.tz_offset_minutes ?? 0,
     model: body.model ?? null,
     subagent_model: body.subagent_model ?? null,
