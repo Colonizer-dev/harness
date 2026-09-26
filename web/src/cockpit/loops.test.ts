@@ -60,9 +60,10 @@ describe("loops", () => {
   it("round-trips an every-N-days local time through UTC, crossing midnight when the zone pushes it", () => {
     const now = new Date(2026, 8, 24, 0, 30);
     const utc = toUtcLoopCadence({ every: "every_days", days: 14, time: "23:30" }, now);
-    // The stored UTC time is the local one shifted by the zone, wrapping past midnight as needed.
+    // The stored UTC time is the local one minus the zone's offset from UTC, wrapping past midnight as
+    // needed (23:30 in UTC+8 is 15:30 UTC; in UTC-5 it is 04:30 the next day).
     const shift = -now.getTimezoneOffset();
-    const minutes = (23 * 60 + 30 + shift + 1440) % 1440;
+    const minutes = (23 * 60 + 30 - shift + 1440) % 1440;
     expect(utc).toEqual({ every: "every_days", days: 14, hour: Math.floor(minutes / 60), minute: minutes % 60 });
     expect(toLocalChoice(utc, now)).toEqual({ every: "every_days", days: 14, time: "23:30" });
     expect(describeLoopCadence(utc, now)).toBe("every 14 days at 23:30");
