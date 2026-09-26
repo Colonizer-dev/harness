@@ -218,7 +218,10 @@ function modelsOfTurn(previous: Record<string, number> | null, current: Record<s
 function verificationLine(ev: Extract<AgentEventBody, { type: "verification" }>): string {
   if (ev.by_declaration) return "verification: unverifiable by declaration (verify: none)";
   const verdict = String(ev.verdict ?? "unverifiable").toUpperCase();
-  const detail = [ev.summary, ...(ev.contradictions ?? [])].filter(Boolean).join("; ");
+  // The summary already quotes the first contradiction; each is said once.
+  const contradictions = (ev.contradictions ?? []).filter((c) => !ev.summary?.includes(c));
+  const notes = [...new Set(ev.advisories ?? [])].map((a) => `note: ${a}`);
+  const detail = [...new Set([ev.summary, ...contradictions, ...notes])].filter(Boolean).join("; ");
   const seconds = Number.isFinite(ev.ms) ? ` (${(ev.ms / 1000).toFixed(1)}s)` : "";
   return `verification: ${verdict}${detail ? ` — ${detail}` : ""}${seconds}`;
 }

@@ -1752,7 +1752,12 @@ impl PublishOps for GitPublishOps<'_> {
         let base = self.base.lock().expect("publish base poisoned").clone();
         let behind = count_behind(self.app, &self.bare, &self.s.branch, &base).await;
         let body_path = self.session_dir.join("pr-body.md");
-        let body = compose_pr_body(body, self.s.issue, behind, &base, self.co_author().as_ref());
+        // The verification's advisories (verify.rs) ride along for the reviewer: noted, not held.
+        let body = match crate::verify::pr_notes(self.s.verification.as_ref()) {
+            Some(notes) => format!("{}\n\n{notes}", body.trim_end()),
+            None => body.to_string(),
+        };
+        let body = compose_pr_body(&body, self.s.issue, behind, &base, self.co_author().as_ref());
         // The audit trail names the exact body that goes out (`publish_candidate_hash`, issue #98).
         let bound = crate::publish::publish_candidate_hash(body.as_bytes());
         self.log.info(format!("opening the pull request; body sha256 {bound}")).await;
@@ -2302,7 +2307,15 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         let modules = app.modules.read().await;
         LabelFilter::from_source(modules.get("source"), &app.agents)
     };
-    Ok(Json(filter.apply(issues)))
+    // Each issue carries `epic` (null, or why it is one and its sub-issue count), so the cockpit
+    // marks epics and leaves them out of bulk hand-offs. The sub-issue totals are one best-effort
+    // read: without them the label and title still mark an epic, and the launch gate
+    // (`sessions::create`, epic.rs) asks GitHub about the one issue either way.
+    let totals = crate::epic::open_sub_issue_totals(&app, &repo).await.unwrap_or_else(|e| {
+        eprintln!("epic: could not read sub-issue totals for {repo} ({e:#}); marking epics by label and title only");
+        Default::default()
+    });
+    Ok(Json(crate::epic::annotate(filter.apply(issues), &totals)))
 }
 
 /// The Source module's label filter: which open issues are offered for a colony. Labels compare

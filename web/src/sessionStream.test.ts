@@ -558,6 +558,19 @@ describe("reduceFrame", () => {
       expect(s.logs[0]).toMatchObject({ source: "harness", level: "warn", message: "verification: CONTRADICTED — `npm test` exited 1 in a fresh checkout; described `x.rs` is not on the branch (41.2s)" });
     });
 
+    it("names each contradiction once, and adds advisories as notes without changing the verdict", () => {
+      const once = send(
+        colony(),
+        verdict({ verdict: "contradicted", summary: "contradicted: described `x.rs` is not on the branch, and it is the only file the description names", contradictions: ["described `x.rs` is not on the branch, and it is the only file the description names"], ms: 1000 }),
+      );
+      expect(once.logs[0].message).toBe("verification: CONTRADICTED — contradicted: described `x.rs` is not on the branch, and it is the only file the description names (1.0s)");
+      const noted = send(colony(), verdict({ advisories: ["described `docs/remote-access.md` is not on the branch", "described `docs/remote-access.md` is not on the branch"] }));
+      expect(noted.logs[0]).toMatchObject({
+        level: "info",
+        message: "verification: CONFIRMED — `npm test` green in a fresh checkout; note: described `docs/remote-access.md` is not on the branch (12.3s)",
+      });
+    });
+
     it("verify: none is unverifiable by declaration, with nothing measured", () => {
       const s = send(colony(), verdict({ verdict: "unverifiable", by_declaration: true, command: null, command_source: null, exit_code: null, tests_ms: null, snapshot: null, ms: 12 }));
       expect(s.logs[0]).toMatchObject({ level: "info", message: "verification: unverifiable by declaration (verify: none)" });

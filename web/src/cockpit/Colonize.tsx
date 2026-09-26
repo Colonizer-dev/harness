@@ -15,7 +15,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import { ApiError, heldByFor, type Api } from "../api";
+import { ApiError, epicMarker, heldByFor, isEpic, type Api } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
 import { Spinner, Switch, cx, sameOrg } from "../components/ui";
 import type { CreatedIssue, Issue, IssueDraft, Repo, Session } from "../types";
@@ -90,9 +90,13 @@ export function labelCounts(issues: readonly ScopedIssue[]): [string, number][] 
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
 
-/** The shown issues that can still be handed off: not already held by a live colony. */
+/**
+ * The shown issues that can still be handed off: not already held by a live colony, and not an epic —
+ * a planning container whose sub-issues get the colonies (the mothership refuses one with a 409 unless
+ * `allow_epic`, epic.rs). `isEpic` mirrors that check from the list's `epic` marker, label and title.
+ */
 export function selectable(issues: readonly ScopedIssue[], sessions: Session[]): ScopedIssue[] {
-  return issues.filter((i) => heldByFor(sessions, i.repo, i.number) === null);
+  return issues.filter((i) => heldByFor(sessions, i.repo, i.number) === null && !isEpic(i));
 }
 
 /** Select all toggles between every selectable shown issue and none of them, keeping hidden picks. */
@@ -500,7 +504,7 @@ export function ColonizePane({
   const list = usePagedFilter(issues, { filters: { labels: [] as string[] }, match: matchIssue });
   const labelSet = new Set(list.filters.labels);
   const pickable = selectable(list.matched, sessions);
-  const chosen = issues.filter((i) => selected.has(issueKey(i.repo, i.number)) && heldByFor(sessions, i.repo, i.number) === null);
+  const chosen = selectable(issues, sessions).filter((i) => selected.has(issueKey(i.repo, i.number)));
   const allOn = pickable.length > 0 && pickable.every((i) => selected.has(issueKey(i.repo, i.number)));
   const target = draftRepo(scope, repo);
 
@@ -826,16 +830,18 @@ export function ColonizePane({
             {list.rows.map((issue) => {
               const key = issueKey(issue.repo, issue.number);
               const held = heldByFor(sessions, issue.repo, issue.number);
+              const epic = epicMarker(issue);
               const result = results[key];
               const fresh = made.some((m) => issueKey(m.repo, m.number) === key);
               const id = `colonize-${key.replace(/[^a-z0-9]/gi, "-")}`;
               return (
-                <li key={key} data-new={fresh || undefined} className={cx("flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-panel-2", held && "opacity-60", fresh && "bg-accent-soft/60")}>
+                <li key={key} data-new={fresh || undefined} className={cx("flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-panel-2", (held || epic) && "opacity-60", fresh && "bg-accent-soft/60")}>
                   <input
                     id={id}
                     type="checkbox"
-                    disabled={held !== null || running}
-                    checked={held === null && selected.has(key)}
+                    disabled={held !== null || epic !== null || running}
+                    checked={held === null && epic === null && selected.has(key)}
+                    title={epic ? "An epic is a planning container: hand off its sub-issues instead" : undefined}
                     onChange={() =>
                       setSelected((s) => {
                         const next = new Set(s);
@@ -852,6 +858,11 @@ export function ColonizePane({
                       <span className="font-mono">
                         {issue.repo.split("/")[1]}#{issue.number}
                       </span>
+                      {epic && (
+                        <span className="text-warn" title={issue.epic?.reason ? `An epic: ${issue.epic.reason}. Hand off its sub-issues instead.` : "An epic: hand off its sub-issues instead."}>
+                          {epic}
+                        </span>
+                      )}
                       {fresh ? <span className="rounded-full bg-accent px-1.5 leading-4 text-on-accent">new</span> : <span>{relative(issue.updatedAt)}</span>}
                       {issue.author && <span>@{issue.author.login}</span>}
                       {issue.labels.slice(0, 4).map((l) => (

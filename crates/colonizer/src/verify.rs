@@ -11,11 +11,16 @@
 //! report — its exit number written to a file only this harness reads — with the sandbox's exit
 //! code corroborating, never deciding alone.
 //!
-//! **Contradicted** when the branch disagrees with the claim (empty diff, or a described file
-//! missing where its directory exists) or the tests fail in the fresh checkout; **confirmed**
-//! only when the tests ran green; **unverifiable** otherwise — no known command, or infra that
-//! broke, which is not the colony's fault. `verify: none` records `unverifiable` by declaration
-//! without any work.
+//! **Contradicted** when the branch disagrees with the claim — the description names files in the
+//! repository and **none** of them is on the branch or in the diff, so the work it describes is not
+//! there — or the tests fail in the fresh checkout; **confirmed** only when the tests ran green;
+//! **unverifiable** otherwise — an empty branch, no known command, or infra that broke, which is not
+//! the colony's fault. `verify: none` records `unverifiable` by declaration without any work.
+//!
+//! A described path that is missing while other described paths *are* there is only an
+//! **advisory** (`advisories`): pull request descriptions routinely name files that were
+//! deliberately not created, belong to other or future work, or were renamed on the way. Advisories
+//! are shown with the verdict and in the published pull request, and never change the verdict.
 
 use crate::{
     App, Shared,
@@ -56,6 +61,10 @@ pub struct Verification {
     pub by_declaration: bool,
     pub summary: String,
     pub contradictions: Vec<String>,
+    /// Observations worth a reviewer's look that do not contradict the claim — a described path
+    /// that is not on the branch while other described paths are. Never changes the verdict.
+    #[serde(default)]
+    pub advisories: Vec<String>,
     pub command: Option<String>,
     /// `"config"` (an explicit command), the base branch file that declared it, or null.
     pub command_source: Option<String>,
@@ -83,6 +92,7 @@ impl Verification {
             by_declaration: false,
             summary: String::new(),
             contradictions: Vec::new(),
+            advisories: Vec::new(),
             command: None,
             command_source: None,
             exit_code: None,
@@ -174,6 +184,65 @@ pub(crate) fn claimed_paths(markdown: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Weighs the described paths against the branch. `corroborated` says the description and the
+/// branch agree somewhere — a described in-repo path the branch or the diff carries, or a changed
+/// file the description names — and `missing` are the described in-repo paths the branch lacks
+/// (deduplicated here, in order). Answers `(contradictions, advisories)`: only a description whose
+/// in-repo paths are **all** missing, with nothing it says found in the diff, contradicts the claim
+/// — the work it describes is not there. A missing path beside corroborated ones is an advisory:
+/// descriptions name files that were deliberately avoided, belong to other or future work, or were
+/// renamed on the way. Pure so the rule is tested directly.
+fn weigh_described(corroborated: bool, missing: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut unique: Vec<&str> = Vec::new();
+    for path in missing {
+        if !unique.contains(&path.as_str()) {
+            unique.push(path);
+        }
+    }
+    match (corroborated, unique.as_slice()) {
+        (_, []) => (Vec::new(), Vec::new()),
+        (false, [only]) => (
+            vec![format!(
+                "described `{only}` is not on the branch, and it is the only file the description names"
+            )],
+            Vec::new(),
+        ),
+        (false, all) => (
+            vec![format!(
+                "none of the {} files the description names is on the branch: {}",
+                all.len(),
+                all.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ")
+            )],
+            Vec::new(),
+        ),
+        (true, some) => (
+            Vec::new(),
+            some.iter().map(|p| format!("described `{p}` is not on the branch")).collect(),
+        ),
+    }
+}
+
+/// Whether the description names a file the diff changed: its path, or its file name (one with an
+/// extension) anywhere in the text — prose like "I named the file remote-tunnel.md" counts, not
+/// only backticked paths.
+fn names_a_changed_file(claim: &str, changed: &[String]) -> bool {
+    changed.iter().any(|path| {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        claim.contains(path.as_str()) || (name.contains('.') && claim.contains(name))
+    })
+}
+
+/// The published pull request's verification notes: the advisories, when there are any, as a
+/// quoted block a reviewer reads before merging. `None` when there is nothing to note.
+pub(crate) fn pr_notes(verification: Option<&Verification>) -> Option<String> {
+    let v = verification.filter(|v| !v.advisories.is_empty())?;
+    let mut out = String::from("> **Verification notes** (advisory; they did not change the verdict):");
+    for note in &v.advisories {
+        out.push_str(&format!("\n> - {note}"));
+    }
+    Some(out)
 }
 
 /// How the fresh-checkout run executes: normally microsandbox, overridable in tests. Takes the
@@ -333,25 +402,29 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
     if changed.is_empty() {
         unverifiable!(format!("branch has no changes against {base}; nothing to verify"));
     }
-    let mut contradictions = Vec::new();
-    {
+    let mut contradictions = {
         let claim = tokio::fs::read_to_string(cwd.join("out").join("pr.md"))
             .await
             .unwrap_or_default();
+        let (mut present, mut missing) = (false, Vec::new());
         for path in claimed_paths(&claim) {
-            // A described path counts against the claim only where it could have existed — its
-            // directory on the branch — while neither the branch nor the diff carries the file.
-            // An example URL or a gitignored build under an untracked dir is wording, not
-            // evidence.
+            // A described path is in the repository when the branch or the diff carries it, or
+            // could have — its directory is on the branch. An example URL or a gitignored build
+            // under an untracked dir is wording, not a described change, and is not weighed.
             if on_branch.contains(&path) || changed.contains(&path) {
+                present = true;
                 continue;
             }
             let tracked_here = |dir: &str| on_branch.iter().any(|t| t.starts_with(&format!("{dir}/")));
             if path.rsplit_once('/').is_some_and(|(dir, _)| tracked_here(dir)) {
-                contradictions.push(format!("described `{path}` is not on the branch"));
+                missing.push(path);
             }
         }
-    }
+        let corroborated = present || names_a_changed_file(&claim, &changed);
+        let (contradictions, advisories) = weigh_described(corroborated, &missing);
+        record.advisories = advisories;
+        contradictions
+    };
 
     // The command: explicit configuration first, then the repository's own declaration on the
     // base branch.
@@ -549,6 +622,7 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
     let verdict = verification.verdict;
     let detail = verification.contradictions.join("; ");
     let summary = verification.summary.clone();
+    let advisories = verification.advisories.clone();
     let event = verification.event();
     app.update_session(&id, |x| x.verification = Some(verification)).await;
     app.session_log(
@@ -557,6 +631,10 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
         format!("verification: {summary}"),
     )
     .await;
+    for note in advisories {
+        app.session_log(&id, "info", format!("verification note (advisory): {note}"))
+            .await;
+    }
     crate::validation::emit_chain(&app, &id, event).await;
     if !gate_publish {
         return;
@@ -613,10 +691,15 @@ mod tests {
         // branch is the belt to that braces.
         assert_eq!(decide(&[], Some(false)), Verdict::Unverifiable);
         // The event's shape is the contract the cockpit renders (web/src/types.ts): the record's
-        // twelve fields plus its `type`, no more.
+        // thirteen fields plus its `type`, no more.
         let event = Verification::blank().event();
         assert_eq!(event["type"], "verification");
-        assert_eq!(event.as_object().unwrap().len(), 13);
+        assert_eq!(event["advisories"], json!([]));
+        assert_eq!(event.as_object().unwrap().len(), 14);
+        // A record persisted before advisories existed still loads.
+        let mut old = serde_json::to_value(Verification::blank()).unwrap();
+        old.as_object_mut().unwrap().remove("advisories");
+        assert_eq!(serde_json::from_value::<Verification>(old).unwrap(), Verification::blank());
     }
 
     /// A runner that must never be asked anything: this verdict must not boot a VM.
@@ -700,6 +783,63 @@ mod tests {
             ]
         );
         assert!(claimed_paths("no backticks, no paths").is_empty());
+    }
+
+    #[test]
+    fn only_a_description_with_nothing_on_the_branch_contradicts() {
+        let paths = |ps: &[&str]| ps.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        // Nothing missing: nothing to say.
+        assert_eq!(weigh_described(true, &[]), (vec![], vec![]));
+        assert_eq!(weigh_described(false, &[]), (vec![], vec![]));
+        // Missing paths beside corroborated ones are advisories, once each.
+        let (contradictions, advisories) = weigh_described(true, &paths(&["docs/a.md", "docs/a.md", "src/b.rs"]));
+        assert!(contradictions.is_empty());
+        assert_eq!(
+            advisories,
+            vec![
+                "described `docs/a.md` is not on the branch".to_string(),
+                "described `src/b.rs` is not on the branch".to_string(),
+            ]
+        );
+        // Every described path missing, nothing corroborated: the claim is about work that is not there.
+        let (contradictions, advisories) = weigh_described(false, &paths(&["src/absent.rs"]));
+        assert_eq!(
+            contradictions,
+            vec!["described `src/absent.rs` is not on the branch, and it is the only file the description names".to_string()]
+        );
+        assert!(advisories.is_empty());
+        let (contradictions, _) = weigh_described(false, &paths(&["src/a.rs", "src/b.rs", "src/a.rs"]));
+        assert_eq!(
+            contradictions,
+            vec!["none of the 2 files the description names is on the branch: `src/a.rs`, `src/b.rs`".to_string()]
+        );
+        // The diff corroborates a description that names a changed file, by path or by file name in prose.
+        let changed = paths(&["docs/remote-tunnel.md"]);
+        assert!(names_a_changed_file(
+            "I named the file remote-tunnel.md to avoid a clash",
+            &changed
+        ));
+        assert!(names_a_changed_file("adds `docs/remote-tunnel.md`", &changed));
+        assert!(!names_a_changed_file("a likely `docs/remote-access.md`", &changed));
+        assert!(
+            !names_a_changed_file("anything", &paths(&["Makefile"])),
+            "no extension, no file-name match"
+        );
+    }
+
+    #[test]
+    fn the_pull_request_carries_advisories_as_notes() {
+        assert_eq!(pr_notes(None), None);
+        assert_eq!(pr_notes(Some(&Verification::blank())), None, "no advisories, no notes");
+        let mut v = Verification::blank();
+        v.advisories = vec!["described `docs/remote-access.md` is not on the branch".into()];
+        assert_eq!(
+            pr_notes(Some(&v)).as_deref(),
+            Some(
+                "> **Verification notes** (advisory; they did not change the verdict):\n\
+                 > - described `docs/remote-access.md` is not on the branch"
+            )
+        );
     }
 
     /// Runs `git` synchronously against a fixture repo — setup and inspection, not the code
@@ -825,15 +965,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_branch_or_an_absent_described_path_contradicts_the_claim() {
+    async fn an_empty_branch_or_a_claim_whose_described_files_are_all_absent() {
         let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
-        // A green run cannot save a claim describing a file the branch does not carry — but only
-        // a path whose directory exists on the branch: `example.com/foo.md` and a gitignored
-        // `dist/bundle.js` are the claim's wording, not evidence against it.
+        // A green run cannot save a claim whose described files are all missing from the branch —
+        // counting only paths whose directory exists on the branch: `example.com/foo.md` and a
+        // gitignored `dist/bundle.js` are the claim's wording, not evidence against it.
         worktree_fixture(
             &app,
             Some("true"),
-            "rewrote `src/absent.rs`, see `example.com/foo.md`, built `dist/bundle.js`",
+            "rewrote `src/absent.rs` and `src/gone.rs`, see `example.com/foo.md`, built `dist/bundle.js`",
             true,
         )
         .await;
@@ -842,6 +982,24 @@ mod tests {
         assert_eq!(v.exit_code, None, "no VM run is paid for once the git state contradicts");
         assert_eq!(
             v.contradictions,
+            vec!["none of the 2 files the description names is on the branch: `src/absent.rs`, `src/gone.rs`".to_string()]
+        );
+        assert!(v.advisories.is_empty(), "{v:?}");
+
+        // One real file described beside the absent one: the absent one is advisory, the tests
+        // decide the verdict.
+        worktree_fixture(
+            &app,
+            Some("true"),
+            "added `src/real.txt`; `src/absent.rs` is left for #9",
+            true,
+        )
+        .await;
+        let v = verify(&app, &fake_runner(0, Some(0))).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(
+            v.advisories,
             vec!["described `src/absent.rs` is not on the branch".to_string()]
         );
 
@@ -854,6 +1012,49 @@ mod tests {
         assert!(v.contradictions.is_empty(), "{v:?}");
         assert_eq!(v.exit_code, None, "{v:?}");
         assert_eq!(v.summary, "branch has no changes against main; nothing to verify");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Colony 5b460871 on #531: a docs-only branch adding `docs/remote-tunnel.md`, whose description
+    /// explains the name by pointing at a `docs/remote-access.md` it deliberately did not create
+    /// (twice). That is a note for the reviewer, listed once — not a contradiction, and autopilot
+    /// is not held.
+    #[tokio::test]
+    async fn a_described_file_the_colony_deliberately_avoided_is_advisory_not_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let pr = "Adds a remote-access tunnel doc for #531.\n\n\
+                  The #536 review may write its own remote-access doc. I named the file remote-tunnel.md \
+                  to avoid clashing with a likely `docs/remote-access.md`; if #536 lands `docs/remote-access.md`, \
+                  the two should link to each other.";
+        let repo = worktree_fixture(&app, Some("true"), pr, false).await;
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/remote-tunnel.md"), "# Remote tunnel\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "docs: remote tunnel");
+        let v = verify(&app, &fake_runner(0, Some(0))).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(
+            v.advisories,
+            vec!["described `docs/remote-access.md` is not on the branch".to_string()],
+            "once, however often the description names it"
+        );
+        assert_eq!(
+            crate::events::verdict_step(&v.verdict),
+            crate::events::Autopilot::Publish,
+            "autopilot is not held"
+        );
+
+        // The same branch, the new file backticked too: still advisory.
+        let out = app.session_dir("abc").join("out");
+        std::fs::write(
+            out.join("pr.md"),
+            "Adds `docs/remote-tunnel.md`, not `docs/remote-access.md`.",
+        )
+        .unwrap();
+        let v = verify(&app, &fake_runner(0, Some(0))).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert_eq!(v.advisories.len(), 1, "{v:?}");
         let _ = std::fs::remove_dir_all(root);
     }
 

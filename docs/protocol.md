@@ -247,7 +247,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry, polled on request |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]` |
 | `PUT /api/modules/{kind}` | `{provider, enabled, settings}` → saves config |
-| `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module |
+| `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module. Each issue carries `epic`: null, or `{reason, sub_issues}` when it is an epic (sub-issues, an `epic` label, or a title marking one; see *Epics* under `POST /api/sessions`) — sub-issue counts from one best-effort GraphQL read of the newest 200 open issues, the label and title always |
 | `POST /api/repos/{owner}/{repo}/issues` | `{title (one line, ≤ 256), body (≤ 60 KB)}`: files a GitHub issue with the Mothership's `gh` (the chat's `…/issue` path); answers `{repo, number, title, url}`, `number` null when gh's answer named none. The cockpit's Colonize pane calls it after the operator confirms a draft; recorded as `colonize.issue` |
 | `POST /api/colonize/draft` | `{text (≤ 8 KB), repo?}`: drafts GitHub issues from free text with the summaries' cheap model (never the subscription login) — one, or up to 5 when the text clearly holds independent tasks — and files nothing: `{issues: [{title, body}], model}`. With no model, or an answer that does not read as drafts, the text itself is the one draft and `model` is null, `note` saying why |
 | `GET /api/repos/{owner}/{repo}/packages` | Monorepo detection: `{monorepo, tool, packages: [{name, path}]}`. `tool` is `npm-workspaces`, `pnpm`, `yarn`, `bun`, `turbo`, `nx`, `cargo`, `go-work`, `lerna` or `dirs` (no manifest declares them, but two or more `apps/*` / `packages/*` directories hold a manifest), `null` with an empty list when the repository is a single package. Read from the default branch's tree plus the root workspace manifests; served from a 10-minute stale-while-revalidate cache |
@@ -284,7 +284,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/chat/{id}/title` | Asks the summaries' cheap model (never the subscription login) for a title from the first exchange and stores it |
 | `GET /api/chat/{id}/export` | The conversation as `text/markdown`, a download; its images are linked as `/api/chat/attachments/{sha}`. `?format=zip` answers `application/zip` instead: `chat-<id>.md` with the images beside it under `images/<sha>.<ext>`, linked relatively |
 | `POST /api/chat/{id}/issue` | `{repo, title (one line, ≤ 256), body (≤ 60 KB)}`: files a GitHub issue with the Mothership's `gh`; answers `{url}`. The cockpit confirms with the operator first |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set; a remote conflict (below) is a **409** either way |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, allow_duplicate?, allow_epic?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6)). Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set; a remote conflict (below) is a **409** either way. **409** when the issue is an epic (sub-issues, an `epic` label, or a title marking one), listing its open sub-issues; `allow_epic: true` starts one anyway (*Epics*, below) |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
 | `POST /api/sessions/{id}/answer` | `{question_id, answers, response?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above) |
@@ -387,6 +387,17 @@ Three ways past a held issue:
   on the `queue_behind_holder` path too: a conflict attributable to one of this mothership's own
   colonies on the issue is the holder being queued behind and is tolerated, while a merged PR —
   ours included, the issue is done — or a foreign claim refuses as above.
+
+**Epics.** An epic is a planning container: a colony on it duplicates the colonies on its
+sub-issues. Before any other issue check, a launch on an issue asks GitHub about it
+(`GET /repos/{o}/{r}/issues/{n}`, plus `…/sub_issues` only when it has some or GitHub does not
+summarise them) and answers **409** when it has sub-issues (`sub_issues_summary.total`, or the list),
+carries a label named `epic` (any case), or has a title ending `(epic)` or starting `Epic:` (any case).
+The message names the reason, lists up to ten open sub-issues to launch instead, and names the way
+out: `allow_epic: true` skips the check. A lookup that fails lets the launch through. Every launch on
+an issue comes through `POST /api/sessions` (the dashboard, the Colonize pane, the MCP tool, the
+CLI), so the one check covers them; loops, burn-down and the map launch no issue. The cockpit's
+issue lists mark epics from `GET …/issues`'s `epic` and leave them out of bulk hand-offs.
 
 On GitHub a launch marks its claim: the `colonizer:claimed` label plus a
 `<!-- colonizer:claim host="<hostname> (<host_id>)" colony="<id>" issue="<n>" -->` comment naming
@@ -1771,13 +1782,24 @@ worktree, reads the git state directly (commits ahead of base, changed files, wh
 description names are on the branch), and re-runs the repository's test command in a fresh one-shot
 microVM over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
 codes. The verdict is `confirmed` (the fresh run is green and the git state matches the description),
-`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — no test
-command known, the runner unavailable — which is never treated as confirmed. The fresh run's exit
-number is the one the guest itself writes to a report file mounted for exactly that
+`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — an empty
+branch, no test command known, the runner unavailable — which is never treated as confirmed.
+The fresh run's exit number is the one the guest itself writes to a report file mounted for exactly that
 (`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it, so a runner that never
 reported has not verified anything. Autopilot publishes on
 `confirmed` and on `unverifiable` exactly as before; on `contradicted` the colony is held with
 `attention.reason` `autopilot_held` and the contradictions in the event below.
+
+The description's paths are the backticked path-like tokens in `pr.md`; a path counts as in the
+repository when the branch or the diff carries it or its directory is on the branch (an example URL
+or an untracked build dir is wording, not weighed). The git state **contradicts** the description
+only when it names in-repo paths and **none** of them is on the branch or in the diff, and no changed
+file is named in the text either (by path, or by file name in prose): the work it describes is not
+there. A described path that is missing while the description is otherwise borne out is an
+**advisory** — descriptions routinely name files that were deliberately not created, belong to other
+or future work, or were renamed on the way. Advisories are listed once each in `advisories`, logged,
+and added to the published pull request as a "Verification notes" block; they never change the
+verdict or hold autopilot.
 
 The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
 colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
@@ -1794,7 +1816,7 @@ same object minus `type`/`seq`/`ts`):
 
 ```jsonc
 {"type":"verification","verdict":"confirmed","by_declaration":false,"summary":"one plain line",
- "contradictions":[],"command":"npm test","command_source":"package.json","exit_code":0,
+ "contradictions":[],"advisories":[],"command":"npm test","command_source":"package.json","exit_code":0,
  "tests_ms":8100,"commits":2,"files_changed":["src/scan.rs"],"snapshot":"<sha>|null","ms":12345}
 ```
 

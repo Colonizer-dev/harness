@@ -1041,6 +1041,10 @@ pub struct NewSession {
     /// Start a colony on an issue another colony already holds. Off by default: see `issue_held_by`.
     #[serde(default)]
     pub allow_duplicate: bool,
+    /// Start a colony on an epic — an issue with sub-issues, an `epic` label, or a title marking it
+    /// as one. Off by default: an epic is a planning container, refused with a 409 (epic.rs).
+    #[serde(default)]
+    pub allow_epic: bool,
     /// Wait politely for an issue another local colony holds instead of being refused: the colony
     /// is admitted `Queued` behind the holder and starts when the issue becomes its own (issue
     /// #321). Off by default; `allow_duplicate` wins when both are set, and a claim another
@@ -1462,6 +1466,13 @@ pub async fn create(
             }
         }
     };
+    // An epic is a planning container: a colony on it duplicates the colonies on its sub-issues.
+    // Every launch on an issue — the cockpit's, the API's, a loop's or a hand-off's — comes through
+    // here, so this one check covers them all. `allow_epic` skips it; a failed lookup lets the
+    // launch through (epic.rs).
+    if let Some(message) = crate::epic::launch_refusal(&crate::epic::gh_fetch(&app), &repo, req.issue, req.allow_epic).await {
+        return Err(client_error(StatusCode::CONFLICT, &message));
+    }
     // Issue #321: a launch that asks to `queue_behind_holder` waits for a local holder instead of
     // being refused. GitHub is checked either way: a conflict attributable to one of this
     // mothership's own colonies on the issue is the holder being queued behind, while a merged PR
@@ -2982,6 +2993,7 @@ pub(crate) mod tests {
             autofix: None,
             automerge: None,
             allow_duplicate: false,
+            allow_epic: false,
             queue_behind_holder: false,
             model_tier: None,
             model_override: None,
@@ -3907,6 +3919,7 @@ pub(crate) mod tests {
                 autofix: None,
                 automerge: None,
                 allow_duplicate: false,
+                allow_epic: false,
                 queue_behind_holder: false,
                 model_tier: None,
                 model_override: None,
@@ -3993,6 +4006,7 @@ pub(crate) mod tests {
                 autofix: None,
                 automerge: None,
                 allow_duplicate: false,
+                allow_epic: false,
                 queue_behind_holder: false,
                 model_tier: None,
                 model_override: None,
@@ -4056,6 +4070,7 @@ pub(crate) mod tests {
             autofix: None,
             automerge: None,
             allow_duplicate: false,
+            allow_epic: false,
             queue_behind_holder: false,
             model_tier: None,
             model_override: None,

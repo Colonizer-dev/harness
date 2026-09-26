@@ -786,7 +786,10 @@ function describeCall(e) {
 function verificationLine(e) {
   if (e.by_declaration) return 'verification: unverifiable by declaration (verify: none)';
   const verdict = String(e.verdict ?? 'unverifiable').toUpperCase();
-  const detail = [excerpt(e.summary, 200), ...(e.contradictions ?? []).map((c) => excerpt(c, 160))].filter(Boolean).join('; ');
+  // The summary already quotes the first contradiction; each is said once, advisories as notes.
+  const contradictions = (e.contradictions ?? []).filter((c) => !String(e.summary ?? '').includes(c));
+  const notes = [...new Set(e.advisories ?? [])].map((a) => `note: ${excerpt(a, 160)}`);
+  const detail = [...new Set([excerpt(e.summary, 200), ...contradictions.map((c) => excerpt(c, 160)), ...notes])].filter(Boolean).join('; ');
   // Counts come from the event's fields, and only when the claim held up: next to why a claim failed,
   // its numbers are not worth printing.
   const counts = [];

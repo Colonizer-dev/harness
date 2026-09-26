@@ -332,6 +332,15 @@ test('a transcript sets the claim and its verdict side by side, one line per ver
   assert.match(formatTranscript(claimed(byDeclaration)), /∎ verification: unverifiable by declaration \(verify: none\)/);
 });
 
+test('a verification line names a contradiction once and carries advisories as notes', () => {
+  const only = 'described `x.rs` is not on the branch, and it is the only file the description names';
+  const once = formatTranscript(claimed({ ...contradicted, summary: `contradicted: ${only}`, contradictions: [only] }));
+  assert.equal(once.split(only).length - 1, 1, once);
+  const note = 'described `docs/remote-access.md` is not on the branch';
+  const noted = formatTranscript(claimed({ ...confirmed, advisories: [note, note] }));
+  assert.match(noted, /∎ verification: CONFIRMED — `npm test` green in a fresh checkout; note: described `docs\/remote-access\.md` is not on the branch, 4 files, 2 commits \(12\.3s\)/);
+});
+
 test('a screening event renders one line per finding, with the decode quoted', () => {
   const text = formatTranscript({
     session: { id: 'ab12cd34', status: 'failed' },
