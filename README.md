@@ -47,6 +47,9 @@ yet is in [docs/gaps.md](docs/gaps.md). What has been decided against, and why, 
 [docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without
 losing colonies, is in [docs/updates.md](docs/updates.md). Which worktree paths a colony must never
 read and which it cannot rewrite is in [docs/path-policy.md](docs/path-policy.md).
+The remote-access review — security review of the relay and tunnel before deploy
+([#536](https://github.com/Colonizer-dev/harness/issues/536)) — is in
+[docs/remote-access-review.md](docs/remote-access-review.md).
 
 ---
 
