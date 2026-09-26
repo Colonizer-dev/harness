@@ -81,6 +81,7 @@ export function Cockpit({
   onOpenColony,
   status,
   statusError = false,
+  remoteOn = false,
   fleet,
   liveConnection,
   liveStorage = null,
@@ -117,6 +118,8 @@ export function Cockpit({
   status: HarnessStatus | null;
   /** The status poll is failing; the header says so, the counts beside it are stale. */
   statusError?: boolean;
+  /** The remote-access switch (issue #535); while on, the header keeps a small badge. */
+  remoteOn?: boolean;
   /** Self plus every configured peer (issue #231); older mothership builds send an empty list. */
   fleet?: FleetHost[];
   /** The realtime feed's connection (issue #446); absent renders the indicator as reconnecting. */
@@ -592,6 +595,8 @@ export function Cockpit({
         needByOrg={needByOrg}
         statusError={statusError}
         connection={liveConnection}
+        remoteOn={remoteOn}
+        onOpenRemote={() => onOpenSettings("remote")}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,

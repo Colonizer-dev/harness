@@ -67,6 +67,8 @@ import type {
   UsageStatus,
   LoginItemStatus,
   PushSubscriptionSummary,
+  RemotePairing,
+  RemoteStatus,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1359,6 +1361,17 @@ export function createMockApi(): Api {
   const pushSubs: PushSubscriptionSummary[] = [
     { id: "push_iphone01", label: "iPhone · Safari", created_at: Math.floor(Date.now() / 1000) - 86_400 * 2, endpoint_host: "fcm.googleapis.com" },
   ];
+  // Remote access (issue #535): the switch starts off, like a fresh install's. Enabling mints the
+  // host and a live tunnel; a reset changes the host, like the server's fresh identity. Install
+  // ids wear the relay's shape: 20 base32 chars (services/relay/src/worker.js). One pairing code
+  // waits at the relay, the shape of #534's view; confirming binds it, single-use.
+  const remoteInstallId = () => Array.from({ length: 20 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join("");
+  let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null };
+  let remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
+  const remotePairingState: RemotePairing = {
+    owner: null,
+    pending: [{ code: "481516", github_login: "octocat", expires_at: Math.floor(Date.now() / 1000) + 600 }],
+  };
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
   // acme/design-system's map has its entry far off the centre (bottom-left), as a real repo's did.
@@ -2368,6 +2381,7 @@ export function createMockApi(): Api {
       { ts: ago(60 * 27 + 20), kind: "loop.run_now", actor: "you", via: "cockpit", org: "acme", repo: "acme/api", target: "Weekly flaky-test hunt", section: "loops" },
       { ts: ago(60 * 50), kind: "settings.remove", actor: "you", via: "cockpit", target: "provider strix-old", section: "providers" },
       { ts: ago(60 * 51), kind: "workspace.enable", actor: "you", via: "cockpit", org: "acme", target: "acme", section: "org:acme" },
+      { ts: ago(60 * 52), kind: "remote.disable", actor: "you", via: "cockpit", target: "remote access", section: "remote" },
     );
     seeds.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
     for (const seedEntry of seeds) logActivity(seedEntry);
@@ -2558,6 +2572,40 @@ export function createMockApi(): Api {
       await sleep(200);
       const at = pushSubs.findIndex((row) => row.id === id);
       if (at >= 0) pushSubs.splice(at, 1);
+    },
+    remote: () => later(() => remoteState),
+    setRemote: async (enabled) => {
+      await sleep(250);
+      // Like the server: a PUT that does not change the switch answers the view and records nothing.
+      if (enabled === remoteState.enabled) return clone(remoteState);
+      remoteState = enabled
+        ? { enabled: true, host: remoteHost, connected: true, since: now() }
+        : { ...remoteState, enabled: false, connected: false, since: null };
+      logActivity({ kind: enabled ? "remote.enable" : "remote.disable", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+      return clone(remoteState);
+    },
+    resetRemote: async () => {
+      await sleep(300);
+      remoteHost = `${remoteInstallId()}.my.colonizer.dev`;
+      // A reset redials at once when the switch was on; the host comes back new either way.
+      remoteState = { ...remoteState, host: remoteHost, ...(remoteState.enabled ? { connected: true, since: now() } : {}) };
+      logActivity({ kind: "remote.reset", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+      return clone(remoteState);
+    },
+    remotePairing: () => later(() => remotePairingState),
+    confirmRemotePairing: async (code) => {
+      await sleep(250);
+      // The relay's rules in the relay's order (worker.js confirmPairing): 400 unless six digits,
+      // unknown/expired/used is one 404, and only a live code can meet the bound-owner 409 — a
+      // confirm deletes every pending pairing, so a used code is gone, never a 409.
+      if (!/^\d{6}$/.test(code)) throw new ApiError("code must be 6 digits", 400);
+      const at = remotePairingState.pending.findIndex((row) => row.code === code && row.expires_at > Math.floor(Date.now() / 1000));
+      if (at < 0) throw new ApiError("no such pairing", 404);
+      if (remotePairingState.owner) throw new ApiError("owner already bound", 409);
+      const login = remotePairingState.pending[at].github_login;
+      remotePairingState.owner = { github_login: login };
+      remotePairingState.pending = [];
+      return clone({ owner: { github_login: login } });
     },
     setUsage: async (enabled) => {
       await sleep(250);

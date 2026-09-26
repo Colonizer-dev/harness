@@ -17,6 +17,7 @@ import {
   IconMemory,
   IconMerge,
   IconMinus,
+  IconNetwork,
   IconOrg,
   IconQuestion,
   IconRepeat,
@@ -97,6 +98,7 @@ function ToneIcon({ tone, kind, section }: { tone: HistoryTone; kind: string; se
 
 function actionGlyph(kind: string, section: string | null, size: number): ReactNode {
   if (section === "secrets" || section === "connections") return <IconKey size={size} />;
+  if (kind.startsWith("remote.")) return <IconNetwork size={size} />;
   if (kind.startsWith("loop.")) return <IconRepeat size={size} />;
   if (kind.startsWith("workspace.")) return <IconOrg size={size} />;
   if (kind.startsWith("memory.")) return <IconMemory size={size} />;

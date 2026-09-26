@@ -40,6 +40,7 @@ import type {
   UsageStatus,
   VoiceStatus,
   LoginItemStatus,
+  RemoteStatus,
 } from "../types";
 import { PROVIDER_CATALOG, fillTemplate, type CatalogEntry } from "../providerCatalog";
 import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, lastFailureText, quotaExhaustedText, quotaTone, usageHealthTone } from "../providerHealth";
@@ -58,6 +59,7 @@ import {
 } from "./icons";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
+import { RemoteAccessPane } from "./RemoteAccessPane";
 import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
@@ -72,7 +74,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -115,6 +117,8 @@ export function SettingsDialog({
   onUsageChanged,
   notifications,
   onNotificationsChanged,
+  remote,
+  onRemoteChanged,
   initialSection,
   setup,
   pull,
@@ -134,6 +138,10 @@ export function SettingsDialog({
   notifications: NotificationPrefs;
   /** A React-style setter, so the pane can compose over the latest prefs: the browser's permission answer lands after a delay, and a value-based write from the opening render would revert anything toggled meanwhile. */
   onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
+  /** The remote-access view App polls (issue #535); null until the first answer. */
+  remote: RemoteStatus | null;
+  /** The pane's setter, shared with the top bar's badge so a toggle moves both at once. */
+  onRemoteChanged: (remote: RemoteStatus) => void;
   /** The section to open on, instead of the first. */
   initialSection?: SectionId;
   /** The Setup checklist's derivation, computed in App from the same state the app polls. */
@@ -174,6 +182,8 @@ export function SettingsDialog({
           onUsageChanged={onUsageChanged}
           notifications={notifications}
           onNotificationsChanged={onNotificationsChanged}
+          remote={remote}
+          onRemoteChanged={onRemoteChanged}
           initialSection={initialSection}
           setup={setup}
           pull={pull}
@@ -202,6 +212,8 @@ export function SettingsBody({
   onUsageChanged,
   notifications,
   onNotificationsChanged,
+  remote,
+  onRemoteChanged,
   initialSection,
   setup,
   pull,
@@ -225,6 +237,9 @@ export function SettingsBody({
   notifications: NotificationPrefs;
   /** A React-style setter, so the pane can compose over the latest prefs (see SettingsDialog). */
   onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
+  /** The remote-access view App polls (issue #535); null until the first answer. */
+  remote: RemoteStatus | null;
+  onRemoteChanged: (remote: RemoteStatus) => void;
   initialSection?: SectionId;
   setup: SetupView | null;
   pull: ImagePull;
@@ -353,6 +368,12 @@ export function SettingsBody({
           badge: telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "remote",
+          label: "Remote access",
+          hint: "Open this cockpit from your phone or another computer",
+          badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
+        },
+        {
           id: "updates",
           label: "Updates",
           hint: "Which Colonizer this is, and whether a newer one is out",
@@ -435,6 +456,13 @@ export function SettingsBody({
           : [];
       case "live-map":
         return telemetry ? [{ label: "Live map", value: telemetry.enabled ? "On" : "Off", tone: onOff(telemetry.enabled) }] : [];
+      case "remote":
+        return remote
+          ? [
+              { label: "Remote access", value: remote.enabled ? "On" : "Off", tone: onOff(remote.enabled) },
+              ...(remote.enabled ? [{ label: "Tunnel", value: remote.connected ? "Connected" : "Offline", tone: remote.connected ? ("ok" as const) : ("warn" as const) }] : []),
+            ]
+          : [];
       case "updates":
         return update
           ? [
@@ -504,6 +532,7 @@ export function SettingsBody({
   } else if (active === "connections") pane = <ConnectionsPane status={status} onStatusChanged={onStatusChanged} back={back} />;
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
+  else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
   else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
@@ -853,7 +882,7 @@ function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; active: Sect
 // Pane and row layout shared by every section
 // ---------------------------------------------------------------------------
 
-function Pane({
+export function Pane({
   title,
   subtitle,
   info,
@@ -916,7 +945,7 @@ function Pane({
 }
 
 /** One setting: label on the left, control on the right, explanation behind the "i". The label's id is `${id}-label`. */
-function Row({
+export function Row({
   id,
   label,
   info,

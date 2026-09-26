@@ -133,6 +133,15 @@ describe("filters and words", () => {
     expect(sentence({ kind: "from.the.future", actor: "you" })).toContain("from.the.future");
   });
 
+  it("reads the remote-access switches, and deep-links them to their section", () => {
+    expect(sentence({ kind: "remote.enable", actor: "you", target: "remote access" })).toBe("You switched remote access on");
+    expect(sentence({ kind: "remote.disable", actor: "you", target: "remote access" })).toBe("You switched remote access off");
+    expect(sentence({ kind: "remote.reset", actor: "you", target: "remote access" })).toBe("You reset the remote access link");
+    const [item] = buildTimeline([entry({ kind: "remote.reset", target: "remote access", section: "remote", colony: null, repo: null, issue: null })], [], true);
+    expect(item).toMatchObject({ tone: "action", section: "remote", text: "You reset the remote access link" });
+    expect(targetOf(item, new Set())).toEqual({ kind: "section", section: "remote" });
+  });
+
   it("counts what matters", () => {
     expect(summarize(items)).toEqual({ prs: 0, merged: 0, failed: 1, questions: 1, yours: 2 });
   });
