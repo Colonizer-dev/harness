@@ -70,7 +70,7 @@ const OUTCOME_TONE: Record<string, HistoryTone> = {
   "outcome.question": "question",
 };
 
-const LAUNCH_KINDS = new Set(["colony.launch", "chat.colony", "loop.run_now", "redteam.start", "colony.resume"]);
+const LAUNCH_KINDS = new Set(["colony.launch", "chat.colony", "colonize.colony", "loop.run_now", "redteam.start", "colony.resume"]);
 
 export function toneFor(kind: string): HistoryTone {
   if (OUTCOME_TONE[kind]) return OUTCOME_TONE[kind];
@@ -136,6 +136,10 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You answered ${s}`;
     case "chat.issue":
       return "You filed an issue from a chat";
+    case "colonize.issue":
+      return `You created ${subjectOf(entry.repo, entry.issue) ?? "an issue"} from Colonize`;
+    case "colonize.colony":
+      return `You dispatched a colony on ${s} from Colonize`;
     case "loop.create":
       return `You created ${loop}`;
     case "loop.update":

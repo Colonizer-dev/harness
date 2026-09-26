@@ -6,6 +6,8 @@
 import { useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 
+import { AntGlyph } from "./chat/PersonaAnt";
+import { useColonize } from "./Colonize";
 import { Glyph, type CockpitView } from "./NavRail";
 import { MOBILE_TABS, mobileMoreViews, mobileTabFor } from "./mobile";
 
@@ -13,13 +15,19 @@ export function MobileTabBar({
   view,
   onNavigate,
   inboxCount,
+  onColonize: openColonize,
 }: {
   view: CockpitView;
+  /** Opens the Colonize pane from the top of the More sheet; absent, the surrounding ColonizeProvider's,
+   *  and outside one the sheet has no Colonize row. */
+  onColonize?: () => void;
   onNavigate: (view: CockpitView) => void;
   /** The inbox's cross-workspace "need you" count, shown as a bubble on its tab like the rail's. */
   inboxCount: number;
 }): ReactElement {
   const [moreOpen, setMoreOpen] = useState(false);
+  const colonizer = useColonize();
+  const onColonize = openColonize ?? colonizer?.open;
   const active = mobileTabFor(view);
   const go = (next: CockpitView) => {
     setMoreOpen(false);
@@ -38,6 +46,20 @@ export function MobileTabBar({
         aria-label="More views"
         className="fixed inset-x-2 bottom-[calc(3.75rem+env(safe-area-inset-bottom))] z-50 grid animate-[ck-in_160ms_ease-out_both] grid-cols-3 gap-1 rounded-2xl border border-border-strong bg-panel p-2 shadow-[0_16px_48px_rgb(0_0_0/0.4)] sm:hidden"
       >
+        {onColonize && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMoreOpen(false);
+              onColonize();
+            }}
+            className="ant-glyph-host col-span-3 flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border-0 bg-accent px-3 text-[13.5px] font-semibold text-on-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <AntGlyph size={24} />
+            Colonize
+          </button>
+        )}
         {mobileMoreViews().map((item) => (
           <button
             key={item.view}

@@ -129,3 +129,51 @@ export function PersonaAnt({ persona, size = 28, motion = "idle", className }: {
     </svg>
   );
 }
+
+/**
+ * The Colonize buttons' icon: Pip's body in one colour — the button's own (`currentColor`), so it
+ * reads on the orange in both themes — without a face or a prop, which would only blur at icon size.
+ * Still by default; its antennae twitch while an `.ant-glyph-host` parent is hovered or focused
+ * (index.css, off under prefers-reduced-motion). `size` is the square it draws in; the ant itself
+ * fills about two thirds of it, like the stroke icons it sits among.
+ */
+export function AntGlyph({ size = 20, className }: { size?: number; className?: string }): ReactElement {
+  const head = { rx: 4.6, ry: 4.2, cy: 11.6 };
+  const base = head.cy - head.ry + 1.4;
+  return (
+    <svg
+      className={["persona-ant ant-glyph", className].filter(Boolean).join(" ")}
+      data-motion="none"
+      viewBox="0 0 40 40"
+      width={size}
+      height={size}
+      aria-hidden="true"
+      focusable="false"
+      style={{ "--pa-body": "currentColor", "--pa-dark": "currentColor", "--pa-accent": "currentColor" } as CSSProperties}
+    >
+      <g className="pa-legs">
+        {LEGS.map((leg, i) => (
+          <Leg key={`l${i}`} leg={leg} side={1} group={i === 1 ? "b" : "a"} />
+        ))}
+        {LEGS.map((leg, i) => (
+          <Leg key={`r${i}`} leg={leg} side={-1} group={i === 1 ? "a" : "b"} />
+        ))}
+      </g>
+      <ellipse cx="20" cy="30.4" rx="5.4" ry="6.8" className="pa-fill" />
+      <circle cx="20" cy="24.4" r="1.6" className="pa-fill" />
+      <ellipse cx="20" cy="20" rx="3.3" ry="4.2" className="pa-fill" />
+      <g className="pa-head">
+        {([1, -1] as const).map((dir) => {
+          const x = (v: number) => (dir === 1 ? v : 40 - v);
+          return (
+            <g key={dir} className="pa-antenna" style={{ transformOrigin: `${x(18.2)}px ${base}px`, "--pa-dir": dir } as CSSProperties}>
+              <path d={`M${x(18.2)} ${base} L${x(14.6)} ${head.cy - head.ry - 3} L${x(11.4)} ${head.cy - head.ry - 2}`} className="pa-line" />
+              <circle cx={x(11.4)} cy={head.cy - head.ry - 2} r="1.5" className="pa-tip" />
+            </g>
+          );
+        })}
+        <ellipse cx="20" cy={head.cy} rx={head.rx} ry={head.ry} className="pa-fill" />
+      </g>
+    </svg>
+  );
+}

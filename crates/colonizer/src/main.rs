@@ -23,6 +23,7 @@ mod claude_accounts;
 mod claude_login;
 mod cli;
 mod code;
+mod colonize;
 mod colony_secrets;
 mod config;
 mod deps;
@@ -1457,7 +1458,11 @@ async fn serve() -> Result<()> {
         .route("/api/maps/{owner}/{name}/files", get(maps::files))
         .route("/api/maps/{owner}/{name}/file", get(maps::file))
         .route("/api/touched", get(maps::touched))
-        .route("/api/repos/{owner}/{name}/issues", get(github::list_issues))
+        .route(
+            "/api/repos/{owner}/{name}/issues",
+            get(github::list_issues).post(colonize::create_issue),
+        )
+        .route("/api/colonize/draft", post(colonize::draft))
         .route("/api/repos/{owner}/{name}/packages", get(packages::list_packages))
         .route("/api/repos/{owner}/{name}/published", get(deps::repo_published))
         .route("/api/repos/{owner}/{name}/dependencies", get(deps::repo_dependencies))

@@ -18,6 +18,7 @@ import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
 import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
+import { ColonizeProvider } from "./Colonize";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { HostView } from "./HostView";
@@ -410,15 +411,6 @@ export function Cockpit({
       case "overview":
         return (
           <OverviewView
-            issues={{
-              repos,
-              org: selectedOrg,
-              sessions,
-              githubConnected: status?.github.connected ?? false,
-              autopilotDefault,
-              onCreated,
-              onOpenColony: openColonyById,
-            }}
             // One control: the sidebar's workspace switcher is the overview's scope, and the page's
             // own "open workspace" / "← All workspaces" move that same scope.
             scopeOrg={selectedOrg}
@@ -560,6 +552,17 @@ export function Cockpit({
   };
 
   return (
+    // Colonize — the rail's button, the dashboard's, ⌘K — is one pane, owned here for every view.
+    <ColonizeProvider
+      repos={repos}
+      org={selectedOrg}
+      sessions={sessions}
+      githubConnected={status?.github.connected ?? false}
+      autopilotDefault={autopilotDefault}
+      onCreated={onCreated}
+      onOpenColony={openColonyById}
+      onOpenLaunch={() => setView("launch")}
+    >
     <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] bg-bg text-text">
       <NavRail
         orgs={workspaces}
@@ -639,6 +642,7 @@ export function Cockpit({
               githubConnected={status?.github.connected ?? false}
               autopilotDefault={autopilotDefault}
               sessions={sessions}
+              shortcutTaken
               onCreated={(session) => {
                 onCreated(session);
                 setView("home");
@@ -691,5 +695,6 @@ export function Cockpit({
       </div>
       <MobileTabBar view={view} onNavigate={navigate} inboxCount={needAnywhere} />
     </div>
+    </ColonizeProvider>
   );
 }

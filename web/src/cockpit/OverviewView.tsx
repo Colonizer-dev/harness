@@ -59,7 +59,7 @@ import { StoragePanel } from "./StoragePanel";
 import { useOpenQuestions } from "./questions";
 import type { FleetHost, HostInfo, RedTeamRun, Session, StartRedTeamRunRequest, StatusQuota, StorageSummary } from "../types";
 import type { LiveConnection } from "../liveStream";
-import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
+import { ColonizeButton } from "./Colonize";
 import { taskLine, taskTooltip } from "../summary";
 import { Pagination } from "./ListControls";
 import { PAGE_SIZE, pageOf } from "./paging";
@@ -114,7 +114,6 @@ export function OverviewView({
   onOpenSettings,
   scopeOrg,
   onScopeOrg,
-  issues,
 }: {
   /** Every colony the mothership knows, unfiltered — this page is the cross-workspace view. */
   sessions: Session[];
@@ -148,8 +147,6 @@ export function OverviewView({
   onOpenColony: (id: string) => void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
-  /** The GitHub issues hand-off, shown as a button above the range toolbar; absent in tests. */
-  issues?: IssuesActions;
   /** The cockpit's workspace scope: set, it opens that org's dashboard in place; null is the
    *  overview. Omitted (tests), the page keeps the choice itself. */
   scopeOrg?: string | null;
@@ -304,15 +301,9 @@ export function OverviewView({
   const rangePicker = (
     <RangePicker range={range} onRange={setRange} compare={compare} onCompare={() => setCompare((c) => !c)} emptyPrevious={prevEmpty} />
   );
-  // The issues hand-off sits above the range controls, at the title row's right.
-  const toolbar = issues ? (
-    <div className="flex flex-col items-end gap-2.5">
-      <IssuesButton variant="header" {...issues} />
-      {rangePicker}
-    </div>
-  ) : (
-    rangePicker
-  );
+  // Colonize, the page's one orange button, sits on the title row; the range controls stay below it.
+  // Outside a ColonizeProvider (the tests) it renders nothing.
+  const colonize = <ColonizeButton />;
 
   // An org dashboard replaces the overview body in place; the header above stays put.
   const dashEntry = dashOrg ? workspaces.find((o) => sameOrg(o.org, dashOrg)) : undefined;
@@ -327,7 +318,8 @@ export function OverviewView({
             range={range}
             compare={compare}
             providers={providers}
-            toolbar={toolbar}
+            action={colonize}
+            toolbar={rangePicker}
             events={events}
             onOpenColony={onOpenColony}
             onBack={() => setDashOrg(null)}
@@ -353,16 +345,21 @@ export function OverviewView({
           </div>
         ) : null}
 
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="min-w-0">
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
             <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Overview</h1>
-            <div className="mt-2 text-[14px] text-muted">
+            {colonize}
+          </div>
+          <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-[14px] text-muted">
               {needList.length} {needList.length === 1 ? "colony needs" : "colonies need"} you · {counts.live} live · {counts.queued} queued across {workspaces.length}{" "}
               {workspaces.length === 1 ? "workspace" : "workspaces"}
               {headerCost !== null && <> · {formatCost(headerCost)} spent</>}
             </div>
           </div>
-          {toolbar}
+          {rangePicker}
+          </div>
         </div>
 
         {(filtered || hiddenOrgs.length > 0) && (

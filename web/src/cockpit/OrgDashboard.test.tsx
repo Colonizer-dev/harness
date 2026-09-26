@@ -49,6 +49,25 @@ describe("OrgDashboard", () => {
     expect(render()).not.toContain("data-org-description");
   });
 
+  it("puts the primary action on the title row and the range toolbar below it", () => {
+    const html = renderToStaticMarkup(
+      <OrgDashboard
+        org={{ ...ACME, description: "Tools for makers" }}
+        sessions={orgSessions()}
+        history={history}
+        range={30}
+        compare
+        onBack={noop}
+        action={<button data-action>Colonize</button>}
+        toolbar={<div data-toolbar />}
+      />,
+    );
+    const row = html.slice(html.indexOf("data-org-title-row"), html.indexOf("data-org-description"));
+    expect(row).toContain("</h1><button data-action");
+    expect(row).not.toContain("data-toolbar");
+    expect(html.indexOf("data-toolbar")).toBeGreaterThan(html.indexOf("data-org-description"));
+  });
+
   it("renders the measured KPIs and names the unmeasured ones once", () => {
     const html = render();
     for (const kpi of ["Merged PRs", "Change failure rate", "Cost per merged PR", "Spend"]) {

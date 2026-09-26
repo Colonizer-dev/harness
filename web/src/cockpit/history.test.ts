@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivityEntry, Session } from "../types";
-import { buildTimeline, collapse, groupRepos, groupSpan, groupText, matchesHistory, sentence, summarize, HISTORY_ALL } from "./history";
+import { buildTimeline, collapse, groupRepos, groupSpan, groupText, matchesHistory, sentence, summarize, toneFor, HISTORY_ALL } from "./history";
 import { mergeEntries, targetOf } from "./HistoryView";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -127,6 +127,9 @@ describe("filters and words", () => {
     expect(sentence({ kind: "settings.save", actor: "you", target: "secret provider-keys:x" })).toBe("You saved the secret provider-keys:x");
     expect(sentence({ kind: "loop.pause", actor: "you", target: "Nightly" })).toBe("You paused the loop “Nightly”");
     expect(sentence({ kind: "outcome.question", actor: "colony", repo: "acme/web", issue: 3 }, true)).toBe("web#3 is waiting on your answer");
+    expect(sentence({ kind: "colonize.issue", actor: "you", repo: "acme/web", issue: 100 })).toBe("You created web#100 from Colonize");
+    expect(sentence({ kind: "colonize.colony", actor: "you", repo: "acme/web", issue: 100 })).toBe("You dispatched a colony on web#100 from Colonize");
+    expect(toneFor("colonize.colony")).toBe("launch");
     expect(sentence({ kind: "from.the.future", actor: "you" })).toContain("from.the.future");
   });
 

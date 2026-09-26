@@ -40,7 +40,10 @@ import type {
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
+  CreatedIssue,
   Issue,
+  IssueDraft,
+  IssueDrafts,
   LoginView,
   Mem0Check,
   Mem0Status,
@@ -217,6 +220,10 @@ export interface Api {
   deletePushSubscription(id: string): Promise<void>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
+  /** POST /api/colonize/draft: free text as one or a few issue drafts, from the cheap summary model (the text itself when there is none). Files nothing. */
+  draftIssues(body: { text: string; repo?: string }): Promise<IssueDrafts>;
+  /** POST /api/repos/{owner}/{repo}/issues: files one issue with the Mothership's `gh`. */
+  createIssue(repo: string, body: IssueDraft): Promise<CreatedIssue>;
   /** GET /api/repos/{owner}/{repo}/packages: monorepo detection. */
   repoPackages(repo: string): Promise<RepoPackages>;
   sessions(): Promise<Session[]>;
@@ -545,6 +552,11 @@ export const httpApi: Api = {
   issues: (repo) => {
     const [owner, name] = repo.split("/");
     return request(`/api/repos/${enc(owner)}/${enc(name)}/issues`);
+  },
+  draftIssues: (body) => post("/api/colonize/draft", body),
+  createIssue: (repo, body) => {
+    const [owner, name] = repo.split("/");
+    return post(`/api/repos/${enc(owner)}/${enc(name)}/issues`, body);
   },
   repoPackages: (repo) => {
     const [owner, name] = repo.split("/");

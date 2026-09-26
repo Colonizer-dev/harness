@@ -49,7 +49,7 @@ export interface MobileMoreItem {
 export function mobileMoreViews(): MobileMoreItem[] {
   return [
     { view: "overview", label: "Overview", glyph: "overview" },
-    { view: "launch", label: "New colony", glyph: "plus" },
+    { view: "launch", label: "Launch", glyph: "plus" },
     { view: "history", label: "History", glyph: "history" },
     { view: "loops", label: "Loops", glyph: "loops" },
     { view: "memory", label: "Memory", glyph: "memory" },

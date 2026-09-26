@@ -1,6 +1,6 @@
 // The cockpit's top bar: the workspaces that have colonies running right now, as avatars at the
-// right, each a filter, then the GitHub issues button (hand issues off to colonies) and the
-// notifications bell (the inbox) at the far right. Navigation and the rest of the state live in the sidebar and the views;
+// right, each a filter, then the notifications bell (the inbox) at the far right. (Issues are handed
+// off from Colonize: the sidebar's button, the dashboard's, or ⌘K.) Navigation and the rest of the state live in the sidebar and the views;
 // the bar only speaks up otherwise when something is wrong (the mothership unreachable, the live feed
 // down).
 import { useEffect, useRef, useState, type ReactElement } from "react";
@@ -9,7 +9,6 @@ import { Avatar } from "../components/Avatar";
 import { sameOrg } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import type { LiveConnection } from "../liveStream";
-import { IssuesButton, type IssuesActions } from "./IssuesHandoff";
 import { NotificationsBell, type InboxActions } from "./NotificationsBell";
 
 export type { CockpitView } from "./NavRail";
@@ -36,12 +35,10 @@ export function Header(props: {
   connection?: LiveConnection;
   /** The inbox behind the bell; absent, the bar has no bell (static tests). */
   inbox?: InboxActions;
-  /** The issues button and its hand-off pane; absent, the bar has no button. */
-  issues?: IssuesActions;
   /** The signed-in GitHub user, shown as the one avatar at the right with its menu. */
   user?: UserMenuProps;
 }): ReactElement {
-  const { statusError, connection, inbox, issues, user } = props;
+  const { statusError, connection, inbox, user } = props;
 
   return (
     <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)]">
@@ -60,7 +57,6 @@ export function Header(props: {
 
       <div className="min-w-0 flex-1" />
 
-      {issues && <IssuesButton {...issues} />}
       {inbox && <NotificationsBell {...inbox} />}
       {user && <UserMenu {...user} />}
     </header>
