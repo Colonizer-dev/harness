@@ -330,10 +330,7 @@ fn http_base(relay: &str) -> Result<String> {
 /// has no rule for these routes) and only after the state actually changed.
 async fn record_change(app: &Shared, kind: &str, via: Option<Extension<crate::auth::Via>>) {
     let mut entry = activity::Entry::new(kind, "you");
-    entry.via = via.map(|Extension(v)| match v {
-        crate::auth::Via::Cockpit => "cockpit".to_string(),
-        crate::auth::Via::Api => "api".to_string(),
-    });
+    entry.via = activity::via_name(via.map(|Extension(v)| v));
     entry.target = Some("remote access".into());
     entry.section = Some("remote".into());
     activity::record(app, entry).await;
