@@ -507,6 +507,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(model) = s.subagent_model_override.as_deref() {
         runner_env.insert("COLONIZER_SUBAGENT_MODEL".into(), Value::String(model.into()));
     }
+    // Conditional instructions (issue #473): the agent's instruction rules can be conditioned on the
+    // task's labels, which only the mothership knows at boot; they travel as a comma-separated list.
+    if !task_labels.is_empty() {
+        runner_env.insert("COLONIZER_TASK_LABELS".into(), Value::String(task_labels.join(",")));
+    }
     // The runner reads only COLONIZER_MODEL: the tier settings are for the mothership's provider
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
     runner_env.remove("COLONIZER_MODEL_LOW");

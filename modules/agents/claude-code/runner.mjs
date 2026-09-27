@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
+import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
 import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
@@ -394,8 +395,9 @@ export function childEnv(env) {
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
+ * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [] } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -588,6 +590,26 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
       },
     ],
   };
+  if (instructions) {
+    // Conditional instructions (issue #473): appended after the gates above — they arrive first at
+    // index 0 — and never carrying a permission decision, so they cannot allow or deny anything.
+    // SessionStart re-injects after a compaction; runAgent's compact_boundary fallback covers the
+    // case where the SDK fires no SessionStart for one.
+    const withEntry = (entries, entry) => [...(entries ?? []), entry];
+    options.hooks = {
+      ...options.hooks,
+      PreToolUse: withEntry(options.hooks?.PreToolUse, {
+        matcher: PATH_TOOLS_MATCHER,
+        hooks: [async (input) => instructions.preToolUse(input)],
+      }),
+      UserPromptSubmit: withEntry(options.hooks?.UserPromptSubmit, {
+        hooks: [async (input) => instructions.userPromptSubmit(input)],
+      }),
+      SessionStart: withEntry(options.hooks?.SessionStart, {
+        hooks: [async (input) => instructions.sessionStart(input)],
+      }),
+    };
+  }
   if (pluginDirs.length) {
     options.plugins = pluginDirs.map((path) => ({ type: 'local', path }));
   }
@@ -645,8 +667,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {object} [args.options]   SDK options (canUseTool is added here)
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
+ * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
  */
-export async function runAgent({ query, commands, emit, options = {}, graceMs = 8000, enforceChoices = true }) {
+export async function runAgent({ query, commands, emit, options = {}, graceMs = 8000, enforceChoices = true, instructions = null }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -922,6 +945,10 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
             onResult(msg);
             break;
           case 'system':
+            // Conditional instructions (issue #473): the main window was just summarised. A
+            // SessionStart(compact) hook usually rebuilds the injected set itself; this covers one
+            // where the hook never fired.
+            if (msg.subtype === 'compact_boundary') instructions?.markCompacted();
             if (msg.subtype === 'init') {
               // The id a resumed boot continues (issue #562); the mothership keeps it on the
               // colony's record. Announced only when it is news, like the model below.
@@ -1126,6 +1153,15 @@ async function main() {
   // setting to gate it on.
   const waitServer = createWaitServer({ createSdkMcpServer, tool, z });
 
+  // Conditional instructions (issue #473): per-directory FOOTGUNS.md and .colonizer/instructions.toml
+  // fragments, injected through hooks once per condition per context window and re-injected after a
+  // compaction. The task's labels come from the mothership (boot.rs) for label-conditioned rules.
+  const instructions = new ConditionalInstructions({
+    workspace: process.cwd(),
+    labels: parseLabels(process.env.COLONIZER_TASK_LABELS),
+    log: ({ level, message }) => emit({ type: 'log', level, message }),
+  });
+
   const { options, warnings } = buildOptions(process.env, {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
@@ -1135,6 +1171,7 @@ async function main() {
     waitServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,
+    instructions,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
 
@@ -1149,7 +1186,7 @@ async function main() {
   }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
-  await runAgent({ query, commands, emit, options, enforceChoices });
+  await runAgent({ query, commands, emit, options, enforceChoices, instructions });
   await headroom?.close();
   await router?.close();
   process.exit(0);
