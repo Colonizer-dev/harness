@@ -412,29 +412,11 @@ pub(crate) fn apply(worktree: &Path, planned: &Materialized) -> io::Result<()> {
     Ok(())
 }
 
-/// Removes placeholders that are still empty — a masked path's placeholder is an empty file the
-/// colony cannot write through its `/dev/null` bind, so "still empty" means "never real work" —
-/// and returns what it removed. Anything the colony managed to fill, and anything missing, is
-/// left as it is: the list only ever names paths a boot put there.
-pub(crate) fn clean_placeholders(worktree: &Path, list: &Path) -> io::Result<Vec<String>> {
-    Ok(remove_empty(
-        worktree,
-        &read_list(&std::fs::read_to_string(list).unwrap_or_default()),
-        &[],
-    ))
-}
-
-/// The publish-side safety net behind [`clean_placeholders`]: any empty regular file or empty
-/// directory sitting at a policy path is removed too, even when the boot's placeholder list was
-/// lost — but only when git does not track it (`tracked` is the `git ls-files` answer for exactly
-/// these paths, taken by the caller). A tracked path is never touched, a symlink is never followed
-/// ([`safe_path`] refuses any symlink component), and anything with content stays.
-pub(crate) fn remove_empty_untracked(worktree: &Path, paths: &[String], tracked: &[String]) -> Vec<String> {
-    remove_empty(worktree, paths, tracked)
-}
-
-/// The shared body: for each path `skip` does not name (modulo a trailing `/`), remove the empty
-/// regular file or empty directory at it and return the ones removed.
+/// For each path `skip` does not name (modulo a trailing `/`), removes the empty regular file or
+/// empty directory at it and returns the ones removed. A masked placeholder is an empty file the
+/// colony cannot write through its `/dev/null` bind, so "still empty" means "never real work";
+/// anything with content stays, a symlink is never followed ([`safe_path`] refuses any symlink
+/// component), and `skip` — the paths HEAD carries — is never touched.
 fn remove_empty(worktree: &Path, paths: &[String], skip: &[String]) -> Vec<String> {
     paths
         .iter()
@@ -544,6 +526,154 @@ fn matches_any(path: &str, entries: &[String]) -> bool {
             components.ends_with(&entry)
         }
     })
+}
+
+/// What the path policy did to one colony's worktree, read back from its session's `vm/` dir: the
+/// policy its guest enforced (rebuilt from the bind list) and the placeholders its boots created.
+/// Every host-side git that snapshots, stages or cleans the worktree works from this, so a
+/// placeholder never reads as the colony's work — not in a verification's changed files, not in a
+/// pull request.
+#[derive(Debug, Default)]
+pub(crate) struct Recorded {
+    pub policy: Policy,
+    pub placeholders: Vec<String>,
+}
+
+impl Recorded {
+    pub(crate) fn read(vm_dir: &Path) -> Recorded {
+        Recorded {
+            policy: from_bind_list(&std::fs::read_to_string(vm_dir.join(POLICY_FILE)).unwrap_or_default()),
+            placeholders: read_list(&std::fs::read_to_string(vm_dir.join(PLACEHOLDERS_FILE)).unwrap_or_default()),
+        }
+    }
+
+    /// Every path a placeholder could sit at: the recorded ones, and — for when that list was
+    /// lost — every bound policy path. Deduplicated, in order.
+    pub(crate) fn candidates(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for path in self
+            .placeholders
+            .iter()
+            .chain(self.policy.masked.iter())
+            .chain(self.policy.protected.iter())
+        {
+            if !out.iter().any(|p| same_path(p, path)) {
+                out.push(path.clone());
+            }
+        }
+        out
+    }
+}
+
+/// A pathspec naming exactly one worktree-relative path: from the worktree root whatever git's
+/// cwd, and with no glob characters interpreted.
+pub(crate) fn literal_pathspec(rel: &str) -> String {
+    format!(":(top,literal){rel}")
+}
+
+/// Whether `path` is a bound masked entry itself, or below a bound masked directory — anchored at
+/// the worktree root, which is where the guest's binds sit (unlike [`violations`], which matches at
+/// any depth for reporting).
+fn under_bound_mask(path: &str, masked: &[String]) -> bool {
+    masked.iter().any(|entry| {
+        let bare = entry.trim_end_matches('/');
+        path == bare || path.strip_prefix(bare).is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Why git must not take a staged path from a colony's worktree, or `None` when it is the
+/// colony's work. `in_head` answers whether HEAD — the checkout as the repository has it — carries
+/// the path.
+///
+/// - **Masked**: a bound masked path never leaves the worktree changed. The colony cannot see it,
+///   so no change there is its work: a real file stays exactly as the repository has it (never
+///   emptied, never rewritten), and one the repository does not have is never added.
+/// - **Placeholder**: a recorded placeholder or policy path HEAD does not carry and that holds no
+///   bytes — an empty file the boot made for a bind target, never work.
+pub(crate) fn hold_back_reason(worktree: &Path, path: &str, rec: &Recorded, in_head: bool) -> Option<&'static str> {
+    if under_bound_mask(path, &rec.policy.masked) {
+        return Some("masked");
+    }
+    let candidate = rec.candidates().iter().any(|c| same_path(c, path));
+    if candidate && !in_head {
+        let holds_bytes = safe_path(worktree, path)
+            .and_then(|p| std::fs::symlink_metadata(p).ok())
+            .is_some_and(|meta| meta.is_file() && meta.len() > 0);
+        if !holds_bytes {
+            return Some("an empty path-policy placeholder");
+        }
+    }
+    None
+}
+
+/// Takes back out of the index whatever [`hold_back_reason`] refuses, after a `git add -A`: each
+/// such staged path is reset to HEAD's version (or dropped from the index when HEAD has none), so
+/// a snapshot or a commit made from this index carries the path exactly as the repository has it.
+/// `git` builds a command against the index in question (the worktree's, or a verification's temp
+/// index). Answers `(path, reason)` for each path held back. No git runs when the colony recorded
+/// no policy at all.
+pub(crate) async fn hold_back_staged(
+    git: impl Fn() -> tokio::process::Command,
+    worktree: &Path,
+    rec: &Recorded,
+    limit: std::time::Duration,
+) -> anyhow::Result<Vec<(String, &'static str)>> {
+    if rec.policy.masked.is_empty() && rec.candidates().is_empty() {
+        return Ok(Vec::new());
+    }
+    let staged = z_paths(&crate::util::exec_within(limit, git().args(["diff", "--cached", "--name-only", "-z", "HEAD"])).await?);
+    let candidates = rec.candidates();
+    let relevant: Vec<&String> = staged
+        .iter()
+        .filter(|p| under_bound_mask(p, &rec.policy.masked) || candidates.iter().any(|c| same_path(c, p)))
+        .collect();
+    if relevant.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ls = git();
+    ls.args(["ls-tree", "-r", "-z", "--full-tree", "--name-only", "HEAD", "--"])
+        .args(relevant.iter().map(|p| literal_pathspec(p)));
+    let in_head: HashSet<String> = z_paths(&crate::util::exec_within(limit, &mut ls).await?)
+        .into_iter()
+        .collect();
+    let held: Vec<(String, &'static str)> = relevant
+        .into_iter()
+        .filter_map(|p| hold_back_reason(worktree, p, rec, in_head.contains(p)).map(|why| (p.clone(), why)))
+        .collect();
+    if !held.is_empty() {
+        let mut reset = git();
+        reset
+            .args(["reset", "-q", "HEAD", "--"])
+            .args(held.iter().map(|(p, _)| literal_pathspec(p)));
+        crate::util::exec_within(limit, &mut reset).await?;
+    }
+    Ok(held)
+}
+
+/// Removes this colony's leftover placeholders from its worktree — the recorded ones, and any
+/// empty path at a policy entry when the list was lost — and answers what it removed. Only an
+/// empty regular file or empty directory goes, never through a symlink, and never a path HEAD
+/// carries: a file the checkout has is the repository's, whatever its size. Runs where the
+/// microVM is gone (its binds need the targets while it runs): before publish stages, and when a
+/// stop or teardown ends the VM. A resume's boot makes them again.
+pub(crate) async fn remove_leftovers(
+    app: &crate::App,
+    admin: &Path,
+    worktree: &Path,
+    vm_dir: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let rec = Recorded::read(vm_dir);
+    let candidates = rec.candidates();
+    if candidates.is_empty() || !worktree.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut ls = app.git(admin);
+    ls.arg("--work-tree")
+        .arg(worktree)
+        .args(["ls-tree", "-r", "-z", "--full-tree", "--name-only", "HEAD", "--"])
+        .args(candidates.iter().map(|p| literal_pathspec(p)));
+    let in_head = z_paths(&crate::util::exec_within(std::time::Duration::from_secs(30), &mut ls).await?);
+    Ok(remove_empty(worktree, &candidates, &in_head))
 }
 
 #[cfg(test)]
@@ -802,7 +932,7 @@ mod tests {
         assert_eq!(resumed.placeholders, vec![(".env".to_string(), false)], "{resumed:?}");
         let mut list = planned.placeholder_names();
         list.push(".missing".to_string());
-        let removed = clean_placeholders(&wt.path, &fake_list(&wt, &list)).unwrap();
+        let removed = remove_empty(&wt.path, &list, &[]);
         assert_eq!(removed, vec![".env".to_string()], "{removed:?}");
         assert!(!wt.path.join(".env").exists(), "the still-empty placeholder is gone");
         assert!(wt.path.join(".claude/settings.json").exists(), "a filled directory stays");
@@ -830,7 +960,7 @@ mod tests {
             "linked.env",
             "missing",
         ];
-        let removed = remove_empty_untracked(
+        let removed = remove_empty(
             &wt.path,
             &paths.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             &["tracked.env".to_string()],
@@ -843,12 +973,80 @@ mod tests {
         wt.close();
     }
 
-    /// Writes a stand-in placeholder list inside the worktree, the way a boot would have left one
-    /// in `vm/`; the file is removed with the worktree by `close()`.
-    fn fake_list(wt: &TempDirGuard, placeholder_list: &[String]) -> PathBuf {
-        let list = wt.path.join("placeholders-list");
-        std::fs::write(&list, placeholder_list.join("\n")).unwrap();
-        list
+    /// What git must not take from a worktree: anything under a bound mask (anchored at the root,
+    /// where the binds sit), and an empty placeholder or policy path HEAD does not carry. Filled
+    /// untracked files at unmasked policy paths, tracked files at placeholder paths, and nested
+    /// look-alikes are the colony's work.
+    #[test]
+    fn what_is_held_back_from_a_snapshot_or_commit() {
+        let wt = tempfile("hold_back");
+        std::fs::write(wt.path.join(".mcp.json"), "").unwrap();
+        std::fs::write(wt.path.join(".gitmodules"), "[submodule]").unwrap();
+        std::fs::create_dir_all(wt.path.join("vendor")).unwrap();
+        std::fs::write(wt.path.join("vendor/.env"), "X=1").unwrap();
+        let rec = Recorded {
+            policy: from_bind_list("mask-file .env\nmask-dir secrets/\nprotect .mcp.json\nprotect .gitmodules\n"),
+            placeholders: vec![".envrc".into(), ".mcp.json".into()],
+        };
+        assert_eq!(
+            rec.candidates(),
+            vec![".envrc", ".mcp.json", ".env", "secrets/", ".gitmodules"],
+            "the recorded placeholders, then every bound path, once each"
+        );
+        let why = |path: &str, in_head: bool| hold_back_reason(&wt.path, path, &rec, in_head);
+        assert_eq!(why(".env", true), Some("masked"), "a masked real file stays as HEAD has it");
+        assert_eq!(why(".env", false), Some("masked"), "and a masked new file is never added");
+        assert_eq!(why("secrets/key.pem", false), Some("masked"));
+        assert_eq!(why("secrets", false), Some("masked"));
+        assert_eq!(why("secretsx/a", false), None, "components, not string prefixes");
+        assert_eq!(why("vendor/.env", false), None, "only the root-level bind was masked");
+        assert_eq!(
+            why(".envrc", false),
+            Some("an empty path-policy placeholder"),
+            "absent on disk"
+        );
+        assert_eq!(why(".mcp.json", false), Some("an empty path-policy placeholder"));
+        assert_eq!(why(".mcp.json", true), None, "the repository's own empty file");
+        assert_eq!(why(".gitmodules", false), None, "bytes are work, not a placeholder");
+        assert_eq!(why("src/lib.rs", false), None);
+        assert_eq!(literal_pathspec("a*b"), ":(top,literal)a*b");
+        wt.close();
+    }
+
+    /// The colony ends (a stop, or any teardown of its microVM): the placeholders its boots made
+    /// come back out of the kept worktree, and nothing else does — not a file HEAD carries, even an
+    /// empty one at a recorded placeholder path, not a filled one, not the masked real file.
+    #[tokio::test]
+    async fn ending_the_colony_removes_only_the_placeholders_it_made() {
+        use crate::verify::tests::{INCIDENT_PLACEHOLDERS, git, git_commit, materialise_incident_policy};
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", crate::sessions::SessionStatus::Stopped).await;
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".env"), "SECRET=real\n").unwrap();
+        std::fs::write(repo.join(".pypirc"), "").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "base");
+        materialise_incident_policy(&app.session_dir("abc").join("vm"), &repo, true);
+        std::fs::write(repo.join(".netrc"), "machine x login y").unwrap();
+        app.update_session("abc", |x| {
+            x.worktree = repo.display().to_string();
+            x.git_admin_dir = Some(repo.join(".git").display().to_string());
+        })
+        .await;
+        let s = app.session("abc").await.unwrap();
+        crate::lifecycle::teardown_vm(&app, &s).await;
+        for p in INCIDENT_PLACEHOLDERS {
+            let kept = matches!(p, ".pypirc" | ".netrc");
+            assert_eq!(repo.join(p).exists(), kept, "{p}");
+        }
+        assert_eq!(std::fs::read_to_string(repo.join(".env")).unwrap(), "SECRET=real\n");
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]),
+            "?? .netrc",
+            "only the filled one is left untracked"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Little local tempdir helper, so the tests do not need a new dev-dependency. Named and

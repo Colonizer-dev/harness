@@ -238,9 +238,10 @@ stateDiagram-v2
    beside ones that are there — a file deliberately not created, or one for other work — is an
    advisory, shown with the verdict and in the pull request, and never changes it. The command comes from the
    `publish` module's `verify` setting — `auto` (the default) reads the repository's own declaration on
-   the base branch (package.json `scripts.test` → `npm ci && npm test`, or `npm install && npm
-   test` without a lockfile; else Cargo.toml → `cargo test`; else a Makefile `test:` target →
-   `make test`), `none` means unverifiable by declaration, and a colony's own `verify`
+   the base branch (package.json `scripts.test`, run by the repository's own package manager —
+   the `packageManager` field, else the root lockfile: bun, pnpm, yarn or npm, and `npm install &&
+   npm test` without one — else Cargo.toml → `cargo test`; else a Makefile `test:` target →
+   `make test`; a tool the colony image lacks leaves the claim unverifiable), `none` means unverifiable by declaration, and a colony's own `verify`
    overrides it. Autopilot publishes on `confirmed` and `unverifiable` exactly as before; on
    `contradicted` it holds the colony the same way an errored turn does. The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)

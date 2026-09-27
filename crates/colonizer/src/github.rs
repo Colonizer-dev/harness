@@ -1557,41 +1557,35 @@ impl PublishOps for GitPublishOps<'_> {
 
     async fn stage_all(&self) -> Result<bool> {
         // Path policy (docs/path-policy.md): the boot's placeholders for absent masked or protected
-        // entries must never land in a pull request, so the still-empty ones go before staging.
-        // What the colony filled — through a path the policy let it reach — is real work and stays.
+        // entries must never land in a pull request, so the still-empty ones go before staging —
+        // the recorded ones, and any empty untracked path at a policy entry when the list was lost.
+        // A path HEAD carries is the checkout's, never ours to delete.
         let vm_dir = self.session_dir.join("vm");
-        let placeholders = std::fs::read_to_string(vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE)).unwrap_or_default();
-        let mut removed = crate::path_policy::clean_placeholders(&self.wt, &vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE))?;
-        // Second line of defence for the same accident: an empty path at a policy entry goes even
-        // when the boot's placeholder list was lost — but only if git does not track it (a tracked
-        // file is the checkout's, never ours to delete) and it is not a symlink.
-        let policy = crate::path_policy::from_bind_list(
-            &std::fs::read_to_string(vm_dir.join(crate::path_policy::POLICY_FILE)).unwrap_or_default(),
-        );
-        let mut policy_paths: Vec<String> = policy.masked.iter().chain(policy.protected.iter()).cloned().collect();
-        policy_paths.extend(crate::path_policy::read_list(&placeholders));
-        if !policy_paths.is_empty() {
-            let mut ls = self.wt_git();
-            ls.arg("ls-files").arg("-z").arg("--").args(&policy_paths);
-            let tracked = crate::path_policy::z_paths(&exec(&mut ls).await?);
-            removed.extend(crate::path_policy::remove_empty_untracked(&self.wt, &policy_paths, &tracked));
-        }
-        for rel in removed {
+        for rel in crate::path_policy::remove_leftovers(self.app, &self.admin, &self.wt, &vm_dir).await? {
             self.log
                 .info(format!("path policy: removed the empty placeholder for {rel}"))
                 .await;
         }
         exec(self.wt_git().args(["add", "-A"])).await?;
-        // Changed masked or protected paths are reported, not rewritten: the commit stays the
-        // colony's, and the colony record is where an operator reads what it touched (issue #300).
-        // Each line once per colony: publish retries re-stage the same tree, and the record does
-        // not need the same warning twice.
+        // Changed masked or protected paths are reported: the colony record is where an operator
+        // reads what it touched (issue #300). Each line once per colony: publish retries re-stage
+        // the same tree, and the record does not need the same warning twice.
+        let rec = crate::path_policy::Recorded::read(&vm_dir);
         let changed = exec(self.wt_git().args(["diff", "--cached", "--name-only", "-z"])).await?;
         let runtime = self.app.runtime(&self.s.id).await;
-        for message in crate::path_policy::violations(&crate::path_policy::z_paths(&changed), &policy) {
+        for message in crate::path_policy::violations(&crate::path_policy::z_paths(&changed), &rec.policy) {
             if runtime.warn_path_policy_once(&message).await {
                 self.app.session_log(&self.s.id, "warn", message).await;
             }
+        }
+        // And whatever the policy put there, or hid, never goes into the commit — even when the
+        // removal above missed it: a masked path stays exactly as the repository has it, and an
+        // empty placeholder is not staged at all.
+        let held = crate::path_policy::hold_back_staged(|| self.wt_git(), &self.wt, &rec, Duration::from_secs(30)).await?;
+        for (rel, why) in held {
+            self.log
+                .warn(format!("path policy: left {rel} out of the commit ({why})"))
+                .await;
         }
         Ok(!exec_status(self.wt_git().args(["diff", "--cached", "--quiet"])).await?)
     }
@@ -4172,6 +4166,80 @@ mod tests {
         *app.github_viewer.lock().await = Some(cached(&key, Duration::from_secs(1), Ok(seeded)));
         let user = viewer(&app).await.unwrap();
         assert_eq!(user["login"], "cached-user");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Colony 4ddc1540's worktree at publish: the boot's six empty placeholders, a masked real
+    /// `.env` that changed on the host all the same, an untracked credential file under a mask, and
+    /// a placeholder path a later checkout now tracks. Publish stages and commits only the
+    /// colony's own work: the placeholders go (the tracked one stays on disk), the masked files
+    /// stay exactly as the repository has them, and the commit carries `src/fix.ts` alone.
+    #[tokio::test]
+    async fn a_publish_commit_never_carries_path_policy_placeholders_or_masked_files() {
+        use crate::verify::tests::{INCIDENT_PLACEHOLDERS, git, git_commit, materialise_incident_policy};
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Stopped).await;
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".env"), "SECRET=real\n").unwrap();
+        // The checkout now tracks one of the recorded placeholder paths (empty, as the repository
+        // has it): the repository's file, never ours to delete.
+        std::fs::write(repo.join(".pypirc"), "").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "base");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "-b", "colonizer/work"]);
+        let vm_dir = app.session_dir("abc").join("vm");
+        materialise_incident_policy(&vm_dir, &repo, true);
+        let mut binds = std::fs::read_to_string(vm_dir.join("path-policy")).unwrap();
+        binds.push_str("mask-file .npmrc\n");
+        std::fs::write(vm_dir.join("path-policy"), binds).unwrap();
+        std::fs::write(repo.join(".npmrc"), "//registry.npmjs.org/:_authToken=leaked\n").unwrap();
+        std::fs::write(repo.join(".env"), "").unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/fix.ts"), "export const fixed = true;\n").unwrap();
+
+        let s = app.session("abc").await.unwrap();
+        let log = app.logger("abc");
+        let ops = GitPublishOps {
+            app: &app,
+            s: &s,
+            log: &log,
+            admin: repo.join(".git"),
+            wt: repo.clone(),
+            bare: repo.join(".git"),
+            base: Mutex::new("main".into()),
+            lease: Mutex::new(None),
+            pending_base: Mutex::new(None),
+            session_dir: app.session_dir("abc"),
+        };
+        assert!(ops.stage_all().await.unwrap(), "the colony's own change is staged");
+        assert_eq!(git(&repo, &["diff", "--cached", "--name-only"]), "src/fix.ts");
+        for p in INCIDENT_PLACEHOLDERS {
+            assert_eq!(
+                repo.join(p).exists(),
+                p == ".pypirc",
+                "{p}: only the tracked one is left on disk"
+            );
+        }
+        git_commit(&repo, "the colony's work");
+        assert_eq!(git(&repo, &["show", "--name-only", "--format=", "HEAD"]), "src/fix.ts");
+        assert_eq!(
+            git(&repo, &["show", "HEAD:.env"]),
+            "SECRET=real",
+            "the masked file is committed as the repository has it"
+        );
+        assert!(
+            git(&repo, &["ls-tree", "-r", "--name-only", "HEAD"])
+                .lines()
+                .all(|p| p != ".npmrc"),
+            "a file under a mask is never added"
+        );
+        let logged = app.runtime("abc").await.logs.lock().await.clone();
+        let text = serde_json::to_string(&logged).unwrap();
+        assert!(text.contains("left .env out of the commit (masked)"), "{text}");
+        assert!(text.contains("removed the empty placeholder for .envrc"), "{text}");
+        assert!(!text.contains("leaked"), "no file contents in the log");
         let _ = std::fs::remove_dir_all(root);
     }
 }

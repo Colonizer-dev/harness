@@ -111,18 +111,43 @@ host path at boot already, so `.git/config` and `.git/hooks/` are beyond the
 colony's reach without a bind of their own; they are listed above for the
 record and for reporting.
 
-**Host, at publish.** Before `git add -A`, the recorded placeholders that are
-still empty regular files or empty directories are removed, so nothing
-placeholder-shaped ever lands in a pull request. (A placeholder cannot be
-filled through its mask — writes go to `/dev/null` — so "still empty" means
-"never real work".) A second pass covers the list being lost: an empty path
-at a policy entry goes too, but only when git does not track it and it is not
-a symlink — a tracked file is the checkout's, never ours to delete. After
-staging, every staged path matching a masked or protected entry is logged on
-the colony at warn level — *path policy: `<path>` is masked and changed
-during the session* — without file contents, once per colony so publish
-retries do not repeat the same lines. Reporting only, on purpose: the commit
-stays the colony's, and the log is the record.
+**Host, whenever it reads the colony's work.** The placeholders are the
+policy's, never the colony's work, and the masked files are not the colony's to
+change. Every host-side git that snapshots or stages the worktree works from
+the boot's two records (`vm/path-policy` and `vm/path-policy.placeholders`)
+and, after its `git add -A`, takes back out of the index:
+
+- any path under a bound masked entry — reset to HEAD's version, so a real
+  masked file is carried exactly as the repository has it (never emptied or
+  rewritten) and one the repository does not have is never added; and
+- any recorded placeholder, or any policy path when that list was lost, that
+  HEAD does not carry and that holds no bytes.
+
+The verification snapshot does this in its private temp index, so its
+`files_changed` and the fresh checkout it tests never include a placeholder,
+and the agent's worktree is untouched. Publish does it before the commit and
+logs each held-back path at warn level — *path policy: left `<path>` out of the
+commit (masked)* — without file contents.
+
+Git has no per-worktree exclude file: `info/exclude` (what `git rev-parse
+--git-path info/exclude` names) lives in the repository's common directory,
+shared by every colony on the same repository, so placeholders are not written
+there. The per-command hold-back above keeps the exclusion to this colony.
+
+**Host, when the microVM ends and at publish.** Once the microVM is gone (a
+stop, a teardown, the start of a publish) the placeholders have nothing left to
+be bind targets for, and the still-empty ones are removed from the kept
+worktree: the recorded ones, and an empty path at a policy entry when the list
+was lost. Never a path HEAD carries — a file the checkout has is the
+repository's, whatever its size — never through a symlink, and never anything
+with content. (A placeholder cannot be filled through its mask — writes go to
+`/dev/null` — so "still empty" means "never real work".) A resume's boot makes
+them again. After staging, every staged path matching a masked or protected
+entry is also logged on the colony at warn level — *path policy: `<path>` is
+masked and changed during the session* — without file contents, once per
+colony so publish retries do not repeat the same lines. A changed protected
+path is reported and stays in the commit, which is the colony's; a masked one
+is held back as above.
 
 ## Not yet covered
 
