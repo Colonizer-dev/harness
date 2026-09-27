@@ -94,7 +94,8 @@ test('recall is wired in only when both env vars are set and the server exists',
   assert.deepEqual(on.mcpServers, { [RECALL_SERVER]: fakeServer });
   assert.ok(on.systemPrompt.append.includes(RECALL_PROMPT_APPEND));
   // Read-only, so subagents may recall too: no gate is registered, and no allowedTools entry shadows canUseTool.
-  assert.equal(on.hooks?.PreToolUse, undefined);
+  // Only the exec policy's Bash hook (#471), which every colony gets; recall adds no gate of its own.
+  assert.deepEqual((on.hooks?.PreToolUse ?? []).map((e) => e.matcher), ['Bash']);
   assert.equal(on.allowedTools, undefined);
 });
 
