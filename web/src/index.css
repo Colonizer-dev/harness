@@ -179,6 +179,37 @@ body {
   scrollbar-color: var(--border-strong) transparent;
 }
 
+/* The shared page container (cockpit/Page.tsx). Every view but the Nest sits in one frame:
+   fluid width, side gutters that grow with the window (24px on a phone, as before, up to 56px on
+   a big display), and a cap per kind of content. The frame is a size container, so a view can
+   lay sections side by side with `@min-[…]:` only when its own column is wide enough. */
+[data-page] {
+  --page-gutter: clamp(24px, 2.5vw, 56px);
+  /* Dashboards, tables and lists: the cap only keeps a 5K screen from stretching one row across it. */
+  --page-max: 2560px;
+  /* Chart plot height: 200px on a laptop, taller as the frame widens. */
+  --chart-h: clamp(200px, 11vw, 320px);
+}
+[data-page="readable"],
+[data-page][data-cap="readable"] {
+  /* Forms and prose: past this a label and its control, or a line of text, drift too far apart. */
+  --page-max: 1280px;
+}
+.page-frame {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--page-max) + 2 * var(--page-gutter));
+  margin-inline: auto;
+  padding-inline: var(--page-gutter);
+  container-type: inline-size;
+}
+/* Chrome inside a full-bleed page (Settings' tabs, pane header, body and footer): borders run the
+   full width, while the padding centres the content at the page's cap. `--pad-x` is the padding
+   it keeps when the window is narrower than the cap. Inert outside a page (the Settings dialog). */
+[data-page] .page-pad {
+  padding-inline: max(var(--pad-x, 1.25rem), calc((100% - var(--page-max)) / 2));
+}
+
 /* Markdown inside chat messages */
 .md > :first-child {
   margin-top: 0;

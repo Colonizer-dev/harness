@@ -34,6 +34,7 @@ import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
 import { NestDashboard } from "./NestDashboard";
 import { OverviewView } from "./OverviewView";
+import { Page } from "./Page";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
@@ -53,11 +54,12 @@ function storedDashOpen(): boolean | null {
 
 const THEME_KEY = "colonizer.theme";
 
-const VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code", "chat"];
+/** Every view the rail can route to; "home" is the Nest. */
+export const COCKPIT_VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code", "chat"];
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
-  return VIEWS.includes(saved as CockpitView) ? (saved as CockpitView) : "home";
+  return COCKPIT_VIEWS.includes(saved as CockpitView) ? (saved as CockpitView) : "home";
 }
 
 function storedTheme(): "light" | "dark" | null {
@@ -405,12 +407,18 @@ export function Cockpit({
 
   const body = () => {
     switch (view) {
+      // Tools that own their panes edge to edge sit in the full-bleed page; Settings caps its
+      // columns at the readable width inside it.
       case "colony":
-        return colony;
+        return <Page width="full">{colony}</Page>;
       case "memory":
-        return memory;
+        return <Page width="full">{memory}</Page>;
       case "settings":
-        return settings(() => setView("home"));
+        return (
+          <Page width="full" cap="readable">
+            {settings(() => setView("home"))}
+          </Page>
+        );
       case "overview":
         return (
           <OverviewView
@@ -474,27 +482,29 @@ export function Cockpit({
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "chat":
         return (
-          <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
-            <ChatView
-              org={selectedOrg}
-              repos={repos}
-              sessions={sessions}
-              autopilotDefault={autopilotDefault}
-              initialPrompt={askPrompt}
-              onPromptTaken={() => setAskPrompt(null)}
-              onCreated={(session) => {
-                onCreated(session);
-                setView("home");
-              }}
-              workspaces={workspaces}
-              onOpenFile={(repo, path) => {
-                const owner = repo.split("/")[0];
-                if (!sameOrg(owner, selectedOrg)) onSelectOrg(owner);
-                setCodeRequest((r) => ({ repo, path, n: (r?.n ?? 0) + 1 }));
-                setView("code");
-              }}
-            />
-          </Suspense>
+          <Page width="full">
+            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
+              <ChatView
+                org={selectedOrg}
+                repos={repos}
+                sessions={sessions}
+                autopilotDefault={autopilotDefault}
+                initialPrompt={askPrompt}
+                onPromptTaken={() => setAskPrompt(null)}
+                onCreated={(session) => {
+                  onCreated(session);
+                  setView("home");
+                }}
+                workspaces={workspaces}
+                onOpenFile={(repo, path) => {
+                  const owner = repo.split("/")[0];
+                  if (!sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+                  setCodeRequest((r) => ({ repo, path, n: (r?.n ?? 0) + 1 }));
+                  setView("code");
+                }}
+              />
+            </Suspense>
+          </Page>
         );
       case "host":
         return (
@@ -585,7 +595,9 @@ export function Cockpit({
         update={update}
         onOpenUpdates={() => onOpenSettings("updates")}
       />
-      <div className="relative isolate grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)]">
+      {/* Pinned to the second track: below `sm` the rail is display:none, and an auto-placed column
+          would then size to its content — which a page frame (a size container) does not report. */}
+      <div className="relative isolate col-start-2 grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)]">
       {/* The v3 halo: a faint radial glow behind the top of the page, under the glass bar. */}
       <div aria-hidden="true" className="v3-halo" />
       <Header

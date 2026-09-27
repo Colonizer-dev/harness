@@ -6,6 +6,7 @@ import { Suspense, lazy, useEffect, useMemo, useState, type ReactElement } from 
 import { useApi } from "../context";
 import type { OrgInfo, Repo, RepoCoverage, RepoGitSummary, RepoLoc, RepoMeta, Session } from "../types";
 import { Avatar } from "../components/Avatar";
+import { Page } from "./Page";
 import { Spinner, cx, sameOrg, store, stored, timeAgo } from "../components/ui";
 import { Segmented } from "./ListControls";
 import { languageColor } from "./RepoPicker";
@@ -163,7 +164,7 @@ function RepoCodeTable({ repos, facts, sessions, onOpen }: { repos: string[]; fa
             const live = liveCount(sessions, repo);
             return (
               <tr key={repo} className="border-b border-border/60 last:border-b-0 hover:bg-panel-2">
-                <td className="max-w-[18rem] py-2.5 pl-4 pr-4">
+                <td className="max-w-[18rem] py-2.5 pl-4 pr-4 @min-[1600px]:max-w-[32rem]">
                   <div className="flex items-center gap-2">
                     <span className="truncate font-mono text-[13px] font-semibold text-text">{repo.split("/")[1]}</span>
                     {live > 0 && <span className="shrink-0 text-[11.5px] text-accent">{live} live</span>}
@@ -288,31 +289,33 @@ export function CodeView({
 
   if (editing) {
     return (
-      <Suspense
-        fallback={
-          <div className="flex flex-1 items-center justify-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading the editor…
-          </div>
-        }
-      >
-        <CodeEditor
-          key={editing}
-          repo={editing}
-          initialPath={initialPath}
-          onClose={() => {
-            setEditing(null);
-            setInitialPath(null);
-          }}
-          onCreated={onCreated}
-          onOpenColony={onOpenColony}
-        />
-      </Suspense>
+      <Page width="full">
+        <Suspense
+          fallback={
+            <div className="flex flex-1 items-center justify-center gap-2 text-[13px] text-muted">
+              <Spinner /> Loading the editor…
+            </div>
+          }
+        >
+          <CodeEditor
+            key={editing}
+            repo={editing}
+            initialPath={initialPath}
+            onClose={() => {
+              setEditing(null);
+              setInitialPath(null);
+            }}
+            onCreated={onCreated}
+            onOpenColony={onOpenColony}
+          />
+        </Suspense>
+      </Page>
     );
   }
 
   if (!selectedOrg || !org) {
     return (
-      <main className="scroll-thin flex-1 overflow-y-auto px-8 py-8">
+      <Page>
         <h1 className="m-0 text-[30px] font-semibold tracking-[-0.035em] text-text">Code</h1>
         <p className="mt-2 text-[14px] text-muted">The Code page is per workspace. Pick one:</p>
         <div className="mt-5 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
@@ -328,13 +331,13 @@ export function CodeView({
               </button>
             ))}
         </div>
-      </main>
+      </Page>
     );
   }
 
   const orgShares = shares(totals.by_language);
   return (
-    <main className="scroll-thin flex-1 overflow-y-auto px-8 py-8">
+    <Page>
       <header className="flex flex-wrap items-start gap-4">
         <Avatar name={org.org} src={org.avatar_url} size={44} rounded="xl" />
         <div className="min-w-0 flex-1">
@@ -367,13 +370,14 @@ export function CodeView({
       ) : layout === "list" ? (
         <RepoCodeTable repos={orgRepos} facts={facts} sessions={sessions} onOpen={setEditing} />
       ) : (
-        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        // As many cards as fit at a comfortable width: two on a laptop, more on a wide screen.
+        <div className="mt-6 grid grid-cols-[repeat(auto-fill,minmax(min(100%,440px),1fr))] gap-4">
           {orgRepos.map((repo) => (
             <RepoCodeCard key={repo} repo={repo} facts={facts[repo]} live={liveCount(sessions, repo)} onOpen={() => setEditing(repo)} />
           ))}
         </div>
       )}
-    </main>
+    </Page>
   );
 }
 

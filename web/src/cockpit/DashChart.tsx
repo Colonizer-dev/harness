@@ -112,7 +112,7 @@ export function KpiTile({ label, value, valueNum, formatNum, delta, deltaTone, s
         {delta && emptyNote == null && <span className={`whitespace-nowrap text-[12.5px] ${DELTA_CLASS[deltaTone ?? "flat"]}`}>{delta}</span>}
       </div>
       {spark && emptyNote == null ? <Sparkline points={spark} color={stroke} /> : <div aria-hidden="true" className="mt-1 h-6" />}
-      <div className="truncate text-[12.5px] text-faint">{emptyNote ?? sub ?? ""}</div>
+      <div className="line-clamp-2 text-[12.5px] text-faint [overflow-wrap:anywhere]">{emptyNote ?? sub ?? ""}</div>
     </div>
   );
 }
@@ -302,13 +302,13 @@ export function AreaChart({
         ))}
       </div>
       <div className="mt-4 flex gap-2.5">
-        <div aria-hidden="true" className="flex h-[200px] w-[34px] shrink-0 flex-col justify-between text-right font-mono text-[11px] leading-none text-faint">
+        <div aria-hidden="true" className="flex h-[var(--chart-h,200px)] w-[34px] shrink-0 flex-col justify-between text-right font-mono text-[11px] leading-none text-faint">
           {[4, 3, 2, 1, 0].map((k) => (
             <span key={k}>{fmtY(step * k)}</span>
           ))}
         </div>
         <div className="min-w-0 flex-1">
-          <div role="img" aria-label={`${series.map((s) => s.label).join(", ")} per day`} onMouseLeave={() => setHover(null)} className="dash-overlay relative h-[200px]">
+          <div role="img" aria-label={`${series.map((s) => s.label).join(", ")} per day`} onMouseLeave={() => setHover(null)} className="dash-overlay relative h-[var(--chart-h,200px)]">
             <div aria-hidden="true" className="absolute inset-x-0 top-0 border-t border-dashed border-border" />
             <div aria-hidden="true" className="absolute inset-x-0 top-1/2 border-t border-dashed border-border" />
             <div aria-hidden="true" className="absolute inset-x-0 bottom-0 border-t border-border" />
@@ -495,7 +495,7 @@ export function ChartSection({
           {typeof chart === "function" ? chart(hot) : chart}
           {foot && <div className="mt-3 text-[12.5px] text-faint">{foot}</div>}
         </div>
-        <div className="flex min-w-0 flex-[1_1_240px] flex-col gap-0.5 py-5 pl-6 shadow-[-1px_0_0_var(--border)]">
+        <div className="flex min-w-0 flex-[1_1_240px] flex-col gap-0.5 py-5 pl-6 shadow-[-1px_0_0_var(--border)] @min-[1400px]:max-w-[480px]">
           <div className="mb-2 text-[13px] text-muted">{sideTitle}</div>
           {rows.map((row) => {
             const body = (

@@ -146,7 +146,7 @@ describe("AreaChart", () => {
     expect(html).toContain("Last 3 days");
     expect(html).toContain("acme <span");
     expect(html).toContain("Sep 1");
-    expect(html).toContain("h-[200px]");
+    expect(html).toContain("h-[var(--chart-h,200px)]");
   });
   it("draws the dashed ghost only when given", () => {
     const withGhost = renderToStaticMarkup(<AreaChart series={series} labels={["a", "b", "c"]} ghost={[2, null, 1]} format={(v) => String(v)} readTitle="r" />);

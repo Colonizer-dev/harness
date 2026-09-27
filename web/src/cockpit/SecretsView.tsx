@@ -10,6 +10,7 @@ import {
   useState,
   type ReactElement,
 } from "react";
+import { Page } from "./Page";
 
 import { errorMessage, useApi, useToast } from "../context";
 import {
@@ -206,160 +207,158 @@ export function SecretsView({
     ).length ?? 0;
 
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-24 pt-10">
-      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-8">
-        <div>
-          <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
-            Secrets
-          </h1>
-          <p className="mt-2 text-[14px] text-muted">
-            {listing
-              ? `${saved} saved · ${onFile.length} on file · values are never shown`
-              : "Reading what this mothership holds…"}
-          </p>
-        </div>
-
-        <SectionHero
-          guide={guide(keychain?.backend ?? "none")}
-          stats={
-            keychain
-              ? [
-                  {
-                    label: keychain.backend,
-                    value: keychain.available ? "Available" : "Unavailable",
-                    tone: keychain.available ? "ok" : "warn",
-                  },
-                  {
-                    label: "In keychain",
-                    value: String(
-                      listing?.secrets.filter((r) => r.location === "keychain")
-                        .length ?? 0,
-                    ),
-                  },
-                  {
-                    label: "On file",
-                    value: String(onFile.length),
-                    tone: onFile.length > 0 ? "warn" : undefined,
-                  },
-                ]
-              : []
-          }
-        />
-
-        <SectionHero guide={COLONY_GUIDE} />
-
-        {keychain && !keychain.available && (
-          <div
-            role="status"
-            className="rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-[13px] text-text"
-          >
-            <div className="font-medium">
-              The keychain is not available on this host, so secrets are saved
-              as 0600 files.
-            </div>
-            <div className="mt-1 text-muted">
-              {keychain.reason ?? "No reason given."} On Linux the Secret
-              Service needs a desktop session with an unlocked keyring (GNOME
-              Keyring or KWallet); a mothership started over ssh usually has
-              neither. Start it from a desktop session, or keep the file store.
-            </div>
-          </div>
-        )}
-
-        {keychain?.available && onFile.length > 0 && (
-          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-panel-2 px-4 py-3">
-            <GuideIcon name="lock" size={16} className="text-accent" />
-            <span className="min-w-0 flex-1 text-[13px]">
-              {onFile.length}{" "}
-              {onFile.length === 1 ? "secret is" : "secrets are"} still saved as
-              a plain file. Moving keeps the value and deletes the file.
-            </span>
-            <Button
-              variant="primary"
-              disabled={busy !== null}
-              onClick={moveAll}
-            >
-              Move all to the keychain
-            </Button>
-          </div>
-        )}
-
-        {error && <p className="text-[13px] text-err">{error}</p>}
-        {!listing && !error && (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading…
-          </p>
-        )}
-
-        {listing &&
-          GROUPS.map((group) => {
-            const rows = listing.secrets.filter((r) => r.group === group.id);
-            // Colony secrets always show, so there is somewhere to add the first one.
-            if (rows.length === 0 && group.id !== "colonies") return null;
-            return (
-              <section key={group.id} aria-labelledby={`secrets-${group.id}`}>
-                <div className="mb-2 flex items-baseline gap-2">
-                  <h2
-                    id={`secrets-${group.id}`}
-                    className="m-0 text-[15px] font-semibold"
-                  >
-                    {group.title}
-                  </h2>
-                  <span className="text-[12.5px] text-faint">{group.hint}</span>
-                </div>
-                {group.id === "colonies" && (
-                  <ColonySecretForm
-                    onSaved={async (id) => {
-                      await load();
-                      toast(`${id.slice("colony:".length)} saved for colonies`);
-                    }}
-                  />
-                )}
-                {rows.length > 0 && (
-                <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-panel">
-                  {rows.map((row) => (
-                    <SecretItem
-                      key={row.id}
-                      row={row}
-                      keychainAvailable={Boolean(keychain?.available)}
-                      busy={busy === row.id}
-                      open={open === row.id}
-                      onOpen={(o) => setOpen(o ? row.id : null)}
-                      onSave={async (value) => {
-                        const ok = await act(row.id, `${row.label} saved`, () =>
-                          api.saveSecret(row.id, value),
-                        );
-                        if (ok) setOpen(null);
-                      }}
-                      onRemove={async () => {
-                        setBusy(row.id);
-                        try {
-                          const result = await api.deleteSecret(row.id);
-                          if ("removed" in result) await load();
-                          else replace(result);
-                          toast(`${row.label} removed`);
-                        } catch (e) {
-                          toast(errorMessage(e), "error");
-                        } finally {
-                          setBusy(null);
-                        }
-                      }}
-                      onMove={(to) =>
-                        act(
-                          row.id,
-                          `${row.label} moved to the ${to === "keychain" ? "keychain" : "file"}`,
-                          () => api.moveSecret(row.id, to),
-                        )
-                      }
-                    />
-                  ))}
-                </ul>
-                )}
-              </section>
-            );
-          })}
+    <Page width="readable" frameClassName="flex flex-col gap-8">
+      <div>
+        <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
+          Secrets
+        </h1>
+        <p className="mt-2 text-[14px] text-muted">
+          {listing
+            ? `${saved} saved · ${onFile.length} on file · values are never shown`
+            : "Reading what this mothership holds…"}
+        </p>
       </div>
-    </main>
+
+      <SectionHero
+        guide={guide(keychain?.backend ?? "none")}
+        stats={
+          keychain
+            ? [
+                {
+                  label: keychain.backend,
+                  value: keychain.available ? "Available" : "Unavailable",
+                  tone: keychain.available ? "ok" : "warn",
+                },
+                {
+                  label: "In keychain",
+                  value: String(
+                    listing?.secrets.filter((r) => r.location === "keychain")
+                      .length ?? 0,
+                  ),
+                },
+                {
+                  label: "On file",
+                  value: String(onFile.length),
+                  tone: onFile.length > 0 ? "warn" : undefined,
+                },
+              ]
+            : []
+        }
+      />
+
+      <SectionHero guide={COLONY_GUIDE} />
+
+      {keychain && !keychain.available && (
+        <div
+          role="status"
+          className="rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-[13px] text-text"
+        >
+          <div className="font-medium">
+            The keychain is not available on this host, so secrets are saved
+            as 0600 files.
+          </div>
+          <div className="mt-1 text-muted">
+            {keychain.reason ?? "No reason given."} On Linux the Secret
+            Service needs a desktop session with an unlocked keyring (GNOME
+            Keyring or KWallet); a mothership started over ssh usually has
+            neither. Start it from a desktop session, or keep the file store.
+          </div>
+        </div>
+      )}
+
+      {keychain?.available && onFile.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-panel-2 px-4 py-3">
+          <GuideIcon name="lock" size={16} className="text-accent" />
+          <span className="min-w-0 flex-1 text-[13px]">
+            {onFile.length}{" "}
+            {onFile.length === 1 ? "secret is" : "secrets are"} still saved as
+            a plain file. Moving keeps the value and deletes the file.
+          </span>
+          <Button
+            variant="primary"
+            disabled={busy !== null}
+            onClick={moveAll}
+          >
+            Move all to the keychain
+          </Button>
+        </div>
+      )}
+
+      {error && <p className="text-[13px] text-err">{error}</p>}
+      {!listing && !error && (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Loading…
+        </p>
+      )}
+
+      {listing &&
+        GROUPS.map((group) => {
+          const rows = listing.secrets.filter((r) => r.group === group.id);
+          // Colony secrets always show, so there is somewhere to add the first one.
+          if (rows.length === 0 && group.id !== "colonies") return null;
+          return (
+            <section key={group.id} aria-labelledby={`secrets-${group.id}`}>
+              <div className="mb-2 flex items-baseline gap-2">
+                <h2
+                  id={`secrets-${group.id}`}
+                  className="m-0 text-[15px] font-semibold"
+                >
+                  {group.title}
+                </h2>
+                <span className="text-[12.5px] text-faint">{group.hint}</span>
+              </div>
+              {group.id === "colonies" && (
+                <ColonySecretForm
+                  onSaved={async (id) => {
+                    await load();
+                    toast(`${id.slice("colony:".length)} saved for colonies`);
+                  }}
+                />
+              )}
+              {rows.length > 0 && (
+              <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-panel">
+                {rows.map((row) => (
+                  <SecretItem
+                    key={row.id}
+                    row={row}
+                    keychainAvailable={Boolean(keychain?.available)}
+                    busy={busy === row.id}
+                    open={open === row.id}
+                    onOpen={(o) => setOpen(o ? row.id : null)}
+                    onSave={async (value) => {
+                      const ok = await act(row.id, `${row.label} saved`, () =>
+                        api.saveSecret(row.id, value),
+                      );
+                      if (ok) setOpen(null);
+                    }}
+                    onRemove={async () => {
+                      setBusy(row.id);
+                      try {
+                        const result = await api.deleteSecret(row.id);
+                        if ("removed" in result) await load();
+                        else replace(result);
+                        toast(`${row.label} removed`);
+                      } catch (e) {
+                        toast(errorMessage(e), "error");
+                      } finally {
+                        setBusy(null);
+                      }
+                    }}
+                    onMove={(to) =>
+                      act(
+                        row.id,
+                        `${row.label} moved to the ${to === "keychain" ? "keychain" : "file"}`,
+                        () => api.moveSecret(row.id, to),
+                      )
+                    }
+                  />
+                ))}
+              </ul>
+              )}
+            </section>
+          );
+        })}
+    </Page>
   );
 }
 
