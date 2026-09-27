@@ -102,19 +102,20 @@ code computes them:
 
 ## The Evolver's feed
 
-The Evolver ([#310](https://github.com/Colonizer-dev/harness/issues/310)) does not exist in this repository
-yet; what exists is the contract it will consume, so the score it optimizes cannot quietly drift from the
-score the bench reports:
+The offline evolver ([#310](https://github.com/Colonizer-dev/harness/issues/310),
+[evolver.md](evolver.md)) consumes this monitor's output through two helpers that live here, so the
+score it optimizes cannot quietly drift from the score the bench reports:
 
 - `fitness(summary)` = the clean rate, with the gap carried beside it as the secondary number;
 - `compareProposal(baseline, candidate)` rejects any proposal that widens the gap — even one that raises
   the raw pass rate ("raised raw score while widening the gap") — and otherwise accepts exactly when the
   clean rate improves.
 
-Until then the bench's comparison table is the scorecard: `node scripts/bench.mjs run` records `clean` and
-`hacks` per result and its summaries carry `clean_resolved`, `hacked_resolved`, `clean_rate` and `gap`;
-`compare` shows the clean verdict per task and the clean-rate/gap movement per run
-([bench.md](bench.md)).
+`scripts/evolve.mjs`'s `retain` stage calls `compareProposal` on the audited pair and lets its verdict
+stand: a proposal it rejects — a widened gap, or a clean rate that fails to improve — is flagged for a
+human, never silently retained. The score it keeps by is the bench's own accounting (a task counts as
+passed only when it passed and was not hacked), and `evaluate` reuses `summarizeRun` from bench.mjs
+for its totals, so neither number is a reimplementation.
 
 ## Why the list is public
 

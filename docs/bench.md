@@ -95,6 +95,10 @@ executes, solution fetches, unflagged injections — and the comparison gains a 
 and clean-resolved. A run that raises its pass rate while widening that gap bought its score; the gap is the
 number to watch.
 
+The [offline evolver](evolver.md) builds on these run files: it clusters diagnosed failures into classes,
+turns one class into a prompt-only proposal, and retains the proposal only when a rerun of the same tasks
+beats a baseline — judged with the same per-task honesty as `compare`, single regressions included.
+
 ## Held-out suite
 
 A change tuned on repeated runs of the visible checks — or a colony that has somehow seen them — can pass

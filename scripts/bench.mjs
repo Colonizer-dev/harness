@@ -173,7 +173,7 @@ async function runTask(task, repo, issue, options) {
 // A node --test started from inside another one inherits NODE_TEST_CONTEXT, skips its files and exits 0 —
 // every check would pass under the bench's own tests — and a colony sandbox exports GIT_DIR and friends
 // that would point scorer git at the wrong work tree. None of it rides into a scored child.
-const childEnv = () => {
+export const childEnv = () => {
   const { NODE_TEST_CONTEXT, NODE_OPTIONS, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...env } = process.env;
   return env;
 };
