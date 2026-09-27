@@ -1073,7 +1073,14 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         Some(key) if key.len() > 500 || key.contains(char::is_whitespace) => {
             return Err(bad("that doesn't look like an API key"));
         }
-        Some(key) => write_secret(&app.provider_key_file(&id), key)?,
+        Some(key) => {
+            // A hosted deployment without a master key refuses the store; answer 503 naming the
+            // env vars before any half-state, rather than a generic 500 from `write_secret`.
+            if let Err(message) = crate::util::credential_writable() {
+                return Err(client_error(StatusCode::SERVICE_UNAVAILABLE, &message));
+            }
+            write_secret(&app.provider_key_file(&id), key)?
+        }
         None => {}
     }
 

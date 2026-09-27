@@ -160,6 +160,7 @@
 /api/update                                          GET    unauth=401    token=owner            activity=-
 /api/update                                          PUT    unauth=401    token=owner            activity=settings.save
 /api/update/apply                                    POST   unauth=401    token=owner            activity=app.update
+/api/upload/manifest                                 GET    unauth=401    token=owner            activity=-
 /api/version                                         GET    unauth=401    token=read             activity=-
 /api/voice                                           GET    unauth=401    token=owner            activity=-
 /api/voice/key                                       PUT    unauth=401    token=owner            activity=settings.save
