@@ -123,12 +123,70 @@ fn decide(contradictions: &[String], green: Option<bool>) -> Verdict {
 }
 
 /// The files on the base branch that can declare a test command, as pure inputs.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct BaseFiles {
     pub package_json: Option<String>,
-    pub package_lock: bool,
+    /// The JavaScript lockfiles at the base branch's root, by file name ([`JS_LOCKFILES`]).
+    pub lockfiles: Vec<String>,
+    /// `yarn.lock` is Yarn 2+'s format (it carries `__metadata:`), not Yarn 1's.
+    pub yarn_berry_lock: bool,
+    /// The base branch carries files bun's own runner would pick up (`*.test.ts`, `*_spec.js`, …):
+    /// only asked when bun is the package manager and there is no `scripts.test` to run instead.
+    pub bun_test_files: bool,
     pub cargo_toml: bool,
     pub makefile: Option<String>,
+}
+
+/// The lockfiles that name a JavaScript package manager, in the order they are trusted when a
+/// base branch carries more than one (and no `packageManager` field settles it).
+pub(crate) const JS_LOCKFILES: &[&str] = &[
+    "bun.lock",
+    "bun.lockb",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+];
+
+/// A tool a declared command needs in the colony image, and the shell test that says it is there.
+/// The fresh-checkout run checks it first: a missing tool is the image's gap, never the colony's,
+/// so it makes the claim unverifiable instead of letting the install fail and contradict it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Needs {
+    pub tool: &'static str,
+    pub check: &'static str,
+}
+
+const fn needs(tool: &'static str, check: &'static str) -> Needs {
+    Needs { tool, check }
+}
+
+static NPM: Needs = needs("npm", "command -v npm >/dev/null 2>&1");
+static BUN: Needs = needs("bun", "command -v bun >/dev/null 2>&1");
+static PNPM: Needs = needs("pnpm", "command -v pnpm >/dev/null 2>&1");
+static YARN: Needs = needs("yarn", "command -v yarn >/dev/null 2>&1");
+/// Yarn 1 (what node images carry globally) does not read a Yarn 2+ lockfile: running it on one
+/// fails the install, which would read as the colony's failure.
+static YARN_BERRY: Needs = needs(
+    "yarn 2 or later",
+    r#"[ "$(yarn --version 2>/dev/null | cut -d. -f1)" -ge 2 ] 2>/dev/null"#,
+);
+/// Runs the exact pnpm or yarn a `packageManager` field pins, downloading it on first use.
+static COREPACK: Needs = needs("corepack", "command -v corepack >/dev/null 2>&1");
+static CARGO: Needs = needs("cargo", "command -v cargo >/dev/null 2>&1");
+static MAKE: Needs = needs("make", "command -v make >/dev/null 2>&1");
+
+/// The command a repository declares for its tests, where it came from, and what it needs.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Declared {
+    /// What decided the command: `packageManager` (the package.json field), the lockfile that
+    /// named the package manager, `package.json` (no lockfile: npm), `Cargo.toml` or `Makefile`.
+    pub source: &'static str,
+    pub command: String,
+    pub needs: &'static Needs,
+    /// The command runs package.json's `scripts.test`, so a branch that rewrote that entry would
+    /// be grading itself.
+    pub runs_script: bool,
 }
 
 /// package.json's `scripts.test`, when the file parses and carries one.
@@ -137,25 +195,140 @@ fn scripts_test(package: Option<&str>) -> Option<String> {
     value["scripts"]["test"].as_str().map(str::to_string)
 }
 
-/// The test command a repository declares, from its base branch's file contents alone: npm's
-/// `scripts.test` (unless it is npm's placeholder) with `npm ci` when a lockfile exists, else
-/// `cargo test` for a Cargo.toml, else `make test` for a Makefile with a `test:` target. Never
-/// guessed from chat text.
-pub(crate) fn declared_test_command(files: &BaseFiles) -> Option<(&'static str, String)> {
-    let npm = scripts_test(files.package_json.as_deref()).filter(|t| !t.is_empty() && !t.contains("no test specified"));
-    if npm.is_some() {
-        let install = if files.package_lock { "npm ci" } else { "npm install" };
-        return Some(("package.json", format!("{install} && npm test")));
+/// `scripts.test` when it runs something: npm's `no test specified` placeholder does not.
+fn usable_script(package: Option<&str>) -> Option<String> {
+    scripts_test(package).filter(|t| !t.is_empty() && !t.contains("no test specified"))
+}
+
+/// package.json's `packageManager` field (corepack's `name@version[+hash]`), as `(name, major)` —
+/// only for the four managers this knows how to run. The major is `None` when it does not parse.
+fn package_manager(package: Option<&str>) -> Option<(&'static str, Option<u64>)> {
+    let value = serde_json::from_str::<Value>(package?).ok()?;
+    let (name, version) = value["packageManager"].as_str()?.trim().split_once('@')?;
+    let name = ["npm", "pnpm", "yarn", "bun"].into_iter().find(|n| *n == name)?;
+    Some((name, version.split('.').next().and_then(|m| m.parse().ok())))
+}
+
+/// Whether bun's own test runner would find a test file at this path.
+pub(crate) fn is_bun_test_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(ext, "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts")
+        && [".test", "_test", ".spec", "_spec"].iter().any(|s| stem.ends_with(s))
+        && !path.split('/').any(|c| c == "node_modules")
+}
+
+/// The test command a repository declares, from its base branch's file contents alone. Never
+/// guessed from chat text. In order:
+///
+/// 1. package.json's `scripts.test` (unless it is npm's placeholder), run by the repository's own
+///    package manager: the `packageManager` field (corepack) when it names one, else the first
+///    lockfile of [`JS_LOCKFILES`], else npm. A frozen install only when that manager's lockfile
+///    is there to freeze. A bun repository without the script runs `bun test` when the base
+///    branch has test files for it.
+/// 2. `cargo test` for a Cargo.toml.
+/// 3. `make test` for a Makefile with a `test:` target.
+pub(crate) fn declared_test_command(files: &BaseFiles) -> Option<Declared> {
+    let script = usable_script(files.package_json.as_deref());
+    if files.package_json.is_some() {
+        let has = |lock: &str| files.lockfiles.iter().any(|l| l == lock);
+        let lockfile = JS_LOCKFILES.iter().copied().find(|l| has(l));
+        let pinned = package_manager(files.package_json.as_deref());
+        let (source, manager) = match (pinned, lockfile) {
+            (Some((name, _)), _) => ("packageManager", name),
+            (None, Some(lock)) => (
+                lock,
+                match lock {
+                    "bun.lock" | "bun.lockb" => "bun",
+                    "pnpm-lock.yaml" => "pnpm",
+                    "yarn.lock" => "yarn",
+                    _ => "npm",
+                },
+            ),
+            (None, None) => ("package.json", "npm"),
+        };
+        let js = |command: String, needs: &'static Needs, runs_script: bool| {
+            Some(Declared {
+                source,
+                command,
+                needs,
+                runs_script,
+            })
+        };
+        match manager {
+            "bun" => {
+                let install = if has("bun.lock") || has("bun.lockb") {
+                    "bun install --frozen-lockfile"
+                } else {
+                    "bun install"
+                };
+                if script.is_some() {
+                    return js(format!("{install} && bun run test"), &BUN, true);
+                }
+                if files.bun_test_files {
+                    return js(format!("{install} && bun test"), &BUN, false);
+                }
+            }
+            _ if script.is_none() => {}
+            "pnpm" => {
+                // A pinned version runs through corepack, which fetches exactly that pnpm.
+                let (pnpm, needs) = if pinned.is_some() {
+                    ("corepack pnpm", &COREPACK)
+                } else {
+                    ("pnpm", &PNPM)
+                };
+                let frozen = if has("pnpm-lock.yaml") { " --frozen-lockfile" } else { "" };
+                return js(format!("{pnpm} install{frozen} && {pnpm} test"), needs, true);
+            }
+            "yarn" => {
+                // Berry (Yarn 2+) spells a frozen install `--immutable`; Yarn 1 `--frozen-lockfile`.
+                let berry = match pinned {
+                    Some((_, major)) => major.is_some_and(|m| m >= 2),
+                    None => files.yarn_berry_lock,
+                };
+                let (yarn, needs) = match (pinned.is_some(), berry) {
+                    (true, _) => ("corepack yarn", &COREPACK),
+                    (false, true) => ("yarn", &YARN_BERRY),
+                    (false, false) => ("yarn", &YARN),
+                };
+                let frozen = match (has("yarn.lock"), berry) {
+                    (false, _) => "",
+                    (true, true) => " --immutable",
+                    (true, false) => " --frozen-lockfile",
+                };
+                return js(format!("{yarn} install{frozen} && {yarn} test"), needs, true);
+            }
+            _ => {
+                let install = if has("package-lock.json") || has("npm-shrinkwrap.json") {
+                    "npm ci"
+                } else {
+                    "npm install"
+                };
+                return js(format!("{install} && npm test"), &NPM, true);
+            }
+        }
     }
     if files.cargo_toml {
-        return Some(("Cargo.toml", "cargo test".into()));
+        return Some(Declared {
+            source: "Cargo.toml",
+            command: "cargo test".into(),
+            needs: &CARGO,
+            runs_script: false,
+        });
     }
     if files
         .makefile
         .as_deref()
         .is_some_and(|m| m.lines().any(|l| l.starts_with("test:")))
     {
-        return Some(("Makefile", "make test".into()));
+        return Some(Declared {
+            source: "Makefile",
+            command: "make test".into(),
+            needs: &MAKE,
+            runs_script: false,
+        });
     }
     None
 }
@@ -313,6 +486,50 @@ async fn file_at(app: &App, admin: &Path, cwd: &Path, rev: &str, path: &str) -> 
         .ok()
 }
 
+/// What the base branch says about its test command: package.json, which lockfiles sit at its
+/// root, whether a yarn.lock is Yarn 2+'s, whether bun would find tests of its own, and the
+/// Cargo.toml/Makefile fallbacks. Read from the base ref only, never the colony's branch.
+async fn base_files(app: &App, admin: &Path, cwd: &Path, base_ref: &str) -> BaseFiles {
+    let root: HashSet<String> = read(app, admin, cwd, &["ls-tree", "--name-only", base_ref])
+        .await
+        .map(|out| out.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let package_json = match root.contains("package.json") {
+        true => file_at(app, admin, cwd, base_ref, "package.json").await,
+        false => None,
+    };
+    let lockfiles: Vec<String> = JS_LOCKFILES
+        .iter()
+        .filter(|l| root.contains(**l))
+        .map(|l| l.to_string())
+        .collect();
+    let yarn_berry_lock = root.contains("yarn.lock")
+        && file_at(app, admin, cwd, base_ref, "yarn.lock")
+            .await
+            .is_some_and(|lock| lock.lines().any(|l| l.starts_with("__metadata:")));
+    let mut files = BaseFiles {
+        package_json,
+        lockfiles,
+        yarn_berry_lock,
+        bun_test_files: false,
+        cargo_toml: root.contains("Cargo.toml"),
+        makefile: match root.contains("Makefile") {
+            true => file_at(app, admin, cwd, base_ref, "Makefile").await,
+            false => None,
+        },
+    };
+    // Only a bun repository without a `scripts.test` asks bun's own runner, and only then is the
+    // whole tree worth listing.
+    let bun = files.lockfiles.iter().any(|l| l.starts_with("bun.lock"))
+        || package_manager(files.package_json.as_deref()).is_some_and(|(name, _)| name == "bun");
+    if bun && usable_script(files.package_json.as_deref()).is_none() {
+        files.bun_test_files = read(app, admin, cwd, &["ls-tree", "-r", "--name-only", base_ref])
+            .await
+            .is_ok_and(|out| out.lines().any(is_bun_test_file));
+    }
+    files
+}
+
 /// One host-side git read against the worktree's admin dir.
 async fn read(app: &App, admin: &Path, cwd: &Path, args: &[&str]) -> Result<String> {
     exec_within(GIT_LIMIT, &mut git_at(app, admin, cwd, args)).await
@@ -428,19 +645,12 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
 
     // The command: explicit configuration first, then the repository's own declaration on the
     // base branch.
-    let files = BaseFiles {
-        package_json: file_at(app, admin, &cwd, &base_ref, "package.json").await,
-        package_lock: file_at(app, admin, &cwd, &base_ref, "package-lock.json").await.is_some(),
-        cargo_toml: file_at(app, admin, &cwd, &base_ref, "Cargo.toml").await.is_some(),
-        makefile: file_at(app, admin, &cwd, &base_ref, "Makefile").await,
-    };
-    let (command, source) = if configured != "auto" {
-        (configured.to_string(), "config")
-    } else {
-        match declared_test_command(&files) {
-            Some((source, command)) => (command, source),
-            None => (String::new(), ""),
-        }
+    let files = base_files(app, admin, &cwd, &base_ref).await;
+    let declared = (configured == "auto").then(|| declared_test_command(&files)).flatten();
+    let (command, source) = match (configured, &declared) {
+        ("auto", Some(d)) => (d.command.clone(), d.source),
+        ("auto", None) => (String::new(), ""),
+        _ => (configured.to_string(), "config"),
     };
     record.command = (!command.is_empty()).then_some(command.clone());
     record.command_source = (!source.is_empty()).then_some(source.to_string());
@@ -448,7 +658,7 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
     // The colony must not grade its own homework: an `auto` command is the base branch's, so a
     // branch that rewrote the entry defining it would run its own replacement. (`cargo test`
     // has no entry to rewrite, and an explicit command is the operator's choice.)
-    let self_graded = if source == "package.json"
+    let self_graded = if declared.as_ref().is_some_and(|d| d.runs_script)
         && scripts_test(files.package_json.as_deref())
             != scripts_test(file_at(app, admin, &cwd, &snapshot, "package.json").await.as_deref())
     {
@@ -468,13 +678,27 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
                 "no test command is known for this repository (nothing usable on {base})"
             ));
         } else {
-            match run_tests(app, s, admin, &cwd, &snapshot, &command, runner).await {
-                Ok((sandbox, reported, ms)) => {
+            let needs = declared.as_ref().map(|d| d.needs);
+            match run_tests(app, s, admin, &cwd, &snapshot, &command, needs, runner).await {
+                Ok(Ran {
+                    sandbox,
+                    reported,
+                    missing_tool,
+                    ms,
+                }) => {
                     record.tests_ms = Some(ms);
                     record.exit_code = reported;
                     match reported {
                         // The guest's own report decides; the sandbox's exit corroborates.
                         None => forced = Some("the runner did not report an exit code".into()),
+                        // The package manager the repository asked for is not in the image: the
+                        // image's gap, not the colony's, so nothing ran and nothing contradicts.
+                        Some(127) if missing_tool => {
+                            forced = Some(format!(
+                                "`{}` (picked from `{source}`) is not in the colony image, so `{command}` could not run (exit 127)",
+                                needs.map_or("the test tool", |n| n.tool)
+                            ))
+                        }
                         Some(127) => forced = Some(format!("`{command}` is not present in the colony image (exit 127)")),
                         Some(0) if sandbox == 0 => green = Some(true),
                         Some(0) => forced = Some(format!("the sandbox itself exited {sandbox}")),
@@ -507,12 +731,37 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
     record.finished(started)
 }
 
+/// What one fresh-checkout run answered.
+struct Ran {
+    /// The sandbox's own exit code: corroboration only.
+    sandbox: i32,
+    /// The number the guest reported, the one the verdict trusts.
+    reported: Option<i32>,
+    /// The guest found the tool the command needs missing, and ran nothing.
+    missing_tool: bool,
+    ms: u64,
+}
+
+/// The guest's script: into the fresh checkout, check for the tool the command needs (a miss
+/// leaves a `missing` marker beside the report and stands in exit 127 for the command), run the
+/// command, and report its exit number where only this harness reads it.
+fn guest_script(command: &str, needs: Option<&Needs>) -> String {
+    match needs {
+        Some(needs) => format!(
+            "cd /workspace && if {}; then ({command}); else touch /colonizer-verify/missing; (exit 127); fi; \
+             echo $? > /colonizer-verify/exit",
+            needs.check
+        ),
+        None => format!("cd /workspace && ({command}); echo $? > /colonizer-verify/exit"),
+    }
+}
+
 /// Exports the snapshot into a fresh temp dir under the session directory (no `.git`, nothing
 /// shared with the agent's worktree), boots a one-shot microVM from the colony's image with that
 /// dir mounted at `/workspace` and a second, empty dir at `/colonizer-verify`, and runs
-/// `cd /workspace && (<command>); echo $? > /colonizer-verify/exit`. Answers the sandbox's own
-/// exit code, the number the guest reported (the one the verdict trusts), and the elapsed ms. On
-/// a timeout the VM is removed here rather than left to `--max-duration`.
+/// [`guest_script`] there. On a timeout the VM is removed here rather than left to
+/// `--max-duration`.
+#[allow(clippy::too_many_arguments)]
 async fn run_tests(
     app: &App,
     s: &Session,
@@ -520,8 +769,9 @@ async fn run_tests(
     cwd: &Path,
     snapshot: &str,
     command: &str,
+    needs: Option<&Needs>,
     runner: &VmRunner,
-) -> Result<(i32, Option<i32>, u64)> {
+) -> Result<Ran> {
     let (checkout, report) = (cwd.join("verify-checkout"), cwd.join("verify-report"));
     clean_up(&[&checkout, &report]).await;
     let exported = async {
@@ -573,17 +823,17 @@ async fn run_tests(
         // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
         // to nothing of the harness's. Left empty, msb's own default would decide instead.
         net_profiles: vec!["public".into()],
-        command: vec![
-            "sh".into(),
-            "-c".into(),
-            format!("cd /workspace && ({command}); echo $? > /colonizer-verify/exit"),
-        ],
+        command: vec!["sh".into(), "-c".into(), guest_script(command, needs)],
         ..Default::default()
     };
     let started = Instant::now();
     let outcome = tokio::time::timeout(TEST_LIMIT, runner(spec)).await;
-    let (sandbox, reported) = match outcome {
-        Ok(Ok(code)) => (code, read_exit_report(&report).await),
+    let (sandbox, reported, missing_tool) = match outcome {
+        Ok(Ok(code)) => (
+            code,
+            read_exit_report(&report).await,
+            tokio::fs::try_exists(report.join("missing")).await.unwrap_or(false),
+        ),
         Ok(Err(e)) => {
             clean_up(&[&checkout, &report]).await;
             bail!("{e:#}");
@@ -595,7 +845,12 @@ async fn run_tests(
         }
     };
     clean_up(&[&checkout, &report]).await;
-    Ok((sandbox, reported, started.elapsed().as_millis() as u64))
+    Ok(Ran {
+        sandbox,
+        reported,
+        missing_tool,
+        ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 /// The exit number the guest wrote to `/colonizer-verify/exit` (mounted from `report`). `None`
@@ -728,45 +983,243 @@ mod tests {
     }
 
     #[test]
-    fn the_command_resolution_order_is_npm_then_cargo_then_make() {
+    fn the_command_resolution_order_is_js_then_cargo_then_make() {
         let package = |test: &str| Some(format!(r#"{{"scripts": {{"test": "{test}"}}}}"#));
-        let base = |package_json, package_lock, cargo_toml, makefile| BaseFiles {
+        let base = |package_json, lockfiles: &[&str], cargo_toml, makefile| BaseFiles {
             package_json,
-            package_lock,
+            lockfiles: lockfiles.iter().map(|l| l.to_string()).collect(),
             cargo_toml,
             makefile,
+            ..Default::default()
         };
-        // (files, the command they declare) — npm first, then cargo, then make, and npm's
-        // placeholder script (or no files at all, or a Makefile without a `test:` target)
+        // (files, the source and command they declare) — JS first, then cargo, then make, and
+        // npm's placeholder script (or no files at all, or a Makefile without a `test:` target)
         // declares nothing.
-        let cases: Vec<(BaseFiles, Option<(&'static str, &str)>)> = vec![
+        let cases: Vec<(BaseFiles, Option<(&str, &str)>)> = vec![
             (
-                base(package("node --test"), true, true, Some("test:\n".into())),
-                Some(("package.json", "npm ci && npm test")),
+                base(package("node --test"), &["package-lock.json"], true, Some("test:\n".into())),
+                Some(("package-lock.json", "npm ci && npm test")),
             ),
             // No lockfile on the base branch means npm install, not npm ci.
             (
-                base(package("jest"), false, false, None),
+                base(package("jest"), &[], false, None),
                 Some(("package.json", "npm install && npm test")),
             ),
             (
-                base(package(r#"echo \"Error: no test specified\" && exit 1"#), true, true, None),
+                base(
+                    package(r#"echo \"Error: no test specified\" && exit 1"#),
+                    &["package-lock.json"],
+                    true,
+                    None,
+                ),
                 Some(("Cargo.toml", "cargo test")),
             ),
             (
-                base(None, false, false, Some("build:\n\techo hi\ntest: build\n".into())),
+                base(None, &[], false, Some("build:\n\techo hi\ntest: build\n".into())),
                 Some(("Makefile", "make test")),
             ),
-            (base(None, false, false, Some("build:\n".into())), None),
-            (base(None, false, false, None), None),
+            (base(None, &[], false, Some("build:\n".into())), None),
+            (base(None, &[], false, None), None),
         ];
         for (files, want) in cases {
             assert_eq!(
-                declared_test_command(&files),
+                declared_test_command(&files).map(|d| (d.source, d.command)),
                 want.map(|(source, command)| (source, command.to_string())),
                 "{files:?}"
             );
         }
+    }
+
+    /// Colony 4ddc1540 on a bun repository (bun.lock, no package-lock.json, no `packageManager`,
+    /// `scripts.test` = jest) was verified with `npm install && npm test`, which failed in the fresh
+    /// checkout and contradicted the claim for twenty hours. The package manager is the
+    /// repository's own: the `packageManager` field, else the lockfile, else npm.
+    #[test]
+    fn the_test_command_runs_the_repositorys_own_package_manager() {
+        let package = |extra: &str| Some(format!(r#"{{"scripts": {{"test": "jest"}}{extra}}}"#));
+        let files = |package_json: Option<String>, lockfiles: &[&str]| BaseFiles {
+            package_json,
+            lockfiles: lockfiles.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        };
+        // (files, source, command, tool it needs)
+        let cases: Vec<(BaseFiles, &str, &str, &str)> = vec![
+            // The incident: bun.lock alone picks bun, and runs the repository's own script.
+            (
+                files(package(""), &["bun.lock"]),
+                "bun.lock",
+                "bun install --frozen-lockfile && bun run test",
+                "bun",
+            ),
+            (
+                files(package(""), &["bun.lockb"]),
+                "bun.lockb",
+                "bun install --frozen-lockfile && bun run test",
+                "bun",
+            ),
+            (
+                files(package(""), &["pnpm-lock.yaml"]),
+                "pnpm-lock.yaml",
+                "pnpm install --frozen-lockfile && pnpm test",
+                "pnpm",
+            ),
+            (
+                files(package(""), &["yarn.lock"]),
+                "yarn.lock",
+                "yarn install --frozen-lockfile && yarn test",
+                "yarn",
+            ),
+            (
+                BaseFiles {
+                    yarn_berry_lock: true,
+                    ..files(package(""), &["yarn.lock"])
+                },
+                "yarn.lock",
+                "yarn install --immutable && yarn test",
+                "yarn 2 or later",
+            ),
+            (
+                files(package(""), &["package-lock.json"]),
+                "package-lock.json",
+                "npm ci && npm test",
+                "npm",
+            ),
+            (
+                files(package(""), &["npm-shrinkwrap.json"]),
+                "npm-shrinkwrap.json",
+                "npm ci && npm test",
+                "npm",
+            ),
+            // No lockfile: today's npm fallback.
+            (files(package(""), &[]), "package.json", "npm install && npm test", "npm"),
+            // A stray package-lock beside bun.lock does not outvote it.
+            (
+                files(package(""), &["bun.lock", "package-lock.json"]),
+                "bun.lock",
+                "bun install --frozen-lockfile && bun run test",
+                "bun",
+            ),
+            // The `packageManager` field (corepack) outranks every lockfile, and pins the version
+            // corepack runs.
+            (
+                files(
+                    package(r#", "packageManager": "pnpm@9.12.0+sha512.abc""#),
+                    &["package-lock.json", "pnpm-lock.yaml"],
+                ),
+                "packageManager",
+                "corepack pnpm install --frozen-lockfile && corepack pnpm test",
+                "corepack",
+            ),
+            (
+                files(package(r#", "packageManager": "yarn@4.5.0""#), &["yarn.lock"]),
+                "packageManager",
+                "corepack yarn install --immutable && corepack yarn test",
+                "corepack",
+            ),
+            (
+                files(package(r#", "packageManager": "yarn@1.22.22""#), &["yarn.lock"]),
+                "packageManager",
+                "corepack yarn install --frozen-lockfile && corepack yarn test",
+                "corepack",
+            ),
+            (
+                files(package(r#", "packageManager": "bun@1.2.0""#), &["package-lock.json"]),
+                "packageManager",
+                "bun install && bun run test",
+                "bun",
+            ),
+            (
+                files(package(r#", "packageManager": "npm@10.9.0""#), &["package-lock.json"]),
+                "packageManager",
+                "npm ci && npm test",
+                "npm",
+            ),
+            // A manager this does not know is ignored, and the lockfile decides.
+            (
+                files(package(r#", "packageManager": "deno@2.0.0""#), &["pnpm-lock.yaml"]),
+                "pnpm-lock.yaml",
+                "pnpm install --frozen-lockfile && pnpm test",
+                "pnpm",
+            ),
+        ];
+        for (files, source, command, tool) in cases {
+            let d = declared_test_command(&files).unwrap_or_else(|| panic!("{files:?} declares nothing"));
+            assert_eq!(
+                (d.source, d.command.as_str(), d.needs.tool),
+                (source, command, tool),
+                "{files:?}"
+            );
+            assert!(d.runs_script, "every one of these runs `scripts.test`: {files:?}");
+        }
+
+        // bun without `scripts.test`: bun's own runner, but only over test files it would find —
+        // `bun test` with none fails, and that failure would not be the colony's.
+        let no_script = || files(Some(r#"{"name": "x"}"#.into()), &["bun.lock"]);
+        let d = declared_test_command(&BaseFiles {
+            bun_test_files: true,
+            ..no_script()
+        })
+        .expect("bun test files declare `bun test`");
+        assert_eq!(
+            (d.source, d.command.as_str()),
+            ("bun.lock", "bun install --frozen-lockfile && bun test")
+        );
+        assert!(!d.runs_script, "`bun test` runs no script a branch could rewrite");
+        assert_eq!(declared_test_command(&no_script()), None);
+        // Without a script, pnpm, yarn and npm declare nothing and the next source is asked.
+        let d = declared_test_command(&BaseFiles {
+            cargo_toml: true,
+            ..files(Some("{}".into()), &["pnpm-lock.yaml"])
+        })
+        .unwrap();
+        assert_eq!((d.source, d.command.as_str()), ("Cargo.toml", "cargo test"));
+
+        for (path, found) in [
+            ("src/a.test.ts", true),
+            ("test/b_spec.js", true),
+            ("c.spec.tsx", true),
+            ("lib/d_test.mjs", true),
+            ("src/a.ts", false),
+            ("src/test.ts", false),
+            ("src/a.test.rs", false),
+            ("node_modules/x/a.test.js", false),
+        ] {
+            assert_eq!(is_bun_test_file(path), found, "{path}");
+        }
+    }
+
+    /// Each tool check is a shell test the guest runs before the command, and a miss leaves the
+    /// marker the verdict reads.
+    #[test]
+    fn the_guest_checks_the_tool_before_it_runs_the_command() {
+        assert_eq!(
+            guest_script("true", None),
+            "cd /workspace && (true); echo $? > /colonizer-verify/exit"
+        );
+        assert_eq!(
+            guest_script("bun install && bun run test", Some(&BUN)),
+            "cd /workspace && if command -v bun >/dev/null 2>&1; then (bun install && bun run test); \
+             else touch /colonizer-verify/missing; (exit 127); fi; echo $? > /colonizer-verify/exit"
+        );
+        // Run for real: a present tool runs the command, a missing one reports 127 and the marker.
+        let dir = std::env::temp_dir().join(format!("colonizer-guest-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |needs: &Needs, command: &str| {
+            let _ = std::fs::remove_file(dir.join("missing"));
+            let script = guest_script(command, Some(needs))
+                .replace("cd /workspace", &format!("cd {}", dir.display()))
+                .replace("/colonizer-verify", &dir.display().to_string());
+            let out = std::process::Command::new("sh").args(["-c", &script]).status().unwrap();
+            assert!(out.success());
+            let code: i32 = std::fs::read_to_string(dir.join("exit")).unwrap().trim().parse().unwrap();
+            (code, dir.join("missing").exists())
+        };
+        let sh = needs("sh", "command -v sh >/dev/null 2>&1");
+        assert_eq!(run(&sh, "exit 3"), (3, false));
+        assert_eq!(run(&sh, "true"), (0, false));
+        let absent = needs("no-such-tool", "command -v colonizer-no-such-tool >/dev/null 2>&1");
+        assert_eq!(run(&absent, "true"), (127, true));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1080,6 +1533,72 @@ mod tests {
             "no lockfile on the base"
         );
         assert_eq!(v.exit_code, None, "nothing ran");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A runner standing in for a colony image without the tool the command checks for: the guest
+    /// script's check fails, so it leaves the `missing` marker and reports 127.
+    fn missing_tool_runner(tool_check: &'static str) -> VmRunner {
+        Arc::new(move |spec| {
+            assert!(
+                spec.command.last().is_some_and(|script| script.contains(tool_check)),
+                "the guest checks for the tool first: {:?}",
+                spec.command
+            );
+            Box::pin(async move {
+                let report = spec.mounts.iter().find(|m| m.target == "/colonizer-verify").unwrap();
+                tokio::fs::write(report.source.join("missing"), "").await?;
+                tokio::fs::write(report.source.join("exit"), "127").await?;
+                Ok(0)
+            })
+        })
+    }
+
+    /// The incident end to end: a bun repository's base branch picks bun from bun.lock (never
+    /// `npm install`), the colony image has no bun, and the claim is unverifiable — named plainly —
+    /// instead of contradicted, so autopilot is not held on it.
+    #[tokio::test]
+    async fn a_bun_repository_without_bun_in_the_image_is_unverifiable_not_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let repo = worktree_fixture(&app, None, "did the work", false).await;
+        std::fs::write(
+            repo.join("package.json"),
+            r#"{"name": "chi-backend", "scripts": {"test": "jest"}}"#,
+        )
+        .unwrap();
+        std::fs::write(repo.join("bun.lock"), "{\n  \"lockfileVersion\": 1,\n}\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "a bun repository");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/fix.ts"), "export const fixed = true;\n").unwrap();
+
+        let v = verify(&app, &missing_tool_runner(BUN.check)).await;
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(v.command.as_deref(), Some("bun install --frozen-lockfile && bun run test"));
+        assert_eq!(v.command_source.as_deref(), Some("bun.lock"));
+        assert_eq!(v.exit_code, Some(127));
+        assert_eq!(
+            v.summary,
+            "`bun` (picked from `bun.lock`) is not in the colony image, so \
+             `bun install --frozen-lockfile && bun run test` could not run (exit 127)"
+        );
+        assert_eq!(
+            crate::events::verdict_step(&v.verdict),
+            crate::events::Autopilot::Publish,
+            "an unverifiable claim does not hold autopilot"
+        );
+
+        // With bun in the image the same run decides as usual: green confirms, red contradicts.
+        let v = verify(&app, &fake_runner(0, Some(0))).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        let v = verify(&app, &fake_runner(1, Some(1))).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(
+            v.contradictions,
+            vec!["`bun install --frozen-lockfile && bun run test` exited 1 in a fresh checkout".to_string()]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

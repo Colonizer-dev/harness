@@ -1188,7 +1188,19 @@ export type AgentEventBody =
       /** Observations that do not change the verdict, e.g. a described path missing beside ones that are there. Absent on events recorded before it existed. */
       advisories?: string[];
       command: string | null;
-      command_source: "config" | "package.json" | "Cargo.toml" | "Makefile" | null;
+      command_source:
+        | "config"
+        | "packageManager"
+        | "bun.lock"
+        | "bun.lockb"
+        | "pnpm-lock.yaml"
+        | "yarn.lock"
+        | "package-lock.json"
+        | "npm-shrinkwrap.json"
+        | "package.json"
+        | "Cargo.toml"
+        | "Makefile"
+        | null;
       exit_code: number | null;
       tests_ms: number | null;
       commits: number;

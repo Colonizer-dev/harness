@@ -1833,8 +1833,17 @@ verdict or hold autopilot.
 The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
 colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
 a command), then — for `auto` — the repository's own declaration read from the **base** branch:
-package.json `scripts.test` (else `npm ci && npm test`, or `npm install && npm test` without a
-lockfile), Cargo.toml → `cargo test`, a Makefile `test:` target → `make test`. A branch that rewrote
+package.json `scripts.test`, run by the repository's own package manager — the `packageManager`
+field through corepack (`corepack pnpm …`, `corepack yarn …`; `bun` and `npm` directly), else the
+root lockfile: `bun.lock`/`bun.lockb` → `bun install --frozen-lockfile && bun run test`,
+`pnpm-lock.yaml` → `pnpm install --frozen-lockfile && pnpm test`, `yarn.lock` → `yarn install
+--immutable && yarn test` (Yarn 2+'s lockfile) or `--frozen-lockfile` (Yarn 1's),
+`package-lock.json`/`npm-shrinkwrap.json` → `npm ci && npm test`, and no lockfile →
+`npm install && npm test`; a bun repository without the script runs `bun test` when the base branch
+has test files for it — then Cargo.toml → `cargo test`, a Makefile `test:` target → `make test`.
+The fresh-checkout VM checks for the tool the command needs before running it: a tool the colony
+image does not carry (the default node image has no bun or pnpm) makes the claim `unverifiable`,
+named in the summary, never `contradicted`. A branch that rewrote
 the entry its resolved command comes from (`scripts.test`, the Makefile) would be grading its own
 homework: the claim comes back `unverifiable` with that said plainly, and nothing runs. `verify:
 none` means
@@ -1850,8 +1859,11 @@ same object minus `type`/`seq`/`ts`):
 ```
 
 `command_source` names where the command came from (`config` for an explicit command — the colony's
-`verify` or the `publish` module's setting — or the base branch file that declared it:
-`package.json`, `Cargo.toml`, `Makefile`; null when no command ran), `exit_code`/`tests_ms` are the
+`verify` or the `publish` module's setting — or what on the base branch declared it:
+`packageManager` (the package.json field), the lockfile that picked the package manager
+(`bun.lock`, `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`,
+`npm-shrinkwrap.json`), `package.json` (no lockfile, so npm), `Cargo.toml`, `Makefile`; null when no
+command ran), `exit_code`/`tests_ms` are the
 fresh run's, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
 
 **No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
