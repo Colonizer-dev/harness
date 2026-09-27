@@ -1,0 +1,15 @@
+{
+  "name": "colonizer-agent-acp",
+  "version": "0.1.0",
+  "description": "Colonizer agent module: any Agent Client Protocol agent over stdio",
+  "scripts": {
+    "test": "node --test test/runner.test.mjs",
+    "start": "node runner.mjs"
+  },
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

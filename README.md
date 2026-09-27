@@ -199,6 +199,7 @@ settings → Agent module; without a pick, the mothership's agent choice applies
 | [`claude-code`](modules/agents/claude-code) | Anthropic's Claude Code via the Claude Agent SDK, with questions to the user as choice cards | `SHIPPING` |
 | [`codex`](modules/agents/codex) | OpenAI's Codex CLI, headless: one `codex exec` process per turn, resumed into a single thread; the `codex` CLI must be present in the colony image | `SHIPPING` |
 | [`grok-build`](modules/agents/grok-build) | xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session | `PLANNED` |
+| [`acp`](modules/agents/acp) | Any Agent Client Protocol agent over stdio, one long-lived process per colony; verified against Google's Gemini CLI (`gemini --experimental-acp`) | `PLANNED` |
 
 ---
 
@@ -221,6 +222,7 @@ can install it.
 | [`modules/agents/pi`](modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
 | [`modules/agents/hermes`](modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
 | [`modules/agents/codex`](modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the `codex` CLI must be present in the colony image | `SHIPPING` |
+| [`modules/agents/acp`](modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) with a snapshot of its built-in subagents (`claude-code-builtins.json`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
@@ -466,6 +468,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 (cd modules/agents/claude-code && npm test)
 (cd modules/agents/pi && npm test)
 (cd modules/agents/codex && npm test)
+(cd modules/agents/acp && npm test)
 (cd services/telemetry && npm test)             # the live map's receiver
 (cd services/relay && npm test)                 # remote access relay
 (cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
