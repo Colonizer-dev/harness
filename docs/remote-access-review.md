@@ -23,6 +23,37 @@ fence from [#375](https://github.com/Colonizer-dev/harness/issues/375) is pinned
 host rather than widened. The id, cookie and pairing design at the relay holds too. Five findings
 were filed as separate security issues; three of them (R1–R3) should block deployment.
 
+## Status on `main` (re-checked 2026-09-27)
+
+The tunnel client has since merged (#558, `61d4d8e`), and the server was split into modules
+(#577): what the review cites in `main.rs` is now `host_guard` in
+`crates/colonizer/src/server.rs:37-90` and the router in `server.rs:226-236`. `remote.rs` on
+`main` is the reviewed code with its line numbers moved by a few lines at most. The relay source
+is unchanged since `5325415` (only the pinned wrangler version moved, #560). The relay is still
+not deployed.
+
+Every finding below is still open on `main`:
+
+| Id | Still true? | What was checked on `main` |
+| :--- | :--- | :--- |
+| R1 | Yes | `stripHopByHop` still throws on the client's `[name, value]` array (`services/relay/src/protocol.js:46-49`, reproduced with Node); the client still sends arrays (`remote.rs:797-802`). No relay test uses that shape. |
+| R2 | Yes | `reset_identity` still registers a fresh install and never retires the old one (`remote.rs:245-263`); the relay still has no endpoint that deletes an install (`worker.js:48-59`). |
+| R3 | Yes | The relay still forwards `colonizer_token` (`auth.js:199-209` strips only its own session cookie); nothing rotates the API token; `http_base` still accepts `ws://` for any host (`remote.rs:319-327`). |
+| R4 | Yes | `stripHopByHop` still passes `set-cookie … Domain=` through; `set_cookie_header` still has no `Secure` (`auth.rs:134-136`). |
+| R5 | Yes | `bodies` and `ws_in` still use unbounded channels (`remote.rs:704`, `:833`); the tunnel is still dialled with tungstenite's default config (`remote.rs:442-445`). |
+| L1–L5 | Yes | `safeNext` (`auth.js:81-85`), the optional limiter (`worker.js:62`, `:111`), bare `create_dir_all` (`remote.rs:169`, `:275`), the `sec-websocket-*` strip (`remote.rs:1048`) and the `via` field without a tunnel marker are all unchanged. |
+
+No issue with any of the five R titles is in the public tracker as of 2026-09-27; if they were
+filed privately (as security advisories), this document cannot see them.
+
+One more gap, found on the re-check and not a security finding: the mothership has no code for
+the relay's signed pairing endpoints. The cockpit calls `GET /api/remote/pairing` and
+`POST /api/remote/pairing/confirm` (`web/src/api.ts`), but neither is a mothership route
+(`crates/colonizer/routes.snap`), so no install can bind an owner and the relay forwards no one.
+Remote access therefore cannot be used end to end yet, independent of R1.
+[remote-tunnel.md](remote-tunnel.md#where-the-code-differs-today) lists every place the two halves
+depart from the pinned tunnel contract.
+
 ## Threat-model verdicts
 
 | Threat | Verdict | Where it is held, or the finding |
@@ -131,6 +162,8 @@ Each was confirmed by code reading; L1 also by a proof-of-concept run.
 - Deploy configuration: `SESSION_SECRET` set (the relay fails closed without it), `REGISTER_LIMITER`
   and `DIAL_LIMITER` bindings deployed, the real `GITHUB_CLIENT_ID` and D1 `database_id` in place of
   `wrangler.toml`'s placeholders, and the GitHub OAuth app's wildcard callback matching enabled
-  (`services/relay/README.md:98-107`).
+  (`services/relay/README.md`, Deploy step 4).
 - The tunnel-client half of this review re-run once #533 merges, since `a518798` was unmerged at
-  review time.
+  review time. (#533 merged as #558; the re-check above found every finding unchanged.)
+- The mothership's side of pairing built, so an install can bind an owner at all (see *Status on
+  `main`* above).

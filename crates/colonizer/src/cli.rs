@@ -76,12 +76,12 @@ Exit codes:
   2  usage: the arguments name no command this build knows
   3  unauthorized or forbidden: the token is missing, unknown (401) or not allowed (403)
   4  not found: no such colony or token (404)
-  5  conflict (409), or `ask` on a colony that is not asking anything
+  5  conflict (409), or `ask`/`answer` on a colony that is not asking anything
   6  a launch cap was refused (429)
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
-(`update`, `open`, `login-item`) read them; the client commands take --host and --token-file.";
+(`update`, `open`, `login-item`, `telemetry`) read them; the client commands take --host and --token-file.";
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -120,7 +120,7 @@ enum Command {
         /// The repository to work in, as owner/repo
         #[arg(value_name = "OWNER/REPO")]
         repo: String,
-        /// Work one issue instead of the repository's own backlog
+        /// Work this issue: its title and body go into the prompt. Without it the colony works on TASK
         #[arg(long)]
         issue: Option<u64>,
         /// Run the orchestrator on this model instead of what routing would pick
@@ -129,10 +129,10 @@ enum Command {
         /// Run the colony's subagents on this model
         #[arg(long, value_name = "MODEL")]
         subagent_model: Option<String>,
-        /// Answer routine questions itself, without waiting for a person
+        /// Open the pull request automatically once the agent finishes cleanly and has written its PR description
         #[arg(long)]
         autopilot: bool,
-        /// Keep autopilot off, even where the install default is on
+        /// Keep autopilot off: the finished work waits for you to open the pull request, even where the install default is on
         #[arg(long, conflicts_with = "autopilot")]
         no_autopilot: bool,
         /// The task, when the issue alone does not say it (the issue body is read either way)

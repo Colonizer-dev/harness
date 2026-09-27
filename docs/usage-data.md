@@ -44,7 +44,7 @@ number leaves the machine; every other string but three comes from a closed, com
 | `usage_id` | UUID or `null` | A random UUID for the current on-period: minted when the first batch is built — reporting is on by default, so usually the first start — or when the switch is turned on, and forgotten when reporting is switched off, so the next period cannot be joined to this one. `null` while reporting is off — after `colonizer telemetry off`, or while an environment switch holds it off. Never the live map's `install_id`. |
 | `harness_version` | string | The Colonizer version, e.g. `0.1.3`. |
 | `platform` | string | `linux-x86_64`, `darwin-arm64` or `other` — the same closed set the live map sends. |
-| `colonies.parallel_now` | count bucket | Colonies with a running microVM right now. Queued ones hold none, so they are not counted. |
+| `colonies.parallel_now` | count bucket | Colonies with a running microVM right now: live colonies (starting, running, idle, waiting for an answer), not counting queued ones or ones suspended while they wait for an answer, which hold no microVM. |
 | `colonies.terminal` | 4 count buckets | How finished colonies ended up: `pr_opened`, `no_changes`, `stopped`, `failed`. |
 | `sandbox.preset` | closed label | The stack preset's id: `auto`, `node`, `python`, `rust`, `go` or `custom` — or `unknown` if a hand-edited `modules.json` names a preset the harness has never heard of. What is configured is what is sent: an install left on `auto` reports `auto`, not the stack it detected for each repository. |
 | `sandbox.image_changed_from_default` | boolean | Whether the image a colony actually boots differs from the one the resolved stack names. Only the comparison is sent; the image string itself is user free text and never is. |
@@ -53,7 +53,7 @@ number leaves the machine; every other string but three comes from a closed, com
 | `settings_set` | sorted strings | `<kind>.<key>` for every module setting this install carries that its schema declares — `agent.model`, `sandbox.preset`, and so on. Names only, never values; keys a hand-edited `modules.json` added but the schema doesn't declare are dropped. |
 | `boot_ms` | list | Where boot time went: one entry per boot phase with samples, in boot order — `issue`, `git`, `providers`, `mesh-start`, `image-pull`, `vm-boot`, `mesh-join`, `agentd` — each the median duration across the colonies this install has booted, bucketed. Phases with no samples are left out. |
 | `providers` | count bucket | Model providers configured on the mothership. |
-| `error_kinds` | map of count buckets | How failures and attention reasons are distributed, as closed labels: `agentd_not_ready`, `harness_restarted`, `vm_stopped`, `publish_interrupted` (the fixed messages the harness itself writes), `stalled`, `waiting_for_answer`, `nudges_exhausted` (the watchdog's reasons) and `autopilot_held`. A colony's own error text names no kind, so this map can sum to less than `colonies.terminal.failed`. |
+| `error_kinds` | map of count buckets | How failures and attention reasons are distributed, as closed labels: `agentd_not_ready`, `harness_restarted`, `vm_stopped`, `publish_interrupted` (the fixed messages the harness itself writes), `stalled`, `waiting_for_answer`, `nudges_exhausted` (the watchdog's reasons), `autopilot_held`, `model_error` (the provider gateway's model or provider failure) and `agent_failed` (the agent's runner never started). A colony's own error text names no kind, so this map can sum to less than `colonies.terminal.failed`. |
 
 The bucket edges, exactly as the code draws them:
 
@@ -177,7 +177,8 @@ after you have answered, in Settings or on the command line. A blocked environme
 built — kept in `usage-last.json` beside the answer, so the command needs neither the network nor a
 running mothership. When no batch has been built yet, a fresh install or a mothership never started, it
 builds the empty batch and prints that instead — so whatever shape the machine is in, "what exactly
-would you send?" has a one-command answer. Anything that is not the batch goes to stderr.
+would you send?" has a one-command answer. That empty batch carries the kept `usage_id`, which is
+`null` until a mothership has built its first batch. Anything that is not the batch goes to stderr.
 
 There is deliberately no background loop: a batch is built when the mothership starts, and when `GET`
 or `PUT /api/telemetry/usage` is called — in practice, while the Settings pane is open. `telemetry
@@ -190,7 +191,8 @@ returns. The batch is shown whatever the switch says; that is the point. It is b
 function a sender would call, so what you read here is what would go out.
 
 The switch itself is `PUT /api/telemetry/usage` with `{"enabled": true}` or `{"enabled": false}` —
-what the pane's toggle calls.
+what the pane's toggle calls. Both routes need the owner token, and the `PUT` answers with the same
+body as the `GET`: `{enabled, blocked_by, payload_version, batch}`.
 
 ## Keeping it off
 
@@ -225,10 +227,10 @@ periods cannot be joined either.
 Nothing is sent today: this change builds the batch, shows it and keeps the switch, locally, and sends
 nothing anywhere. Adding a sender is a release, and it ships with these preconditions met:
 
-1. **The sender composes `Cratefield/harness#413`'s telemetry module, not a bespoke HTTP client.**
-   That issue is an open feature request, filed 2026-09-16: no `module-telemetry` crate exists on
-   crates.io yet, and the client contract Colonizer would consume is itself unbuilt. Until it exists
-   there is nothing to compose — which is why this release ships everything except egress.
+1. **The sender composes Cratefield's telemetry module, not a bespoke HTTP client.** The module was
+   asked for in `Cratefield/harness#413` and landed there on 2026-09-19 as `cratefield-module-telemetry`
+   (`crates/module-telemetry`). It is not published on crates.io, and nothing in this repository
+   composes it yet — which is why this release ships everything except egress.
 2. **colonizer.dev says the harness reports anonymous usage data** — the copy describing what is
    collected, and the site's `llms.txt` (there is no `llms.txt` in this repository; it is the site's).
    The website, including its footer and its `COPY.md`, where the site tracks its claims against this

@@ -17,8 +17,9 @@ keep both off.
 ## What is sent
 
 While it is on, the mothership sends a heartbeat to `https://telemetry.colonizer.dev/v1/heartbeat` every
-5 minutes, and within a minute when the number of running colonies changes. The heartbeat is this, and
-nothing else:
+5 minutes, and within a minute when the number of running colonies changes. (The interval is whatever
+the service answers in `next_in`, which is 5 minutes; the mothership holds it between 1 and 60
+minutes.) The heartbeat is this, and nothing else:
 
 ```json
 {
@@ -32,9 +33,9 @@ nothing else:
 | Field | What it is |
 | :--- | :--- |
 | `install_id` | A random UUID, created when you switch the live map on. It lets a mothership's heartbeats count once. |
-| `version` | The Colonizer version. |
+| `version` | The Colonizer version, without the leading `v`. |
 | `platform` | `linux-x86_64`, `darwin-arm64`, or `other`. |
-| `colonies` | How many colonies have a running microVM, capped at 64. |
+| `colonies` | How many colonies are live (starting, running, idle or waiting for an answer), capped at 64. A colony suspended while it waits for an answer still counts, although its microVM is down. |
 
 No repository, issue, branch, code, prompt, user name, host name or path is sent. Settings shows the
 exact heartbeat the mothership will send next.
@@ -43,8 +44,14 @@ When you switch it off, the mothership sends `{"install_id": "…", "online": fa
 row straight away, and then forgets the id. The id is forgotten whether or not that message gets
 through. If the service is unreachable, the row simply stays: it stops being counted 12 minutes after
 the last heartbeat, and because the id is gone, nothing can refresh it. If you switch it on again
-later, it gets a new id, so the two periods can't be linked. Stopping the mothership sends the same
-message, but keeps the id.
+later, it gets a new id, so the two periods can't be linked. Stopping the mothership, and restarting it
+into an [update](updates.md), sends the same message but keeps the id.
+
+Settings, under **Live map**, shows the switch, the next heartbeat, when the last one was sent and the
+last error. The same is `GET /api/telemetry`; the switch is `PUT /api/telemetry` with
+`{"enabled": true}` or `{"enabled": false}`, which answers `409` while an environment switch keeps the
+map off. Both need the owner token. `colonizer telemetry` on the command line is the
+[usage data](usage-data.md) switch, not this one.
 
 ## What the service keeps
 
@@ -75,8 +82,9 @@ nothing is deleted: the row sits there, read by nothing, until the next request 
 scheduled prune; the section below says why.
 
 Cloudflare's own request logs for the Worker are outside this table and outside the project's control.
-They follow whatever retention the Cloudflare account has, which has not been checked, and unlike this
-table they do see IP addresses.
+The Worker has Cloudflare's observability (Workers Logs) switched on in `wrangler.toml`. Those logs follow
+whatever retention the Cloudflare account has, which has not been checked, and unlike this table they do
+see IP addresses.
 
 ## What is public
 
@@ -103,7 +111,9 @@ statistics.
 ## Keeping it off for good
 
 Set `DO_NOT_TRACK=1` or `COLONIZER_TELEMETRY=off` in the mothership's environment. The live map then
-stays off, whatever Settings says, and the web UI doesn't ask. `COLONIZER_TELEMETRY_URL` points the
+stays off, whatever Settings says, and the web UI doesn't ask. `DO_NOT_TRACK` counts when it is set to
+anything but empty, `0` or `false`; `COLONIZER_TELEMETRY` when it is `off`, `0`, `false` or `no`, in any
+case. `COLONIZER_TELEMETRY_URL` points the
 heartbeat at another receiver, such as your own deployment of the service.
 
 Both switches keep [usage data](usage-data.md) off too; that page also names one more switch,

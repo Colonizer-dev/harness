@@ -7,7 +7,7 @@
 //! `<config_dir>/api-tokens.json` and stores only a SHA-256 hash of each token: the plaintext is
 //! returned once at creation and never again, by this process or by the file.
 //!
-//! `host_guard` (main.rs) accepts a scoped token as `Authorization: Bearer` only — a browser never
+//! `host_guard` (server.rs) accepts a scoped token as `Authorization: Bearer` only — a browser never
 //! holds one, so the `colonizer_token` cookie stays owner-only — and [`authorize`] decides the
 //! route: anything outside the scope's allowlist is a 403 naming the scope, and a colony-scoped
 //! route for a colony outside the token's org/repo limits is a 404, the same answer an unknown id

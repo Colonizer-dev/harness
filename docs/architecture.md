@@ -27,7 +27,7 @@ flowchart TB
     direction TB
     vmts["tailscaled (static)<br/>joins the mesh at boot"]
     agentd["colonizer-agentd :7070<br/>events · pty · shutdown"]
-    runner["agent runner (module)<br/>Claude Code via the Agent SDK"]
+    runner["agent runner (module)<br/>Claude Code by default"]
     ws["/workspace<br/>git worktree (rw)"]
   end
 
@@ -59,7 +59,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
 | `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; `auto`, the default, reads the stack off the repository's marker files when the colony's worktree is checked out and falls back to Node when a repository names none; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
-| `agent` | `claude-code` | Runner that speaks the Colonizer agent protocol inside the VM |
+| `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `codex`, `pi`, `hermes` and `grok-build` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
@@ -102,8 +102,10 @@ mothership's saved key for the provider is injected.
 
 ## How the mothership's code is put together
 
-`crates/colonizer/src/main.rs` holds the command line entry point and the module list, nothing more.
-The rest of the mothership lives in three files and in the modules themselves:
+`crates/colonizer/src/main.rs` holds the module list (`mod <name>;`, alphabetical), a few
+re-exports that keep paths like `crate::App` stable, and `main`, which parses the command line and
+hands it to `cli::run`. With no subcommand, `cli::run` calls `server::serve`. The rest of the
+mothership lives in three files and in the modules themselves:
 
 - `app.rs` defines `App`, the state every handler and background task shares as `Shared`, and
   `App::new`, the one place it is built (tests build it there too). It also holds the loading of
@@ -114,6 +116,25 @@ The rest of the mothership lives in three files and in the modules themselves:
   `start_tasks`, which starts every module's background work.
 - Each feature module owns its handlers, its routes (`pub(crate) fn routes()`) and its background
   work (`pub(crate) fn start_tasks(app: &Shared)`).
+
+Two parts are bigger than one file:
+
+- `sessions/` is the colony itself, split by concern: `model.rs` (the `Session` record as
+  `sessions.json` stores it), `launch.rs` (`POST /api/sessions` and its admission rules),
+  `api.rs` (the session handlers and WebSockets, and `routes()`), `persist.rs` (reading and
+  saving the colony list and per-colony directories), `runtime.rs` (a live colony's event fan-out
+  and agent link), `agentd.rs` (talking to `colonizer-agentd` in the VM) and `attention.rs` (the
+  attention flag). `sessions/mod.rs` re-exports them, so callers still write `sessions::create`.
+- `boot.rs` is the colony boot: resolve the base and issue, prepare the worktree, assemble the
+  prompt, mounts, secrets and network rules, write `boot.sh`, start the microVM and wait for
+  agentd. `sessions::boot` is a re-export of it.
+
+`crates/colonizer/routes.snap` is the API's surface in one file, one line per route: the path and
+method, what an unauthenticated request gets (`unauth=401`, or `public` for `GET /api/status`),
+what a scoped API token needs (`token=owner`, `read`, `session>=read`, `session>=operate`, `map` or
+`launch`, from `api_tokens::classify`), and the History entry it records (`activity=`). A test
+(`server/route_table_tests.rs`) rebuilds the table from the real router and fails when it differs
+from the file.
 
 ### Adding a module
 
@@ -143,6 +164,7 @@ different lines instead of both appending to the same spot.
    `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` to regenerate
    `crates/colonizer/routes.snap`, the route table with each route's auth, token scope and
    activity kind. Commit it with the change, so the change to the API's surface shows in review.
+   Without the regeneration, `cargo test` fails and prints that command.
 3. **State.** If the module keeps state, give it a type of its own with a constructor taking what
    it needs from `Settings`. Add one field to the "module state" block of `App` and one line to
    the same block of `App::new`, both alphabetical. Handlers reach it as `app.<name>`.
@@ -181,6 +203,10 @@ colony that ends or dies loses no proposal already made. `MEMORY.md` is written 
 notes only.
 
 ## Session lifecycle
+
+This is the mechanism. What a colony looks like from the operator's side (launching, claims,
+questions, stop and resume, budgets) is in [colonies.md](colonies.md), and the web UI in
+[cockpit.md](cockpit.md).
 
 ```mermaid
 stateDiagram-v2
@@ -381,7 +407,7 @@ vendored one — logged when the skillset is saved and again at each colony boot
 | `COLONIZER_GATEWAY_BIND` | `Settings::parse_gateway_bind` refuses startup (issue #406) | `gateway_bind_defaults_unset_parses_an_ip_port_and_refuses_everything_else` |
 | Colony launch | `sessions::create`: unknown tier, a model naming no configured provider, an uninstalled agent module, missing Claude credentials | none yet (follow-up) |
 | Activity log filters | `activity::list` → `parse_filter`: an unknown kind or actor, or a `limit` outside 1–500, is refused naming the value and the accepted ones | `a_bad_filter_is_refused_by_name` |
-| Spawn | the boot refuses an unrouted `<provider>/` model setting (`ColonyRoutes::unrouted_provider`); the runner's router warns about malformed routes | `unrouted_providers_are_reported_with_the_value_and_prefix`; `router.test.mjs` |
+| Spawn | the boot refuses a `<provider>/` model setting no configured provider owns, or one a provider's `model_map` does not list (`ColonyRoutes::unusable_route`); the runner's router warns about malformed routes | `an_unconfigured_provider_prefix_refuses_the_launch_naming_the_fix`, `configured_prefixes_and_bare_names_pass_the_unrouted_check`; `router.test.mjs` |
 
 ### Documented fallbacks
 
@@ -393,7 +419,7 @@ The deliberate degradations, each with its reason:
   boots as the bare tag rather than not at all — a colony that cannot boot is worse than one booting
   unpinned (`an_unpinned_image_degrades_to_the_bare_reference`).
 - The token savers — `rtk`, Headroom, caveman — warn and continue when the install lacks the piece
-  they need: saving tokens is never the reason a colony doesn't start (sessions.rs).
+  they need: saving tokens is never the reason a colony doesn't start (boot.rs).
 - A module-settings save lets a stored key the schema no longer declares pass through. The Settings
   UI saves back everything `modules.json` holds, and a provider switch keeps the previous provider's
   keys, so refusing them would lock the user out of saving until the file was hand-edited
@@ -451,7 +477,10 @@ tier or a bad model override have no direct unit test.
 - VMs get one narrow extra rule, `allow@<host-lan-ip>:udp:<harness-udp-port>`, so WireGuard
   connects directly (≈1 ms) instead of through a public DERP relay. LAN access stays blocked.
 - Users: `harness` and `vms`. Policy: `harness@` may reach `vms@:*`; VMs cannot reach each other.
-- VM keys are single-use, ephemeral, 30-minute pre-auth keys; nodes are deleted on session end.
+- VM keys are single-use, 30-minute pre-auth keys. They are deliberately not ephemeral: headscale
+  would delete an ephemeral node when it disconnects, and a colony that outlives a mothership
+  restart, or is stopped and resumed, would lose its place on the mesh. The harness deletes a
+  colony's node itself when the colony is torn down.
 - Headscale reads a bundled DERP relay map (`vendor/derpmap.yaml`, refreshed with
   `scripts/update-derpmap.sh`) instead of fetching one, so the mesh starts without internet access.
   Relays are only a fallback; the direct UDP path doesn't need them.

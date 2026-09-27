@@ -4,8 +4,10 @@ A *connection* is one entry in Model providers (`providers.json` on the mothersh
 credential, and a `wire` — `anthropic` (the default) or `openai`. Model traffic reaches a connection
 through the provider gateway at `/providers/<id>/` (docs/protocol.md §6.5), which presents the
 Anthropic Messages wire to the colony and translates an `openai`-wire connection in both directions.
-This page is the compatibility map between those connections and the shipped agent backends, plus the
-two switches that take tools away from a colony.
+This page is the compatibility map between those connections and the shipped agent backends, the
+two switches that take tools away from a colony, and the settings that decide what a connection may
+spend and carry. Every field and route is in
+[docs/protocol.md §6.5](protocol.md#65-provider-gateway-v12-issue-5).
 
 ## Connection → backends
 
@@ -13,7 +15,7 @@ two switches that take tools away from a colony.
 | :--- | :--- | :--- | :--- |
 | `claude-code` | yes — unrouted models go straight to Anthropic; `<provider>/<model>` rides the gateway's Anthropic Messages route | yes — same route; the gateway translates the openai wire | yes — the `disabled_tools` setting (`COLONIZER_DISABLED_TOOLS`) becomes the SDK session's `disallowedTools` |
 | `acp` | no | no — talks to the agent's own API host (Gemini: `generativelanguage.googleapis.com`) with the colony's own secret; the runner passes model ids to `session/set_model` and reads no model routes | not yet — ACP names no per-tool switch; the runner maps no `disabled_tools` equivalent |
-| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY`; it refuses every provider prefix but `openai/` and reads no model routes | not yet — the runner already passes `-c` config overrides; a tool switch would ride those |
+| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY` (or `OPENAI_API_KEY`); it refuses every provider prefix but `openai/` and reads no model routes | not yet — the runner already passes `-c` config overrides; a tool switch would ride those |
 | `grok-build` | no | no — talks to `api.x.ai` directly with `XAI_API_KEY`; it refuses every provider prefix but `xai-grok/` and reads no model routes | not yet — the runner sets only `GROK_*` env toggles (memory, telemetry, updater) |
 | `hermes` | yes — one config provider per gateway route, `transport: anthropic_messages` | yes — same route; the gateway translates | not yet — the runner hardcodes `agent.disabled_toolsets` (whole toolsets, not a per-colony setting) |
 | `opencode` | yes — one `@ai-sdk/anthropic` provider per gateway route at `<base_url>/v1` | yes — same route; the gateway translates | not yet — the generated inline config carries no per-tool entries |
@@ -30,6 +32,11 @@ A connection's optional `model_map` maps a canonical model name to the name sent
 is sent verbatim, so a provider that only knows its own branding can be addressed by the canonical
 name every setting uses. A non-empty `model_map` is authoritative: the connection serves only the
 canonicals it lists, and boot refuses a model that is not among them.
+
+The cockpit's provider form does not show `model_map` or `disabled_tools` yet. Set them with
+`PUT /api/providers/{id}` or by editing `providers.json`; saving the provider from the cockpit keeps
+whatever is there, because a `PUT` that leaves a field out keeps its saved value (an explicit empty
+value clears it).
 
 ## Taking tools away: two levels
 
@@ -54,7 +61,14 @@ with a fix in the message, when any of these holds:
 
 1. the model's `<provider>/` prefix names no configured connection;
 2. the connection's non-empty `model_map` does not list the model;
-3. the connection is unreachable at launch and the route has no `fallback_model`.
+3. the connection is unreachable at launch and the route has no `fallback_model`. Before refusing, the
+   boot probes the connection again rather than trusting the cached answer, so an outage that ended a
+   moment ago does not block the launch. A connection with a `fallback_model` only gets a warning in
+   the colony log: its requests go to that Claude model instead.
+
+Only the connections this colony's model settings name (`model`, `subagent_model`,
+`background_model`, and `model_low`/`model_high` when per-task routing picks one) are checked, so an
+unrelated connection that is down blocks nothing.
 
 Two more misconfigurations refuse the launch the same way, before any probe runs:
 
@@ -63,3 +77,31 @@ Two more misconfigurations refuse the launch the same way, before any probe runs
   `providers.json: provider '<id>': model_map['<canonical>']: …` (or `disabled_tools['<tool>']: …`);
 - an unknown tool in the harness `disabled_tools` setting — the message names the agent module and
   the known tools: `agent module '<id>' setting 'disabled_tools': unknown tool '<name>' (known: …)`.
+
+## Plans, quotas and trust
+
+A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers.
+`trusted`, like `model_map` and `disabled_tools`, is not in the cockpit yet: the API accepts it
+(`PUT /api/providers/{id}`) and `providers.json` holds it, but `GET /api/providers` does not return it.
+
+- **Which colonies may use it.** A colony's gateway token opens only the connections its model settings
+  route to. A request for any other connection is refused with `403`, so one colony cannot spend on a
+  provider it was not configured for.
+- **`pricing`** — dollars per million input, output, cache-read, cache-write and thinking tokens. Unset,
+  routed requests cost `$0` but their tokens are still counted, so the sandbox module's `budget_tokens`
+  still holds a colony on a prepaid plan that `budget_usd` never can.
+- **`quota`** — `{"url", "pointer"}`, where to read what is left in a prepaid token plan. The gateway sends
+  a `GET` to `url` with the connection's own credential, so `url` must have the same scheme, host and
+  port as `base_url`, and reads the number (or numeric string) at `pointer`, an RFC 6901 JSON pointer.
+  The provider health check (`GET /api/providers/{id}/health`) then answers `quota: {remaining, error}`,
+  and the provider card shows "N left in plan". A failed quota read never marks the connection
+  unreachable. `quota` omitted on a `PUT` keeps the saved probe; an empty `url` clears it.
+- **Quota exhaustion.** When a provider answers `429` or `403` with a message that says the plan ran out
+  (not a plain rate limit), the gateway records it as exhausted until the reset the message names, or
+  for 15 minutes when it names none. With a `fallback_model`, the request is retried on that Claude
+  model. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
+  connection the colonies route to is exhausted, the queue pauses, and a colony whose turn died on the
+  plan is stopped with its worktree kept until the provider recovers.
+- **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
+  infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
+  and the colony log says why.

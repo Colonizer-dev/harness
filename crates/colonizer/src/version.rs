@@ -7,9 +7,9 @@
 //! about the install beyond a user agent; the live map is separate and off by
 //! default (`telemetry.rs`).
 //!
-//! Applying an update is not here. That needs the versioned app directory from
-//! #90/#104 to land first, so an old release can stay readable while colonies
-//! still mount plugins from it.
+//! Applying an update is not here: `update.rs` installs a release into the
+//! versioned app directory and restarts into it (`colonizer update`,
+//! `POST /api/update/apply`).
 
 use std::{
     path::{Path, PathBuf},

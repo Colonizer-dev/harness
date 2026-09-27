@@ -50,8 +50,12 @@ user agent — no id, no machine, no colonies. That is a different thing from th
 | Point it somewhere else | `COLONIZER_RELEASES_URL` |
 
 Switched off, it makes no request at all rather than making one and discarding
-the answer. Set in the environment, the switch in Settings is disabled and says
-which variable is holding it off.
+the answer. `COLONIZER_UPDATE_CHECK` counts as off when it is exactly `0`,
+`false` or `off`. Set in the environment, the switch in Settings is disabled and
+says which variable is holding it off, and `PUT /api/update` answers `409`.
+
+A failed check keeps the last answer it had, so a flaky network does not hide a
+release you were already told about.
 
 ## Updating in place
 
@@ -63,6 +67,12 @@ that is already running:
 colonizer update
 ```
 
+`colonizer update` talks to the mothership on `COLONIZER_BIND` with the local
+token file (`<config dir>/api-token`), so run it on the machine the mothership
+runs on; `--host` does not apply to it. It needs the check to have run: with the
+check switched off, or before its first answer (a minute after start), it says
+so and installs nothing.
+
 Two builds are refused, and the refusal names both versions: a development
 build, which holds work no release contains, and a release newer than the
 latest one, which would be a downgrade rather than an update. Either refusal
@@ -72,16 +82,19 @@ takes `--force`:
 colonizer update --force
 ```
 
-That installs the latest release anyway: it warns how many sessions are at
-risk, backs `sessions.json` up first and prints where, and still waits while a
-colony is publishing. Forcing needs a known latest release, like any update.
+That installs the latest release anyway. It prints a warning naming both
+versions first, backs `sessions.json` up and prints where, and is still refused
+while a colony is publishing. Forcing needs a known latest release, like any
+update.
 
 Both do the same thing, because the command is a client of the same two routes
 the pane uses — `GET /api/update` and `POST /api/update/apply`. Neither
 downloads anything itself: the mothership runs `scripts/install-release.sh`,
 shipped inside the app, which is the same installer the one-line install command
 runs. The download is checked against the release's `SHA256SUMS`, and against
-the build attestation when `gh` can reach a verdict.
+the build attestation when `gh` can reach a verdict. The installer gets 20
+minutes; past that the update is marked failed and the running version is left
+as it was.
 
 What happens, in order:
 
@@ -102,17 +115,20 @@ What happens, in order:
    part-way leaves the running version exactly as it was.
 3. **The `app` symlink is moved with one rename.** There is no moment at which
    it points at half an install.
-4. **The process replaces itself** with the new binary. Colonies are detached
-   microVMs, so each live one is reconnected and its event stream carries on
-   from the sequence number it had. The pane lists every colony and what
-   happened to it.
+4. **The process replaces itself** with the new binary, `<app>/bin/colonizer`,
+   started with the same arguments. Before it does, it takes the mothership off
+   the [live map](telemetry.md) if that is on and stops the mesh, so the new
+   process can take its ports. Colonies are detached microVMs, so each live one
+   is reconnected and its event stream carries on from the sequence number it
+   had. The pane lists every colony and what happened to it.
 
 The browser reconnects on its own; a colony's chat continues where it stopped.
 
 ## The previous version is kept for a while
 
-An update applied from Settings passes `COLONIZER_KEEP_PREVIOUS=1`, so the slot
-it replaced stays on disk. Colonies mount vendored plugin directories straight
+An update applied in place, from Settings or with `colonizer update`, passes
+`COLONIZER_KEEP_PREVIOUS=1` to the installer, so the slot it replaced stays on
+disk. Colonies mount vendored plugin directories straight
 out of the slot their mothership started from, and taking that away while a
 colony is reading it breaks the colony, not the upgrade.
 
@@ -156,11 +172,14 @@ start — see [Where things live](install.md#where-things-live).
 
 ## The routes
 
+`GET /api/version` accepts any token with the `read` scope; the other three
+need the owner token (the sign-in link's).
+
 | Route | What it answers |
 | :--- | :--- |
 | `GET /api/version` | The build: version, commit, dirty, built at, the release it descends from, whether it is a development build |
-| `GET /api/update` | The above, plus the latest release, whether one is available, when it was last checked, whether it can be applied here, and how an update in flight is getting on |
-| `PUT /api/update` | `{"enabled": true\|false}` — the check |
+| `GET /api/update` | `installed` (the above), plus `enabled` and `blocked_by` (the check's switch and the variable holding it off), `latest`, `available`, `last_checked`, `error`, `can_apply` (`{ok, reason}`), and `apply`, how an update in flight is getting on (`phase`, `version`, `started_at`, `error`, `log`, `colonies`, `backup`) |
+| `PUT /api/update` | `{"enabled": true\|false}` — the check. Answers the same body as `GET`, or `409` while the environment keeps the check off |
 | `POST /api/update/apply` | Install the newer release and restart into it; an optional `{"force": true}` body installs the latest release over a development build or a newer release instead (no body means no force, anything else that is not JSON is a 400) |
 
 Designed in [#45](https://github.com/Colonizer-dev/harness/issues/45); the

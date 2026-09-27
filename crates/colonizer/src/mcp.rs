@@ -149,13 +149,14 @@ struct AnswerColony {
 struct LaunchColony {
     /// The repository to work in, as owner/repo
     repo: String,
-    /// Work one issue instead of the repository's own backlog
+    /// Work this issue: its title and body go into the prompt. Without it the colony works on the task
     issue: Option<u64>,
     /// The task, when the issue alone does not say it
     task: Option<String>,
     /// Run the orchestrator on this model instead of what routing would pick
     model: Option<String>,
-    /// Answer routine questions itself; omitted uses the install's default
+    /// Open the pull request automatically once the agent finishes cleanly and has written its PR
+    /// description; omitted uses the install's default (the publish module's autopilot setting)
     autopilot: Option<bool>,
 }
 
@@ -389,7 +390,8 @@ impl ServerHandler for ColonyServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Drive a Colonizer harness: list colonies (agent sessions working GitHub repositories in \
              microVMs), read one's status or pending question, answer it, stop or resume it, or launch \
-             a new one. Launching needs a token with launch scope.",
+             a new one. The tools listed are the ones this session's scope reaches: answering, stopping \
+             and resuming need operate, launching needs launch.",
         )
     }
 }

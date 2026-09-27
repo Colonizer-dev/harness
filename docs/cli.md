@@ -2,15 +2,16 @@
 
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
-colonies. The subcommands are everything else: a few run against this machine (`update`, `open`,
-`login-item`, `telemetry`), and the rest are clients of a mothership already running somewhere —
+colonies. The subcommands are everything else: a few run against this machine (`version`,
+`update`, `open`, `login-item`, `telemetry`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
 
-Every client command takes the same two global flags, before or after the subcommand:
+Every client command takes the same two global flags, before or after the subcommand. The local
+commands accept them too, and ignore them:
 
 - **`--host HOST[:PORT]`** — the mothership to talk to. The default is the local one
   (`COLONIZER_BIND`, else `127.0.0.1:7878`). A bare host name gets the default port 7878; a host
@@ -23,7 +24,9 @@ Every client command takes the same two global flags, before or after the subcom
   three there is nothing to prove yourself with and the command says so.
 
 `colonizer open` is local on purpose: it reprints the sign-in link and opens a browser on this
-machine. The mothership on another machine cannot be opened from here.
+machine, always with the local token and `COLONIZER_BIND`, whatever `--host` or `--token-file`
+say. The mothership on another machine cannot be opened from here. The cockpit itself is described
+in [cockpit.md](cockpit.md).
 
 **Over a tailnet.** The client half needs nothing from the mothership but reachability. The
 mothership side needs three things, or it refuses remote callers:
@@ -59,8 +62,8 @@ colonizer telemetry show      # anonymous usage reporting (on, off; no network, 
 Colonies — the ids are what `list` and the cockpit show:
 
 ```sh
-colonizer launch owner/repo "migrate the auth tests"   # a colony on the repository's own backlog
-colonizer launch owner/repo --issue 42 --no-autopilot  # one issue, holding autopilot for your answers
+colonizer launch owner/repo "migrate the auth tests"   # a colony working the task you give it
+colonizer launch owner/repo --issue 42 --no-autopilot  # one issue; you open the pull request yourself
 colonizer list --org acme --status running             # colonies this token may see, newest first
 colonizer status abc123                                # where it stands, what it costs, what it is doing now
 colonizer logs abc123 -f                               # recent events; -f streams until Ctrl-C
@@ -76,8 +79,15 @@ colonizer map owner/repo --find login                  # only the components a q
 ```
 
 `launch` takes the repository as `owner/repo`, an optional task as the last argument, and
-`--issue`, `--model`, `--subagent-model` and `--autopilot`/`--no-autopilot` (the two refuse to
-combine; no flag at all means the install's autopilot setting decides). `list` filters
+`--issue`, `--model`, `--subagent-model` and `--autopilot`/`--no-autopilot`. Autopilot is about
+publishing, not questions: with it on, the mothership opens the pull request by itself once the
+agent finishes cleanly and has written its PR description. The two flags refuse to combine; with
+neither, the publish module's `autopilot` setting decides (on by default). Who answers a colony's
+questions is a separate setting, the `autonomy` module ([colonies.md](colonies.md#questions-and-who-answers-them)).
+
+`launch` cannot override the launch guards the cockpit can: an issue another colony already holds,
+or an epic (an issue with sub-issues), is refused with a 409 (exit 5). Launch those from the
+cockpit ([colonies.md](colonies.md#claims-one-colony-per-issue)). `list` filters
 client-side: `--org` by repository owner, `--status` by the API's state names, case-insensitively.
 `answer` matches its argument against the pending question: a 1-based option number wins, then a
 whole-label match case-insensitively, and anything else goes to the agent as a free-text note —
@@ -112,7 +122,7 @@ colonizer token revoke tok_x
 
 ## `--json`
 
-`--json` prints machine-readable JSON instead of the human rendering, where a command has one —
+`--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —
 what the mothership answered, pretty-printed, for `list`, `status`, `ask`, `stop`, `resume` and
 the `token` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
 the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
@@ -129,7 +139,7 @@ Exit codes are part of the interface, so a script can tell a typo from a refusal
 | :--- | :--- |
 | 0 | Everything worked (also `--help`, `--version`, `version`) |
 | 1 | Error: the mothership is unreachable, answered with an error no code below names, or the command failed locally |
-| 2 | Usage: the arguments name no command this build knows |
+| 2 | Usage: the arguments name no command this build knows, or a flag's value is refused (a `--host` URL, an unknown `--scope`) |
 | 3 | Unauthorized or forbidden: the token is missing or unknown (401), or not allowed (403 — a scope or an org/repo limit refusing) |
 | 4 | Not found: no such colony or token (404) |
 | 5 | Conflict (409, e.g. `stop` mid-publish); for `ask` and `answer`, a colony that is not asking anything |
@@ -140,6 +150,15 @@ Exit codes are part of the interface, so a script can tell a typo from a refusal
 ```sh
 colonizer completions bash    # or zsh, fish, powershell, elvish — source the script from your shell's rc
 colonizer man                 # the man page, rendered to stdout
+```
+
+For example:
+
+```sh
+echo 'source <(colonizer completions bash)' >> ~/.bashrc                 # bash
+mkdir -p ~/.zfunc && colonizer completions zsh > ~/.zfunc/_colonizer     # zsh: put fpath=(~/.zfunc $fpath) before compinit in ~/.zshrc
+colonizer completions fish > ~/.config/fish/completions/colonizer.fish   # fish
+colonizer man > colonizer.1 && man ./colonizer.1                         # read the man page
 ```
 
 ## Scoped API tokens

@@ -22,13 +22,18 @@ What the relay stores is the whole of what it knows (see `migrations/0001_instal
 
 Nothing else. No request or response bodies, no headers, no IP addresses, no cookies, no GitHub access
 tokens ever reach storage — the access token is used once, to read `/user`, and discarded. Logs carry only
-method, path template, status, bytes and duration. The mothership's WebSocket and all proxied traffic are
-end-to-end with the tunnel DO; the relay routes bytes, it does not read them.
+method, path template, status, bytes and duration. Storage is not the whole trust story, though: the
+relay terminates TLS, so the worker and the tunnel DO see every proxied request and response in
+cleartext in memory, including the cockpit's own login cookie
+([remote-access-review.md](../../docs/remote-access-review.md), finding R3).
 
 The DO tunnel (connect, framing, offline handling) is described in `src/tunnel.js`; the worker never
 forwards a client-supplied `x-relay-*` header — it strips them all and stamps its own verdicts.
 Per stream, the response body must keep moving — 5 minutes without an inbound body frame fails the
-stream — and a buffered (non-streaming) response body is capped at 8 MiB.
+stream — and a response body the browser has not read yet may queue at most 8 MiB before the stream
+fails. A response head must arrive within 60 s (`504` otherwise). Each install gets a 120-request
+burst refilled at 20 per second (`429` past it), at most 32 open streams (`503` with
+`retry-after: 1`), and an offline tunnel answers a `502` page.
 
 ## Protocol encodings pinned here
 
@@ -40,24 +45,36 @@ agree; `src/protocol.js` is the reference):
 - timestamps are **unix seconds**;
 - the signed hello message is **UTF-8 concatenation** `nonce ‖ install_id ‖ ts` (no separators);
 - stream ids are **integers**;
-- one frame carries at most **36 KiB raw → 48 KiB base64**.
+- the relay sends body chunks of at most **36 KiB raw (48 KiB of base64)** and accepts chunks that
+  decode to at most **48 KiB**.
+
+The mothership (`crates/colonizer/src/remote.rs`) and this relay do not yet agree with each other or
+with the pinned contract in every detail — for one, the relay cannot read the `[name, value]` header
+pairs the mothership sends in `res`. [docs/remote-tunnel.md](../../docs/remote-tunnel.md#where-the-code-differs-today)
+lists the differences.
 
 ## Signed mothership API (apex, `my.colonizer.dev`)
 
-Every request the mothership makes is authenticated with the key it registered: headers `x-colonizer-ts`
+Registration and the tunnel dial are unauthenticated (the dial proves the key in its hello). The
+pairing and owner endpoints are signed with the key the install registered: headers `x-colonizer-ts`
 (unix seconds, `|now − ts| ≤ 300`) and `x-colonizer-sig` (base64 Ed25519 over the UTF-8 string
 `METHOD\npathname\nts\nrawBody`, with `rawBody` empty when there is no body). Bad or missing → 401;
-an oversized request body → 413.
+a request body over 1 KiB → 413.
+
+The mothership does not call the signed endpoints yet: it has no pairing code, and the cockpit's
+Settings → Remote access hides the pairing block when the mothership has no pairing route. Until
+that lands, no install can bind an owner, so the relay forwards no one.
 
 - `POST /api/installs` `{"public_key": …}` → `201 {"install_id", "host"}` — 20 random base32 chars, 100
-  bits; the key must be 32 bytes. Rate limited per IP when the `REGISTER_LIMITER` binding is present.
+  bits; the key must be 32 bytes. Every call makes a new install, even for a key already registered.
+  Rate limited per IP (10 a minute) when the `REGISTER_LIMITER` binding is present.
 - `GET /tunnel/<install_id>` — the mothership's WebSocket dial (`426` for anything that is not an
   `Upgrade: websocket`); the worker adds `x-relay-kind: tunnel`, `x-relay-install-id`,
-  `x-relay-public-key` and hands the request to the install's DO. Rate limited per IP when the
-  `DIAL_LIMITER` binding is present. Inside the DO, pending handshakes are independent of each other
+  `x-relay-public-key` and hands the request to the install's DO. An unknown install is `404`. Rate
+  limited per IP (30 a minute) when the `DIAL_LIMITER` binding is present. Inside the DO, pending handshakes are independent of each other
   and capped at 16 per install — the 17th dial is closed with `1013` before it can disturb the others.
 - `GET /api/installs/<id>/pairing` → `{"owner": {"github_login"} | null, "pending": [{code, github_login,
-  expires_at}]}` — what the local cockpit's Settings → Remote access shows.
+  expires_at}]}` — what the local cockpit's Settings → Remote access is meant to show.
 - `POST /api/installs/<id>/pairing/confirm` `{"code": …}` → `200 {"owner": …}` — binds that pairing's
   GitHub account, deletes every pairing of the install (single-use). Unknown/expired/used → 404; an
   owner already bound → 409.

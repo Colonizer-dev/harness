@@ -415,8 +415,8 @@ pub async fn status_now(app: &Shared) -> Value {
 
 /// `POST /api/burn-down/stop`: persistently switches the module off, then stops every colony it
 /// launched — live ones through the ordinary stop, queued ones out of the queue — and every other
-/// colony is left alone. Idempotent, and safe before burn-down was ever configured: the module
-/// record is simply created with `enabled: false`.
+/// colony is left alone. Idempotent, and safe before burn-down was ever configured: with no module
+/// record there is nothing to switch off (a missing record already reads as off), and none is created.
 pub async fn stop(State(app): State<Shared>) -> impl IntoResponse {
     {
         let mut modules = app.modules.write().await;
