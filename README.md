@@ -49,7 +49,9 @@ losing colonies, is in [docs/updates.md](docs/updates.md). Which worktree paths 
 read and which it cannot rewrite is in [docs/path-policy.md](docs/path-policy.md).
 The remote-access review — security review of the relay and tunnel before deploy
 ([#536](https://github.com/Colonizer-dev/harness/issues/536)) — is in
-[docs/remote-access-review.md](docs/remote-access-review.md).
+[docs/remote-access-review.md](docs/remote-access-review.md). The contract that keeps a hosted
+deployment the same API as your own machine — credentials encrypted at rest, config-only upload —
+is in [docs/hosted.md](docs/hosted.md).
 
 ---
 

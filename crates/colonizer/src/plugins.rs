@@ -372,6 +372,20 @@ fn directories(root: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
+/// The locally-installed packs as `(name, dir)`, sorted by name. The upload manifest
+/// (upload.rs) lists these by name and version only — never a pack's contents.
+pub(crate) fn local_packs(cfg: &Settings) -> Vec<(String, PathBuf)> {
+    directories(&local_root(cfg)).into_iter().collect()
+}
+
+/// A pack's manifest `version`, when the manifest exists and parses.
+pub(crate) fn manifest_version(dir: &Path) -> Option<String> {
+    let manifest: Value = std::fs::read(manifest_file(dir))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())?;
+    manifest["version"].as_str().map(str::to_string)
+}
+
 /// Every plugin directory a colony could load, one entry per name, sorted.
 pub fn available(cfg: &Settings) -> Value {
     let root = local_root(cfg);

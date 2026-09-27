@@ -96,6 +96,7 @@ mod summaries;
 mod telemetry;
 mod timing;
 mod update;
+mod upload;
 mod usage;
 mod util;
 mod validation;

@@ -97,6 +97,14 @@ pub fn read_trimmed(path: &Path) -> Option<String> {
 /// `path` is removed. Without the env var the value is stored as plaintext at `path` and any
 /// stale `.enc` is removed, so a downgrade never leaves a shadowing ciphertext behind.
 ///
+/// The plaintext fallback is a *local* convenience, and `COLONIZER_DEPLOYMENT` is the switch that
+/// picks the contract: unset (the default) or `local` keeps today's behaviour, while any other
+/// value — a typo included, so an unrecognised value fails closed rather than downgrading — is
+/// `hosted`, and then this refuses to store anything while `COLONIZER_MASTER_KEY` is unset: an
+/// error, no plaintext file, no `.enc`, no keychain entry, and any stored value left untouched
+/// (see [`credential_writable`]). A hosted install that has not been given a key must not quietly
+/// grow plaintext secrets for its disk image, backups or control plane to leak.
+///
 /// What this protects, honestly: a copied, synced or backed-up config dir no longer leaks the
 /// secrets. What it does not: a process running as the user can read the env var and the files,
 /// so this is not a defense against local malware or the user themselves. A second machine with
@@ -107,6 +115,9 @@ pub fn read_trimmed(path: &Path) -> Option<String> {
 /// With the secret store installed (secrets.rs), a secret that lives in the system keychain — or a
 /// new one while the keychain is available — is saved there instead, and no file is written.
 pub fn write_secret(path: &Path, value: &str) -> Result<()> {
+    if let Err(message) = credential_writable() {
+        bail!("{message}");
+    }
     if let Some(store) = crate::secrets::global() {
         if store.write(path, value)? {
             return Ok(());
@@ -118,9 +129,36 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
     write_file_secret(path, value)
 }
 
+/// The [`write_secret`] gate, pure so tests can pin it without racing env vars. `deployment` is the
+/// raw `COLONIZER_DEPLOYMENT` value (`None` when unset): `local` and unset are local installs;
+/// anything else is hosted — and hosted must never accept a credential without the master key.
+fn plaintext_refused(deployment: Option<&str>, has_master_key: bool) -> bool {
+    deployment.is_some_and(|v| v.trim() != "local") && !has_master_key
+}
+
+/// Whether storing a credential is allowed right now; `Err` carries the message both
+/// [`write_secret`] and the provider PUT handler's pre-check surface, naming both env vars and
+/// saying the credential was not stored.
+pub(crate) fn credential_writable() -> Result<(), String> {
+    let deployment = env_nonempty("COLONIZER_DEPLOYMENT");
+    if plaintext_refused(deployment.as_deref(), master_key().is_some()) {
+        return Err(format!(
+            "refusing to store a credential in plaintext: COLONIZER_DEPLOYMENT={} requires \
+             COLONIZER_MASTER_KEY; the credential was not stored",
+            deployment.unwrap().trim()
+        ));
+    }
+    Ok(())
+}
+
 /// The file half of [`write_secret`]: plaintext 0600, or the `.enc` envelope under
-/// `COLONIZER_MASTER_KEY`. The secret store calls it directly when it moves a secret to its file.
+/// `COLONIZER_MASTER_KEY`. The secret store calls it directly when it moves a secret to its file,
+/// so it carries the same [`credential_writable`] gate as [`write_secret`] — moving a secret out
+/// of the keychain onto disk is exactly the write hosted mode must refuse.
 pub fn write_file_secret(path: &Path, value: &str) -> Result<()> {
+    if let Err(message) = credential_writable() {
+        bail!("{message}");
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
@@ -1072,25 +1110,36 @@ mod tests {
     /// in one process, so two env-mutating tests at once would read each other's key.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Runs `f` with `COLONIZER_MASTER_KEY` set to `key` (or removed when `None`), restoring
-    /// whatever was there before. Callers must already hold `ENV_LOCK`.
-    fn with_master_key_env(key: Option<&str>, f: impl FnOnce()) {
-        let prev = std::env::var("COLONIZER_MASTER_KEY").ok();
+    /// Runs `f` with the env var `key` set to `value` (or removed when `None`), restoring whatever
+    /// was there before. Callers must already hold `ENV_LOCK`.
+    fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
+        let prev = std::env::var(key).ok();
         // SAFETY: env-mutating tests are serialised on ENV_LOCK, so no other test in this
         // process can observe the variable mid-change.
         unsafe {
-            match key {
-                Some(k) => std::env::set_var("COLONIZER_MASTER_KEY", k),
-                None => std::env::remove_var("COLONIZER_MASTER_KEY"),
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
             }
         }
         f();
         unsafe {
             match prev {
-                Some(v) => std::env::set_var("COLONIZER_MASTER_KEY", v),
-                None => std::env::remove_var("COLONIZER_MASTER_KEY"),
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
             }
         }
+    }
+
+    /// Runs `f` with `COLONIZER_MASTER_KEY` set to `key` (or removed when `None`), restoring
+    /// whatever was there before. Callers must already hold `ENV_LOCK`.
+    fn with_master_key_env(key: Option<&str>, f: impl FnOnce()) {
+        with_env_var("COLONIZER_MASTER_KEY", key, f)
+    }
+
+    /// Same, for `COLONIZER_DEPLOYMENT`. Callers must already hold `ENV_LOCK`.
+    fn with_deployment_env(value: Option<&str>, f: impl FnOnce()) {
+        with_env_var("COLONIZER_DEPLOYMENT", value, f)
     }
 
     #[test]
@@ -1161,6 +1210,66 @@ mod tests {
             assert_eq!(read_secret(&path).as_deref(), Some("legacy-token"));
             let _ = std::fs::remove_dir_all(dir);
         });
+    }
+
+    #[test]
+    fn hosted_deployment_refuses_a_credential_without_a_master_key_and_writes_nothing() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // The pure gate: hosted refuses exactly when the key is missing; local never refuses, and
+        // an unrecognised deployment value counts as hosted (fail closed).
+        assert!(plaintext_refused(Some("hosted"), false));
+        assert!(!plaintext_refused(Some("hosted"), true));
+        assert!(!plaintext_refused(None, false));
+        assert!(!plaintext_refused(Some("local"), false));
+        assert!(!plaintext_refused(Some(" local "), false));
+        assert!(plaintext_refused(Some("prod"), false));
+
+        let dir = temp_root("hosted-refusal");
+        let path = dir.join("github-token");
+        std::fs::write(&path, "pre-existing-token").unwrap();
+        with_deployment_env(Some("hosted"), || {
+            with_master_key_env(None, || {
+                let err = write_secret(&path, "ghp_newsecret").unwrap_err().to_string();
+                assert!(err.contains("COLONIZER_DEPLOYMENT"), "{err}");
+                assert!(err.contains("COLONIZER_MASTER_KEY"), "{err}");
+                assert!(err.contains("not stored"), "{err}");
+                // The pre-existing value is untouched, and nothing shadows it.
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), "pre-existing-token");
+                assert!(!enc_path(&path).exists());
+                // A first save leaves nothing on disk at all: no plaintext, no .enc.
+                let fresh = dir.join("provider-keys/deepseek");
+                assert!(write_secret(&fresh, "sk-test-SECRET").is_err());
+                assert!(!fresh.exists());
+                assert!(!enc_path(&fresh).exists());
+                // The file half is gated too: the secret store's move-to-file path (and any other
+                // direct caller) refuses exactly the same way.
+                assert!(write_file_secret(&fresh, "sk-test-SECRET").is_err());
+                assert!(!fresh.exists());
+                assert!(!enc_path(&fresh).exists());
+            });
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hosted_with_a_master_key_still_seals_instead_of_storing_plaintext() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = temp_root("hosted-sealed");
+        let path = dir.join("provider-key");
+        with_deployment_env(Some("hosted"), || {
+            with_master_key_env(Some("test-master-key-for-hosted-012345678900"), || {
+                write_secret(&path, "sk-ant-hosted-secret").unwrap();
+                assert_eq!(read_secret(&path).as_deref(), Some("sk-ant-hosted-secret"));
+                assert!(!path.exists(), "hosted stores ciphertext, never plaintext");
+                let raw = std::fs::read_to_string(enc_path(&path)).unwrap();
+                assert!(!raw.contains("sk-ant-hosted-secret"), "the .enc must not carry the value");
+            });
+            // A wrong key on read fails closed like any other install.
+            with_master_key_env(Some("a-different-key-0000000000000000000000"), || {
+                assert_eq!(read_secret(&path), None);
+            });
+        });
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
