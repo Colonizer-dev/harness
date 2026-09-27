@@ -41,7 +41,9 @@ is not built yet, and nothing in this README pretends otherwise.
 > ([docs/audit.md](docs/audit.md)).
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
-mothership and browser is in [docs/protocol.md](docs/protocol.md). Why any of this exists, and where
+mothership and browser is in [docs/protocol.md](docs/protocol.md). How that wire measures against the
+open [Unified Harness Protocol](https://unifiedharnessprotocol.org/) is in
+[docs/conformance.md](docs/conformance.md). Why any of this exists, and where
 it's going, is in [docs/vision.md](docs/vision.md); what the design shows that the code has not built
 yet is in [docs/gaps.md](docs/gaps.md). What has been decided against, and why, is in
 [docs/decisions.md](docs/decisions.md). Knowing which version you run, and moving to a newer one without

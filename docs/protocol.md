@@ -2772,7 +2772,9 @@ Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
 
 **Status: proposed.** These tables are the contract to review before any code;
 each one is implemented in its own change afterwards. Until then nothing on the
-wire changes, and the *Colonizer today* column is what works. The runner
+wire changes, and the *Colonizer today* column is what works; how that as-is
+surface measures against the UHP conformance suite is in
+[docs/conformance.md](conformance.md). The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the
 sandbox, the mesh and the publish path stay as they are: the standard names live
 on the mothership's API, not inside the microVM. The one exception is §7.5's
