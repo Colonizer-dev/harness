@@ -3901,6 +3901,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The same neutralisation, run for real: whatever shape the VM left `.git` in, the rewrite
+    /// puts a plain 0644 gitfile pointing at the recorded admin dir back in its place.
+    #[test]
+    fn restore_gitfile_replaces_a_hostile_dotgit_with_the_recorded_gitdir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("colonizer-github-test-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let admin = dir.join("admin");
+        std::fs::create_dir_all(&admin).unwrap();
+
+        // Case A: a hostile directory standing in for the gitfile.
+        let wt = dir.join("dir-git");
+        std::fs::create_dir_all(wt.join(".git")).unwrap();
+        std::fs::write(wt.join(".git/config"), "evil = true\n").unwrap();
+        restore_gitfile(&wt, &admin).unwrap();
+        let meta = std::fs::symlink_metadata(wt.join(".git")).unwrap();
+        assert!(meta.file_type().is_file(), "a hostile .git directory must be replaced");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o644);
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".git")).unwrap(),
+            format!("gitdir: {}\n", admin.display())
+        );
+
+        // Case B: a symlink to a host file is replaced without following or clobbering it.
+        let wt = dir.join("symlink-git");
+        std::fs::create_dir_all(&wt).unwrap();
+        let target = dir.join("host-file");
+        std::fs::write(&target, "not git metadata\n").unwrap();
+        std::os::unix::fs::symlink(&target, wt.join(".git")).unwrap();
+        restore_gitfile(&wt, &admin).unwrap();
+        let meta = std::fs::symlink_metadata(wt.join(".git")).unwrap();
+        assert!(meta.file_type().is_file(), "the symlink must become a regular file");
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".git")).unwrap(),
+            format!("gitdir: {}\n", admin.display())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "not git metadata\n",
+            "the symlink target must not be written through"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Stripping runs for real too: every nested repository goes, the worktree's own gitfile and
+    /// the colony's files stay.
+    #[test]
+    fn strip_nested_git_removes_nested_repos_but_keeps_the_root() {
+        let root = std::env::temp_dir().join(format!("colonizer-github-test-{}", short_id()));
+        std::fs::create_dir_all(root.join("sub/.git/objects")).unwrap();
+        std::fs::create_dir_all(root.join("deeper/nest")).unwrap();
+        std::fs::write(root.join(".git"), "gitdir: /admin\n").unwrap();
+        std::fs::write(root.join("sub/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.join("deeper/nest/.git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(root.join("sub/keep.txt"), "stays\n").unwrap();
+
+        let mut removed = strip_nested_git(&root).unwrap();
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![root.join("deeper/nest/.git"), root.join("sub/.git")],
+            "the nested repository directory and the nested gitfile both go"
+        );
+        assert!(!root.join("sub/.git").exists());
+        assert!(!root.join("deeper/nest/.git").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git")).unwrap(),
+            "gitdir: /admin\n",
+            "the worktree's own gitfile stays"
+        );
+        assert_eq!(std::fs::read_to_string(root.join("sub/keep.txt")).unwrap(), "stays\n");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Drift guard on the host-side git hardening: every `-c` that stops a repository running code
+    /// stays put.
+    #[test]
+    fn host_git_no_exec_neutralises_hooks_fsmonitor_and_maintenance() {
+        let flat = HOST_GIT_NO_EXEC.join(" ");
+        for needed in [
+            "core.hooksPath=/dev/null",
+            "core.fsmonitor=false",
+            "gc.auto=0",
+            "maintenance.auto=false",
+        ] {
+            assert!(flat.contains(needed), "{flat} must still carry {needed}");
+        }
+    }
+
     // ----- the screening gate (issue #320) -----
 
     /// An app with the screen module configured to `mode`, and the colony publishing under it.
