@@ -34,7 +34,9 @@ use crate::{events::*, publish::*, queue::*, sessions::*};
 /// What a refused resume says: the conditions `can_resume` checks, phrased for the user.
 pub(crate) const RESUME_CONFLICT: &str = "this colony can't be resumed: it has to be stopped and still have its worktree";
 
-/// Stops the agent link, asks agentd to shut the runner down, removes the VM and its mesh node.
+/// Stops the agent link, asks agentd to shut the runner down, removes the VM and its mesh node,
+/// and takes the path policy's empty placeholders back out of the kept worktree: they were only
+/// bind targets for the VM just removed, and a resume's boot makes them again.
 pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
     if let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() {
         rt.stop.send_replace(true);
@@ -43,6 +45,26 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
         let _ = tokio::time::timeout(Duration::from_secs(15), agentd_http(app, s, "POST", "/v1/shutdown")).await;
     }
     sandbox::remove(&app.cfg.msb, &s.sandbox).await;
+    // A deleted colony's worktree is gone with it, and its record must not gain a log line back.
+    if let Some(admin) = s.git_admin_dir.as_deref()
+        && app.session(&s.id).await.is_some()
+    {
+        let vm_dir = app.session_dir(&s.id).join("vm");
+        match crate::path_policy::remove_leftovers(app, std::path::Path::new(admin), std::path::Path::new(&s.worktree), &vm_dir)
+            .await
+        {
+            Ok(removed) if !removed.is_empty() => {
+                let names = removed.join(", ");
+                app.session_log(&s.id, "info", format!("path policy: removed the empty placeholders {names}"))
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                app.session_log(&s.id, "warn", format!("path policy: could not clear the placeholders: {e:#}"))
+                    .await
+            }
+        }
+    }
     if s.mesh.is_some()
         && let Ok(mesh) = app.mesh().await
     {

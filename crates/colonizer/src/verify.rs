@@ -451,17 +451,26 @@ fn git_at(app: &App, admin: &Path, cwd: &Path, args: &[&str]) -> Command {
 /// publish's `add -A` — into a commit object **without** mutating the agent's worktree, index or
 /// branch: a temp `GIT_INDEX_FILE` outside the worktree, seeded from HEAD, then `add -A`,
 /// `write-tree`, `commit-tree -p HEAD`. Only objects are written, which the worktree's git dir
-/// already exists to hold.
+/// already exists to hold. What the path policy put in the worktree, or hid, is held back exactly
+/// as publish holds it back (`path_policy::hold_back_staged`): an empty placeholder is not work,
+/// and must not count as a changed file or reach the fresh checkout.
 async fn snapshot_work(app: &App, s: &Session, admin: &Path, cwd: &Path) -> Result<String> {
     let index = cwd.join(format!("verify-index-{}", short_id()));
-    let git = |args: &[&str]| {
+    let at_index = || {
         let mut c = disowned(app.git(admin), cwd);
-        c.arg("--work-tree").arg(&s.worktree).env("GIT_INDEX_FILE", &index).args(args);
+        c.arg("--work-tree").arg(&s.worktree).env("GIT_INDEX_FILE", &index);
+        c
+    };
+    let git = |args: &[&str]| {
+        let mut c = at_index();
+        c.args(args);
         c
     };
     let result = async {
         exec_within(GIT_LIMIT, &mut git(&["read-tree", "HEAD"])).await?;
         exec_within(GIT_LIMIT, &mut git(&["add", "-A"])).await?;
+        let rec = crate::path_policy::Recorded::read(&cwd.join("vm"));
+        crate::path_policy::hold_back_staged(at_index, Path::new(&s.worktree), &rec, GIT_LIMIT).await?;
         let tree = exec_within(GIT_LIMIT, &mut git(&["write-tree"])).await?;
         let mut c = disowned(app.git(admin), cwd);
         c.args([
@@ -930,7 +939,7 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sessions::{SessionStatus, tests::app_with_colony};
     use std::path::PathBuf;
@@ -1298,7 +1307,7 @@ mod tests {
     /// Runs `git` synchronously against a fixture repo — setup and inspection, not the code
     /// under test. The `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` a colony sandbox exports for
     /// its own worktree are dropped, so the fixture is the only repo git sees.
-    fn git(dir: &Path, args: &[&str]) -> String {
+    pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .current_dir(dir)
             .env_remove("GIT_DIR")
@@ -1311,7 +1320,7 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    fn git_commit(dir: &Path, message: &str) {
+    pub(crate) fn git_commit(dir: &Path, message: &str) {
         git(
             dir,
             &[
@@ -1533,6 +1542,81 @@ mod tests {
             "no lockfile on the base"
         );
         assert_eq!(v.exit_code, None, "nothing ran");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The six placeholders colony 4ddc1540's boot left in its worktree for the path policy's binds
+    /// — empty, untracked, not ignored — as the policy list and placeholder list record them.
+    pub(crate) const INCIDENT_PLACEHOLDERS: [&str; 6] =
+        [".envrc", ".git-credentials", ".gitmodules", ".mcp.json", ".netrc", ".pypirc"];
+
+    /// Writes a boot's path-policy records into the colony's `vm/` dir and creates the placeholders
+    /// in the worktree, the way `boot.rs` does: `.env` masked over a real tracked file, the six
+    /// incident paths as empty placeholders.
+    pub(crate) fn materialise_incident_policy(vm_dir: &Path, repo: &Path, with_list: bool) {
+        let _ = std::fs::remove_dir_all(vm_dir);
+        std::fs::create_dir_all(vm_dir).unwrap();
+        let binds = [
+            "mask-file .env",
+            "mask-file .envrc",
+            "mask-file .netrc",
+            "mask-file .git-credentials",
+            "mask-file .pypirc",
+            "protect .gitmodules",
+            "protect .mcp.json",
+        ];
+        std::fs::write(vm_dir.join("path-policy"), binds.join("\n") + "\n").unwrap();
+        if with_list {
+            std::fs::write(
+                vm_dir.join("path-policy.placeholders"),
+                INCIDENT_PLACEHOLDERS.join("\n") + "\n",
+            )
+            .unwrap();
+        }
+        for p in INCIDENT_PLACEHOLDERS {
+            std::fs::write(repo.join(p), "").unwrap();
+        }
+    }
+
+    /// Colony 4ddc1540: the boot's empty placeholders sat untracked in the worktree, and the
+    /// verification snapshot counted all six as changed files. They are the policy's, not the
+    /// colony's work: the snapshot holds them back (with or without the placeholder list), a
+    /// masked real file stays as the repository has it, and the agent's worktree is untouched.
+    #[tokio::test]
+    async fn path_policy_placeholders_are_not_the_colonys_changes() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        for with_list in [true, false] {
+            let repo = worktree_fixture(&app, Some("true"), "fixed `src/fix.ts`", false).await;
+            std::fs::write(repo.join(".env"), "SECRET=real\n").unwrap();
+            git(&repo, &["add", "-A"]);
+            git_commit(&repo, "the repository carries a real .env");
+            git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            materialise_incident_policy(&app.session_dir("abc").join("vm"), &repo, with_list);
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/fix.ts"), "export const fixed = true;\n").unwrap();
+            // Suppose the masked .env changed on the host all the same (a colony that got past
+            // its mask): still not the colony's to change.
+            std::fs::write(repo.join(".env"), "").unwrap();
+            let status = git(&repo, &["status", "--porcelain"]);
+
+            let v = verify(&app, &fake_runner(0, Some(0))).await;
+            assert_eq!(v.verdict, Verdict::Confirmed, "with_list={with_list}: {v:?}");
+            assert_eq!(v.files_changed, vec!["src/fix.ts".to_string()], "with_list={with_list}");
+            let snapshot = v.snapshot.expect("a snapshot");
+            let tree = git(&repo, &["ls-tree", "-r", "--name-only", &snapshot]);
+            for p in INCIDENT_PLACEHOLDERS {
+                assert!(!tree.lines().any(|l| l == p), "{p} is not in the snapshot: {tree}");
+            }
+            assert_eq!(
+                git(&repo, &["show", &format!("{snapshot}:.env")]),
+                "SECRET=real",
+                "the masked file is snapshotted as the repository has it"
+            );
+            assert_eq!(git(&repo, &["status", "--porcelain"]), status, "the worktree is untouched");
+            for p in INCIDENT_PLACEHOLDERS {
+                assert!(repo.join(p).exists(), "verification removes nothing: {p}");
+            }
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
