@@ -1,30 +1,63 @@
-# Gaps: design ahead of code
+# Gaps: what is promised and not built yet
 
-[vision.md](vision.md) and the illustrations on [colonizer.dev](https://colonizer.dev) are the design.
-The cockpit and the settler cards were also ported from two design prototypes that are not in this
-repository: the cockpit prototype, "Colonizer Cockpit", first ported in
-[#187](https://github.com/Colonizer-dev/harness/pull/187) and caught up with in
-[#194](https://github.com/Colonizer-dev/harness/pull/194), and the Settler Showcase
-([#71](https://github.com/Colonizer-dev/harness/pull/71)). This page lists the elements they depict
-that the code does not implement yet, as far as they have been checked, so that something remembered
-from a picture can be checked here before it is reported as a regression. Nest text balloons were
-once reported as lost when the nest had never drawn them
-([#232](https://github.com/Colonizer-dev/harness/issues/232)).
+This page lists what the docs, the cockpit, [vision.md](vision.md) or
+[colonizer.dev](https://colonizer.dev) promise or imply that the code does not do yet. Check an item
+here before you report it as a regression, and before you write about it as if it works.
+
+It covers two kinds of promise:
+
+- **Features.** A setting, button, route or module that exists in some form but does not do
+  everything its name or docs suggest (a setting that is read by nothing, a download with nothing
+  published, a module whose CLI is not staged).
+- **Design.** Elements drawn in the design: vision.md, the website's illustrations, and two
+  prototypes the cockpit was ported from, which are not in this repository. The cockpit prototype,
+  "Colonizer Cockpit", was first ported in
+  [#187](https://github.com/Colonizer-dev/harness/pull/187) and caught up with in
+  [#194](https://github.com/Colonizer-dev/harness/pull/194). The Settler Showcase was ported in
+  [#71](https://github.com/Colonizer-dev/harness/pull/71). Nest text balloons were once reported as
+  lost when the nest had never drawn them
+  ([#232](https://github.com/Colonizer-dev/harness/issues/232)).
 
 It is a register, not a roadmap. Where the code does not yet meet the security and trust claims,
-[audit.md](audit.md) says so; planned work is the horizon in [vision.md](vision.md) and the issues.
+[audit.md](audit.md) says so. Planned work is the horizon in [vision.md](vision.md) and the issues.
+Last checked against the code on 2026-09-27.
 
 ## Not built
 
 | Element | Where the design shows it | What the code has instead | Issue |
 | --- | --- | --- | --- |
-| Role captions under a crew's ants | `colonizer-website/colonies.html`, "a crew on one trail" illustration | The ants on one trail and a count ("3 settlers · all done"); each ant's name is only its hover title (`web/src/components/ChatPanel.tsx`, `CrewStrip`) | none filed |
-| Previews over the mesh | `docs/vision.md`, principle 5: "a hop away for chat, terminals and previews" | Chat and terminal only (`web/src/components/ChatPanel.tsx`, `web/src/components/TerminalPanel.tsx`); previews are on the same page's horizon and `PLANNED` in `README.md` | none filed |
+| Remote access that works end to end | `docs/remote-tunnel.md`; the Settings switch (`web/src/components/RemoteAccessPane.tsx`) | The relay (`services/relay`), the tunnel client (`crates/colonizer/src/remote.rs`) and the Settings switch are merged, but the relay is not deployed, the mothership has no pairing routes, and the relay throws on the mothership's response headers (finding R1 in `docs/remote-access-review.md`). Off by default | [#531](https://github.com/Colonizer-dev/harness/issues/531), [#599](https://github.com/Colonizer-dev/harness/issues/599) |
+| Codex, Hermes, Grok Build and Gemini (ACP) colonies | The org dialog offers every agent module (`web/src/components/OrgSettingsDialog.tsx`) | The runners and their tests exist, but only Claude Code is staged into the colony, Pi is bundled and OpenCode downloads itself. The other four CLIs are not staged, so a colony on them stops at preflight unless you build your own image | [#602](https://github.com/Colonizer-dev/harness/issues/602) |
+| The ACP module's Model setting | `modules/agents/acp/module.json`, setting `model` | Nothing reads it (`modules/agents/acp/runner.mjs`); only a live model switch from the cockpit works | [#603](https://github.com/Colonizer-dev/harness/issues/603) |
+| Strix and Shannon as red-team hunters | The red-team wizard shows both as "Coming soon" (`web/src/cockpit/RedTeamWizard.tsx`) | Strix installs and probes (off unless `COLONIZER_HUNTER_INSTALL=1`), Shannon is a manifest only; a run that names either gets a 400. Only the colony swarm hunts | [#216](https://github.com/Colonizer-dev/harness/issues/216) |
+| Claim and epic overrides from the CLI and MCP | `docs/cli.md`, `docs/mcp.md`; the refusal text says "pass allow_duplicate" | The cockpit and `POST /api/sessions` take `allow_duplicate`, `queue_behind_holder` and `allow_epic`; `colonizer launch` and `launch_colony` do not | [#600](https://github.com/Colonizer-dev/harness/issues/600) |
+| `--host` and `--token-file` on local commands | `colonizer open --help` and the other local commands list them | `open`, `update`, `login-item`, `telemetry`, `version`, `completions` and `man` ignore them (`crates/colonizer/src/cli.rs`) | [#604](https://github.com/Colonizer-dev/harness/issues/604) |
+| Module egress declarations in the allowlist | `crates/colonizer/src/modules.rs`: "The #304 allowlist is this plus the task's" | Declarations are validated at load and used by nothing; `allowlist` mode uses `egress_allow` only (`crates/colonizer/src/egress.rs`) | [#601](https://github.com/Colonizer-dev/harness/issues/601) |
+| Provider Trusted, model map and disabled tools in the cockpit | `docs/providers.md`; the gateway's 403 says "mark it trusted in providers.json" | The fields work through `PUT /api/providers/{id}` or `providers.json`; the cockpit has no controls and `GET /api/providers` does not return `trusted` | [#605](https://github.com/Colonizer-dev/harness/issues/605) |
+| Automatic log-archive retention | The Storage panel's "Automatic cleanup" form (`web/src/cockpit/StoragePanel.tsx`) | Retention runs only on request (`POST /api/archive/retention`); nothing sweeps on its own, and `GET /api/storage` leaves the archive out (`crates/colonizer/src/archive.rs`) | [#606](https://github.com/Colonizer-dev/harness/issues/606) |
+| The graft skillset download | Settings offers it (`web/src/components/Skillsets.tsx`) | No bundle is published or pinned in `crates/colonizer/graft.lock`, so it is always "Not published for this machine yet" | [#607](https://github.com/Colonizer-dev/harness/issues/607) |
+| A loop end date in the cockpit | `docs/loops.md` | `end_at` is stored and honoured, but only the API sets it; the form has no field (`web/src/cockpit/LoopsView.tsx`) | [#608](https://github.com/Colonizer-dev/harness/issues/608) |
+| Self-paced loops on agents other than Claude Code | `docs/loops.md` | Only the Claude Code runner has the `loop_next` and `loop_stop` tools; other agents' self-paced loops run every 24 hours and cannot stop themselves | none filed |
+| Watchdog hint-loop and control-defeat signatures | `docs/boundaries.md`, "Watchdog signatures (planned)" | Only the stall path exists (`crates/colonizer/src/watchdog.rs`) | [#609](https://github.com/Colonizer-dev/harness/issues/609) |
+| A session store other than local disk | `docs/session-store.md` | The `SessionStore` trait and a reference object-store backend exist, but startup reads and per-session writes bypass it, and no command runs the migration | [#610](https://github.com/Colonizer-dev/harness/issues/610) |
+| Verifying bun and pnpm repositories | `docs/colonies.md`, "Verifying done" | Verification detects the package manager, but the stock colony image has no bun or pnpm | [#589](https://github.com/Colonizer-dev/harness/issues/589) |
+| Sending usage data | `docs/usage-data.md` | Batches are built and kept locally (`crates/colonizer/src/usage.rs`); nothing sends them. The sender is Cratefield/harness#413, which nothing here composes yet | none filed |
+| Approval rules for commands (exec policy) | `docs/vision.md`, guardrails | Not built; a first slice is in review | [#471](https://github.com/Colonizer-dev/harness/issues/471) |
+| Resuming a colony whose tokens ran out | `docs/protocol.md`, quota exhaustion | A quota-parked colony reuses `stopped` and is resumed by hand | [#213](https://github.com/Colonizer-dev/harness/issues/213) |
+| Jev deciding, not only measuring | `docs/colonies.md`, "Measuring Jev compaction" | Stage 1 is shadow-mode measurement only; nothing acts on it | [#582](https://github.com/Colonizer-dev/harness/issues/582) |
+| Landlock inside the colony | `docs/architecture.md`, in-guest hardening | Capabilities, no_new_privs, no core dumps and a seccomp denylist apply; Landlock waits on a guest kernel built with it | none filed |
+| Remote outposts and a fleet board of every colony | `docs/vision.md`, `docs/outposts.md` | `ExecutionBackend` exists but nothing calls it (`crates/colonizer/src/execution.rs`); the fleet panel lists peer motherships, not their colonies | none filed |
+| Previews over the mesh | `docs/vision.md`, principle 5: "a hop away for chat, terminals and previews" | Chat and terminal only (`web/src/components/ChatPanel.tsx`, `web/src/components/TerminalPanel.tsx`) | none filed |
+| Per-file +/- counts on the pull request card | Cockpit prototype, inspector ([#194](https://github.com/Colonizer-dev/harness/pull/194)) | Pull request number, publish stage and branch (`web/src/cockpit/Inspector.tsx`). The counts now exist in `GET /api/sessions/{id}/diff`; the card does not read them | [#611](https://github.com/Colonizer-dev/harness/issues/611) |
+| An inbox read from the activity log | Cockpit prototype, inbox ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | One entry per colony, its current state stamped with its `updated_at` (`web/src/cockpit/feed.ts`). History reads the activity log since [#527](https://github.com/Colonizer-dev/harness/pull/527); the inbox does not | [#612](https://github.com/Colonizer-dev/harness/issues/612) |
+| Today's spend in the header | Cockpit prototype, header ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | The workspace's running total, "$N spent" (`web/src/cockpit/OverviewView.tsx`) | [#613](https://github.com/Colonizer-dev/harness/issues/613) |
 | A settler count on each overview row | Cockpit prototype, overview ([#194](https://github.com/Colonizer-dev/harness/pull/194)) | No count: the mothership streams one colony's events at a time (`web/src/cockpit/OverviewView.tsx`) | none filed |
-| Per-file +/- counts on the pull request card | Cockpit prototype, inspector ([#194](https://github.com/Colonizer-dev/harness/pull/194)) | Pull request number, publish stage and branch; the API reports no diff stats (`web/src/cockpit/Inspector.tsx`) | none filed |
-| Inbox and history read from an event log | Cockpit prototype, inbox and history ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | One entry per colony: its current state, stamped with its `updated_at` (`web/src/cockpit/feed.ts`) | none filed |
-| Today's spend in the header | Cockpit prototype, header ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | The workspace's running total, "$N spent" (`web/src/cockpit/Header.tsx`) | none filed |
+| Role captions under a crew's ants | `colonizer-website/colonies.html`, "a crew on one trail" illustration | The ants on one trail and a count ("3 settlers · all done"); each ant's name is only its hover title (`web/src/components/ChatPanel.tsx`, `CrewStrip`) | none filed |
 | A done settler's duration, and "retried" after a failed step | Settler Showcase, settler card ([#71](https://github.com/Colonizer-dev/harness/pull/71)) | The step count, and "didn't work" on a failed step; the stream records neither (`web/src/components/SettlerCard.tsx`) | none filed |
+
+"Where the design shows it" means wherever the promise is made: a doc, a screen, a comment in the
+code, or a design. "none filed" means the gap is known and no issue tracks it, usually because it
+is a design detail or depends on something outside this repository.
 
 ## Checked and built
 
@@ -42,12 +75,14 @@ Elements that are easy to remember as missing, and where they are.
 | Twelve settler roles | `colonizer-website/colonies.html`, "03 / settlers" | `web/src/settlers.ts`, `web/src/components/AntAvatar.tsx` |
 | Five ant states, and a stumble on a failed step | `colonizer-website/colonies.html`, "the ant shows what its settler is doing" | `web/src/components/AntAvatar.tsx`; "stopped" is its `paused` state |
 | A model for each kind of work | `colonizer-website/index.html`, "03 / the router" illustration | `web/src/components/SettingsDialog.tsx` |
+| History read from an event log | Cockpit prototype, history ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | Since [#527](https://github.com/Colonizer-dev/harness/pull/527), History reads the activity log (`GET /api/activity`, `web/src/cockpit/history.ts`); the inbox does not yet (above) |
 
 ## Keeping it true
 
 A pull request that builds a **Not built** element moves its row to **Checked and built**, or drops
-it. One that adds or changes a claim in [vision.md](vision.md), or ports a design and leaves part of
-it out, adds a row. The pull request template asks.
+it. One that adds or changes a claim in [vision.md](vision.md) or any other doc, ships a setting or
+screen that does less than its name says, or ports a design and leaves part of it out, adds a row.
+The pull request template asks.
 
 `scripts/test/gaps.test.mjs` checks that every repository path cited here exists, and that every
 **Not built** row names a tracking issue or says `none filed`. It cannot check the pictures: the

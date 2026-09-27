@@ -7,12 +7,19 @@ changelog entries (as `changelog.d/` fragments in a repository that keeps them, 
 
 ## Making one
 
-- **Loops** in the sidebar → **New loop**: pick a repository, write what each run does (or start
-  from a template), choose when, and optionally a model, a subagent model, autopilot and a run limit.
-- **Composer (⌘K)**: `/loop 1h check CI on main and fix flakes` creates a loop on the composer's
-  repository that runs every hour. `/loop 14d …` runs every 14 days at the current time of day — a
-  whole-day interval past a week becomes an every-N-days cadence. `/loop <task>` without an
-  interval is self-paced.
+- **Loops** in the sidebar → **New loop**: choose what each run does (a colony from a prompt, or
+  refresh the architecture map), pick a repository, write the prompt (or start from a template:
+  triage new issues, keep dependencies current, fix last night's flaky tests, write changelog
+  entries), choose when, and optionally a model, a subagent model, autopilot (on by default) and a
+  run limit.
+- **Colonize (⌘K) or the composer**: `/loop 1h check CI on main and fix flakes` creates a loop on
+  the repository picked there that runs every hour. The interval takes `m`, `h` or `d`. `/loop 14d …`
+  runs every 14 days at the current time of day: a whole-day interval past a week becomes an
+  every-N-days cadence (up to 365 days). `/loop <task>` without an interval is self-paced.
+- **The Map view** offers a map-refresh loop once a repository has a map ([Map refresh](#map-refresh)).
+
+An end date (`end_at`) can be set through the API; the cockpit's form keeps one that is already set
+but has no field for it.
 
 ## When it runs
 
@@ -22,25 +29,32 @@ changelog entries (as `changelog.d/` fragments in a repository that keeps them, 
 | Daily | every day at a time you pick, in your local time |
 | Weekly | on a weekday at a time |
 | Monthly | on a day of the month at a time; days 29–31 fire on a shorter month's last day |
-| Every N days | every N days (1–365) at a time you pick, anchored in UTC so a run that fires late never moves the schedule |
+| Every N days | every N days (1–365) at a time you pick; a run that fires a little late does not push the next one later |
 | Self-paced | each run names the next with `loop_next` (15 minutes to 24 hours); without one, 24 hours later |
 
-Times are stored in UTC; the cockpit converts your local choice when you save.
+Times are stored in UTC; the cockpit converts your local choice when you save. The scheduler checks
+for due loops once a minute.
 
-**One run at a time.** A tick that finds the loop's previous run still live — queued, working,
-waiting for an answer, or publishing — skips, and the loop's note says so. A fixed loop tries again
+**One run at a time.** A tick that finds the loop's previous run still live — queued, starting,
+working, idle, waiting for an answer (suspended included), or publishing — skips, and the loop's note says so. A fixed loop tries again
 at its next slot; a self-paced one 15 minutes later. **Run now** starts a run immediately, and is
-refused while the previous one is live.
+refused (409) while the previous one is live.
 
 ## What the colony can do
 
 Every run is an ordinary colony (its origin is `loop:<id>`, and colony lists badge it ↻ loop). It
-gets the loop's prompt plus a note saying which run it is, and two tools only the orchestrator may
-call:
+goes through the same admission path as any launch: parallel limits, budgets and a switched-off
+workspace apply. A run that cannot start says why in the loop's note and tries again at the next
+slot. The colony gets the loop's prompt plus a note saying which run it is, and two tools only the
+orchestrator may call:
 
 - `loop_next(delay_minutes, reason)` — self-paced loops only: when the next run starts, and why.
   The value is clamped to 15 minutes – 24 hours and shown in the loop's note.
 - `loop_stop(reason)` — ends the loop ("stopped by the colony: …"). Re-enable it on the Loops page.
+
+Only the Claude Code agent module has these two tools today. A loop whose colonies run on another
+agent module still runs on its schedule, but its colonies cannot stop it, and a self-paced one runs
+every 24 hours.
 
 A loop also ends by itself after its **max runs**, or when its next run would fall past its **end
 date**.
@@ -49,12 +63,13 @@ date**.
 
 A map loop keeps architecture maps fresh instead of running a prompt: each firing launches the same
 mapping colony as the Map view — same instructions, same `archify` skillset, reuse of a colony
-already drawing — so its runs are the map, exactly as if it had been drawn by hand. Its prompt is
-not used and may be left empty. Choose a scope:
+already drawing — so its runs are the map, exactly as if it had been drawn by hand. Its colonies
+carry the origin `map:loop:<id>`. Its prompt is not used and may be left empty. Choose a scope:
 
 - **This repository** — maps the one repository on its cadence.
 - **All repositories in the org** (`owner/*`) — maps them one at a time, ten minutes apart, and
-  re-lists the org at the start of every cycle, so repositories added later are included.
+  re-lists the org at the start of every cycle, so repositories added later are included. The next
+  repository starts even while the previous one is still drawing.
 
 Launches go through the ordinary admission path, so parallel limits, org budgets and the archify
 skillset rule the loop in exactly as they rule the Map view. A firing that is refused says so in the
@@ -63,9 +78,11 @@ cycle moves on to the next — and a workspace that is switched off altogether s
 with that single note rather than one per repository. When a refresh ends, History records it as
 `map.refresh` — and a repository whose refresh failed keeps its old map.
 
-**Keep this map up to date?** — the Map view asks once per repository when its first map is drawn.
-The answer defaults to every 14 days, with presets 7/14/30/60/90 or a custom number; **Not now** is
-remembered in that browser for 30 days. Once a refresh loop exists, the map shows
+**Keep this map up to date?** — the Map view asks this once a repository has a map and no enabled
+map loop covers it. The answer defaults to every 14 days, with presets 7/14/30/60/90 or a custom
+number of days (up to 365), for this repository or all repositories in its org; the loop runs at
+03:00 your local time. **Not now** is remembered in that browser for 30 days, and the map bar's
+**Keep fresh…** link asks again. Once a refresh loop covers the repository, the map shows
 "Refreshed every N days · edit". Map loops can also be made from the Loops page.
 
 ## Cost

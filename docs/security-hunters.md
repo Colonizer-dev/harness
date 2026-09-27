@@ -4,7 +4,9 @@ What ships today: one `Manifest` per hunter, a `hunters.lock` pin per platform, 
 opt-in (`COLONIZER_HUNTER_INSTALL=1`) guarding a Linux-only, race-free, checksum-verified
 on-demand install, and a capability probe. No scan runs yet: the Strix and SARIF parsers exist
 but nothing calls them, hunter LLM traffic is not routed anywhere, and no run stage drives
-these modules.
+these modules. In the cockpit's red-team wizard, Strix and Shannon are disabled cards marked
+"Coming soon", and the red-team API refuses them with a 400; only the colony swarm runs (see
+[red-team.md](red-team.md#operating-it)).
 
 ## On demand, verified, never vendored
 
@@ -15,7 +17,7 @@ anything. Shannon is not even a download — it installs via `npx` as a Node pac
 
 ## The manifest
 
-Each hunter is a `Manifest` in `src/hunters.rs` (`builtin()`), with one row per field:
+Each hunter is a `Manifest` in `crates/colonizer/src/hunters.rs` (`builtin()`), with one row per field:
 
 | Field | What it is |
 |---|---|
@@ -54,8 +56,8 @@ spawns Strix must target a Docker daemon inside the colony microVM.
 
 ## On-demand install
 
-Binary artifacts pin in `hunters.lock` (id, version, platform, kind, sha256, url — the same
-columns as `headroom.lock`), compiled into the binary and cached under
+Binary artifacts pin in `crates/colonizer/hunters.lock` (id, version, platform, kind, sha256,
+url — the same columns as `headroom.lock`), compiled into the binary and cached under
 `<data_dir>/hunters/<id>/<version>/`. Installing is opt-in: `POST /api/hunters/{id}/install`
 returns 403 unless `COLONIZER_HUNTER_INSTALL` holds a truthy value (`1`/`true`/`on`/`yes`,
 case-insensitive). Pins are Linux-only, so macOS and Windows report the hunter as not
@@ -90,6 +92,9 @@ binary behind and readers never see one mid-write.
 Strix is phase one: manifest, pinned lock, opt-in install, probe, and two parsers
 (`parse_strix`, `parse_sarif`) that exist but are not wired to anything — no scan runs, no
 findings flow. Shannon is a manifest-only stub (phase 2): its manifest, install command, scan
-template and SARIF format are recorded, but there is no download and no driving run yet. The
-cockpit module gallery will extend the existing `/api/plugins` surface rather than adding a
-parallel one, and the `logo` field is a name only until that gallery renders it.
+template and SARIF format are recorded, but there is no download and no driving run yet.
+
+In the cockpit, the red-team wizard calls the probe for both hunters and shows them as disabled
+"Coming soon" cards with bundled logo images; the manifest's `logo` field is not used there.
+There is no hunter gallery and no install button in the cockpit: installing Strix is the
+`POST /api/hunters/strix/install` route above, with the opt-in set.

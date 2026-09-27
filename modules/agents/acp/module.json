@@ -2,7 +2,7 @@
   "kind": "agent",
   "id": "acp",
   "name": "ACP",
-  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Verified with Google's Gemini CLI (`gemini --experimental-acp`); other ACP agents run through a custom command. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
+  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Google's Gemini CLI (`gemini --experimental-acp`) is the preset, its handshake verified; other ACP agents run through a custom command. Nothing stages the gemini binary into the colony image yet. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
   "protocol": "colonizer-runner/1",
   "entry": [
     "node",
@@ -59,7 +59,7 @@
       "model": {
         "type": "string",
         "title": "Model",
-        "description": "Model id sent to the agent with session/set_model after session/new. Only applied when the agent advertises model selection at session/new; otherwise the agent's own default runs and a warning is logged. A Gemini CLI configured with GEMINI_API_KEY picks its model with the same setting's default.",
+        "description": "Model id meant for session/set_model after session/new. Not applied yet: the runner does not read this setting, so the agent runs on its own default model. Switching the model on a running colony works when the agent advertises model selection at session/new; otherwise it is a logged warning.",
         "default": "",
         "env": "COLONIZER_MODEL"
       }

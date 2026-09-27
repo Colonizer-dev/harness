@@ -14,14 +14,18 @@ These held when the audit checked them against the code.
 
 - **The mount split.** The worktree and `/harness/out` are writable; the bare repository, the agent,
   the plugins, the memory scopes and the binaries are mounted read-only.
-- **Secrets on the host.** The GitHub token, the provider keys and the mem0 key are written 0600
-  under the mothership's config directory, and never enter a colony. The Claude credential is handed
+- **Secrets on the host.** The GitHub token, the provider keys and the mem0 key stay on the host
+  and never enter a colony. Since #468 a newly saved secret goes to the system keychain (Keychain
+  on macOS, the Secret Service on Linux) when the keychain answers a startup probe; otherwise, and
+  for every secret saved before that, it is a 0600 file under the mothership's config directory. The Claude credential is handed
   to the sandbox as a host-scoped secret and swapped in by the TLS proxy for `api.anthropic.com`;
   the guest environment holds a placeholder.
 - **Per-colony gateway tokens.** Each colony gets its own random token, written 0600 on the host and
   compared in constant time at the gateway.
 - **The publish step.** The branch must carry the `colonizer/` prefix and must not be the base
-  branch. There is no force-push, and nothing merges automatically.
+  branch. There is no force-push. Nothing merges automatically by default: the one exception is
+  the publish module's `automerge` setting (off by default, and it needs `autofix`), which merges
+  a fix colony's pull request once an independent review session passes it.
 - **Untrusted colony output.** The worktree's `.git` is rewritten from the value recorded before the
   VM ran, nested `.git` directories are removed, and `pr.md` must be a regular file within a size
   limit.
@@ -32,9 +36,51 @@ These held when the audit checked them against the code.
   `Origin` requirement on writes and upgrades. The earlier Host-and-Origin checks stopped browsers,
   not scripts — the API had no authentication until this change. `Host` is still checked against
   the bind address (DNS rebinding), and unauthenticated `GET /api/status` answers a reduced body
-  (version, counts, capacity and health only) for fleet peers.
+  (version, counts, capacity and health only) for fleet peers. Since then, scoped API tokens
+  (#557) are accepted too, as a Bearer header only; see
+  [Trust controls added since the audit](#trust-controls-added-since-the-audit).
 - **Pinned inputs.** The vendored artefacts, the agent binary and the Headroom bundles are verified
   against recorded sha256 digests, and the GitHub Actions are pinned by commit.
+
+## Trust controls added since the audit
+
+None of these clears a gate below. Each is a control the audit did not see, and each has its own
+limits.
+
+- **Scoped API tokens** (#557). `colonizer token create` mints named tokens with a scope — `read`,
+  `operate` or `launch`, in that order — and optional org and repo limits, a cap on unfinished
+  colonies and a daily dollar budget. Only a SHA-256 hash is stored, in
+  `<config_dir>/api-tokens.json`. A scoped token works as `Authorization: Bearer` only, never as the
+  cookie. A route outside its scope answers 403; a colony outside its org or repo limits answers 404
+  (`crates/colonizer/src/api_tokens.rs`). See [cli.md](cli.md#scoped-api-tokens).
+- **Remote access** (#555, #558, #575). Off by default. When you turn it on (Settings → Remote
+  access, or `PUT /api/remote`), the mothership keeps one outbound WebSocket to the relay and
+  serves the cockpit through it, under the same API token. `host_guard` admits a tunnelled request
+  only while the switch is on and only for the tunnel's own host, and a cookie write through the
+  tunnel must carry `Origin: https://<that host>` exactly (`crates/colonizer/src/server.rs`). The
+  relay is not deployed yet, and the security review filed findings R1–R3 as blockers for its
+  first deployment; see [remote-access-review.md](remote-access-review.md) and
+  [remote-tunnel.md](remote-tunnel.md).
+- **Security-aware routing** (#530). At boot, the paths a task names are classified `open`,
+  `standard`, `custom` or `restricted` (secrets, keys, cloud credentials, infra config), from
+  built-in defaults a repository can extend with `.colonizer/sensitivity.toml`
+  (`crates/colonizer/src/sensitivity.rs`). A `restricted` colony is refused, with a 403, any
+  gateway provider not marked `trusted` in providers.json. The gate sits in the provider gateway,
+  so it covers configured providers only: an agent's own Claude traffic goes straight to
+  `api.anthropic.com` with its host-scoped credential and does not pass through it. The other
+  classes change nothing yet.
+- **Gateway audit** (#546). Every authenticated gateway request appends one line to the colony's
+  `gateway.jsonl`: provider, wire, method, path, requested and sent model, status, a typed failure
+  code, durations, bytes and token counts. The record is a fixed struct, so keys, tokens and
+  request bodies never reach it (`crates/colonizer/src/gateway_audit.rs`).
+- **Inside the colony.** Credential files in the worktree are masked and agent config is pinned
+  read-only ([path-policy.md](path-policy.md), #545); every colony boots behind an egress policy
+  with a deny set no setting can reopen ([sandbox-network.md](sandbox-network.md#egress-policy-303),
+  #542); and the agent runs with capabilities dropped and a seccomp denylist
+  ([architecture.md](architecture.md#in-guest-hardening), #547).
+- **Prompt screening** (#540). An opt-in `screen` module checks the diff and the pull request text
+  for hidden code points before push ([prompt-screening.md](prompt-screening.md)). It reads code
+  points only; it is not a prompt-injection detector.
 
 ## Findings
 
@@ -93,7 +139,7 @@ Nothing is checked off yet, and no gate is cleared. The roadmap is the issue tra
 is the audit's view of it. Since the audit, `.github/workflows/ci.yml` runs on every pull request and
 push to `main`: `cargo test --workspace` (including agentd's no-KVM smoke test), `cargo clippy` with
 warnings denied and `cargo fmt --check`; the Claude Code runner's tests; the web UI's `tsc`, build and
-tests; and the tests of the telemetry receiver and the scripts. `supply-chain.yml` adds dependency audits
+tests; and the tests of the telemetry receiver, the remote-access relay and the scripts. `supply-chain.yml` adds dependency audits
 and SBOMs. Two limits keep this short of what G4 asks for: CI is not yet a required check on `main` — a
 red run does not block a merge until a maintainer applies the ruleset with
 `scripts/require-ci-checks.mjs` ([#367](https://github.com/Colonizer-dev/harness/issues/367), below) —
@@ -135,8 +181,11 @@ name does not count. `scripts/require-ci-checks.mjs` prints the ruleset (a dry r
 `--apply` sends it through `gh api`, idempotently; applying it needs a repository admin, which is why
 it is a script and not a pull request. The update replaces the ruleset wholesale, so a rule, ref
 condition or bypass actor added to it by hand in the UI is lost on the next run — change it in the
-script, not in the UI. Not required, on purpose: `colony-smoke`, which is skipped
-until the repository has the KVM runner it names; the supply-chain jobs, where `vulnerabilities` can
+script, not in the UI. Not required: `colony-e2e`, on purpose, since a KVM-dependent job can
+flake on a runner difference and a retry is cheaper than a blocked pull request; `relay`, which
+runs on every pull request but is not in the script's list (`REQUIRED_CHECKS` in
+`scripts/require-ci-checks.mjs`);
+the supply-chain jobs, where `vulnerabilities` can
 go red on a newly published advisory with no commit at all (the weekly run is the detection path) and
 an SBOM is evidence, not a gate; and the release jobs, which paths and tags keep away from an
 ordinary pull request. Two settings travel with it and are flipped by hand in the repository's

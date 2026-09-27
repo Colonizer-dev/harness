@@ -2,7 +2,8 @@
 
 Runs Claude Code through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) and speaks
 the Colonizer runner contract (`docs/protocol.md` §2): commands as JSON lines on stdin, events as JSON
-lines on stdout, diagnostics on stderr.
+lines on stdout, diagnostics on stderr. It is the default agent module, and the only one CI runs
+in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are tested against stubs.
 
 - Streaming-input session: every `user_message` command becomes a turn (or joins the current one).
 - Questions: Claude is told to ask only via `AskUserQuestion`. The call is routed through `canUseTool`
@@ -25,9 +26,22 @@ lines on stdout, diagnostics on stderr.
 | `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
 | `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
 | `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
+| `COLONIZER_DELEGATE` | `enforce` | `enforce`, `encourage` or `off`: how far the orchestrator hands work to subagents (see above) |
+| `COLONIZER_DISABLED_TOOLS` | none | Comma-separated Claude Code tool names the colony never gets |
+| `COLONIZER_PLUGIN_DIRS` | `archify` | Plugin directories to load, read-only; the mothership rewrites them to their in-VM paths |
+| `COLONIZER_SCAN`, `COLONIZER_SCAN_COMMAND` | `off`, none | Pre-flight scan of the workspace before the agent starts: `warn` or `block`, with a scanner you mount yourself (`preflight.mjs`; advisory, not a boundary) |
+| `COLONIZER_CAVEMAN`, `COLONIZER_CAVEMAN_LEVEL` | off, `full` | Terse replies (`lite`, `full` or `ultra`) |
+| `COLONIZER_RTK` | off | Shell output shortened by rtk before the agent reads it |
+| `COLONIZER_HEADROOM` | off | Model requests pass through Headroom inside the colony (`headroom.mjs`) |
+| `COLONIZER_JEV_COMPACTION`, `COLONIZER_JEV_KEEP_THRESHOLD`, `COLONIZER_JEV_PRESERVE_RECENT` | off, 0.5, 6 | Compaction by Jev score instead of Claude Code's summary |
 | `COLONIZER_TASK_LABELS` | unset | Comma-separated task labels (set by the mothership from the issue) for `.colonizer/instructions.toml` label rules |
 | `COLONIZER_EXEC_POLICY` | unset | The install layer's exec policy as JSON (the `exec_policy` setting); see Exec policy above |
 | `COLONIZER_EXEC_POLICY_ORG` | unset | An org layer's exec policy as JSON; narrows the install layer, is narrowed by the repo file |
+| `COLONIZER_FINDINGS`, `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED`, `COLONIZER_RESUME_SESSION`, `COLONIZER_IMAGE` | set by the mothership | The findings tool, a loop colony's tools, the Claude Code session to resume (a suspended colony picks up where it stopped), and the image named in the prompt |
+
+The module's settings in the cockpit (Settings → Modules) set most of these; `summaries`,
+`summary_model`, `route_per_task`, the tier models and the `route_cost_*`/`jev_shadow_mode` settings
+are read by the mothership; the runner does not use them.
 
 Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a microsandbox placeholder in
 the VM).

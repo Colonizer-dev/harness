@@ -14,7 +14,7 @@ There are two scanners, on the two sides of the trust boundary, on purpose:
 
 | | Colony-side preflight | Mothership-side screening (this page) |
 | :--- | :--- | :--- |
-| Module | the agent module's `scan` settings | the `screen` module, provider `promptdecode` |
+| Module | the claude-code agent module's `scan` and `scan_command` settings (other agent modules have none) | the `screen` module, provider `promptdecode` |
 | When | before the agent starts | after the colony ends, before push/PR |
 | Sees | the whole base repository | the colony's final diff, the PR title and the PR body |
 | Scanner | one you mount (`scan_command`) | built in: a code-point decoder |
@@ -43,6 +43,9 @@ The false-positive budget is deliberate: emoji ZWJ sequences and skin tones, CJK
 Hebrew prose that uses no direction controls — the marks above are fine — all pass clean. What the
 decoder deliberately does *not* do is read the change for meaning — a plain-language injection that
 uses no hidden code points is not a finding here.
+
+Each scan keeps at most 50 findings, and a decoded payload is cut at 200 characters
+(`MAX_FINDINGS` and `MAX_DECODED` in `crates/colonizer/src/screen.rs`).
 
 ## What is scanned, exactly
 
@@ -84,10 +87,13 @@ carries none of it: the webhook fires off session status changes, not event payl
 ## Pointing a custom scanner
 
 The built-in decoder is intentionally not extensible: if you want a full scanner (a vendored
-preflight scanner, a secret scanner, a policy engine), keep it on the colony side with the agent
-module's `scan_command` setting, which mounts and runs your command inside the microVM before the
-agent starts, with `warn`/`block` semantics of its own. See the agent module's settings in
-Settings → Modules → Agent.
+preflight scanner, a secret scanner, a policy engine), keep it on the colony side. The claude-code
+agent module has two settings for this: `scan` (`off`, `warn` or `block`, default `off`) and
+`scan_command`, a command resolved inside the colony, for example a scanner you mount through
+Plugin directories. It runs inside the microVM before the agent starts. `warn` reports findings
+and carries on; `block` ends the colony when the scanner exits non-zero. The module itself calls
+this advisory, not a security boundary. Find both in Settings → Modules → Agent. The other agent
+modules (Codex, Pi, OpenCode, Grok Build, Hermes, ACP) have no preflight scan yet.
 
 ## Not done yet
 

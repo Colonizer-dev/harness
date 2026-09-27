@@ -4,6 +4,10 @@ Runs [OpenCode](https://opencode.ai) (`opencode run --format json`) and speaks t
 runner contract (`docs/protocol.md` §2): commands as JSON lines on stdin, events as JSON lines
 on stdout, diagnostics on stderr.
 
+**Status: experimental.** The runner has driven the real pinned OpenCode binary end to end, but only
+against a stand-in gateway, outside a microVM; no colony launched from the cockpit has run on it
+yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/test/*.test.mjs`).
+
 - One turn per `user_message`: `opencode run` with the prompt on stdin, resumed with `--session`
   from the second turn on. A turn with no output for 120 s is SIGINTed and retried once.
 - Questions: OpenCode's native question tool is unavailable in `run` mode, so the model asks
