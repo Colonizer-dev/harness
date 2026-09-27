@@ -64,3 +64,12 @@ archify      2026.09.23-9e35d2b any       plugin  24b38bf7ea6de8d2d77d32c1a7320c
 # hooks/, .claude-plugin/ and src/ the hook actually runs) and is published by a different account
 # than the repo owner with extra CLIs not in the repo.
 fast-jev-compaction e3f262a any           hook    4b1de046ee17f93079968c0865a12bf94fa264f007b2527c0a11eb6794550e77  https://codeload.github.com/tamaratran/fast-jev-compaction/tar.gz/e3f262a7f4d42bd8dd32ced30d26176f7cb545b0
+
+# deja-vu is github.com/vshulcz/deja-vu at tag v0.21.1 (MIT): the transcript indexer behind the
+# optional deja memory feature (crates/colonizer/src/deja.rs). Only the host binary is used —
+# colonies never run deja — so staging keeps just the `deja` binary and drops the archive's
+# skills/ and README, which are for standalone deja users.
+deja-vu      0.21.1    linux-x86_64  tgz     d953476808cf48b4093602381883e48e081c50e6b33256c54fd390a30c8574f9  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_linux_amd64.tar.gz
+deja-vu      0.21.1    linux-aarch64 tgz     23175b19101191ab30f219d620484772a5359afc951bd42a98673daeba900188  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_linux_arm64.tar.gz
+deja-vu      0.21.1    darwin-x86_64 tgz     6201afef450c70515225d92cee43fa1a0cf0b0c1f7a91eb4e56c078585388950  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_darwin_amd64.tar.gz
+deja-vu      0.21.1    darwin-aarch64 tgz    98ac0e211239bc04d20aa7aa98ab3c89f28550f371f7a1a4648ca1cf5d021ab3  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_darwin_arm64.tar.gz

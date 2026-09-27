@@ -676,6 +676,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if memory_on {
         runner_env.insert("COLONIZER_MEMORY_DIR".into(), Value::String("/colonizer/memory".into()));
     }
+    // deja recall (issue #495): the URL and this colony's gateway token, so the colony's MCP tool
+    // can ask its own org's transcript index read-only. Set only when deja is effective-on for the
+    // colony's org; the tool reports its absence as "unavailable" rather than erroring.
+    if !s.org.is_empty() && orgs::effective_deja_enabled(&modules, &org_settings) {
+        runner_env.insert(
+            "COLONIZER_RECALL_URL".into(),
+            Value::String(format!(
+                "http://host.microsandbox.internal:{}/recall",
+                app.cfg.gateway_bind.port()
+            )),
+        );
+        runner_env.insert("COLONIZER_RECALL_TOKEN".into(), Value::String(gateway_token.clone()));
+    }
     // What the colony can and cannot run is part of the agent's brief (runner.mjs), so it names the
     // image this colony actually boots — the resolved stack's, not the configured one — or an agent
     // in a repository detected as Rust would brief itself for a Node machine.

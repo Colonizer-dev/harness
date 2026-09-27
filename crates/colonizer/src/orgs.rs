@@ -48,6 +48,10 @@ pub struct AgentOverrides {
 pub struct MemoryOverrides {
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// The org's deja recall switch (`settings.memory.deja` in `orgs.json`, issue #495). `None`
+    /// follows the install's `deja` under the memory module; recall is on only when both levels are.
+    #[serde(default)]
+    pub deja: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -552,6 +556,17 @@ pub fn effective_memory_enabled(modules: &ModulesConfig, org: &OrgSettings) -> b
     org.memory.as_ref().and_then(|m| m.enabled).unwrap_or(global)
 }
 
+/// Whether deja transcript recall (issue #495) is on for an org: memory itself must be on at both
+/// levels, and deja on at both levels too. deja is off unless the install's memory settings switch
+/// it on — an org cannot opt in to something the install has not offered.
+pub fn effective_deja_enabled(modules: &ModulesConfig, org: &OrgSettings) -> bool {
+    if !effective_memory_enabled(modules, org) {
+        return false;
+    }
+    let global = modules.memory.settings.get("deja").and_then(Value::as_bool).unwrap_or(false);
+    org.memory.as_ref().and_then(|m| m.deja).unwrap_or(global)
+}
+
 pub fn memory_requires_review(modules: &ModulesConfig) -> bool {
     modules
         .memory
@@ -967,10 +982,37 @@ mod tests {
 
         assert!(effective_memory_enabled(&modules, &OrgSettings::default()));
         let disabled = OrgSettings {
-            memory: Some(MemoryOverrides { enabled: Some(false) }),
+            memory: Some(MemoryOverrides {
+                enabled: Some(false),
+                deja: None,
+            }),
             ..Default::default()
         };
         assert!(!effective_memory_enabled(&modules, &disabled));
+    }
+
+    /// deja needs both levels on: the install's memory `deja` switch is off unless set, and an org
+    /// override wins — including opting an enabled install back out (issue #495).
+    #[test]
+    fn dejas_two_level_switch() {
+        let mut modules = ModulesConfig::default();
+        assert!(!effective_deja_enabled(&modules, &OrgSettings::default()), "off by default");
+
+        modules.memory.settings.insert("deja".into(), json!(true));
+        assert!(effective_deja_enabled(&modules, &OrgSettings::default()));
+
+        let opted_out = OrgSettings {
+            memory: Some(MemoryOverrides {
+                enabled: None,
+                deja: Some(false),
+            }),
+            ..Default::default()
+        };
+        assert!(!effective_deja_enabled(&modules, &opted_out));
+
+        // An install with deja on but memory off recalls nothing either.
+        modules.memory.enabled = false;
+        assert!(!effective_deja_enabled(&modules, &OrgSettings::default()));
     }
 
     #[test]

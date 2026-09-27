@@ -1860,7 +1860,7 @@ export function createMockApi(): Api {
       agent: { model: "strix/ds4-flash", subagent_model: "deepseek/deepseek-flash", background_model: null },
       max_parallel: 2,
       stack: "rust",
-      memory: { enabled: true },
+      memory: { enabled: true, deja: true },
       watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
     },
     // Switched off (issue #176): out of the workspace choices, still reachable via the switcher's Hidden disclosure.

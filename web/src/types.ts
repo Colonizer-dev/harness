@@ -914,7 +914,8 @@ export interface OrgSettings {
   host_disk?: string | null;
   /** The sandbox stack this org's colonies boot, pinning what the global `preset` would otherwise choose; `null` inherits. */
   stack?: string | null;
-  memory?: { enabled?: boolean | null } | null;
+  /** `deja` is the recall toggle; null or absent inherits the install setting. */
+  memory?: { enabled?: boolean | null; deja?: boolean | null } | null;
   watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;
   /**
    * Off keeps the org out of the workspace list and stops new colonies starting there; its existing
