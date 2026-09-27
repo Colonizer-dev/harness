@@ -182,6 +182,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::code::routes())
         .merge(crate::colonize::routes())
         .merge(crate::colony_secrets::routes())
+        .merge(crate::deja::routes())
         .merge(crate::deps::routes())
         .merge(crate::egress::routes())
         .merge(crate::findings::routes())

@@ -566,6 +566,17 @@ fn catalog(app: &App) -> Vec<Item> {
     items
 }
 
+/// The values of every saved secret the catalogue knows — the Secrets page entries and the
+/// per-colony secrets, keychain or file (issue #495). deja scrubs transcripts of exactly these
+/// before they reach an org's index.
+pub(crate) fn saved_values(app: &App) -> Vec<String> {
+    catalog(app)
+        .iter()
+        .filter_map(|item| item.path.as_ref().and_then(|path| crate::util::read_secret(path)))
+        .filter(|value| !value.trim().is_empty())
+        .collect()
+}
+
 fn find(app: &App, id: &str) -> Result<Item, crate::AppError> {
     catalog(app)
         .into_iter()

@@ -432,6 +432,9 @@ async fn stop_colony_with(
         // A stopped colony frees the issue for a retry, on GitHub as well as locally.
         if let Some(s) = app.session(&s.id).await {
             crate::claims::spawn_release_if_needed(app.clone(), &s);
+            // deja (issue #495): the colony's work is done, its transcripts are final — index them
+            // for its org's recall. Fire-and-forget; a deja failure never fails the stop.
+            crate::deja::spawn_after_stop(app.clone(), &s);
         }
     }
     claimed
@@ -943,6 +946,8 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     // A stopped colony frees the issue for a retry, on GitHub as well as locally.
     if let Some(s) = app.session(&id).await {
         crate::claims::spawn_release_if_needed(app.clone(), &s);
+        // deja (issue #495): the transcripts are final now — index them for the org's recall.
+        crate::deja::spawn_after_stop(app.clone(), &s);
     }
     Ok(stopped(app.session(&id).await.unwrap_or(s)))
 }

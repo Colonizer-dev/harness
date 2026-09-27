@@ -18,6 +18,7 @@ import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision
 import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
+import { createRecallServer, RECALL_PROMPT_APPEND, RECALL_SERVER } from './recall.mjs';
 import { routeEnv, routingPlan, startRouter } from './router.mjs';
 import { subagentDefinitions } from './subagents.mjs';
 
@@ -392,12 +393,13 @@ export function childEnv(env) {
  * @param {object} [extras]
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
+ * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -411,6 +413,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   }
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
+  // Both halves of the recall credential: the mothership sets them only when deja is enabled for
+  // this colony's org, so a half-set pair is a misconfiguration, not a reason to half-serve it.
+  const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
   const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
@@ -430,6 +435,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   if (waitServer) appended.push(WAIT_PROMPT_APPEND);
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
+  if (recall) appended.push(RECALL_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
@@ -479,6 +485,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, findi
   const mcpServers = {};
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
+  if (recall) mcpServers[RECALL_SERVER] = recallServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
@@ -1144,6 +1151,12 @@ async function main() {
     findingsServer = createFindingsServer({ emit, createSdkMcpServer, tool, z });
   }
 
+  // Read-only search of the mothership's deja-vu index: no emit, because nothing leaves the colony.
+  let recallServer;
+  if (process.env.COLONIZER_RECALL_URL && process.env.COLONIZER_RECALL_TOKEN) {
+    recallServer = createRecallServer({ url: process.env.COLONIZER_RECALL_URL, token: process.env.COLONIZER_RECALL_TOKEN, createSdkMcpServer, tool, z });
+  }
+
   let loopServer;
   if (process.env.COLONIZER_LOOP === 'true') {
     loopServer = createLoopServer({ emit, createSdkMcpServer, tool, z, selfPaced: process.env.COLONIZER_LOOP_SELF_PACED === 'true' });
@@ -1166,6 +1179,7 @@ async function main() {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
+    recallServer,
     findingsServer,
     loopServer,
     waitServer,

@@ -373,7 +373,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "Shared memory",
                 "Markdown notes per repository, org and globally, mounted read-only into colonies; agents propose new notes",
                 json!({"type": "object", "properties": {
-                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context. Off only lets repo notes through; org and global notes are always reviewed", "default": true}
+                    "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context. Off only lets repo notes through; org and global notes are always reviewed", "default": true},
+                    "deja": {"type": "boolean", "title": "Transcript recall (deja)", "description": "After a colony finishes, index its transcripts (secrets scrubbed) into its org's local deja index; later colonies of the same org can recall them with a recall tool. Off by default, and off unless this switch is on; each org can opt in or out separately.", "default": false}
                 }}),
             ),
             p(
@@ -382,7 +383,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "Approved notes stored in your mem0 project. Colonies read them exactly as they read files, most relevant to the task first; the key never enters a colony",
                 json!({"type": "object", "properties": {
                     "require_review": {"type": "boolean", "title": "Review proposals before they become memory", "description": "Recommended: an approved note becomes part of every future colony's context. Off only lets repo notes through; org and global notes are always reviewed", "default": true},
-                    "base_url": {"type": "string", "title": "API base URL", "description": "The mem0 Platform API. Self-hosted mem0 serves a different API and is not supported", "default": "https://api.mem0.ai"}
+                    "base_url": {"type": "string", "title": "API base URL", "description": "The mem0 Platform API. Self-hosted mem0 serves a different API and is not supported", "default": "https://api.mem0.ai"},
+                    "deja": {"type": "boolean", "title": "Transcript recall (deja)", "description": "After a colony finishes, index its transcripts (secrets scrubbed) into its org's local deja index; later colonies of the same org can recall them with a recall tool. Off by default, and off unless this switch is on; each org can opt in or out separately.", "default": false}
                 }}),
             ),
         ],

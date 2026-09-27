@@ -30,6 +30,7 @@ mod code;
 mod colonize;
 mod colony_secrets;
 mod config;
+mod deja;
 mod deps;
 mod diagnosis;
 mod egress;

@@ -20,6 +20,7 @@ type FieldKey =
   | "host_disk"
   | "stack"
   | "memory_enabled"
+  | "memory_deja"
   | "watchdog_enabled"
   | "stall_minutes"
   | "max_nudges";
@@ -48,6 +49,7 @@ const FIELDS: FieldSpec[] = [
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
+  { key: "memory_deja", group: "Memory", label: "Transcript recall (deja)", hint: "Off by default; indexes finished colonies' transcripts for this org only, after removing Colonizer's secret values", kind: "boolean" },
   { key: "watchdog_enabled", group: "Watchdog", label: "Watchdog", hint: "Nudge colonies that stop making progress", kind: "boolean" },
   { key: "stall_minutes", group: "Watchdog", label: "Stalled after", hint: "Minutes without agent activity", kind: "number", min: 1, max: 1440, unit: "min" },
   { key: "max_nudges", group: "Watchdog", label: "Nudges", hint: "Before the colony is flagged as still stalled", kind: "number", min: 0, max: 20 },
@@ -76,6 +78,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       return settings.stack;
     case "memory_enabled":
       return settings.memory?.enabled;
+    case "memory_deja":
+      return settings.memory?.deja;
     case "watchdog_enabled":
       return settings.watchdog?.enabled;
     case "stall_minutes":
@@ -115,6 +119,8 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
       return setting("sandbox", "preset");
     case "memory_enabled":
       return toggle("memory");
+    case "memory_deja":
+      return setting("memory", "deja");
     case "watchdog_enabled":
       return toggle("watchdog");
     case "stall_minutes":
@@ -203,7 +209,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
-    memory: { enabled: pick("memory_enabled") as boolean | null },
+    memory: { enabled: pick("memory_enabled") as boolean | null, deja: pick("memory_deja") as boolean | null },
     watchdog: {
       enabled: pick("watchdog_enabled") as boolean | null,
       stall_minutes: pick("stall_minutes") as number | null,

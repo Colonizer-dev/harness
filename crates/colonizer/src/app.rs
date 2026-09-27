@@ -127,6 +127,8 @@ pub struct App {
     /// only: Settings re-renders the red "missing" row from every poll, so a binary installed while
     /// the harness runs must be picked up without a restart.
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
+    /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
+    pub deja: crate::deja::Deja,
     /// The fleet view's peer half (issue #231): last-known `HostSummary` per configured peer base URL,
     /// so a peer that goes quiet still shows its last real numbers instead of nulls. This machine's
     /// own entry is never cached here — `crate::fleet::self_summary` always computes it live.
@@ -232,6 +234,7 @@ impl App {
             api_tokens: crate::api_tokens::Registry::load(&cfg.config_dir),
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
+            deja: crate::deja::Deja::default(),
             fleet_cache: crate::fleet::FleetCache::new(),
             gateway: crate::gateway::Gateway::new(&cfg.data_dir)?,
             github_viewer: Mutex::new(None),

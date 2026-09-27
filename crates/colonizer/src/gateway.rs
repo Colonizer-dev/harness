@@ -16,7 +16,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::any,
+    routing::{any, post},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
@@ -653,8 +653,35 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/providers/{id}/{*path}", any(proxy))
+        .route("/recall", post(recall))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(app)
+}
+
+/// A colony's deja recall request (issue #495): the query, and at most how many hits back.
+#[derive(Deserialize)]
+struct RecallBody {
+    query: String,
+    limit: Option<u32>,
+}
+
+/// `POST /recall` on the colony gateway: read-only deja recall over the *token's own org's* index.
+/// Authenticated like every gateway route with the colony's per-colony bearer token; a token that
+/// does not name a live colony is a 401, and an org with no index — deja off, never indexed — gets
+/// empty hits rather than an error, the same answer an empty index would give.
+async fn recall(State(app): State<Shared>, headers: HeaderMap, Json(body): Json<RecallBody>) -> Response {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let Some(s) = app.colony_for_token(token).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "authentication_error", "unknown colony token", None);
+    };
+    match crate::deja::search(&app, &s.org, &body.query, body.limit).await {
+        Ok(hits) => Json(hits).into_response(),
+        Err(e) => api_error(StatusCode::BAD_GATEWAY, "api_error", format!("deja: {e:#}"), None),
+    }
 }
 
 /// Flushes dirty usage counters every [`USAGE_FLUSH_INTERVAL`]; spawned once at startup.

@@ -279,6 +279,18 @@ NODE
       esac
       rm -rf "$tmp"
       ;;
+    deja-vu)
+      # The host-side transcript indexer for the optional deja memory feature (deja.rs): only the
+      # binary is staged, at dist/vendor/deja/deja. The archive's skills/ and README are for
+      # standalone deja users; the mothership runs `deja` alone, and nothing of it is staged into
+      # dist/plugins/, so no colony can load it as a skillset.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      [ -f "$tmp/deja" ] || { echo "deja-vu $version has no deja binary" >&2; exit 1; }
+      mkdir -p "$out/deja"
+      install -m 755 "$tmp/deja" "$out/deja/deja"
+      rm -rf "$tmp"
+      ;;
   esac
   echo "installed $name $version"
 done < "$root/vendor/vendor.lock"

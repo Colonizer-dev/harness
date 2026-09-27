@@ -29,6 +29,8 @@
 /api/claude-login/code                               POST   unauth=401    token=owner            activity=-
 /api/claude-login/start                              POST   unauth=401    token=owner            activity=-
 /api/colonize/draft                                  POST   unauth=401    token=owner            activity=-
+/api/deja                                            GET    unauth=401    token=owner            activity=-
+/api/deja/search                                     GET    unauth=401    token=owner            activity=-
 /api/editor/settings                                 GET    unauth=401    token=owner            activity=-
 /api/editor/settings                                 PUT    unauth=401    token=owner            activity=-
 /api/findings                                        GET    unauth=401    token=owner            activity=-
