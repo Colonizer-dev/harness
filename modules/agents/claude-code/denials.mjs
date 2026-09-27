@@ -11,7 +11,7 @@
  */
 
 /** The closed vocabulary of denial classes (docs/agent-events.schema.json `tool_result.denial`). */
-export const DENIAL_CLASSES = ['egress', 'read_only', 'tool_disabled'];
+export const DENIAL_CLASSES = ['egress', 'read_only', 'tool_disabled', 'policy'];
 
 /**
  * The guidance each class carries. The same text travels on the event and, once per class per
@@ -24,6 +24,8 @@ export const DENIAL_HINTS = {
     'That path is read-only in this colony; edit files in the working tree only, and leave commits and installs to the harness.',
   tool_disabled:
     'That tool is disabled for this session; delegate the work with the Task tool or ask via a choice card instead of retrying.',
+  policy:
+    'That command is refused by the colony’s exec policy (the matching rule is named in the reason); don’t retry it, and put what you needed and why in your report.',
 };
 
 /**
@@ -57,6 +59,12 @@ const DENIAL_RULES = [
       /unable to create '[^']*[/\\]\.git[/\\][^']*lock'/i,
       /\binsufficient permission for adding an object\b/i,
     ],
+  ],
+  [
+    // Before tool_disabled: an exec-policy refusal also reads "Permission for this action has been
+    // denied", but its reason names the rule, and the policy's own hint is the useful one.
+    'policy',
+    [/exec policy rule `[^`]+`/i],
   ],
   [
     'tool_disabled',

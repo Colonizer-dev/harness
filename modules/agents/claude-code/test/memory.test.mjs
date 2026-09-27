@@ -147,7 +147,17 @@ test('only the orchestrator proposes: a subagent is told to report instead', () 
 
 test('the memory gate is registered only with memory, and refuses a subagent even when delegation is off', async () => {
   const memoryServer = { type: 'sdk', name: MEMORY_SERVER, instance: {} };
-  assert.equal(buildOptions({}, { memoryServer }).options.hooks.PreToolUse, undefined, 'no memory, no gate');
+  // The exec-policy Bash gate (issue #471) is the one hook every colony carries; memory's gate is
+  // only registered with memory, so without it nothing refuses a memory proposal.
+  const withoutMemory = buildOptions({}, { memoryServer }).options.hooks.PreToolUse.flatMap((entry) => entry.hooks);
+  const decideWithout = async (input) => {
+    for (const hook of withoutMemory) {
+      const out = await hook({ hook_event_name: 'PreToolUse', tool_input: {}, ...input });
+      if (out.hookSpecificOutput?.permissionDecision === 'deny') return out.hookSpecificOutput;
+    }
+    return null;
+  };
+  assert.equal(await decideWithout({ tool_name: MEMORY_PROPOSE_TOOL }), null, 'no memory, no gate');
 
   const { options } = buildOptions({ COLONIZER_MEMORY_DIR: '/colonizer/memory' }, { memoryServer });
   const hooks = options.hooks.PreToolUse.flatMap((entry) => entry.hooks);

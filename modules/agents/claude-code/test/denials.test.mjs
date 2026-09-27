@@ -25,6 +25,8 @@ const REFUSALS = [
   ['tool_disabled', 'Only the orchestrator files findings. Put this finding in your report, with how you confirmed it.'],
   ['tool_disabled', 'memory_read_only: only the orchestrator proposes shared memory. Put this learning in your report.'],
   ['tool_disabled', 'tool NotebookEdit is not allowed for this session'],
+  ['policy', 'Permission for this action has been denied. Reason: exec policy rule `secret-paths` (default): the command reaches a credential path the colony must not read'],
+  ['policy', 'exec policy rule `script-egress` (install): the script this command runs talks to the network'],
 ];
 
 const NOT_REFUSALS = [
@@ -38,7 +40,7 @@ test('refusal signatures classify to their fixed hint; ordinary failures do not'
   for (const [cls, text] of REFUSALS) assert.deepEqual(classifyDenial(text), { class: cls, hint: DENIAL_HINTS[cls] }, text);
   assert.deepEqual(classifyDenial('FATAL: CONNECTION REFUSED'), { class: 'egress', hint: DENIAL_HINTS.egress }, 'case-blind');
   for (const text of NOT_REFUSALS) assert.equal(classifyDenial(text), null, text);
-  assert.deepEqual(DENIAL_CLASSES, ['egress', 'read_only', 'tool_disabled']);
+  assert.deepEqual(DENIAL_CLASSES, ['egress', 'read_only', 'tool_disabled', 'policy']);
   for (const empty of ['', undefined, 42]) assert.equal(classifyDenial(empty), null);
 });
 

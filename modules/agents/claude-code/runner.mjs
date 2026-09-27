@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
+import { evaluateExecPolicy, execPolicyLogLine, execPolicyQuestion, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
@@ -398,8 +399,9 @@ export function childEnv(env) {
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
+ * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -554,6 +556,30 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
       ],
     });
   }
+  // Exec policy (issue #471): every Bash command meets the layered rules in execpolicy.mjs — a
+  // deny is refused with the rule named, an ask surfaces as a colony question through canUseTool.
+  // Loaded once here (the repo layer's file is read at start, so the agent rewriting it mid-run
+  // cannot widen anything); the same object rides along to runAgent for the ask path.
+  const policy = execPolicy ?? loadExecPolicy(env);
+  for (const warning of policy.warnings) warnings.push(warning);
+  preToolUse.push({
+    matcher: 'Bash',
+    hooks: [
+      async (input) => {
+        const command = input.tool_input?.command;
+        if (typeof command !== 'string' || !command) return { continue: true };
+        const hit = evaluateExecPolicy(policy, command, { cwd: process.cwd() });
+        if (!hit) return { continue: true };
+        // One harness-log line per decision (agentd turns stderr lines into `log` events).
+        process.stderr.write(`${execPolicyLogLine(hit, command)}\n`);
+        if (hit.decision === 'allow') return { continue: true };
+        return {
+          continue: true,
+          hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: hit.decision, permissionDecisionReason: execPolicyReason(hit) },
+        };
+      },
+    ],
+  });
   if (rtkBin) {
     // In process, like the delegation gate: rtk's own Claude Code hook is a shell script needing jq, and
     // Colonizer doesn't run plugin hooks. Only the input is updated; no permission decision is returned,
@@ -672,11 +698,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {AsyncIterable<object>} args.commands  parsed stdin commands
  * @param {Function} args.emit      writes one protocol event
  * @param {object} [args.options]   SDK options (canUseTool is added here)
+ * @param {object} [args.execPolicy]  the layered exec policy (issue #471); an `ask` becomes a question
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
  */
-export async function runAgent({ query, commands, emit, options = {}, graceMs = 8000, enforceChoices = true, instructions = null }) {
+export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -725,17 +752,13 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
     else setStatus(turnActive ? 'working' : 'idle');
   };
 
-  const canUseTool = async (toolName, toolInput, { signal, toolUseID } = {}) => {
-    if (toolName !== ASK_TOOL) return { behavior: 'allow', updatedInput: toolInput };
-
-    const questionId = toolUseID || `question-${askIds.size + 1}`;
-    askIds.add(questionId);
+  /** Puts one question to the colony and resolves with its answer (null when cancelled or shut down). */
+  const putQuestion = (questionId, questions, { signal }) => {
     const reply = new Promise((resolve) => {
       pending.set(questionId, { resolve });
       if (signal?.aborted) resolve(null);
       signal?.addEventListener('abort', () => resolve(null), { once: true });
     });
-    const questions = normalizeQuestions(toolInput);
     emit({
       type: 'question',
       question_id: questionId,
@@ -744,18 +767,58 @@ export async function runAgent({ query, commands, emit, options = {}, graceMs = 
       questions,
     });
     settleStatus();
+    return reply;
+  };
 
-    const answer = await reply;
+  /** Records that a question closed — answered, or not — and settles the status it held. */
+  const settleAnswer = (questionId, answer) => {
     pending.delete(questionId);
+    if (answer) emit({ type: 'question_answered', question_id: questionId, answers: answer.answers, response: answer.response });
+    settleStatus();
+  };
+
+  const canUseTool = async (toolName, toolInput, { signal, toolUseID } = {}) => {
+    if (toolName !== ASK_TOOL) {
+      // An exec-policy `ask` reaches canUseTool the same way an AskUserQuestion does: the SDK turns
+      // the PreToolUse hook's ask decision into a permission request here. The hook has already
+      // refused `deny`; this only has to put the question to the colony and map the answer.
+      if (execPolicy && toolName === 'Bash' && typeof toolInput?.command === 'string' && toolInput.command) {
+        const hit = evaluateExecPolicy(execPolicy, toolInput.command, { cwd: process.cwd() });
+        if (hit?.decision === 'deny') return { behavior: 'deny', message: execPolicyReason(hit) };
+        if (hit?.decision === 'ask') {
+          const allowed = await askColony(hit, toolInput, { signal, toolUseID });
+          return allowed
+            ? { behavior: 'allow', updatedInput: toolInput }
+            : { behavior: 'deny', message: execPolicyReason(hit) };
+        }
+      }
+      return { behavior: 'allow', updatedInput: toolInput };
+    }
+
+    const questionId = toolUseID || `question-${askIds.size + 1}`;
+    askIds.add(questionId);
+    const answer = await putQuestion(questionId, normalizeQuestions(toolInput), { signal });
     if (!answer) {
-      settleStatus();
+      settleAnswer(questionId, null);
       return { behavior: 'deny', message: 'The question was cancelled before the user answered.' };
     }
-    emit({ type: 'question_answered', question_id: questionId, answers: answer.answers, response: answer.response });
-    settleStatus();
+    settleAnswer(questionId, answer);
     const updatedInput = { ...toolInput, answers: answer.answers };
     if (answer.response) updatedInput.response = answer.response;
     return { behavior: 'allow', updatedInput };
+  };
+
+  /**
+   * Raises an exec-policy `ask` as a colony question (the same `question`/`question_answered` pair
+   * AskUserQuestion uses, so the cockpit card and the autonomy judge both work unchanged) and
+   * resolves true only when the answer is Allow. Any other answer — Deny, a free-text "Other",
+   * a cancellation — leaves the command refused with the policy reason.
+   */
+  const askColony = async (hit, toolInput, { signal, toolUseID }) => {
+    const questionId = toolUseID || `exec-policy-${pending.size + 1}`;
+    const answer = await putQuestion(questionId, normalizeQuestions(execPolicyQuestion(hit, toolInput.command)), { signal });
+    settleAnswer(questionId, answer);
+    return Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
   };
 
   const blockSlot = (messageId, index) => {
@@ -1175,6 +1238,9 @@ async function main() {
     log: ({ level, message }) => emit({ type: 'log', level, message }),
   });
 
+  // The layered exec policy (issue #471), loaded once: the repo layer's file is read before the
+  // agent can run anything, and the same object is what runAgent answers questions from.
+  const execPolicy = loadExecPolicy(process.env);
   const { options, warnings } = buildOptions(process.env, {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
@@ -1186,6 +1252,7 @@ async function main() {
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,
     instructions,
+    execPolicy,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
 
@@ -1200,7 +1267,7 @@ async function main() {
   }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
-  await runAgent({ query, commands, emit, options, enforceChoices, instructions });
+  await runAgent({ query, commands, emit, options, execPolicy, enforceChoices, instructions });
   await headroom?.close();
   await router?.close();
   process.exit(0);
