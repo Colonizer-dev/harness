@@ -65,6 +65,8 @@ from what it only suggests. "Hit a wall" — a denial the colony could not cross
 never a security finding. "Defeated a control" — a boundary crossed — is one, and it is the
 watchdog's stop-and-flag signal.
 
+The [escape-vector review checklist](escape-vectors.md) tracks each colony-escape class against the live sandbox with a verdict and mechanism per vector, and re-runs on every sandbox-affecting change.
+
 ## Checkpoints
 
 Four gates have to pass before unattended work is on the table.
