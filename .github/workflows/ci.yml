@@ -124,6 +124,12 @@ jobs:
         working-directory: modules/agents/codex
         run: npm test
 
+      # The ACP runner is shaped the same way: no dependencies, the real runner.mjs driven over
+      # stdio against a scriptable fake ACP agent — no gemini install, no network.
+      - name: Test the ACP runner
+        working-directory: modules/agents/acp
+        run: npm test
+
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
   # either, and none of the tests touch a mothership, a colony or the network; the job's one
   # network step is the staged-pack validation below, which downloads the pinned archives the

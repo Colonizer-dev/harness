@@ -1,0 +1,68 @@
+{
+  "kind": "agent",
+  "id": "acp",
+  "name": "ACP",
+  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Verified with Google's Gemini CLI (`gemini --experimental-acp`); other ACP agents run through a custom command. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
+  "protocol": "colonizer-runner/1",
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "gemini"
+    ],
+    "image": "glibc + node >= 20 + the pinned @google/gemini-cli on PATH (npm install -g @google/gemini-cli) for the gemini preset",
+    "pins": {
+      "@google/gemini-cli": {
+        "version": "0.61.0",
+        "integrity": "sha512-dbQ9A0qBtFJNi6XBkHvfZ6Azpn6PNgH/P8h2MZ67RLlX8hSAVjup39CRWqdRxZv7YXIuhrFaytr8y0jKnkoxnQ==",
+        "source": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.61.0.tgz",
+        "install": "npm install -g @google/gemini-cli@0.61.0"
+      }
+    }
+  },
+  "secrets": [
+    {
+      "env": [
+        "GEMINI_API_KEY"
+      ],
+      "hosts": [
+        "generativelanguage.googleapis.com"
+      ]
+    }
+  ],
+  "egress": {
+    "api": ["generativelanguage.googleapis.com"],
+    "auth": [],
+    "telemetry": [],
+    "extra": []
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "agent": {
+        "type": "string",
+        "title": "ACP agent",
+        "enum": ["gemini", "custom"],
+        "description": "Which ACP agent to launch. `gemini` is the verified one: Google's Gemini CLI in its ACP mode (`gemini --experimental-acp`), authenticated with the GEMINI_API_KEY secret for generativelanguage.googleapis.com. `custom` launches any other ACP agent through the command below — declare its API hosts and credential in your deployment, since this manifest only declares Gemini's.",
+        "default": "gemini",
+        "env": "COLONIZER_ACP_AGENT"
+      },
+      "command": {
+        "type": "string",
+        "title": "Custom command",
+        "description": "Used when the ACP agent is `custom`: the full command line including arguments, e.g. `grok agent stdio` (unverified) or `node /opt/acp-agent/main.js --stdio`. Quote spans with single or double quotes to keep arguments with spaces whole.",
+        "default": "",
+        "env": "COLONIZER_ACP_COMMAND"
+      },
+      "model": {
+        "type": "string",
+        "title": "Model",
+        "description": "Model id sent to the agent with session/set_model after session/new. Only applied when the agent advertises model selection at session/new; otherwise the agent's own default runs and a warning is logged. A Gemini CLI configured with GEMINI_API_KEY picks its model with the same setting's default.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      }
+    }
+  }
+}
