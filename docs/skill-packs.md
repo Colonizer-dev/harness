@@ -176,7 +176,7 @@ disk shows the Download button again.
 
 ## Reference migration: superpowers
 
-superpowers ([obra/superpowers](https://github.com/obra/superpowers), v6.4.1, MIT) is the
+superpowers ([obra/superpowers](https://github.com/obra/superpowers), v6.4.2, MIT) is the
 first pack on the canonical layout, staged by `scripts/fetch-vendor.sh` at
 `dist/plugins/superpowers`:
 
